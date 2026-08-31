@@ -17,6 +17,8 @@ import (
 	"github.com/spawn08/chronos/storage"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 
+	"github.com/spawn08/chronos-code/internal/activation"
+	"github.com/spawn08/chronos-code/internal/attention"
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
@@ -44,10 +46,12 @@ type Orchestrator struct {
 	sessionMgr *session.Manager
 	sessions   map[string]string // agentID -> current sessionID
 
-	router    *router.Router
-	budget    *budget.Tracker
-	memory    *memory.Store
-	workspace *workspace.Info
+	router     *router.Router
+	budget     *budget.Tracker
+	memory     *memory.Store
+	workspace  *workspace.Info
+	actBuf     *activation.Buffer
+	attBudget  *attention.Budgeter
 }
 
 // OpenStorageForCLI opens the same storage.Storage backend New would (per
@@ -120,6 +124,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 
 	maxTokens, _ := grCfg.TokenBudget()
 	tracker := budget.NewTracker(maxTokens, cfg.Tools.CompressionThresholdTokens)
+	attBudget := attention.NewBudgeter(100)
 	for _, a := range agents {
 		agentID := a.ID
 		// budgetHook forces a session id onto ctx before delegating to the
@@ -129,8 +134,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		// itself has no way to know which agent a hooks.Event came from; it
 		// only sees a *hooks.Event and a shared ctx.)
 		a.Hooks = append(a.Hooks, budgetHook{tracker: tracker, agentID: agentID})
+		a.Hooks = append(a.Hooks, attBudget)
 	}
 
+	actBuf := activation.NewBuffer(50)
 	for _, a := range agents {
 		if err := a.ConnectMCP(ctx); err != nil {
 			fmt.Printf("warning: MCP connect for %s: %v\n", a.ID, err)
@@ -140,9 +147,14 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		// built-in/YAML-declared ones registered before this point.
 		agentID := a.ID
 		toolcompress.WrapDynamic(a, func(ctx context.Context) int {
-			return tracker.CompressionThreshold(sessionOrAgentKey(ctx, agentID))
+			base := tracker.CompressionThreshold(sessionOrAgentKey(ctx, agentID))
+			w := attBudget.CurrentWeight(sessionOrAgentKey(ctx, agentID))
+			return attention.AdjustThreshold(base, w)
 		})
 		incctx.Wrap(a, root)
+		if graphStore != nil {
+			activation.Wrap(a, graphStore, actBuf)
+		}
 	}
 
 	active := "coder"
@@ -164,6 +176,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		budget:     tracker,
 		memory:     memStore,
 		workspace:  wsInfo,
+		actBuf:     actBuf,
+		attBudget:  attBudget,
 	}, nil
 }
 
@@ -524,6 +538,15 @@ func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatRes
 	if a == nil {
 		return nil, fmt.Errorf("no active agent")
 	}
+	// Predictive context loading (PRD P3-007): resolve symbol names from the
+	// user message in the code graph and pre-load L2 summaries so the model's
+	// first turn starts with relevant code context instead of spending extra
+	// turns reading files.
+	if o.graphStore != nil && o.actBuf != nil {
+		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
+			message = message + "\n\n" + preloaded
+		}
+	}
 	sid := o.sessions[o.active]
 	if sid == "" || a.Storage == nil {
 		return a.Chat(ctx, message)
@@ -654,6 +677,16 @@ func (o *Orchestrator) BudgetStatusLine() string {
 // detection failed.
 func (o *Orchestrator) Workspace() *workspace.Info {
 	return o.workspace
+}
+
+// ActivationBuffer returns the spreading activation buffer (PRD P3-007).
+func (o *Orchestrator) ActivationBuffer() *activation.Buffer {
+	return o.actBuf
+}
+
+// AttentionBudgeter returns the attention budgeter (PRD P3-008).
+func (o *Orchestrator) AttentionBudgeter() *attention.Budgeter {
+	return o.attBudget
 }
 
 func (o *Orchestrator) Close() error {
