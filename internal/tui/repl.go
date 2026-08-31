@@ -38,12 +38,19 @@ type REPL struct {
 
 func NewREPL(orch *orchestrator.Orchestrator, stream bool) *REPL {
 	ctx, cancel := context.WithCancel(context.Background())
-	scanner := bufio.NewScanner(os.Stdin)
+	// Both the main input loop and the tool-approval prompt (installed by
+	// installApprovalHandlers, via InteractiveApproval) must read from a
+	// single shared *bufio.Reader over os.Stdin. Two independent buffered
+	// readers over the same os.Stdin can each over-read into their own
+	// buffer, so a line typed for one can be silently consumed by the other,
+	// hanging or misreading the next prompt.
+	reader := bufio.NewReader(os.Stdin)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	return &REPL{
 		orch:    orch,
 		scanner: scanner,
-		reader:  bufio.NewReader(os.Stdin),
+		reader:  reader,
 		stream:  stream,
 		ctx:     ctx,
 		cancel:  cancel,

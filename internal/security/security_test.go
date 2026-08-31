@@ -183,6 +183,30 @@ func TestGuard_FileRead_DeniedPemGlob(t *testing.T) {
 	}
 }
 
+func TestGuard_FileGlob_DeniedPatternEnv(t *testing.T) {
+	g := NewGuard(defaultTestPolicy(), "/workspace", nil)
+	evt := &hooks.Event{
+		Type:  hooks.EventToolCallBefore,
+		Name:  "file_glob",
+		Input: map[string]any{"pattern": "**/.env"},
+	}
+	if err := g.Before(context.Background(), evt); err == nil {
+		t.Fatal("expected file_glob with pattern **/.env to be blocked, got nil error (P2-004 gap: file_glob has no \"path\" arg, only \"pattern\")")
+	}
+}
+
+func TestGuard_FileGlob_AllowedPattern(t *testing.T) {
+	g := NewGuard(defaultTestPolicy(), "/workspace", nil)
+	evt := &hooks.Event{
+		Type:  hooks.EventToolCallBefore,
+		Name:  "file_glob",
+		Input: map[string]any{"pattern": "**/*_test.go"},
+	}
+	if err := g.Before(context.Background(), evt); err != nil {
+		t.Fatalf("expected file_glob with pattern **/*_test.go to be allowed, got %v", err)
+	}
+}
+
 func TestGuard_Shell_DeniedPatternSudo(t *testing.T) {
 	g := NewGuard(defaultTestPolicy(), "/workspace", nil)
 	evt := &hooks.Event{

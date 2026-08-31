@@ -1,0 +1,384 @@
+# Chronos Code — Default Skills
+# Shipped embedded in the binary. Each skill is a reusable capability bundle
+# with expert-level SE knowledge in its manifest.
+
+skills:
+
+  - name: code-review
+    version: "1.0.0"
+    description: "Review code for correctness bugs, security issues, and style violations"
+    author: chronos-code
+    tags: [review, quality, security]
+    tools: [file_read, file_grep, file_glob, shell, graph_query, find_callers, impact_analysis]
+    manifest: |
+      ## Code Review Skill
+
+      Review code changes against this checklist, ordered by severity.
+
+      ### Correctness (Critical)
+      - Nil/null pointer dereferences: every pointer returned from a lookup, type assertion, or channel receive must be checked before use
+      - Race conditions: shared mutable state accessed from multiple goroutines without sync.Mutex, atomic, or channel serialization
+      - Off-by-one errors: loop bounds, slice indices, pagination offsets
+      - Error swallowing: returned errors must be checked; `_ = fn()` on fallible calls is a bug unless justified
+      - Resource leaks: every Open/Lock/Acquire must have a matching Close/Unlock/Release on all paths (including error paths)
+      - Integer overflow/truncation: narrowing conversions (int64→int32), unsigned arithmetic near zero
+      - Deadlocks: lock ordering violations, blocking channel operations inside a lock
+
+      ### Security (Critical)
+      - SQL injection: user input concatenated into queries instead of parameterized ($1, ?)
+      - Command injection: user input passed to exec.Command or shell without sanitization
+      - Path traversal: user-controlled paths not validated against a root (filepath.Rel, filepath.Clean)
+      - Secrets in code: API keys, passwords, tokens in source files or committed configs
+      - Missing authentication: endpoints/handlers reachable without auth middleware
+      - Missing authorization: IDOR — accessing resources by ID without ownership check
+      - XSS: user input rendered into HTML without escaping
+      - SSRF: user-controlled URLs passed to HTTP clients without allowlist
+
+      ### Error Handling (High)
+      - Errors wrapped with context: fmt.Errorf("context: %w", err) not bare return err
+      - Panics in library code: only main/CLI may panic; libraries return errors
+      - Ignored context cancellation: long operations must check ctx.Err() or use ctx-aware APIs
+
+      ### Style & Simplification (Medium)
+      - Dead code: unused functions, unreachable branches, commented-out blocks
+      - Unnecessary complexity: abstraction without duplication, interface with one implementation
+      - Naming: unclear abbreviations, misleading names, inconsistent conventions
+      - Duplicate logic: same 5+ lines repeated — extract a function
+
+      ### Report Format
+      For each finding:
+      ```
+      severity: critical|high|medium|low
+      file: path/to/file.go
+      line: 42
+      finding: Description of the issue
+      fix: Suggested remediation
+      ```
+
+  - name: refactor
+    version: "1.0.0"
+    description: "Restructure code without changing observable behavior"
+    author: chronos-code
+    tags: [refactor, quality]
+    tools: [file_read, file_write, file_grep, file_glob, shell, graph_query, find_callers, impact_analysis, test_map]
+    manifest: |
+      ## Refactoring Skill
+
+      ### Golden Rule
+      Run existing tests BEFORE and AFTER every change. If tests fail after, revert.
+
+      ### Decision Framework
+      - **Rename first**: Clear names often eliminate the need for extraction or comments.
+      - **Extract when**: The same logic (not just similar-looking code) appears 3+ times, OR a function exceeds ~40 lines with distinct phases.
+      - **Inline when**: A function is called once, adds no clarity, and its name just restates the body.
+      - **Never extract prematurely**: Two similar blocks are not duplication — they might diverge later. Wait for the third occurrence.
+
+      ### Process
+      1. Read the code and its tests. Understand current behavior.
+      2. Run tests — they must pass before you start.
+      3. Make ONE refactoring move at a time (rename, extract, inline, move).
+      4. Run tests after each move. Fix or revert if red.
+      5. Check impact_analysis before moves that change signatures.
+      6. After all moves, run the full affected test suite.
+
+      ### Smells to Fix
+      - Long parameter lists → introduce a config/options struct
+      - Switch on type → interface + polymorphism (only if >3 cases)
+      - Deep nesting → early returns (guard clauses)
+      - God function → extract phases into named helpers
+      - Shotgun surgery (one change touches 10 files) → consolidate the scattered logic
+
+  - name: test-writer
+    version: "1.0.0"
+    description: "Generate tests for existing code with comprehensive coverage"
+    author: chronos-code
+    tags: [testing, quality]
+    tools: [file_read, file_write, file_grep, file_glob, shell, graph_query, find_callers]
+    manifest: |
+      ## Test Writing Skill
+
+      ### Strategy
+      1. Read the function under test and ALL its callers (find_callers) to understand real usage patterns.
+      2. Identify the contract: what does the function promise? What are its preconditions?
+      3. Design test cases covering: happy path, each error path, boundary values, zero/nil/empty inputs.
+
+      ### Table-Driven Tests (Go)
+      Always use table-driven tests unless the test has complex setup:
+      ```go
+      tests := []struct {
+          name    string
+          input   InputType
+          want    OutputType
+          wantErr bool
+      }{
+          {name: "valid input", input: ..., want: ..., wantErr: false},
+          {name: "nil input", input: nil, want: zero, wantErr: true},
+          {name: "empty string", input: "", want: ..., wantErr: true},
+      }
+      for _, tt := range tests {
+          t.Run(tt.name, func(t *testing.T) { ... })
+      }
+      ```
+
+      ### Naming Convention
+      `Test<Function>_<Scenario>` — e.g., `TestBuildAgent_MissingProvider`
+
+      ### Mocking Strategy
+      - Mock at the BOUNDARY (interfaces), not internal functions.
+      - If you need to mock a concrete type, the code needs refactoring — say so.
+      - For storage: use the in-memory adapter, not mocks.
+      - For HTTP: use httptest.NewServer, not a mock client.
+
+      ### Edge Cases to Always Test
+      - nil/zero-value inputs for every parameter
+      - Empty slices, empty strings, empty maps
+      - Context cancellation (pass a cancelled ctx)
+      - Concurrent access (if the function is documented as safe)
+      - Maximum/minimum values for numeric inputs
+
+      ### Verification
+      Run the tests. Verify they pass AND that they can fail (comment out the implementation temporarily if needed).
+
+  - name: debug
+    version: "1.0.0"
+    description: "Diagnose and fix bugs from error output and failing tests"
+    author: chronos-code
+    tags: [debug, diagnosis]
+    tools: [file_read, file_grep, file_glob, shell, graph_query, find_callers, resolve_symbol, impact_analysis]
+    manifest: |
+      ## Debugging Skill
+
+      ### The Debug Loop
+      REPRODUCE → PARSE → TRACE → ROOT CAUSE → FIX → VERIFY
+
+      ### Step 1: REPRODUCE
+      Run the exact failing command. Capture the full output. If you can't reproduce, say so and ask for more info.
+
+      ### Step 2: PARSE the error
+      Extract from the output:
+      - Error type/message
+      - File and line number (from stack trace or error message)
+      - The call chain (goroutine stack)
+
+      ### Step 3: TRACE to the source
+      - Read ONLY the failing line and ~10 lines of surrounding context (file_read with line range).
+      - Use resolve_symbol to find where the failing function is defined.
+      - Use find_callers to understand how we got here.
+      - Trace the data flow: where did the bad value come from? Follow it backward.
+
+      ### Step 4: ROOT CAUSE
+      Distinguish symptom from cause:
+      - Symptom: "nil pointer dereference at line 42"
+      - Root cause: "the lookup at line 30 returns nil when the key doesn't exist, and line 42 doesn't check"
+      - Fix the root cause (add the nil check at line 30 or handle the missing key), not the symptom.
+
+      ### Step 5: FIX
+      Apply the minimal change that fixes the root cause. Don't refactor while debugging.
+
+      ### Step 6: VERIFY
+      - Run the originally failing command — it must pass.
+      - Run related tests (from test_map) — they must still pass.
+      - If the bug has a pattern (same mistake elsewhere), grep for it.
+
+      ### Binary Search Debugging
+      When the error location is unclear:
+      1. Add a temporary log/print at the midpoint of the suspected code path
+      2. Run → does the log appear? Narrow to the half that contains the bug.
+      3. Repeat until you find the exact line.
+      4. Remove all temporary logs after fixing.
+
+      ### Anti-Patterns
+      - Don't read the entire codebase before diagnosing. Start from the error.
+      - Don't guess-and-check randomly. Trace systematically.
+      - Don't fix the symptom (adding a nil check at the crash site) when the real bug is upstream.
+
+  - name: explain
+    version: "1.0.0"
+    description: "Explain code, architecture, or concepts at the right detail level"
+    author: chronos-code
+    tags: [explain, documentation]
+    tools: [file_read, file_list, file_glob, file_grep, graph_query, multi_resolution_view, find_callers, find_implementations]
+    manifest: |
+      ## Explanation Skill
+
+      ### Detail Levels (match to the question)
+      - **Quick** (1-2 sentences): "What does this function do?"
+      - **Standard** (a paragraph + references): "How does auth work here?"
+      - **Deep dive** (multi-section): "Walk me through the request lifecycle."
+
+      ### Process
+      1. Use multi_resolution_view to orient (L0 or L1 — don't read full files yet).
+      2. Use graph_query to understand the symbol's role (callers, callees, interface).
+      3. Only file_read the specific code if the graph doesn't answer the question.
+      4. Explain behavior and intent, not line-by-line syntax.
+      5. Always include file:line references so the user can follow along.
+
+      ### What Makes a Good Explanation
+      - Starts with the 1-sentence summary (what it does)
+      - Then the design intent (why it's structured this way)
+      - Then the connections (how it fits with the rest)
+      - Uses analogies only when the concept is genuinely unfamiliar
+
+  - name: security-audit
+    version: "1.0.0"
+    description: "Comprehensive security review against OWASP Top 10 and CWE"
+    author: chronos-code
+    tags: [security, audit]
+    tools: [file_read, file_grep, file_glob, shell, graph_query, find_callers, find_implementations]
+    manifest: |
+      ## Security Audit Skill
+
+      ### OWASP Top 10 (2021) Checklist
+      1. **A01 Broken Access Control** (CWE-284, CWE-639): Missing authz checks, IDOR, directory traversal, CORS misconfiguration
+      2. **A02 Cryptographic Failures** (CWE-259, CWE-327): Weak algorithms (MD5, SHA1 for passwords), hardcoded keys, missing TLS, cleartext storage
+      3. **A03 Injection** (CWE-79, CWE-89): SQL, NoSQL, OS command, LDAP, XPath, template injection
+      4. **A04 Insecure Design** (CWE-209, CWE-522): Missing rate limiting, no account lockout, excessive data exposure in errors
+      5. **A05 Security Misconfiguration** (CWE-16): Default credentials, unnecessary features enabled, verbose errors in production
+      6. **A06 Vulnerable Components** (CWE-1104): Known CVEs in dependencies (check go.sum/package-lock.json)
+      7. **A07 Auth Failures** (CWE-287, CWE-384): Weak passwords, missing MFA, session fixation, credential stuffing
+      8. **A08 Data Integrity** (CWE-502, CWE-829): Unsafe deserialization, unsigned updates, untrusted CI/CD pipelines
+      9. **A09 Logging Failures** (CWE-778): Missing audit logs, logging sensitive data, no alerting
+      10. **A10 SSRF** (CWE-918): User-controlled URLs fetched by the server without allowlist
+
+      ### Secret Detection Patterns
+      Grep for:
+      - `AKIA[0-9A-Z]{16}` — AWS access key
+      - `ghp_[a-zA-Z0-9]{36}` — GitHub PAT
+      - `sk-[a-zA-Z0-9]{48}` — OpenAI key
+      - `-----BEGIN.*PRIVATE KEY-----` — PEM private key
+      - `password\s*[:=]\s*['"][^'"]+` — hardcoded password
+
+      ### Report Format
+      ```
+      severity: critical|high|medium|low
+      cwe: CWE-XXX
+      owasp: A0X
+      file: path/to/file.go
+      line: 42
+      finding: Description
+      remediation: How to fix
+      ```
+
+  - name: migrate
+    version: "1.0.0"
+    description: "Dependency, API, or framework migration"
+    author: chronos-code
+    tags: [migration, refactor]
+    tools: [file_read, file_write, file_grep, file_glob, shell, graph_query, find_callers, find_implementations, impact_analysis]
+    manifest: |
+      ## Migration Skill
+
+      ### Process: INVENTORY → MAP → PLAN → APPLY → TEST → CLEANUP
+
+      1. **INVENTORY**: Find ALL usage sites (grep + find_callers + find_implementations). Count them. List them.
+      2. **MAP**: For each site, determine what changes. Old API → New API mapping.
+      3. **PLAN**: Order by dependency (leaf→root). Plan to complete one file at a time.
+      4. **APPLY**: Change one file at a time. Run tests after each file.
+      5. **TEST**: Full test suite after all files are migrated.
+      6. **CLEANUP**: Remove old imports, deprecated compatibility shims, unused adapters.
+
+      ### Rules
+      - Never leave a partial migration. Either complete a file or revert it.
+      - Check changelogs/release notes for breaking changes between versions.
+      - Pin the new version explicitly (no floating ranges).
+      - If a migration tool exists (go fix, codemod, jscodeshift), use it first.
+
+  - name: optimize
+    version: "1.0.0"
+    description: "Profile and optimize code for performance"
+    author: chronos-code
+    tags: [performance, optimization]
+    tools: [file_read, file_write, file_grep, file_glob, shell, graph_query]
+    manifest: |
+      ## Optimization Skill
+
+      ### Rule 1: MEASURE FIRST
+      Never optimize without profiling. Run benchmarks or profile before touching code.
+
+      ### Process
+      1. Write a benchmark BEFORE optimizing: `func BenchmarkX(b *testing.B)`
+      2. Run it: `go test -bench=. -benchmem`
+      3. Profile: `go test -cpuprofile cpu.prof -memprofile mem.prof`
+      4. Identify the actual bottleneck (usually I/O, not CPU).
+      5. Fix the bottleneck. Re-run the benchmark. Report the delta.
+
+      ### Optimization Hierarchy (biggest wins first)
+      1. Algorithmic: O(n^2) → O(n log n) — always fix this first
+      2. I/O batching: N database queries → 1 batch query
+      3. Caching: repeated expensive computations → LRU cache
+      4. Allocation reduction: pool objects, pre-allocate slices (make([]T, 0, n))
+      5. Data structure: map vs slice, sync.Pool, string builder
+      6. Micro: inlining, alignment — only if the above are exhausted
+
+      ### Don't
+      - Don't sacrifice readability for <10% gains
+      - Don't optimize cold paths (code that runs once at startup)
+      - Don't cache without a TTL/eviction strategy
+
+  - name: document
+    version: "1.0.0"
+    description: "Generate or improve code documentation"
+    author: chronos-code
+    tags: [documentation]
+    tools: [file_read, file_write, file_list, file_glob, file_grep, graph_query, multi_resolution_view]
+    manifest: |
+      ## Documentation Skill
+
+      ### Principles
+      - Document the WHY, not the WHAT. Code shows what; docs show why.
+      - Package-level doc: purpose, key types, one usage example. Every package needs this.
+      - Function-level doc: only when name + signature don't tell the full story.
+      - No stale docs: read the code, write from truth.
+
+      ### Go Doc Conventions
+      - Package comment: first sentence is the summary, starts with "Package X provides..."
+      - Exported function: "FuncName does X." (starts with the function name)
+      - Keep it to 1-3 sentences. More goes in a doc.go or README.
+
+  - name: git-workflow
+    version: "1.0.0"
+    description: "Git operations: commits, branches, PRs"
+    author: chronos-code
+    tags: [git, workflow]
+    tools: [shell, file_read, file_grep]
+    manifest: |
+      ## Git Workflow Skill
+
+      ### Commit Conventions
+      - Format: `type(scope): description` — e.g., `fix(auth): validate JWT expiry before cache lookup`
+      - Types: feat, fix, refactor, test, docs, chore, perf
+      - Description: imperative mood, lowercase, no period, <72 chars
+      - Body (optional): what and why, not how
+
+      ### PR Creation
+      - Title: same as commit convention, <70 chars
+      - Body: ## Summary (1-3 bullets), ## Test plan (checklist)
+      - One concern per PR. Don't bundle unrelated changes.
+
+      ### Branch Strategy
+      - Feature: `feat/short-description`
+      - Fix: `fix/short-description`
+      - Always branch from main. Always rebase before PR.
+
+  - name: dependency-update
+    version: "1.0.0"
+    description: "Update dependencies safely"
+    author: chronos-code
+    tags: [dependencies, maintenance]
+    tools: [shell, file_read, file_write, file_grep]
+    manifest: |
+      ## Dependency Update Skill
+
+      ### Process
+      1. Check current versions: `go list -m all` or `npm outdated`
+      2. Read changelogs for breaking changes between current and target version
+      3. Update one dependency at a time
+      4. Run full test suite after each update
+      5. Pin exact versions (no floating ranges in production)
+      6. Check for known CVEs: `govulncheck ./...` or `npm audit`
+
+      ### Rules
+      - Major version bumps: read the migration guide. Expect API changes.
+      - Minor version bumps: read the changelog. Should be safe but verify.
+      - Patch version bumps: usually safe. Run tests to confirm.
+      - Never update all dependencies at once. One at a time, test between each.

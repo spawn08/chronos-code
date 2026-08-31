@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -61,8 +62,13 @@ type fileDoc struct {
 
 // Store is a local, YAML-backed memory store. One file per category is
 // stored under dir, e.g. dir/project.yaml, dir/user.yaml, dir/feedback.yaml.
+// mu serializes the load-modify-save cycle in Add and Forget so two
+// concurrent calls (e.g. two fast turns both triggering auto-extraction)
+// can't both load the same snapshot and have one silently overwrite the
+// other's write.
 type Store struct {
 	dir string
+	mu  sync.Mutex
 }
 
 // NewStore returns a Store rooted at dir. It does not create dir eagerly;
@@ -148,6 +154,9 @@ func (s *Store) Add(category Category, content string) (Record, error) {
 		return Record{}, fmt.Errorf("memory: invalid category %q", category)
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	id, err := newID()
 	if err != nil {
 		return Record{}, err
@@ -229,6 +238,9 @@ func (s *Store) Search(query string) ([]Record, error) {
 // contains it, and rewrites that file atomically. It returns a "not found"
 // error if no record with that id exists in any category.
 func (s *Store) Forget(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for _, c := range categories {
 		doc, err := s.load(c)
 		if err != nil {

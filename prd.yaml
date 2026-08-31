@@ -1,0 +1,4096 @@
+##############################################################################
+#  PRD: Chronos Code — AI Coding Agent Harness
+#  Version: 1.0.0-draft
+#  Date: 2026-08-31
+#  Author: spawn08
+#  Status: DRAFT
+##############################################################################
+
+meta:
+  product_name: Chronos Code
+  tagline: "YAML-native AI coding agent harness built on Chronos"
+  repository: github.com/spawn08/chronos-code  # separate repo — see rationale below
+  framework_dependency: github.com/spawn08/chronos v0.x
+  binary_name: chronos-code
+  target_binary_size: "<20MB stripped"
+  target_token_efficiency: "40-60% fewer tokens per task vs Claude Code / Cursor / Aider"
+  license: same as Chronos
+
+# ============================================================================
+# 1. EXECUTIVE SUMMARY
+# ============================================================================
+
+summary: |
+  Chronos Code is an AI coding agent harness — a standalone CLI and server
+  binary built on the Chronos agentic framework. It provides a YAML-first,
+  configuration-driven experience for defining, composing, and running AI
+  coding agents with full MCP integration, tool calling, subagent delegation,
+  persistent memory, session management, guardrails, and a self-learning loop
+  that distills past executions into reusable YAML agent definitions.
+
+  Think of it as "infrastructure for building your own Cursor/Claude Code" —
+  batteries-included out of the box, infinitely customizable via YAML, and
+  deployable as a tiny CLI for local dev or a horizontally-scaled server for
+  team/enterprise use.
+
+# ============================================================================
+# 2. COMPETITIVE LANDSCAPE & BENCHMARK
+# ============================================================================
+
+competitive_benchmark:
+  overview: |
+    The AI coding agent market in 2026 has 13+ serious tools. None combines
+    all of: token efficiency, code graph indexing, YAML-first config,
+    self-learning, and enterprise auth in a single small binary. Chronos Code
+    targets the intersection of Aider's token efficiency, Augment Code's
+    context engine, and Claude Code's agentic capabilities — without IDE
+    lock-in or cloud dependency.
+
+  # ── Head-to-Head Comparison ─────────────────────────────────────────
+
+  comparison_table:
+    columns:
+      - "Tool"
+      - "Type"
+      - "Context Engineering"
+      - "Token Efficiency"
+      - "SWE-bench"
+      - "Code Indexing"
+      - "MCP"
+      - "Enterprise Auth"
+      - "Self-Learning"
+      - "Binary/Install"
+
+    rows:
+      - tool: "Claude Code"
+        type: "CLI agent"
+        context: "Full file reads on demand. CLAUDE.md + .claude/ rules. 1M context window."
+        tokens: "High (~4.2x Aider baseline). No compression, no graph."
+        swe_bench: "80.9% (Opus 4.6) → 88.6% (Opus 4.8) → 95.0% (Fable 5)"
+        indexing: "None. Runtime grep/read only."
+        mcp: "Full (stdio + SSE)"
+        auth: "OAuth PKCE for Pro/Max/Team/Enterprise. Bans third-party OAuth relay."
+        learning: "No"
+        binary: "npm install, ~50MB node_modules"
+
+      - tool: "Cursor"
+        type: "IDE (VS Code fork)"
+        context: "Vector embeddings via Turbopuffer. .cursor/rules/. @codebase query."
+        tokens: "Highest (~23x Aider). Massive context sends per turn."
+        swe_bench: "N/A (IDE, not benchmarked on SWE-bench)"
+        indexing: "Background vector embedding. Modified-file re-indexing."
+        mcp: "Yes"
+        auth: "Subscription ($20-40/mo). No BYO key."
+        learning: "No"
+        binary: "IDE download, ~500MB"
+
+      - tool: "Aider"
+        type: "CLI (Python)"
+        context: "Repo-map via tree-sitter AST. Function signatures, graph-ranked. ~1K token budget."
+        tokens: "Best in class (1.0x baseline). Repo-map is the key innovation."
+        swe_bench: "88.0% (polyglot, gpt-5 high)"
+        indexing: "On-demand tree-sitter parse. No background daemon."
+        mcp: "No"
+        auth: "BYO API key only. No enterprise."
+        learning: "No"
+        binary: "pip install, Python dependency"
+
+      - tool: "OpenAI Codex CLI"
+        type: "CLI (Rust)"
+        context: "OS-level kernel sandbox scopes context naturally."
+        tokens: "Low (~1.5x Aider). Sandbox limits context scope."
+        swe_bench: "~72%"
+        indexing: "None. Reads on demand within sandbox."
+        mcp: "Yes (client + server)"
+        auth: "OpenAI API key or subscription. Device flow."
+        learning: "No"
+        binary: "Rust binary, ~15MB"
+
+      - tool: "Windsurf (Codeium)"
+        type: "IDE"
+        context: "'Fast Context' — proprietary connected graph of code relationships."
+        tokens: "Unknown (proprietary)"
+        swe_bench: "N/A"
+        indexing: "Local-first background graph indexing. Code never leaves machine."
+        mcp: "Yes"
+        auth: "Subscription. Enterprise tier."
+        learning: "No"
+        binary: "IDE download"
+
+      - tool: "Devin (Cognition)"
+        type: "Cloud autonomous"
+        context: "Containerized devbox. Brain (cloud) + Devbox (execution). Multi-model routing."
+        tokens: "Very high (many planning/execution loops)"
+        swe_bench: "N/A (repositioned to 'capable assistant')"
+        indexing: "Full codebase in container. No persistent graph."
+        mcp: "No"
+        auth: "Subscription ($500/mo). Enterprise."
+        learning: "No"
+        binary: "Cloud-only"
+
+      - tool: "GitHub Copilot"
+        type: "IDE + Desktop app"
+        context: "'Repo Grokking' — deep workspace index. Session-level caching."
+        tokens: "Medium (IDE integration reduces redundant reads)"
+        swe_bench: "N/A"
+        indexing: "Background workspace indexing. Pre-indexing + parallel loading."
+        mcp: "Yes (agent mode)"
+        auth: "GitHub account. Enterprise SSO via org."
+        learning: "No"
+        binary: "IDE extension or desktop app"
+
+      - tool: "Augment Code"
+        type: "IDE extension"
+        context: "Proprietary Context Engine — real-time knowledge graph. 500K files across dozens of repos. Millisecond cross-service dependency queries."
+        tokens: "Low (graph reduces context size). 70% faster bug investigation."
+        swe_bench: "N/A"
+        indexing: "Best in class. Program-structure graph, not just embeddings. Cross-repo."
+        mcp: "Unknown"
+        auth: "Enterprise only. SSO."
+        learning: "No"
+        binary: "IDE extension"
+
+      - tool: "Sourcegraph Cody"
+        type: "IDE + platform"
+        context: "Hybrid — local editor + remote Sourcegraph search + embeddings. Cross-repo semantic retrieval."
+        tokens: "Medium-low (server-side retrieval pre-filters)"
+        swe_bench: "N/A"
+        indexing: "Enterprise indexes 300K+ repos. SCIP-based code intelligence."
+        mcp: "No"
+        auth: "Enterprise SSO. Context Filters for sensitive code."
+        learning: "No"
+        binary: "IDE extension + Sourcegraph instance"
+
+      - tool: "Amazon Q Developer"
+        type: "IDE + CLI"
+        context: "RAG architecture. IDE extension collects cursor position, open files, imports."
+        tokens: "Medium"
+        swe_bench: "N/A"
+        indexing: "Workspace-level for code transform. Enterprise code graph planned."
+        mcp: "No"
+        auth: "AWS IAM/SSO. Enterprise-ready (SOC, ISO, HIPAA, PCI)."
+        learning: "No"
+        binary: "IDE extension"
+
+      - tool: "Cline"
+        type: "VS Code extension"
+        context: "File read/write, terminal, workspace browser."
+        tokens: "High (~3-5x Aider). Looping behavior burns tokens."
+        swe_bench: "N/A"
+        indexing: "None."
+        mcp: "Best MCP integration — native marketplace of pre-built servers."
+        auth: "BYO API key (Anthropic, OpenAI, OpenRouter)."
+        learning: "No"
+        binary: "VS Code extension"
+
+      - tool: "Pi (Codegen)"
+        type: "CLI agent"
+        context: "File read/write, shell execution."
+        tokens: "Unknown"
+        swe_bench: "N/A"
+        indexing: "None."
+        mcp: "Unknown"
+        auth: "OAuth PKCE for OpenAI/Google subscriptions. Device flow for GitHub. API keys for Anthropic (third-party OAuth banned)."
+        learning: "No"
+        binary: "Go binary"
+
+      - tool: "Gemini Code Assist"
+        type: "IDE + CLI"
+        context: "Agent mode with whole-codebase analysis."
+        tokens: "Unknown"
+        swe_bench: "N/A"
+        indexing: "Google-scale code understanding."
+        mcp: "Yes (agent mode)"
+        auth: "Google Cloud IAM."
+        learning: "No"
+        binary: "Being consolidated into 'Antigravity' platform"
+
+  # ── Key Competitive Insights ────────────────────────────────────────
+
+  insights:
+    - insight: "Token efficiency and accuracy are inversely correlated in current tools"
+      detail: |
+        Claude Code has the highest accuracy (80-95% SWE-bench) but the highest
+        token cost (4.2x baseline). Aider has the best efficiency (1.0x) but
+        lower accuracy. NO tool achieves both. Chronos Code's code graph +
+        tiered routing targets this gap: Aider-class efficiency with Claude
+        Code-class accuracy.
+
+    - insight: "Code graph indexing is the proven context engineering winner"
+      detail: |
+        Research (ICLR 2025, RepoGraph): repo-level code graphs boost SWE-bench
+        by 32.8%. CodeGraph MCP reduces token costs by ~35% and tool calls by
+        ~70%. AST-derived graphs (tree-sitter) build in seconds, outperform
+        LLM-generated graphs. Augment Code's proprietary graph handles 500K
+        files. This is the key architectural investment.
+
+    - insight: "'More tokens makes agents worse' — context stuffing degrades performance"
+      detail: |
+        Martin Fowler (ThoughtWorks, 2026), Sequoia Capital research, and
+        Augment Code's findings all agree: a weaker model with excellent context
+        outperforms a stronger model with poor context. Over-stuffing the
+        context window with irrelevant code hurts accuracy. Selective, graph-
+        guided context loading is superior to "dump everything."
+
+    - insight: "No tool has a self-learning loop"
+      detail: |
+        Zero of the 13 tools learn from past executions. Every session starts
+        from scratch. Chronos Code's self-learning loop (trace → distill →
+        generate YAML) is a genuine differentiator with no current competitor.
+
+    - insight: "Enterprise auth is fragmented and restrictive"
+      detail: |
+        Anthropic banned third-party OAuth relay (April 2026). OpenAI and Google
+        still allow it. Pi works around this with API keys for Anthropic. The
+        safe approach: API key as primary, OAuth where allowed, enterprise SSO
+        for server mode.
+
+    - insight: "CLI agents are winning over IDE agents for power users"
+      detail: |
+        Claude Code, Aider, Codex CLI, Pi — the trend is toward standalone CLI
+        agents that work with any editor. IDE lock-in (Cursor, Windsurf) limits
+        adoption. CLI + optional IDE integration is the right architecture.
+
+  # ── Chronos Code Positioning ────────────────────────────────────────
+
+  positioning:
+    tagline: "Aider's efficiency + Augment's context engine + Claude Code's agentic power — in a <20MB binary"
+
+    unique_combination:
+      - "Code graph indexing (like Augment) — but open-source and local-only"
+      - "Token efficiency (like Aider) — plus tiered routing and compression"
+      - "Full MCP support (like Claude Code) — YAML-configured"
+      - "Self-learning loop — no competitor has this"
+      - "YAML-first config (unique) — agents, skills, guardrails, security"
+      - "Embedded defaults (unique) — zero-config first run"
+      - "Small binary (like Codex CLI) — <20MB, Go, no runtime deps"
+      - "Enterprise auth — API key + OAuth + SSO federation"
+      - "Server mode (like Devin) — but self-hosted, horizontal scaling"
+
+    target_benchmarks:
+      token_efficiency: "1.0-1.5x Aider baseline (40-60% less than Claude Code)"
+      accuracy: ">80% on SWE-bench Lite (Claude Code class)"
+      binary_size: "<20MB stripped (Codex CLI class)"
+      index_speed: "<30s full index on 50K-file project"
+      startup: "<500ms to first prompt"
+
+# ============================================================================
+# 3. REPOSITORY DECISION: SEPARATE CODEBASE
+# ============================================================================
+
+repository_decision:
+  recommendation: SEPARATE_REPO
+  name: chronos-code
+  import: "github.com/spawn08/chronos (library dependency)"
+
+  rationale:
+    - heading: Binary size control
+      detail: |
+        Chronos's go.mod carries k8s client-go (~20MB), aws-sdk-go-v2 (~15MB),
+        mongo-driver (~8MB), wazero (~10MB), and swagger (~5MB) for storage
+        adapters and sandbox backends the coding agent never uses. While Go's
+        linker only includes reachable code, a separate go.mod means `go mod
+        tidy` never downloads these at all. The coding agent's deps are: core
+        Chronos SDK/engine packages, sqlite (modernc ~8MB), pgx (~3MB), yaml,
+        tiktoken, and a terminal UI library. Target: <20MB stripped binary vs
+        the current 71MB monolith.
+
+    - heading: Product vs framework lifecycle
+      detail: |
+        Chronos is a framework — it ships when interfaces stabilize. Chronos
+        Code is a product — it ships when a feature is ready. Decoupled repos
+        mean the coding agent can cut releases weekly (bug fixes, new skills,
+        prompt tuning) without touching the framework. The framework pins at a
+        tested version via go.mod.
+
+    - heading: Product-specific dependencies
+      detail: |
+        The coding agent will need tree-sitter bindings (AST-aware code search),
+        LSP client (go-to-definition, diagnostics), diff/patch libraries, a
+        terminal UI (bubbletea or similar), and potentially git2go. None of
+        these belong in a general-purpose agentic framework's go.mod.
+
+    - heading: Clean dependency graph
+      detail: |
+        chronos-code → chronos (one-way). No circular dependency. Chronos
+        remains framework-shaped. The coding agent is the flagship consumer,
+        not a special case inside the framework.
+
+  what_stays_in_chronos:
+    - "sdk/agent — builder, YAML config, BuildAgent/BuildAll"
+    - "sdk/harness — DeepAgent preset, subagent service, planning tools, VFS"
+    - "sdk/memory — Store, Manager, vector recall"
+    - "sdk/skill — Skill, Registry, SKILL.md loader"
+    - "sdk/team — multi-agent strategies"
+    - "engine/* — model providers, tool registry, graph, MCP client, guardrails, hooks, streaming"
+    - "storage/storage.go, storage/vector.go — interfaces"
+    - "storage/adapters/sqlite, storage/adapters/postgres — production adapters"
+
+  what_goes_in_chronos_code:
+    - "cmd/chronos-code — binary entry point"
+    - "internal/agent — coding-agent-specific agent definitions and prompt engineering"
+    - "internal/workspace — project detection, file indexing, .gitignore awareness"
+    - "internal/learning — self-learning loop (trace → distill → YAML generation)"
+    - "internal/config — .chronos-code/ directory structure, settings, security policies"
+    - "internal/tui — terminal UI (interactive REPL, permission prompts, streaming)"
+    - "internal/server — HTTP/gRPC server for team deployment"
+    - "internal/lsp — LSP client for code intelligence (optional, build-tagged)"
+    - "skills/ — built-in skill YAML definitions"
+    - "guardrails/ — YAML-configurable guardrail presets"
+    - "agents/ — default agent YAML definitions (coder, reviewer, planner, etc.)"
+
+# ============================================================================
+# 4. GOALS & NON-GOALS
+# ============================================================================
+
+goals:
+  - id: G-001
+    title: YAML-native configuration
+    detail: |
+      All agent definitions, team compositions, tool permissions, guardrails,
+      MCP server connections, skills, and security policies are expressed in
+      YAML. No Go code required to define or customize agents. YAML is the
+      first-class citizen — not markdown, not JSON, not code.
+
+  - id: G-002
+    title: Minimal binary size
+    detail: |
+      Stripped CLI binary under 20MB. Achieved by: separate go.mod (no k8s,
+      aws, mongo, wazero, swagger transitive deps), careful import selection,
+      and optional features behind build tags (LSP, tree-sitter).
+
+  - id: G-003
+    title: Full MCP integration
+    detail: |
+      First-class MCP client (already in Chronos engine/mcp) for connecting
+      to external tool servers (filesystem, git, databases, APIs). Agents
+      declare MCP servers in YAML; the harness auto-connects, registers tools,
+      and enforces per-server permission policies.
+
+  - id: G-004
+    title: Tool calling with permission model
+    detail: |
+      Tools are the agent's hands. Built-in tools (file read/write/glob/grep,
+      shell, semantic search) plus MCP-sourced tools plus custom YAML-defined
+      tools. Three-tier permission model (allow/require_approval/deny) with
+      YAML-configurable per-tool overrides and interactive user approval in
+      the TUI.
+
+  - id: G-005
+    title: YAML-defined agents with subagent support
+    detail: |
+      Agents are defined in YAML files under .chronos-code/agents/. A parent
+      agent can spawn subagents (named or dynamic) that run in isolated
+      contexts, inherit the parent's model, and return only their result.
+      Subagent nesting is depth-bounded. Teams of agents use the 6 existing
+      Chronos strategies (sequential, parallel, router, coordinator, swarm,
+      hierarchy).
+
+  - id: G-006
+    title: Small CLI, scalable server
+    detail: |
+      Single binary serves both modes. CLI mode: interactive REPL for local
+      dev, single-user, SQLite storage. Server mode: multi-tenant HTTP/gRPC
+      server, PostgreSQL storage, horizontal scaling, SSE streaming, session
+      management, auth.
+
+  - id: G-007
+    title: Database-backed persistence
+    detail: |
+      Sessions, memory, audit logs, traces, checkpoints — all persisted via
+      Chronos storage interfaces. SQLite for local (zero-config), PostgreSQL
+      for server (production). No new storage adapters needed — Chronos's
+      existing sqlite and postgres adapters cover all 18 Storage methods.
+
+  - id: G-008
+    title: Local memory layer
+    detail: |
+      The AI coding agent manages its own memory locally. Short-term (within
+      session) and long-term (cross-session) memory with optional vector-based
+      semantic recall. Memory is scoped per-project and per-user. The agent
+      auto-extracts memories from conversations (Chronos sdk/memory/Manager).
+      Memory files live in .chronos-code/memory/ as YAML — inspectable and
+      editable by the user.
+
+  - id: G-009
+    title: Self-learning loop
+    detail: |
+      After each session, the harness runs a distillation pass: analyze the
+      execution trace, extract what worked (tool sequences, prompt patterns,
+      successful strategies), and generate/update YAML agent definitions,
+      skills, and guardrail configs. This is NOT fine-tuning — it is
+      structured knowledge extraction into YAML artifacts that improve future
+      runs. The learning loop is opt-in and transparent (all generated YAML
+      is human-reviewable).
+
+  - id: G-010
+    title: Skills integration
+    detail: |
+      Skills are reusable capability bundles (Chronos sdk/skill). The coding
+      agent ships with built-in skills (code-review, refactor, test-writer,
+      debug, explain, migrate) defined as YAML + markdown manifests in
+      .chronos-code/skills/. Users add custom skills in the same format.
+      Skills are referenced by name in agent YAML (use_skills:).
+
+  - id: G-011
+    title: Guardrails and security via config
+    detail: |
+      Guardrails (input/output validation) are configured in YAML — not in
+      code. Ship with presets: prompt-injection detection, PII filtering,
+      blocklist, max-length, cost caps, file-path allowlists. Security
+      policies (which directories are writable, which shell commands are
+      allowed, which MCP servers are trusted) live in
+      .chronos-code/security.yaml.
+
+  - id: G-012
+    title: Token efficiency — fewer tokens per task than competitors
+    detail: |
+      Chronos Code must consume significantly fewer tokens (40-60% less) than
+      comparable coding agents (Claude Code, Cursor, Aider) for equivalent
+      tasks. This is achieved through: tiered model routing (cheap models for
+      mechanical tasks, expensive for reasoning), aggressive context
+      compression, AST-aware partial file loading, tool result truncation,
+      semantic deduplication, diff-based editing (never resend full files),
+      plan-first execution (fewer retries), and real-time budget enforcement.
+      Token efficiency is a first-class metric tracked in CI via eval suites.
+
+  - id: G-013
+    title: Session management
+    detail: |
+      Every interaction is a session with a unique ID, full message history,
+      checkpoints, and metadata. Sessions are resumable (pick up where you
+      left off), branchable (fork from a checkpoint), and inspectable (view
+      history, traces, tool calls). Stored in the configured database.
+
+non_goals:
+  - "IDE extension / VS Code plugin — that's a separate product on top of the server API"
+  - "Fine-tuning or model training — self-learning produces YAML, not model weights"
+  - "Running untrusted code in production sandboxes — use Chronos sandbox directly for that"
+  - "Replacing Chronos's CLI — chronos-code is a separate binary with a different audience"
+  - "Supporting non-Go agent code — agents are YAML configs that drive Go runtime"
+  - "Building a SaaS — this is an open-source tool, not a hosted service"
+
+# ============================================================================
+# 5. ARCHITECTURE
+# ============================================================================
+
+architecture:
+  overview: |
+    Chronos Code is a thin, opinionated layer on top of Chronos's SDK and
+    engine. It provides: (1) a project-aware workspace layer, (2) YAML-driven
+    agent/skill/guardrail configuration, (3) a TUI and server for user
+    interaction, (4) a self-learning loop for continuous improvement.
+
+    ┌─────────────────────────────────────────────────────┐
+    │                   chronos-code CLI / Server          │
+    │  ┌───────────┐ ┌──────────┐ ┌────────────────────┐  │
+    │  │    TUI    │ │  Server  │ │   Self-Learning     │  │
+    │  │  (REPL)   │ │ (HTTP)   │ │   Loop              │  │
+    │  └─────┬─────┘ └────┬─────┘ └─────────┬──────────┘  │
+    │        │             │                 │              │
+    │  ┌─────▼─────────────▼─────────────────▼──────────┐  │
+    │  │              Agent Orchestrator                  │  │
+    │  │   (workspace detection, config loading,         │  │
+    │  │    agent lifecycle, session routing)             │  │
+    │  └─────────────────────┬───────────────────────────┘  │
+    │                        │                              │
+    │  ┌─────────────────────▼───────────────────────────┐  │
+    │  │           Config Resolver (YAML-first)           │  │
+    │  │   agents/ + skills/ + guardrails/ + security     │  │
+    │  └─────────────────────┬───────────────────────────┘  │
+    │                        │                              │
+    ├────────────────────────▼──────────────────────────────┤
+    │             Chronos Framework (library)               │
+    │  ┌──────┐ ┌───────┐ ┌──────┐ ┌───────┐ ┌─────────┐  │
+    │  │Agent │ │Harness│ │Memory│ │Engine │ │Storage  │  │
+    │  │SDK   │ │(Deep) │ │Mgr   │ │(model,│ │(sqlite, │  │
+    │  │      │ │       │ │      │ │tool,  │ │postgres)│  │
+    │  │      │ │       │ │      │ │graph, │ │         │  │
+    │  │      │ │       │ │      │ │mcp,   │ │         │  │
+    │  │      │ │       │ │      │ │guard) │ │         │  │
+    │  └──────┘ └───────┘ └──────┘ └───────┘ └─────────┘  │
+    └─────────────────────────────────────────────────────┘
+
+  directory_structure:
+    ".chronos-code/":
+      description: "Project-level config directory (like .git/, .vscode/)"
+      children:
+        "config.yaml": "Main config — model, storage, defaults, feature flags"
+        "agents/": "Agent YAML definitions"
+        "agents/coder.yaml": "Primary coding agent"
+        "agents/reviewer.yaml": "Code review specialist"
+        "agents/planner.yaml": "Task decomposition agent"
+        "agents/debugger.yaml": "Bug diagnosis specialist"
+        "skills/": "Skill manifests (YAML + optional markdown body)"
+        "skills/code-review.yaml": "Code review skill definition"
+        "skills/refactor.yaml": "Refactoring skill"
+        "guardrails/": "Guardrail configurations"
+        "guardrails/default.yaml": "Default guardrail preset"
+        "security.yaml": "Security policy — path allowlists, shell restrictions, MCP trust"
+        "memory/": "Persistent memory store (YAML files, inspectable)"
+        "memory/project.yaml": "Project-level memories"
+        "memory/user.yaml": "User preference memories"
+        "learned/": "Self-learning loop output"
+        "learned/patterns.yaml": "Distilled execution patterns"
+        "learned/agents/": "Auto-generated agent YAML from successful runs"
+        "sessions.db": "SQLite session database (local mode)"
+
+# ============================================================================
+# 6. CONFIGURATION SCHEMA (YAML-FIRST)
+# ============================================================================
+
+config_schema:
+  description: |
+    All configuration is YAML. The schema builds on Chronos's existing
+    AgentConfig/FileConfig but adds coding-agent-specific sections. The
+    harness reads configs in this precedence order:
+      1. CLI flags (highest)
+      2. Environment variables (CHRONOS_CODE_*)
+      3. .chronos-code/config.yaml (project)
+      4. ~/.chronos-code/config.yaml (user global)
+      5. Built-in defaults (lowest)
+
+  main_config:
+    file: ".chronos-code/config.yaml"
+    schema:
+      version: "v1"
+
+      model:
+        provider: "anthropic"                     # any Chronos-supported provider
+        model: "claude-sonnet-4-6"
+        api_key: "${ANTHROPIC_API_KEY}"
+        timeout_sec: 120
+
+      storage:
+        backend: "sqlite"                         # sqlite (local) or postgres (server)
+        dsn: ".chronos-code/sessions.db"
+
+      memory:
+        enabled: true
+        backend: "local"                          # local (YAML files) or storage (database)
+        vector_recall: true                       # enable semantic search over memories
+        embeddings:
+          provider: "openai"
+          model: "text-embedding-3-small"
+        auto_extract: true                        # LLM-powered memory extraction after each session
+        retention_days: 90
+
+      learning:
+        enabled: true
+        auto_distill: true                        # run distillation after each session
+        min_sessions_before_distill: 3            # need N successful sessions before generating YAML
+        review_before_apply: true                 # require user approval before applying learned YAML
+        output_dir: ".chronos-code/learned/"
+
+      workspace:
+        root: "."                                 # auto-detected from git root
+        gitignore_aware: true
+        index_on_start: true                      # build file index on startup
+        max_file_size_kb: 512                     # skip files larger than this for indexing
+
+      session:
+        auto_resume: true                         # offer to resume last session on startup
+        max_history_turns: 100
+        compaction:
+          enabled: true
+          threshold: 0.8                          # summarize at 80% context window
+          preserve_recent_turns: 6
+
+      defaults:
+        stream: true
+        debug: false
+        permission_mode: "require_approval"       # default for all agents
+        reasoning:
+          strategy: "cot"
+          effort: "medium"
+
+      server:
+        enabled: false
+        listen: ":8430"
+        auth:
+          type: "api_key"                         # api_key, jwt, none
+          api_key: "${CHRONOS_CODE_API_KEY}"
+        cors:
+          allowed_origins: ["*"]
+        max_concurrent_sessions: 50
+        rate_limit:
+          requests_per_minute: 60
+
+  agent_config:
+    file: ".chronos-code/agents/coder.yaml"
+    description: "Individual agent definition — extends Chronos AgentConfig"
+    schema:
+      id: "coder"
+      name: "Coding Agent"
+      description: "Primary autonomous coding agent"
+
+      model:
+        provider: "anthropic"
+        model: "claude-sonnet-4-6"
+
+      system_prompt: |
+        You are an expert autonomous coding agent. You work in the user's
+        project directory and have access to file tools, shell, and semantic
+        search. Follow the user's instructions precisely.
+
+      instructions:
+        - "Always read relevant files before modifying them"
+        - "Run tests after making changes"
+        - "Wrap errors with context: fmt.Errorf(\"context: %w\", err)"
+        - "Never hardcode secrets or credentials"
+
+      tools:
+        - name: "file_read"
+          permission: "allow"
+        - name: "file_write"
+          permission: "require_approval"
+        - name: "file_list"
+          permission: "allow"
+        - name: "file_glob"
+          permission: "allow"
+        - name: "file_grep"
+          permission: "allow"
+        - name: "shell"
+          permission: "require_approval"
+          requires_confirmation: true
+        - name: "semantic_search"
+          permission: "allow"
+
+      mcp_servers:
+        - name: "filesystem"
+          transport: "stdio"
+          command: "npx"
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+          permission: "allow"
+        - name: "git"
+          transport: "stdio"
+          command: "npx"
+          args: ["-y", "@modelcontextprotocol/server-git"]
+          permission: "require_approval"
+
+      use_skills:
+        - "code-review"
+        - "refactor"
+        - "test-writer"
+
+      sub_agents:
+        - "reviewer"
+        - "planner"
+
+      guardrails:
+        preset: "default"                          # references .chronos-code/guardrails/default.yaml
+        overrides:
+          max_output_chars: 50000
+          blocked_terms: ["TODO: remove", "HACK"]
+
+      reasoning:
+        strategy: "cot"
+        effort: "high"
+
+      context:
+        max_tokens: 128000
+        summarize_threshold: 0.8
+        preserve_recent_turns: 6
+
+  guardrail_config:
+    file: ".chronos-code/guardrails/default.yaml"
+    description: "Guardrail preset — reusable across agents"
+    schema:
+      name: "default"
+      description: "Standard coding agent guardrails"
+
+      input:
+        - type: "injection_detector"
+          enabled: true
+          sensitivity: "medium"                    # low, medium, high
+        - type: "max_length"
+          max_chars: 100000
+
+      output:
+        - type: "pii_filter"
+          enabled: true
+          action: "redact"                         # redact, block, warn
+        - type: "blocklist"
+          terms: ["password", "secret_key", "private_key"]
+          action: "warn"
+        - type: "max_length"
+          max_chars: 200000
+
+      cost:
+        max_tokens_per_session: 500000
+        max_cost_per_session_usd: 5.00
+        warn_at_percent: 80
+
+  security_config:
+    file: ".chronos-code/security.yaml"
+    description: "Security policy — what the agent can and cannot do"
+    schema:
+      version: "v1"
+
+      filesystem:
+        writable_paths:
+          - "."                                    # project root
+        readable_paths:
+          - "."
+          - "~/.chronos-code/"
+        denied_paths:
+          - ".env"
+          - ".git/config"
+          - "**/*.pem"
+          - "**/*.key"
+          - "**/credentials*"
+        denied_patterns:
+          - "**/.env*"
+          - "**/secrets/**"
+
+      shell:
+        allowed_commands:
+          - "go"
+          - "git"
+          - "make"
+          - "npm"
+          - "node"
+          - "python"
+          - "pip"
+          - "cargo"
+          - "rustc"
+          - "ls"
+          - "cat"
+          - "grep"
+          - "find"
+          - "wc"
+          - "diff"
+        denied_commands:
+          - "rm -rf /"
+          - "sudo"
+          - "curl | sh"
+          - "wget | sh"
+        max_execution_time_sec: 300
+        allow_network: false                       # block outbound network from shell by default
+
+      mcp:
+        trusted_servers:
+          - "filesystem"
+          - "git"
+        untrusted_default_permission: "require_approval"
+        max_concurrent_connections: 5
+
+      secrets:
+        scan_output: true                          # scan agent output for leaked secrets
+        patterns:
+          - "AKIA[0-9A-Z]{16}"                    # AWS access key
+          - "ghp_[a-zA-Z0-9]{36}"                 # GitHub PAT
+          - "sk-[a-zA-Z0-9]{48}"                  # OpenAI API key
+
+  # ── Enterprise Authentication Config ────────────────────────────────
+
+  auth_config:
+    file: ".chronos-code/config.yaml (auth section)"
+    description: |
+      Enterprise authentication for model providers. Supports three flows:
+      (1) BYO API key — works with all providers, always available.
+      (2) OAuth PKCE — for providers that allow third-party login (OpenAI,
+          Google). Note: Anthropic banned third-party OAuth relay in April
+          2026, so API key or setup-token is required for Claude models.
+      (3) Enterprise SSO federation — server mode OIDC/SAML → token exchange.
+
+      Credentials are stored in the OS keychain (macOS Keychain, Linux
+      libsecret, Windows Credential Manager). Fallback: encrypted file in
+      ~/.chronos-code/credentials.enc (AES-256-GCM, user passphrase).
+
+    schema:
+      auth:
+        # Primary: API keys (all providers)
+        providers:
+          anthropic:
+            method: "api_key"                      # api_key | setup_token
+            api_key: "${ANTHROPIC_API_KEY}"         # env var or literal
+            # setup_token: "${CLAUDE_SETUP_TOKEN}" # alternative: token from `claude setup-token`
+
+          # Claude Enterprise — org-level access with admin-provisioned keys
+          anthropic_enterprise:
+            method: "org_api_key"                   # org_api_key | admin_provisioned_key | setup_token
+            api_key: "${ANTHROPIC_API_KEY}"
+            org_id: "${ANTHROPIC_ORG_ID}"           # enterprise org identifier
+            # Enterprise features: 1M context, higher rate limits, data residency, audit logs
+            # Auth flow: enterprise admin provisions org-level or per-user API key via
+            # console.anthropic.com. Developer runs `chronos-code login --provider anthropic-enterprise`.
+            # For existing Claude Code enterprise users: `--method setup-token` reuses their login.
+            # Server mode: single org key + per-user attribution via x-anthropic-metadata header.
+            # See autoresearch/artifacts/enterprise-auth.yaml for full login flows.
+
+          openai:
+            method: "oauth"                        # api_key | oauth
+            # For OAuth: opens browser, user logs in with enterprise SSO
+            # Tokens stored in OS keychain, auto-refreshed
+            client_id: "chronos-code"              # registered OAuth app ID
+            # For API key: simpler, always works
+            # api_key: "${OPENAI_API_KEY}"
+
+          azure:
+            method: "device_code"                  # api_key | device_code | managed_identity
+            # Device code: prints a URL + code, user authenticates in browser
+            # Managed identity: for server mode on Azure (no credentials needed)
+            tenant_id: "${AZURE_TENANT_ID}"
+            endpoint: "${AZURE_OPENAI_ENDPOINT}"
+            deployment: "${AZURE_OPENAI_DEPLOYMENT}"
+
+          google:
+            method: "oauth"                        # api_key | oauth | service_account
+            # OAuth: Google Cloud consent flow
+            # Service account: for server mode (JSON key file)
+            # service_account_key: "/path/to/key.json"
+
+          xai:
+            method: "api_key"
+            api_key: "${XAI_API_KEY}"
+
+          ollama:
+            method: "none"                         # local, no auth needed
+            base_url: "http://localhost:11434"
+
+        # Credential storage
+        credential_store: "keychain"               # keychain | encrypted_file | env_only
+        # For encrypted_file: uses ~/.chronos-code/credentials.enc
+        # For env_only: never persists credentials (CI/CD use case)
+
+        # Token refresh
+        auto_refresh: true                         # refresh OAuth tokens before expiry
+        refresh_buffer_sec: 300                    # refresh 5 min before expiry
+
+    cli_commands:
+      - command: "chronos-code login"
+        description: "Interactive login — auto-detects provider from config"
+        flow: |
+          1. Read provider from config (or prompt user to choose)
+          2. If method=oauth: open browser to authorize URL, wait for callback
+          3. If method=device_code: print URL + code, poll for completion
+          4. If method=api_key: prompt for key (masked input)
+          5. Validate credentials with a test API call
+          6. Store in OS keychain
+          7. Print: "Logged in to <provider> as <identity>"
+
+      - command: "chronos-code login --provider anthropic"
+        description: "Login to specific provider"
+
+      - command: "chronos-code login --provider openai --method oauth"
+        description: "Force OAuth flow for OpenAI enterprise"
+
+      - command: "chronos-code logout"
+        description: "Clear stored credentials"
+
+      - command: "chronos-code logout --provider openai"
+        description: "Clear credentials for specific provider"
+
+      - command: "chronos-code auth status"
+        description: "Show current auth state for all configured providers"
+        output_example: |
+          Provider    Method     Status       Identity          Expires
+          anthropic   api_key    active       org-abc123        never
+          openai      oauth      active       user@corp.com     2h 45m
+          azure       device     expired      user@corp.com     —
+          google      oauth      active       user@corp.com     3h 12m
+
+      - command: "chronos-code auth refresh"
+        description: "Force refresh all OAuth tokens"
+
+    enterprise_sso_server_mode:
+      description: |
+        In server mode, Chronos Code supports OIDC/SAML SSO federation.
+        Users authenticate via their corporate identity provider; the
+        server exchanges the SSO token for provider API tokens using a
+        token exchange service (configured by the org admin).
+      config: |
+        server:
+          auth:
+            type: "oidc"
+            issuer: "https://login.corp.com"
+            client_id: "chronos-code-server"
+            client_secret: "${OIDC_CLIENT_SECRET}"
+            scopes: ["openid", "profile", "email"]
+            # Token exchange: map OIDC identity to provider API keys
+            token_exchange:
+              endpoint: "https://api.corp.com/token-exchange"
+              # Server-side: org admin configures which provider keys
+              # each user/group gets access to
+
+  skill_config:
+    file: ".chronos-code/skills/code-review.yaml"
+    description: "Skill definition — YAML + optional markdown body"
+    schema:
+      name: "code-review"
+      version: "1.0.0"
+      description: "Review code changes for bugs, style, and best practices"
+      author: "chronos-code"
+      tags: ["review", "quality"]
+      tools: ["file_read", "file_grep", "file_glob", "shell"]
+      manifest_path: "code-review.md"              # markdown body appended to system prompt
+
+# ============================================================================
+# 7. DEFAULT AGENTS & SKILLS (SHIP WITH BINARY)
+# ============================================================================
+
+defaults_shipping:
+  overview: |
+    These agents, skills, guardrail presets, and the security policy are
+    embedded in the binary via Go's //go:embed directive. Running
+    `chronos-code init` writes them to .chronos-code/ as editable YAML.
+    Running `chronos-code` without init uses the embedded copies directly —
+    zero-config, zero-file, zero-network first-run experience.
+
+    Every default agent and skill is engineered for token efficiency:
+    - System prompts are terse (<800 tokens each)
+    - Tools are minimal (only what the role needs, no kitchen sink)
+    - Model tiers are assigned per role (not everything needs frontier)
+    - Subagent delegation is explicit (who can call whom)
+
+  embed_strategy: |
+    internal/defaults/
+      embed.go          — //go:embed all:agents all:skills all:guardrails ...
+      agents/            — default agent YAML files
+      skills/            — default skill YAML files
+      guardrails/        — default guardrail presets
+      security.yaml      — default security policy
+      config.yaml        — default main config
+
+    At startup, the config resolver checks for .chronos-code/ on disk.
+    If it exists, disk configs win (user overrides). If it doesn't,
+    embedded defaults are used. `chronos-code init` copies embedded
+    defaults to disk for customization.
+
+  # ── Default Agents ──────────────────────────────────────────────────
+
+  agents:
+
+    - id: "coder"
+      file: "agents/coder.yaml"
+      role: "Primary coding agent — reads, writes, tests, iterates"
+      model_tier: "T2 (frontier)"
+      is_default: true  # this agent handles messages when no agent is specified
+      yaml: |
+        id: coder
+        name: Coding Agent
+        description: >
+          Primary autonomous coding agent. Reads, modifies, and tests code.
+          Plans before complex changes. Delegates review and research to
+          subagents.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_MODEL:-claude-sonnet-4-6}"
+
+        system_prompt: |
+          You are an expert coding agent working in the user's project.
+
+          Workflow: read context → plan (if complex) → edit (diffs only) → test → iterate.
+
+          Rules:
+          - Read before edit. Outline first, full content on demand.
+          - Diffs only — never rewrite entire files.
+          - Run tests after changes. Fix what breaks.
+          - One concern per edit. Small, verifiable steps.
+          - Ask before destructive operations (delete, overwrite, force-push).
+
+        instructions:
+          - "Prefer file outlines over full reads to save context"
+          - "Compress shell output mentally — report pass/fail, not raw logs"
+          - "When >3 files need changes, use update_plan first"
+          - "Delegate code review to the reviewer subagent after changes"
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_write
+            permission: require_approval
+          - name: file_list
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: shell
+            permission: require_approval
+          - name: semantic_search
+            permission: allow
+
+        use_skills:
+          - code-review
+          - refactor
+          - test-writer
+          - debug
+
+        sub_agents:
+          - reviewer
+          - planner
+          - researcher
+
+        guardrails:
+          preset: default
+
+        reasoning:
+          strategy: cot
+          effort: high
+
+        context:
+          max_tokens: 128000
+          summarize_threshold: 0.8
+          preserve_recent_turns: 6
+
+    - id: "planner"
+      file: "agents/planner.yaml"
+      role: "Decomposes complex tasks into executable steps"
+      model_tier: "T2 (frontier) — planning needs strong reasoning"
+      yaml: |
+        id: planner
+        name: Planner
+        description: >
+          Decomposes complex tasks into ordered steps. Reads code structure,
+          identifies dependencies, and produces a plan the coder can execute.
+          Never writes code — only plans.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_MODEL:-claude-sonnet-4-6}"
+
+        system_prompt: |
+          You are a planning agent. Decompose the task into concrete steps.
+
+          For each step specify: what to do, which files, expected outcome.
+          Read project structure and dependencies before planning.
+          Never write code. Return only the plan.
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_list
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: semantic_search
+            permission: allow
+
+        reasoning:
+          strategy: cot
+          effort: high
+
+        context:
+          max_tokens: 32000
+          summarize_threshold: 0.9
+          preserve_recent_turns: 3
+
+    - id: "reviewer"
+      file: "agents/reviewer.yaml"
+      role: "Reviews code changes for bugs, style, security"
+      model_tier: "T2 (frontier) — review needs nuance"
+      yaml: |
+        id: reviewer
+        name: Code Reviewer
+        description: >
+          Reviews code changes for correctness bugs, security issues,
+          style violations, and simplification opportunities. Reads diffs
+          and surrounding context. Returns structured findings.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_MODEL:-claude-sonnet-4-6}"
+
+        system_prompt: |
+          You are a code reviewer. Review the given changes for:
+          1. Correctness bugs (logic errors, edge cases, nil derefs)
+          2. Security issues (injection, secrets, path traversal)
+          3. Simplification (dead code, unnecessary complexity)
+
+          Be precise. Cite file:line. Rate severity: critical/high/medium/low.
+          If the code is clean, say so — don't invent issues.
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: shell
+            permission: allow   # for git diff
+
+        use_skills:
+          - code-review
+          - security-audit
+
+        reasoning:
+          strategy: cot
+          effort: high
+
+        context:
+          max_tokens: 64000
+          summarize_threshold: 0.85
+          preserve_recent_turns: 4
+
+    - id: "debugger"
+      file: "agents/debugger.yaml"
+      role: "Diagnoses failures from error output and traces"
+      model_tier: "T2 (frontier) — diagnosis needs strong reasoning"
+      yaml: |
+        id: debugger
+        name: Debugger
+        description: >
+          Specializes in diagnosing test failures, build errors, and runtime
+          crashes. Reads error output, traces the root cause through code,
+          and suggests or applies fixes.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_MODEL:-claude-sonnet-4-6}"
+
+        system_prompt: |
+          You are a debugging specialist. Given an error or failure:
+          1. Parse the error message and stack trace
+          2. Locate the failing code (file:line)
+          3. Read surrounding context to understand the bug
+          4. Identify root cause (not just the symptom)
+          5. Suggest or apply the minimal fix
+
+          Work from the error outward. Don't guess — trace.
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: shell
+            permission: allow
+          - name: semantic_search
+            permission: allow
+
+        use_skills:
+          - debug
+
+        reasoning:
+          strategy: cot
+          effort: high
+
+        context:
+          max_tokens: 64000
+          summarize_threshold: 0.85
+          preserve_recent_turns: 4
+
+    - id: "researcher"
+      file: "agents/researcher.yaml"
+      role: "Read-only exploration — finds relevant code, answers questions"
+      model_tier: "T1 (cheap) — research is mostly reading and summarizing"
+      yaml: |
+        id: researcher
+        name: Researcher
+        description: >
+          Read-only agent that explores the codebase to answer questions,
+          find relevant code, and gather context. Never modifies files.
+          Uses a cheap model since the task is search + summarize.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_ROUTER_MODEL:-claude-haiku-4-5}"
+
+        system_prompt: |
+          You are a codebase researcher. Find information, never modify files.
+          Search efficiently: glob for file names, grep for symbols, read
+          only the relevant sections. Return concise, structured answers.
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_list
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: semantic_search
+            permission: allow
+
+        reasoning:
+          strategy: none
+          effort: low
+
+        context:
+          max_tokens: 16000
+          summarize_threshold: 0.85
+          preserve_recent_turns: 2
+
+    - id: "architect"
+      file: "agents/architect.yaml"
+      role: "High-level design decisions, file structure, patterns"
+      model_tier: "T2 (frontier) — design needs strong reasoning"
+      yaml: |
+        id: architect
+        name: Architect
+        description: >
+          Advises on high-level design: package structure, interface design,
+          dependency management, design patterns. Reads code structure but
+          never writes code. Returns design recommendations.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_MODEL:-claude-sonnet-4-6}"
+
+        system_prompt: |
+          You are a software architect. Analyze code structure and advise on:
+          - Package organization and dependency direction
+          - Interface design and abstraction boundaries
+          - Design pattern selection
+          - Scalability and maintainability concerns
+
+          Read the codebase structure, understand the existing patterns,
+          and make recommendations that fit — don't impose alien patterns.
+          Never write code. Return design guidance.
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_list
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: semantic_search
+            permission: allow
+
+        reasoning:
+          strategy: cot
+          effort: high
+
+        context:
+          max_tokens: 64000
+          summarize_threshold: 0.9
+          preserve_recent_turns: 3
+
+    - id: "explainer"
+      file: "agents/explainer.yaml"
+      role: "Explains code to the user — uses cheap model"
+      model_tier: "T1 (cheap) — explanation is summarization, not reasoning"
+      yaml: |
+        id: explainer
+        name: Explainer
+        description: >
+          Explains code, concepts, and project structure to the user.
+          Reads relevant files and produces clear, concise explanations
+          tailored to the user's level. Uses a cheap model.
+
+        model:
+          provider: "${CHRONOS_CODE_PROVIDER:-anthropic}"
+          model: "${CHRONOS_CODE_ROUTER_MODEL:-claude-haiku-4-5}"
+
+        system_prompt: |
+          You explain code clearly. Read the relevant files, then explain:
+          - What it does (behavior, not line-by-line)
+          - Why it's structured this way (design intent)
+          - How it connects to the rest of the system
+
+          Match detail to the question. Simple question → short answer.
+
+        tools:
+          - name: file_read
+            permission: allow
+          - name: file_list
+            permission: allow
+          - name: file_glob
+            permission: allow
+          - name: file_grep
+            permission: allow
+          - name: semantic_search
+            permission: allow
+
+        reasoning:
+          strategy: none
+          effort: low
+
+        context:
+          max_tokens: 16000
+          summarize_threshold: 0.85
+          preserve_recent_turns: 3
+
+  # ── Default Teams ───────────────────────────────────────────────────
+
+  teams:
+    - id: "code-review-team"
+      file: "teams/code-review.yaml"
+      description: "Sequential pipeline: planner → coder → reviewer"
+      yaml: |
+        id: code-review-team
+        name: Code Review Pipeline
+        strategy: sequential
+        agents: [planner, coder, reviewer]
+        error_strategy: fail_fast
+
+    - id: "debug-team"
+      file: "teams/debug.yaml"
+      description: "Coordinator delegates to debugger and researcher"
+      yaml: |
+        id: debug-team
+        name: Debug Team
+        strategy: coordinator
+        agents: [debugger, researcher, coder]
+        coordinator: debugger
+        max_iterations: 5
+        error_strategy: best_effort
+
+  # ── Default Skills ──────────────────────────────────────────────────
+
+  skills:
+
+    - name: "code-review"
+      file: "skills/code-review.yaml"
+      description: "Review code changes for correctness, style, and security"
+      yaml: |
+        name: code-review
+        version: "1.0.0"
+        description: >
+          Review code for correctness bugs, security issues, and
+          simplification opportunities. Rate findings by severity.
+        author: chronos-code
+        tags: [review, quality, security]
+        tools: [file_read, file_grep, file_glob, shell]
+      manifest: |
+        ## Code Review
+
+        When reviewing code, follow this checklist:
+        1. **Correctness**: Logic errors, nil/null derefs, off-by-one, race conditions
+        2. **Security**: Injection, path traversal, secrets in code, missing auth checks
+        3. **Edge cases**: Empty inputs, large inputs, concurrent access, error paths
+        4. **Simplification**: Dead code, unnecessary abstraction, duplicate logic
+        5. **Style**: Naming, formatting, idiomatic patterns for the language
+
+        Report findings as: `severity | file:line | description | suggested fix`
+
+    - name: "refactor"
+      file: "skills/refactor.yaml"
+      description: "Restructure code without changing behavior"
+      yaml: |
+        name: refactor
+        version: "1.0.0"
+        description: >
+          Restructure code to improve clarity, reduce duplication, or
+          simplify logic — without changing observable behavior.
+        author: chronos-code
+        tags: [refactor, quality]
+        tools: [file_read, file_write, file_grep, file_glob, shell]
+      manifest: |
+        ## Refactoring
+
+        Principles:
+        - Preserve behavior: run existing tests before AND after every change
+        - Small steps: one refactoring at a time, test between each
+        - No premature abstraction: only extract when there's real duplication
+        - Rename first: clear names often eliminate the need for comments or restructuring
+
+        Process: read → identify smell → plan refactoring → apply → test → verify
+
+    - name: "test-writer"
+      file: "skills/test-writer.yaml"
+      description: "Generate tests for existing code"
+      yaml: |
+        name: test-writer
+        version: "1.0.0"
+        description: >
+          Generate tests for existing code. Prefer table-driven tests.
+          Cover happy path, error cases, and edge cases.
+        author: chronos-code
+        tags: [testing, quality]
+        tools: [file_read, file_write, file_grep, file_glob, shell]
+      manifest: |
+        ## Test Writing
+
+        Strategy:
+        1. Read the function/method under test and its dependencies
+        2. Identify test cases: happy path, error paths, edge cases, boundary values
+        3. Use table-driven tests (Go) or parameterized tests (Python/JS)
+        4. Mock external dependencies at the boundary, not internal functions
+        5. Test behavior, not implementation — tests should survive refactoring
+        6. Run the tests to verify they pass (and that they CAN fail)
+
+        Name tests descriptively: `Test<Function>_<Scenario>_<ExpectedOutcome>`
+
+    - name: "debug"
+      file: "skills/debug.yaml"
+      description: "Diagnose and fix bugs from error output"
+      yaml: |
+        name: debug
+        version: "1.0.0"
+        description: >
+          Diagnose bugs from error messages, stack traces, and failing tests.
+          Trace root causes through the code and apply minimal fixes.
+        author: chronos-code
+        tags: [debug, diagnosis]
+        tools: [file_read, file_grep, file_glob, shell, semantic_search]
+      manifest: |
+        ## Debugging
+
+        Process:
+        1. **Reproduce**: Run the failing command to see the exact error
+        2. **Parse**: Extract file, line, error type from the output
+        3. **Trace**: Read the failing code and trace the call chain upward
+        4. **Root cause**: Identify why it fails (not just where)
+        5. **Fix**: Apply the minimal change that fixes the root cause
+        6. **Verify**: Run the original failing command + full test suite
+
+        Common traps:
+        - Fixing the symptom, not the cause (e.g., adding a nil check instead of fixing why it's nil)
+        - Fixing in the wrong layer (the bug may be upstream of where the error manifests)
+
+    - name: "explain"
+      file: "skills/explain.yaml"
+      description: "Explain code, architecture, or concepts to the user"
+      yaml: |
+        name: explain
+        version: "1.0.0"
+        description: >
+          Explain code, architecture, patterns, or concepts. Tailor the
+          explanation to the user's question — simple question gets a
+          short answer.
+        author: chronos-code
+        tags: [explain, documentation]
+        tools: [file_read, file_list, file_glob, file_grep, semantic_search]
+      manifest: |
+        ## Explanation
+
+        Levels of detail (match to the question):
+        - **Quick**: 1-2 sentences. "What does this function do?"
+        - **Standard**: A paragraph + key code references. "How does auth work?"
+        - **Deep dive**: Multi-section walkthrough. "Walk me through the request lifecycle."
+
+        Always: read the actual code before explaining. Don't guess from names.
+        Include file:line references so the user can follow along.
+
+    - name: "security-audit"
+      file: "skills/security-audit.yaml"
+      description: "Audit code for security vulnerabilities"
+      yaml: |
+        name: security-audit
+        version: "1.0.0"
+        description: >
+          Audit code for security vulnerabilities: injection, auth bypass,
+          secrets exposure, path traversal, and OWASP Top 10.
+        author: chronos-code
+        tags: [security, audit]
+        tools: [file_read, file_grep, file_glob, shell, semantic_search]
+      manifest: |
+        ## Security Audit
+
+        Check for:
+        1. **Injection**: SQL, command, template, LDAP, XPath injection
+        2. **Authentication**: Missing auth, weak token generation, hardcoded creds
+        3. **Authorization**: Missing authz checks, IDOR, privilege escalation
+        4. **Secrets**: API keys, passwords, tokens in code or config committed to git
+        5. **Input validation**: Missing validation at system boundaries
+        6. **Path traversal**: Unsanitized file paths from user input
+        7. **Cryptography**: Weak algorithms, hardcoded IVs, missing HTTPS
+        8. **Dependencies**: Known CVEs in dependencies (check lock files)
+
+        Report: severity (critical/high/medium/low) | CWE ID | file:line | finding | remediation
+
+    - name: "migrate"
+      file: "skills/migrate.yaml"
+      description: "Assist with dependency, API, or framework migrations"
+      yaml: |
+        name: migrate
+        version: "1.0.0"
+        description: >
+          Help migrate between dependency versions, API versions, or
+          frameworks. Find all usage sites, plan the migration, apply
+          changes, and verify.
+        author: chronos-code
+        tags: [migration, refactor]
+        tools: [file_read, file_write, file_grep, file_glob, shell, semantic_search]
+      manifest: |
+        ## Migration
+
+        Process:
+        1. **Inventory**: Find all usage sites of the thing being migrated (grep/search)
+        2. **Map changes**: For each usage site, determine what changes
+        3. **Plan order**: Migrations often have dependency order — plan it
+        4. **Apply**: Change one site at a time, verify after each
+        5. **Test**: Run full test suite after all changes
+        6. **Cleanup**: Remove old imports, deprecated calls, compatibility shims
+
+        Never leave partial migrations — either complete a file or revert it.
+
+    - name: "optimize"
+      file: "skills/optimize.yaml"
+      description: "Profile and optimize code for performance"
+      yaml: |
+        name: optimize
+        version: "1.0.0"
+        description: >
+          Profile code and optimize for performance. Identify bottlenecks
+          before optimizing — never optimize without measurement.
+        author: chronos-code
+        tags: [performance, optimization]
+        tools: [file_read, file_write, file_grep, file_glob, shell]
+      manifest: |
+        ## Performance Optimization
+
+        Rules:
+        1. **Measure first**: Profile before optimizing. No guessing.
+        2. **Bottleneck**: Find the actual bottleneck (usually I/O, not CPU)
+        3. **Algorithmic**: Fix O(n^2) before micro-optimizing O(n)
+        4. **Benchmark**: Write a benchmark BEFORE the optimization
+        5. **Compare**: Run the benchmark before and after, report the delta
+        6. **Readability**: Don't sacrifice clarity for <10% gains
+
+        Common wins: batch I/O, cache repeated lookups, reduce allocations,
+        use appropriate data structures, avoid unnecessary serialization.
+
+    - name: "document"
+      file: "skills/document.yaml"
+      description: "Generate or improve code documentation"
+      yaml: |
+        name: document
+        version: "1.0.0"
+        description: >
+          Generate or improve documentation: package docs, function docs,
+          API docs, architecture docs. Reads code to produce accurate docs.
+        author: chronos-code
+        tags: [documentation]
+        tools: [file_read, file_write, file_list, file_glob, file_grep]
+      manifest: |
+        ## Documentation
+
+        Principles:
+        - Document the WHY, not the WHAT (code shows what, docs show why)
+        - Package-level: purpose, key types, usage example
+        - Function-level: only if the name + signature don't tell the whole story
+        - API: request/response schema, auth, error codes, example calls
+        - No stale docs: read the code, write from truth, not memory
+
+  # ── Default Guardrail Presets ───────────────────────────────────────
+
+  guardrail_presets:
+
+    - name: "default"
+      file: "guardrails/default.yaml"
+      description: "Balanced guardrails for everyday coding"
+      yaml: |
+        name: default
+        description: Standard guardrails for coding agents
+
+        input:
+          - type: injection_detector
+            enabled: true
+            sensitivity: medium
+          - type: max_length
+            max_chars: 100000
+
+        output:
+          - type: pii_filter
+            enabled: true
+            action: warn
+          - type: secret_scanner
+            enabled: true
+            action: block
+            patterns:
+              - "AKIA[0-9A-Z]{16}"
+              - "ghp_[a-zA-Z0-9]{36}"
+              - "sk-[a-zA-Z0-9]{48}"
+              - "-----BEGIN.*PRIVATE KEY-----"
+          - type: blocklist
+            terms: ["TODO: remove before merge", "FIXME: hack"]
+            action: warn
+          - type: max_length
+            max_chars: 200000
+
+        cost:
+          max_tokens_per_session: 500000
+          max_cost_per_session_usd: 5.00
+          warn_at_percent: 80
+
+    - name: "strict"
+      file: "guardrails/strict.yaml"
+      description: "Strict guardrails for production-critical or sensitive code"
+      yaml: |
+        name: strict
+        description: Strict guardrails — higher sensitivity, lower budgets
+
+        input:
+          - type: injection_detector
+            enabled: true
+            sensitivity: high
+          - type: max_length
+            max_chars: 50000
+
+        output:
+          - type: pii_filter
+            enabled: true
+            action: block
+          - type: secret_scanner
+            enabled: true
+            action: block
+            patterns:
+              - "AKIA[0-9A-Z]{16}"
+              - "ghp_[a-zA-Z0-9]{36}"
+              - "sk-[a-zA-Z0-9]{48}"
+              - "-----BEGIN.*PRIVATE KEY-----"
+              - "password\\s*[:=]\\s*['\"][^'\"]{4,}"
+          - type: blocklist
+            terms: ["TODO", "FIXME", "HACK", "XXX", "TEMP"]
+            action: block
+          - type: max_length
+            max_chars: 100000
+
+        cost:
+          max_tokens_per_session: 200000
+          max_cost_per_session_usd: 2.00
+          warn_at_percent: 60
+
+    - name: "permissive"
+      file: "guardrails/permissive.yaml"
+      description: "Minimal guardrails for trusted environments / experimentation"
+      yaml: |
+        name: permissive
+        description: Minimal guardrails — secret scanning only
+
+        input:
+          - type: max_length
+            max_chars: 500000
+
+        output:
+          - type: secret_scanner
+            enabled: true
+            action: warn
+
+        cost:
+          max_tokens_per_session: 2000000
+          max_cost_per_session_usd: 50.00
+          warn_at_percent: 90
+
+  # ── Agent Selection Logic ───────────────────────────────────────────
+
+  agent_routing:
+    description: |
+      When the user sends a message, the orchestrator (or router agent)
+      selects which default agent handles it. This is the first-pass
+      routing — the user can also switch explicitly with @agent_name.
+
+    rules:
+      - pattern: "explain|what does|how does|why does|walk me through"
+        agent: explainer
+        tier: T1
+        reason: "Explanation is read + summarize — cheap model suffices"
+
+      - pattern: "review|check|audit|look at (my|the|this) (changes|diff|code|PR)"
+        agent: reviewer
+        tier: T2
+        reason: "Review needs nuanced judgment"
+
+      - pattern: "plan|break down|decompose|how should I approach"
+        agent: planner
+        tier: T2
+        reason: "Planning needs strong reasoning"
+
+      - pattern: "debug|fix (the|this) (error|failure|crash|bug)|why is.*failing"
+        agent: debugger
+        tier: T2
+        reason: "Diagnosis needs deep reasoning"
+
+      - pattern: "find|where is|which file|search|locate|grep"
+        agent: researcher
+        tier: T1
+        reason: "Search is mechanical — cheap model"
+
+      - pattern: "design|architecture|structure|should I use.*pattern"
+        agent: architect
+        tier: T2
+        reason: "Design needs broad knowledge"
+
+      - pattern: "default — all other requests"
+        agent: coder
+        tier: T2
+        reason: "General coding tasks go to the primary agent"
+
+    explicit_switch:
+      syntax: "@<agent_id> <message>"
+      examples:
+        - "@reviewer check my last commit"
+        - "@planner break down this feature into tasks"
+        - "@debugger why is TestAuth failing"
+        - "@explainer how does the middleware chain work"
+
+# ============================================================================
+# 8. CORE COMPONENTS
+# ============================================================================
+
+components:
+  - id: C-001
+    name: Agent Orchestrator
+    package: "internal/orchestrator"
+    description: |
+      Central coordinator that loads YAML configs, builds agents via Chronos
+      SDK (agent.BuildAll), manages their lifecycle, routes user messages to
+      the right agent, and handles session continuity. This is the main
+      runtime loop.
+    depends_on:
+      - "chronos: sdk/agent (BuildAgent, BuildAll, FileConfig)"
+      - "chronos: sdk/harness (NewDeepAgent, SubAgentService)"
+      - "C-002 (Config Resolver)"
+      - "C-005 (Session Manager)"
+    responsibilities:
+      - "Load and validate all YAML configs on startup"
+      - "Build agents from YAML via Chronos BuildAll"
+      - "Route user messages to the active agent"
+      - "Handle agent switching (user asks for reviewer vs coder)"
+      - "Manage subagent lifecycle and result collection"
+      - "Enforce security policy before tool execution"
+      - "Trigger self-learning loop after session completion"
+
+  - id: C-002
+    name: Config Resolver
+    package: "internal/config"
+    description: |
+      Discovers, loads, validates, and merges YAML configuration from all
+      sources (project, user global, env vars, CLI flags). Produces a fully
+      resolved config tree that the orchestrator consumes.
+    depends_on:
+      - "chronos: sdk/agent (AgentConfig, FileConfig, LoadFile)"
+    responsibilities:
+      - "Discover .chronos-code/ directory (walk up from cwd to git root)"
+      - "Load config.yaml, agents/*.yaml, skills/*.yaml, guardrails/*.yaml, security.yaml"
+      - "Merge with user global (~/.chronos-code/config.yaml)"
+      - "Apply environment variable expansion (${VAR})"
+      - "Validate all configs against schemas"
+      - "Expose typed Go structs for consumption"
+
+  - id: C-003
+    name: Workspace Manager
+    package: "internal/workspace"
+    description: |
+      Project-aware layer that understands the codebase being worked on.
+      Detects project type (Go, Node, Python, Rust, etc.), respects
+      .gitignore, builds a file index for fast lookup, and provides
+      project context to agents.
+    responsibilities:
+      - "Detect project root (git root, go.mod, package.json, etc.)"
+      - "Build file index (path, size, language, last modified)"
+      - "Respect .gitignore and custom ignore patterns"
+      - "Detect project type and inject relevant context"
+      - "Watch for file changes and update index"
+      - "Provide project summary for agent system prompts"
+
+  - id: C-004
+    name: Memory Layer
+    package: "internal/memory"
+    description: |
+      Local-first memory management. Wraps Chronos sdk/memory with a
+      YAML-file persistence layer. Memories are stored as inspectable YAML
+      files in .chronos-code/memory/. Supports semantic recall via vector
+      embeddings when configured.
+    depends_on:
+      - "chronos: sdk/memory (Store, Manager)"
+      - "chronos: storage (VectorStore — optional, for recall)"
+    responsibilities:
+      - "Store memories as YAML files (not opaque database rows)"
+      - "Categorize memories: project, user, feedback, patterns"
+      - "Auto-extract memories from sessions via LLM (Manager.ExtractMemories)"
+      - "Semantic recall via vector index (Manager.Recall)"
+      - "Memory lifecycle: create, update, expire, delete"
+      - "Scope isolation: per-project, per-user"
+      - "Expose memories to agents as context in system prompt"
+
+  - id: C-005
+    name: Session Manager
+    package: "internal/session"
+    description: |
+      Manages conversation sessions with full persistence. Builds on top of
+      Chronos storage for sessions, checkpoints, and message history.
+    depends_on:
+      - "chronos: storage.Storage (sessions, checkpoints, events)"
+      - "chronos: sdk/agent (ChatWithSession, context compaction)"
+    responsibilities:
+      - "Create, resume, list, delete sessions"
+      - "Checkpoint conversations for resumability"
+      - "Branch sessions from checkpoints (explore alternatives)"
+      - "Track session metadata (agent, model, tokens used, cost)"
+      - "Garbage collect old sessions per retention policy"
+      - "Export session history (for debugging, sharing, learning)"
+
+  - id: C-006
+    name: Self-Learning Loop
+    package: "internal/learning"
+    description: |
+      The core differentiator. After each session (or periodically), the
+      learning loop analyzes execution traces and produces YAML artifacts
+      that improve future runs. This is structured knowledge extraction,
+      not model fine-tuning.
+    depends_on:
+      - "chronos: os/trace (Collector, spans)"
+      - "chronos: storage.Storage (audit logs, events)"
+      - "C-004 (Memory Layer)"
+      - "C-005 (Session Manager)"
+    responsibilities:
+      - "Trace analysis: extract tool call sequences from completed sessions"
+      - "Pattern detection: identify recurring successful strategies"
+      - "Agent generation: produce new agent YAML from patterns"
+      - "Skill extraction: distill reusable skills from repeated tool sequences"
+      - "Guardrail tuning: suggest guardrail adjustments from failures"
+      - "Memory consolidation: merge related memories, prune stale ones"
+      - "Human review gate: all generated YAML requires user approval"
+
+    learning_pipeline:
+      - step: 1
+        name: "Trace Collection"
+        detail: "Gather execution traces, tool calls, model responses, outcomes"
+      - step: 2
+        name: "Outcome Classification"
+        detail: |
+          Classify each session: success (task completed), partial (some
+          progress), failure (error or user abort). Use the model to assess
+          outcome if no explicit signal.
+      - step: 3
+        name: "Pattern Extraction"
+        detail: |
+          Use LLM to analyze successful sessions and extract:
+          - Tool call sequences that worked (e.g., "read → grep → write → test")
+          - System prompt fragments that led to better results
+          - Guardrail triggers that caught real issues
+          - Subagent delegation patterns that saved context
+      - step: 4
+        name: "YAML Generation"
+        detail: |
+          Produce YAML artifacts from patterns:
+          - Agent definitions: new specialist agents for recurring task types
+          - Skills: reusable capability bundles from repeated tool sequences
+          - Guardrail configs: tuned thresholds from actual failure data
+          - Memory entries: consolidated project knowledge
+      - step: 5
+        name: "Human Review"
+        detail: |
+          Present generated YAML to user with diff view. User can:
+          - Accept (apply immediately)
+          - Edit (modify before applying)
+          - Reject (discard)
+          - Defer (save for later review)
+      - step: 6
+        name: "Application"
+        detail: |
+          Accepted YAML is written to .chronos-code/learned/ and symlinked
+          or merged into the active config directories (agents/, skills/,
+          guardrails/). The next session picks it up automatically.
+
+  - id: C-007
+    name: Guardrail Engine (YAML-configured)
+    package: "internal/guardrails"
+    description: |
+      Extends Chronos engine/guardrails with YAML-configurable presets.
+      Guards agent input, output, tool calls, and cost. Security policies
+      from security.yaml are enforced here.
+    depends_on:
+      - "chronos: engine/guardrails (Guardrail, Engine, built-in guards)"
+    responsibilities:
+      - "Load guardrail configs from YAML"
+      - "Map YAML types to Chronos Guardrail implementations"
+      - "Add coding-agent-specific guardrails (secret detection, path validation)"
+      - "Enforce cost caps (tokens, USD)"
+      - "Enforce security.yaml policies (path allowlists, command restrictions)"
+      - "Report guardrail violations to the user with actionable context"
+
+  - id: C-008
+    name: TUI (Terminal User Interface)
+    package: "internal/tui"
+    description: |
+      Interactive terminal interface for local use. Streaming responses,
+      tool call visualization, permission prompts, session management,
+      and status display.
+    responsibilities:
+      - "Interactive REPL with streaming LLM output"
+      - "Permission prompts for tool calls (approve/deny/always-allow)"
+      - "Tool call visualization (show what the agent is doing)"
+      - "Session controls (resume, branch, inspect, export)"
+      - "File diff preview for write operations"
+      - "Cost/token counter display"
+      - "Multi-agent status (show subagent activity)"
+
+  - id: C-009
+    name: Server Mode
+    package: "internal/server"
+    description: |
+      HTTP server for team/enterprise deployment. Exposes the same agent
+      capabilities via REST API with SSE streaming. Multi-tenant, auth,
+      rate limiting.
+    depends_on:
+      - "chronos: os/ (HTTP server patterns, auth, CORS)"
+      - "chronos: engine/stream (SSE Broker)"
+    responsibilities:
+      - "REST API for sessions, agents, memory, skills"
+      - "SSE streaming for real-time agent output"
+      - "Auth (API key, JWT)"
+      - "Multi-tenant session isolation"
+      - "Rate limiting and cost controls"
+      - "Health/readiness probes for k8s deployment"
+
+  - id: C-010
+    name: Token Efficiency Engine
+    package: "internal/efficiency"
+    description: |
+      Central subsystem responsible for minimizing token consumption across
+      all components. Owns: tiered model routing, tool result compression,
+      incremental context loading, semantic deduplication, prompt assembly,
+      file content caching, and real-time budget tracking. Every model call
+      and tool result passes through this layer.
+    depends_on:
+      - "chronos: engine/model (Provider interface for tiered routing)"
+      - "chronos: sdk/agent (ContextConfig for compaction tuning)"
+      - "chronos: tiktoken-go (token counting)"
+      - "C-003 (Workspace Manager — file mtime cache)"
+    responsibilities:
+      - "Route model calls to appropriate tier (T0/T1/T2)"
+      - "Compress tool results before they enter conversation history"
+      - "Assemble system prompts dynamically (only relevant sections)"
+      - "Track file reads per session for dedup"
+      - "Maintain per-session token budget and trigger compression ramp"
+      - "Measure and report token efficiency metrics"
+      - "Cache prompt prefixes for provider-level caching alignment"
+    key_interfaces:
+      - name: "Router"
+        method: "Route(ctx, userMessage) → ModelTier"
+        detail: "Classifies intent and selects T0/T1/T2"
+      - name: "Compressor"
+        method: "CompressToolResult(ctx, toolName, result) → compressedResult"
+        detail: "Shrinks tool output to essential information"
+      - name: "PromptAssembler"
+        method: "Assemble(ctx, agent, session) → systemPrompt"
+        detail: "Builds minimal system prompt from relevant components"
+      - name: "BudgetTracker"
+        method: "Track(tokens), Remaining() int, Tier() CompressionTier"
+        detail: "Real-time budget tracking with progressive compression"
+
+  - id: C-011
+    name: MCP Integration Layer
+    package: "internal/mcp"
+    description: |
+      Thin wrapper over Chronos engine/mcp that adds: auto-discovery of
+      MCP servers from project config, security policy enforcement, and
+      connection lifecycle management.
+    depends_on:
+      - "chronos: engine/mcp (Client, ServerConfig, ConnectMCP)"
+    responsibilities:
+      - "Auto-discover MCP servers from config YAML"
+      - "Apply security.yaml trust levels to MCP servers"
+      - "Connection pooling and health checks"
+      - "Graceful shutdown of MCP connections"
+      - "Tool name deconfliction across multiple MCP servers"
+
+# ============================================================================
+# 9. CLI DESIGN
+# ============================================================================
+
+cli:
+  binary: "chronos-code"
+  description: |
+    Single binary, two personas: interactive CLI (default) and headless
+    server (with --serve). Minimal flags — everything else is in YAML.
+
+  commands:
+    - name: "chronos-code"
+      description: "Start interactive REPL (default)"
+      flags:
+        - "--config, -c: path to config.yaml"
+        - "--agent, -a: agent ID to use (default: coder)"
+        - "--session, -s: session ID to resume"
+        - "--model, -m: override model (e.g., claude-opus-4-6)"
+        - "--debug: enable debug logging"
+        - "--no-memory: disable memory layer"
+        - "--no-learning: disable self-learning loop"
+
+    - name: "chronos-code run"
+      description: "Execute a single task and exit (non-interactive)"
+      usage: "chronos-code run 'fix the failing test in pkg/auth'"
+
+    - name: "chronos-code serve"
+      description: "Start HTTP server for team deployment"
+      flags:
+        - "--listen: address to listen on (default: :8430)"
+        - "--auth: auth mode (api_key, jwt, none)"
+
+    - name: "chronos-code init"
+      description: "Initialize .chronos-code/ in current project"
+      detail: |
+        Creates the directory structure with default configs, built-in
+        agents, skills, and guardrails. Detects project type and
+        customizes defaults accordingly.
+
+    - name: "chronos-code agents"
+      description: "List/inspect configured agents"
+      subcommands:
+        - "list: show all agents"
+        - "show <id>: show agent config"
+        - "validate: validate all agent YAML"
+
+    - name: "chronos-code sessions"
+      description: "Manage sessions"
+      subcommands:
+        - "list: show recent sessions"
+        - "resume <id>: resume a session"
+        - "export <id>: export session to YAML"
+        - "delete <id>: delete a session"
+
+    - name: "chronos-code memory"
+      description: "Inspect and manage memories"
+      subcommands:
+        - "list: show all memories"
+        - "search <query>: semantic search over memories"
+        - "forget <id>: delete a memory"
+        - "consolidate: run memory consolidation"
+
+    - name: "chronos-code learn"
+      description: "Self-learning loop commands"
+      subcommands:
+        - "status: show learning status and pending reviews"
+        - "review: interactively review generated YAML"
+        - "apply <id>: apply a learned artifact"
+        - "reject <id>: reject a learned artifact"
+        - "distill: manually trigger distillation"
+
+    - name: "chronos-code skills"
+      description: "Manage skills"
+      subcommands:
+        - "list: show available skills"
+        - "add <name>: add a skill from registry"
+        - "create: scaffold a new skill"
+
+    - name: "chronos-code config"
+      description: "View/edit configuration"
+      subcommands:
+        - "show: print resolved config"
+        - "validate: validate all configs"
+        - "set <key> <value>: set a config value"
+
+# ============================================================================
+# 10. SELF-LEARNING LOOP — DETAILED DESIGN
+# ============================================================================
+
+self_learning:
+  overview: |
+    The self-learning loop is what makes Chronos Code get better over time
+    without any model fine-tuning. It works by analyzing execution traces
+    and producing YAML artifacts that encode successful patterns.
+
+  trace_schema:
+    description: "What we capture from each session"
+    fields:
+      session_id: "unique session identifier"
+      agent_id: "which agent ran"
+      task_description: "user's original request"
+      outcome: "success | partial | failure | aborted"
+      duration_ms: "total wall-clock time"
+      total_tokens: "tokens consumed"
+      total_cost_usd: "estimated cost"
+      tool_calls:
+        description: "ordered list of tool invocations"
+        fields:
+          tool_name: "name of tool called"
+          arguments_summary: "compressed arg summary (no secrets)"
+          result_summary: "compressed result (no file contents)"
+          success: "true/false"
+          duration_ms: "time taken"
+      model_calls:
+        description: "LLM invocations"
+        fields:
+          prompt_tokens: "input tokens"
+          completion_tokens: "output tokens"
+          reasoning_strategy: "cot/reflection/none"
+      subagent_invocations:
+        description: "subagent delegation events"
+        fields:
+          subagent_name: "which subagent"
+          task: "what was delegated"
+          result_summary: "compressed result"
+          success: "true/false"
+      guardrail_triggers:
+        description: "guardrail violations"
+        fields:
+          guardrail_name: "which guardrail fired"
+          position: "input/output"
+          action_taken: "blocked/warned/redacted"
+      user_corrections:
+        description: "when user rejected agent output or corrected behavior"
+
+  distillation_prompts:
+    description: |
+      The distillation step uses an LLM call to analyze traces and produce
+      YAML. The prompt is carefully structured to extract actionable patterns
+      without hallucinating capabilities.
+
+    pattern_extraction_prompt: |
+      Analyze these execution traces from a coding agent and extract
+      reusable patterns. Focus on:
+      1. Tool call sequences that consistently led to successful outcomes
+      2. System prompt instructions that the agent followed effectively
+      3. Subagent delegation patterns that preserved parent context
+      4. Guardrail configurations that caught real issues
+
+      Output as YAML with this structure:
+      patterns:
+        - name: <pattern-name>
+          description: <what this pattern does>
+          trigger: <when to apply this pattern>
+          tool_sequence: [<ordered tool names>]
+          confidence: <0.0-1.0 based on evidence strength>
+
+    agent_generation_prompt: |
+      Based on these validated patterns, generate a YAML agent definition
+      that encodes the successful strategy. The agent should be:
+      1. Focused on a specific task type (not general-purpose)
+      2. Equipped with only the tools the pattern uses
+      3. Given instructions derived from what worked
+      4. Configured with appropriate guardrails
+
+      Output valid Chronos agent YAML (id, name, model, system_prompt,
+      tools, instructions, guardrails).
+
+  storage:
+    traces: "Stored in the session database alongside session data"
+    patterns: ".chronos-code/learned/patterns.yaml"
+    generated_agents: ".chronos-code/learned/agents/"
+    generated_skills: ".chronos-code/learned/skills/"
+    review_queue: ".chronos-code/learned/pending/"
+
+# ============================================================================
+# 11. TOKEN EFFICIENCY ARCHITECTURE
+# ============================================================================
+
+token_efficiency:
+  overview: |
+    Current coding agents are profligate with tokens. Claude Code sends full
+    file contents on every read, keeps bloated system prompts, and doesn't
+    distinguish tasks that need GPT-4-class reasoning from those that need
+    a grep. Cursor's composer mode dumps entire file trees. Aider sends
+    "repo maps" — full file listings — on every turn.
+
+    Chronos Code treats tokens as a scarce resource. Every component is
+    designed to minimize token consumption while preserving task success
+    rate. The target is 40-60% fewer tokens per equivalent task, measured
+    via reproducible eval suites against Claude Code / Aider benchmarks.
+
+  target: "40-60% fewer tokens per equivalent task vs Claude Code / Cursor / Aider"
+
+  measurement:
+    method: |
+      Run the SWE-bench Lite subset (or a curated internal eval set) on
+      both Chronos Code and the baseline tools using the same model
+      (e.g., Claude Sonnet). Compare: total tokens consumed (prompt +
+      completion), task success rate, and tokens-per-successful-task.
+      The efficiency ratio is: (baseline_tokens / chronos_code_tokens)
+      at equal or better success rate.
+    ci_gate: |
+      Every PR runs the eval suite. A PR that increases tokens-per-task
+      by >10% without improving success rate is flagged for review.
+
+  # ── Strategy 1: Tiered Model Routing ──────────────────────────────────
+
+  tiered_model_routing:
+    description: |
+      Not every agent action needs the most expensive model. A file listing,
+      a grep, or a "which test file corresponds to this source file" lookup
+      can be handled by a small, fast, cheap model. Only complex reasoning
+      (architecture decisions, multi-file refactors, bug diagnosis) needs
+      the frontier model. Routing saves 30-50% of tokens on typical sessions.
+
+    tiers:
+      - tier: "T0 — Zero-LLM (deterministic)"
+        model: "none"
+        cost: "0 tokens"
+        used_for:
+          - "File listing, glob, grep — executed directly, no LLM call"
+          - "Git operations (status, diff, log) — shell, no LLM"
+          - "Project type detection — heuristic, no LLM"
+          - "Dependency resolution — parse go.mod/package.json, no LLM"
+        how: |
+          The orchestrator recognizes patterns in user requests that map
+          to deterministic tool calls (e.g., "list files in src/" → file_list,
+          no model needed). These bypass the LLM entirely.
+
+      - tier: "T1 — Fast/cheap model (classification + simple tasks)"
+        model: "haiku-class (claude-haiku-4-5, gpt-4o-mini, gemini-flash)"
+        cost: "~5-10x cheaper per token than frontier"
+        used_for:
+          - "Intent classification: what does the user want?"
+          - "Tool selection: which tool(s) to call?"
+          - "File relevance scoring: which files matter for this task?"
+          - "Memory recall ranking: which memories are relevant?"
+          - "Simple code edits: rename a variable, fix a typo"
+          - "Context summarization: compress old turns"
+          - "Tool result summarization: compress large outputs before feeding back"
+        how: |
+          A lightweight classifier agent (the 'router') runs first on every
+          turn. It decides: (a) can this be handled at T0/T1, or does it need
+          T2? (b) which files/tools are needed? The router itself uses a cheap
+          model, so its overhead is minimal (~200-500 tokens per classification).
+
+      - tier: "T2 — Frontier model (complex reasoning)"
+        model: "sonnet/opus-class (claude-sonnet-4-6, gpt-4o, gemini-pro)"
+        cost: "full price"
+        used_for:
+          - "Multi-step task planning"
+          - "Complex code generation and refactoring"
+          - "Bug diagnosis across multiple files"
+          - "Architecture decisions"
+          - "Code review with nuanced feedback"
+        how: |
+          Only the primary coding agent and complex subagents use the frontier
+          model. They receive pre-filtered context (only relevant files, only
+          relevant memories) so even their prompts are lean.
+
+    config_schema:
+      routing:
+        enabled: true
+        router_model:
+          provider: "anthropic"
+          model: "claude-haiku-4-5"               # cheap model for routing
+        classification_budget_tokens: 500          # max tokens for the router call
+        tier_overrides:
+          file_read: "T0"                          # always deterministic
+          file_write: "T2"                         # always needs reasoning
+          shell: "T1"                              # simple commands at T1, complex at T2
+          semantic_search: "T0"                    # embedding lookup, no LLM
+
+  # ── Strategy 2: Incremental Context Loading ───────────────────────────
+
+  incremental_context:
+    description: |
+      Never send a full file to the model unless it's small (<100 lines) or
+      the task explicitly requires the whole thing. Instead, load incrementally:
+      first the file's structure (outline), then specific sections on demand.
+
+    techniques:
+      - name: "AST-aware file summaries"
+        detail: |
+          On first access, send a structural summary: function signatures,
+          type declarations, import list — NOT the full file body. The model
+          can then request specific functions by name. For a 500-line Go file,
+          the summary is ~50 tokens vs ~2000 tokens for the full file.
+        token_savings: "60-80% per file access"
+        implementation: |
+          Use Go's go/ast parser (for Go files) or tree-sitter (build-tagged)
+          to extract structure. Fall back to a line-count-based heuristic for
+          unknown languages: first 20 lines + last 10 lines + function-line
+          grep.
+
+      - name: "Line-range reads"
+        detail: |
+          When the model asks to read a file, the tool returns an outline
+          first. The model can then request specific line ranges (e.g.,
+          "read lines 45-80 of handler.go"). This is already how Chronos's
+          file_read tool works — but the system prompt must teach the model
+          to use it this way.
+        token_savings: "40-70% per file read"
+
+      - name: "Diff-based editing"
+        detail: |
+          For file modifications, the model produces a diff (old_string →
+          new_string), not the entire rewritten file. Chronos's file_write
+          already supports this mode. The system prompt enforces it:
+          "Never rewrite an entire file. Always use targeted edits."
+        token_savings: "80-95% per file write vs full-file rewrite"
+
+      - name: "Context-window-aware file selection"
+        detail: |
+          Before loading files into context, estimate their token cost.
+          If the sum exceeds the context budget, prioritize by relevance
+          score (from the router or semantic search) and load only what
+          fits. Never silently truncate — explicitly tell the model which
+          files were omitted and why.
+        token_savings: "Prevents context overflow and expensive re-reads"
+
+  # ── Strategy 3: Aggressive Context Compression ────────────────────────
+
+  context_compression:
+    description: |
+      Conversation history is the single largest token consumer in long
+      sessions. Chronos already has context compaction (summarize at 80%
+      of window, preserve recent turns). Chronos Code adds multiple
+      layers on top.
+
+    techniques:
+      - name: "Tool result compression"
+        detail: |
+          Large tool results (shell output, file contents, search results)
+          are compressed before being stored in conversation history. A T1
+          model summarizes the result into the essential facts. Example:
+          a `go test ./...` output of 200 lines → "All 47 tests passed in
+          3 packages. No failures." (~15 tokens vs ~800 tokens).
+        token_savings: "70-90% on tool results"
+        when: "After every tool call whose result exceeds 500 tokens"
+
+      - name: "Sliding window with smart eviction"
+        detail: |
+          Instead of keeping all turns until the 80% threshold triggers a
+          full summarization, use a sliding window that evicts old turns
+          incrementally. Turns containing: (a) tool calls that modified
+          files, (b) user corrections, (c) key decisions are kept longer.
+          Pure information-gathering turns (reads, greps) are evicted first.
+        token_savings: "20-30% reduction in steady-state context size"
+
+      - name: "Semantic deduplication"
+        detail: |
+          If the model reads the same file twice in a session, the second
+          read returns a reference ("file handler.go was read at turn 3,
+          no changes since") instead of the full content. Similarly, if
+          the model asks a question it already asked (and got answered),
+          the orchestrator short-circuits with "you already determined X
+          at turn N."
+        token_savings: "10-25% on sessions with iterative exploration"
+
+      - name: "System prompt minimization"
+        detail: |
+          The system prompt is the most expensive recurring cost — it's sent
+          on every model call. Chronos Code's system prompts are engineered
+          for minimal token count:
+          - No verbose explanations of what tools do (the model knows)
+          - No redundant safety disclaimers
+          - Compressed instruction format (bullet points, not paragraphs)
+          - Dynamic prompt assembly: only include sections relevant to the
+            current task (e.g., skip RAG instructions if no knowledge base)
+          Target: <800 tokens for the base system prompt (vs 2000-4000 in
+          Claude Code / Cursor).
+        token_savings: "50-75% on system prompt per turn"
+
+  # ── Strategy 4: Plan-First Execution ──────────────────────────────────
+
+  plan_first:
+    description: |
+      The biggest token waste in coding agents is failed attempts: the model
+      tries something, it fails, it retries with different context. A single
+      planning step before execution dramatically reduces retries.
+
+    how: |
+      1. User gives task → Router classifies complexity
+      2. If complex (T2): the agent produces a plan FIRST using the planning
+         tool (Chronos harness built-in). The plan lists: files to read,
+         changes to make, tests to run, expected outcome.
+      3. The orchestrator validates the plan against the file index and
+         security policy BEFORE execution. Catches errors like "that file
+         doesn't exist" or "you can't write to .env" at zero LLM cost.
+      4. Execution follows the plan step-by-step. If a step fails, the agent
+         updates the plan (not starts over).
+
+    token_savings: |
+      30-50% on complex tasks. Without planning, agents typically need 2-3
+      attempts to get a multi-file change right. With planning, they get it
+      in 1-1.5 attempts on average.
+
+  # ── Strategy 5: Smart Subagent Delegation ─────────────────────────────
+
+  subagent_efficiency:
+    description: |
+      Subagents are already context-isolated (Chronos harness design). But
+      token efficiency requires being smart about WHAT to delegate and HOW
+      MUCH context to pass.
+
+    techniques:
+      - name: "Minimal context transfer"
+        detail: |
+          When spawning a subagent, pass only: (a) the specific task, (b) the
+          files/context it needs (not the parent's full history), (c) relevant
+          memories. The parent's conversation history is never forwarded.
+        token_savings: "60-80% per subagent invocation vs full-context fork"
+
+      - name: "Result-only return"
+        detail: |
+          Subagents return only their final result (a string), not their
+          intermediate reasoning or tool call history. Already implemented
+          in Chronos harness.
+        token_savings: "Already built into Chronos"
+
+      - name: "Subagent model tiering"
+        detail: |
+          Subagents for simple tasks (e.g., "find all test files for
+          this package") use T1 models. Only complex subagents (e.g.,
+          "review this diff for security issues") use T2.
+        token_savings: "50-70% on subagent costs for delegated lookups"
+
+  # ── Strategy 6: Caching & Memoization ─────────────────────────────────
+
+  caching:
+    description: |
+      Avoid redundant LLM calls entirely when the answer hasn't changed.
+
+    techniques:
+      - name: "Prompt caching (provider-level)"
+        detail: |
+          Use Anthropic prompt caching (system prompt + common prefix cached
+          for 5 minutes). Structure prompts so the cacheable prefix is
+          maximized: system prompt + project context + memory block (stable)
+          come first; conversation history (changing) comes last.
+        token_savings: "90% reduction on cached prefix (Anthropic pricing)"
+
+      - name: "File content cache (application-level)"
+        detail: |
+          The workspace manager tracks file mtimes. If the model reads a
+          file that hasn't changed since the last read (same session), return
+          from cache without a tool call. If it HAS changed, return only
+          the diff since the last read.
+        token_savings: "100% on redundant reads (no tokens at all)"
+
+      - name: "Intent classification cache"
+        detail: |
+          Cache router classifications for similar request patterns.
+          "fix the test" and "fix the failing test" have the same intent
+          and routing. Use embedding similarity to match against cached
+          classifications before making a new router call.
+        token_savings: "~300-500 tokens per cache hit (router call avoided)"
+
+      - name: "Semantic search result cache"
+        detail: |
+          Cache vector search results with a TTL. Same query within the
+          session hits cache. Similar queries (cosine > 0.95) also hit
+          cache. Avoid re-embedding and re-searching.
+        token_savings: "Eliminates redundant embedding + search overhead"
+
+  # ── Strategy 7: Real-Time Budget Enforcement ──────────────────────────
+
+  budget_enforcement:
+    description: |
+      Users set a token/cost budget per session. The orchestrator tracks
+      consumption in real time and makes progressively more aggressive
+      compression decisions as the budget depletes.
+
+    budget_tiers:
+      - at_percent: 0
+        behavior: "Normal operation — all strategies active at default settings"
+      - at_percent: 50
+        behavior: |
+          Increase compression: summarize tool results more aggressively,
+          evict older turns earlier, prefer T1 model for non-critical calls.
+      - at_percent: 75
+        behavior: |
+          Aggressive mode: all new file reads return outlines only (no full
+          content unless explicitly requested). Subagents use T1 exclusively.
+          Context window trimmed to last 4 turns + plan.
+      - at_percent: 90
+        behavior: |
+          Warn user: "90% of budget consumed. Wrapping up." Agent completes
+          current step and reports status rather than starting new work.
+      - at_percent: 100
+        behavior: |
+          Hard stop. Save session state. Report what was accomplished and
+          what remains. Session is resumable.
+
+    config_schema:
+      budget:
+        max_tokens_per_session: 500000             # total (prompt + completion)
+        max_cost_per_session_usd: 5.00
+        warn_at_percent: 80
+        hard_stop_at_percent: 100
+        compression_ramp:
+          start_percent: 50
+          aggressive_percent: 75
+
+  # ── Strategy 8: Lean System Prompts ───────────────────────────────────
+
+  lean_prompts:
+    description: |
+      System prompts are the single most repeated token cost — sent on every
+      LLM call. Chronos Code targets <800 tokens for the base prompt.
+
+    comparison:
+      claude_code_system_prompt: "~3500-4000 tokens"
+      cursor_system_prompt: "~2000-3000 tokens"
+      aider_system_prompt: "~1500-2000 tokens"
+      chronos_code_target: "<800 tokens base, <1200 with skills/memory"
+
+    techniques:
+      - name: "Compressed instruction format"
+        detail: |
+          Use terse, imperative instructions. No verbose explanations.
+          The model already knows what tools do from their JSON schemas —
+          don't repeat it in the prompt.
+        example: |
+          BAD (verbose, 180 tokens):
+            "You have access to a file_read tool that allows you to read
+             the contents of files on the local filesystem. When you need
+             to understand the code in a file, you should use this tool
+             by providing the file path. The tool will return the file
+             contents..."
+
+          GOOD (terse, 30 tokens):
+            "Tools: file_read/write/list/glob/grep, shell, semantic_search.
+             Read before edit. Test after change. Diffs only, never full rewrites."
+
+      - name: "Dynamic prompt assembly"
+        detail: |
+          Only include prompt sections relevant to the active task:
+          - Base instructions: always (800 tokens)
+          - Active skills: only when the task might use them (+100-200 each)
+          - Memory block: only relevant memories, not all (+50-150 tokens)
+          - Project context: only on first turn or after long pause (+100-200)
+          - Plan: only when a plan exists (+varies)
+        savings: "Avoids 500-1500 tokens of irrelevant prompt sections per call"
+
+      - name: "Provider-aware prompt tuning"
+        detail: |
+          Different models need different prompt densities. Claude follows
+          terse instructions well; GPT models sometimes need more explicit
+          guidance. The prompt templates are per-provider, optimized for
+          the minimum tokens that maintain task success rate.
+
+  # ── Token Efficiency Summary ──────────────────────────────────────────
+
+  estimated_savings_breakdown:
+    scenario: "Fix a failing test in a Go project (typical 8-turn session)"
+    baseline_claude_code:
+      system_prompt_per_turn: 3500
+      turns: 8
+      avg_tool_results_per_turn: 1500
+      total_prompt_tokens: "~60,000"
+      total_completion_tokens: "~15,000"
+      total: "~75,000 tokens"
+
+    chronos_code_projected:
+      system_prompt_per_turn: 800
+      turns: 6                                     # plan-first → fewer turns
+      avg_tool_results_per_turn: 400               # compressed tool results
+      prompt_caching_savings: "90% on system prefix"
+      router_overhead: 1500                        # 6 × 250 tokens for routing
+      total_prompt_tokens: "~18,000"
+      total_completion_tokens: "~10,000"
+      total: "~28,000 tokens"
+      savings: "~63% fewer tokens"
+
+    notes: |
+      These are estimates based on observed token patterns in Claude Code
+      sessions. Actual savings depend on task complexity, model used, and
+      caching behavior. The eval suite measures real numbers continuously.
+
+# ============================================================================
+# ============================================================================
+# 12. CODE GRAPH ENGINE
+# ============================================================================
+
+code_graph:
+  overview: |
+    The Code Graph Engine is Chronos Code's primary competitive advantage.
+    Research shows AST-derived code graphs boost SWE-bench scores by 32.8%
+    (RepoGraph, ICLR 2025) and reduce token costs by 35-70% (CodeGraph MCP).
+    Augment Code proved the approach scales to 500K files across dozens of
+    repos with millisecond query times.
+
+    Chronos Code builds an open-source, local-only code graph that indexes
+    the project's structure, relationships, and history into a queryable
+    SQLite database. The graph is built in the background on startup,
+    incrementally updated on file changes, and exposed to agents as T0
+    (zero-LLM-cost) tools.
+
+    Key research grounding:
+    - AST-derived graphs outperform LLM-generated graphs (arxiv 2601.08773)
+    - Tree-sitter + SQLite indexes average repos in milliseconds
+    - Merkle-tree change detection enables sub-second incremental updates
+    - Program-structure-based retrieval beats pure vector embeddings
+
+  architecture: |
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                      Code Graph Engine                          │
+    │                                                                 │
+    │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
+    │  │   Indexer     │───▶│  Graph Store  │───▶│  Query Engine   │  │
+    │  │  (background) │    │  (SQLite)    │    │  (T0 tools)     │  │
+    │  └──────┬───────┘    └──────────────┘    └────────┬─────────┘  │
+    │         │                                         │             │
+    │  ┌──────▼───────┐                         ┌──────▼─────────┐   │
+    │  │  Language     │                         │  Agent Tools   │   │
+    │  │  Parsers      │                         │  ─────────────  │  │
+    │  │  ┌─────────┐ │                         │  graph_query    │  │
+    │  │  │Go (typed)│ │                         │  find_callers   │  │
+    │  │  │TS (sitter)│ │                        │  find_impls     │  │
+    │  │  │Py (sitter)│ │                        │  impact_analysis│  │
+    │  │  │Rust(sitter)│ │                       │  test_map       │  │
+    │  │  │Java(sitter)│ │                       │  co_change      │  │
+    │  │  │Generic   │ │                         │  resolve_symbol │  │
+    │  │  └─────────┘ │                         │  multi_res_view │  │
+    │  └──────────────┘                         └────────────────┘   │
+    │                                                                 │
+    │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
+    │  │  File Watcher │    │ Git Analyzer  │    │  LSP Bridge     │  │
+    │  │  (fsnotify)  │    │ (co-change,  │    │  (build-tagged, │  │
+    │  │              │    │  blame, churn)│    │  optional)      │  │
+    │  └──────────────┘    └──────────────┘    └──────────────────┘  │
+    └─────────────────────────────────────────────────────────────────┘
+
+  # ── Graph Schema ────────────────────────────────────────────────────
+
+  graph_schema:
+    description: |
+      The graph is stored in a local SQLite database (.chronos-code/graph.db).
+      Two core tables (symbols + edges) plus auxiliary tables for files,
+      git history, and test mappings.
+
+    tables:
+      symbols:
+        columns:
+          - "id INTEGER PRIMARY KEY"
+          - "name TEXT NOT NULL"
+          - "qualified_name TEXT NOT NULL"          # e.g., "github.com/spawn08/chronos/sdk/agent.BuildAgent"
+          - "kind TEXT NOT NULL"                    # func, method, type, interface, struct, var, const, package
+          - "file_id INTEGER REFERENCES files(id)"
+          - "line INTEGER NOT NULL"
+          - "end_line INTEGER"
+          - "signature TEXT"                        # compact: "func(ctx context.Context, cfg *AgentConfig) (*Agent, error)"
+          - "doc TEXT"                              # first line of doc comment only
+          - "visibility TEXT"                       # exported, unexported
+          - "language TEXT"
+          - "package TEXT"
+        indexes:
+          - "CREATE INDEX idx_sym_name ON symbols(name)"
+          - "CREATE INDEX idx_sym_qualified ON symbols(qualified_name)"
+          - "CREATE INDEX idx_sym_file ON symbols(file_id)"
+          - "CREATE INDEX idx_sym_kind ON symbols(kind)"
+
+      edges:
+        columns:
+          - "id INTEGER PRIMARY KEY"
+          - "from_id INTEGER REFERENCES symbols(id)"
+          - "to_id INTEGER REFERENCES symbols(id)"
+          - "kind TEXT NOT NULL"                    # calls, implements, embeds, imports, contains, tests, references
+          - "file_id INTEGER REFERENCES files(id)" # where the edge was observed
+          - "line INTEGER"                         # where in the file
+        indexes:
+          - "CREATE INDEX idx_edge_from ON edges(from_id, kind)"
+          - "CREATE INDEX idx_edge_to ON edges(to_id, kind)"
+
+      files:
+        columns:
+          - "id INTEGER PRIMARY KEY"
+          - "path TEXT NOT NULL UNIQUE"
+          - "language TEXT"
+          - "size INTEGER"
+          - "mtime INTEGER"                        # unix timestamp
+          - "content_hash TEXT"                    # XXH3 for change detection
+          - "line_count INTEGER"
+        indexes:
+          - "CREATE INDEX idx_file_path ON files(path)"
+
+      git_history:
+        columns:
+          - "file_id INTEGER REFERENCES files(id)"
+          - "commit_count_30d INTEGER"             # churn: commits in last 30 days
+          - "last_author TEXT"
+          - "last_commit_date INTEGER"
+          - "co_change_files TEXT"                 # JSON array of paths that change together
+        description: "Populated from git log. Updated periodically (not on every file change)."
+
+      test_map:
+        columns:
+          - "test_symbol_id INTEGER REFERENCES symbols(id)"
+          - "tested_symbol_id INTEGER REFERENCES symbols(id)"
+          - "confidence REAL"                      # 1.0 for same-package tests, lower for indirect
+        description: |
+          Maps test functions to the code they test. Built heuristically:
+          - Same package: TestFoo → Foo (naming convention, high confidence)
+          - Import analysis: test imports package X → tests symbols in X
+          - Call graph: test calls Foo → Foo is tested (from call edges)
+
+  # ── Language Parsers ────────────────────────────────────────────────
+
+  parsers:
+    description: |
+      Each language gets a parser that extracts symbols and edges. Two tiers:
+      - Tier 1 (typed): Full type resolution, precise call graphs. Go only
+        (via go/packages + go/types). Produces the richest graph.
+      - Tier 2 (AST): Tree-sitter based. Function signatures, import edges,
+        containment. No type resolution. Covers all other languages.
+
+    implementations:
+      - language: "Go"
+        tier: 1
+        parser: "go/packages + go/types + golang.org/x/tools/go/callgraph"
+        capabilities:
+          - "Full type-checked call graph (pointer analysis or VTA)"
+          - "Interface → implementation resolution"
+          - "Struct embedding chains"
+          - "Import graph with transitive closure"
+          - "Method sets and type assertion targets"
+        build_tag: "none (always included — Go is the primary language)"
+        performance: "~50K symbols in ~10 seconds for a large Go project"
+
+      - language: "TypeScript / JavaScript"
+        tier: 2
+        parser: "tree-sitter-typescript / tree-sitter-javascript"
+        capabilities:
+          - "Function/class/method signatures"
+          - "Import/export edges"
+          - "Containment (class → method)"
+          - "JSDoc type annotations where present"
+        build_tag: "treesitter"
+
+      - language: "Python"
+        tier: 2
+        parser: "tree-sitter-python"
+        capabilities:
+          - "Function/class definitions"
+          - "Import edges"
+          - "Decorator detection"
+          - "Type hints where present"
+        build_tag: "treesitter"
+
+      - language: "Rust"
+        tier: 2
+        parser: "tree-sitter-rust"
+        capabilities:
+          - "Function/struct/enum/trait/impl signatures"
+          - "Use/mod edges"
+          - "Trait → impl resolution (naming heuristic)"
+        build_tag: "treesitter"
+
+      - language: "Java / Kotlin"
+        tier: 2
+        parser: "tree-sitter-java / tree-sitter-kotlin"
+        capabilities:
+          - "Class/method/interface signatures"
+          - "Import edges"
+          - "Extends/implements edges"
+        build_tag: "treesitter"
+
+      - language: "Generic fallback"
+        tier: 2
+        parser: "tree-sitter (language auto-detected from extension)"
+        capabilities:
+          - "Function-level symbols"
+          - "Import edges (regex-based)"
+        build_tag: "treesitter"
+
+    binary_size_impact: |
+      Tree-sitter grammars are compiled C. Each grammar adds ~200-500KB.
+      With 6 grammars: ~2MB. Behind the `treesitter` build tag — users
+      who only work with Go (default) pay zero binary size cost.
+
+      Default binary (Go only): ~20MB
+      With treesitter tag: ~22MB
+      With treesitter + lsp tag: ~25MB
+
+  # ── Indexing Modes ──────────────────────────────────────────────────
+
+  indexing:
+    modes:
+      - name: "Background (default)"
+        trigger: "On startup, after prompt is ready"
+        behavior: |
+          Index runs in a background goroutine. The agent is usable
+          immediately — graph tools return "index building, N% complete"
+          until the graph is ready. Typically <30 seconds for a 50K-file
+          project. User sees a progress indicator in the TUI.
+
+      - name: "Incremental (watch mode)"
+        trigger: "File save events from fsnotify"
+        behavior: |
+          When a file changes: re-parse only that file + files that
+          import it (one hop). Update symbols and edges. Typically
+          <500ms. Uses XXH3 content hashing — if the hash hasn't
+          changed (metadata-only update), skip entirely.
+
+      - name: "Full rebuild"
+        trigger: "chronos-code index --full or graph.db missing"
+        behavior: |
+          Wipe and rebuild the entire graph. Used after major VCS
+          operations (branch switch, large merge) or as a recovery
+          mechanism.
+
+      - name: "Git-enhanced (optional)"
+        trigger: "Periodically (every 10 minutes) or on git operations"
+        behavior: |
+          Analyze git log to populate: churn scores, co-change pairs,
+          authorship, last-change dates. Runs as a separate background
+          task. Does not block agent operation.
+
+    performance_targets:
+      full_index_50k_files: "<30 seconds"
+      incremental_one_file: "<500ms"
+      graph_query: "<10ms"
+      memory_usage: "Graph in SQLite, not in-memory. ~50MB DB for 50K files."
+      startup_impact: "<100ms (index starts async, doesn't block prompt)"
+
+  # ── T0 Tools (Zero-LLM-Cost) ───────────────────────────────────────
+
+  graph_tools:
+    description: |
+      These tools query the code graph and return structured results. They
+      consume ZERO LLM tokens — the results are computed locally from the
+      SQLite graph. This is the core token efficiency mechanism: the agent
+      gets precise code intelligence without reading full files.
+
+    tools:
+      - name: "graph_query"
+        description: "Look up a symbol by name. Returns: kind, file, line, signature, doc, callers count, callees count."
+        parameters:
+          name: "Symbol name (exact or fuzzy)"
+          kind: "Optional filter: func, type, interface, etc."
+        example_result: |
+          {
+            "name": "BuildAgent",
+            "qualified": "github.com/spawn08/chronos/sdk/agent.BuildAgent",
+            "kind": "func",
+            "file": "sdk/agent/config.go",
+            "line": 462,
+            "signature": "func BuildAgent(ctx context.Context, cfg *AgentConfig, opts ...BuildOption) (*Agent, error)",
+            "doc": "BuildAgent constructs a fully-wired *Agent from an AgentConfig.",
+            "callers": 4,
+            "callees": 12
+          }
+        tokens: "~50 tokens (vs ~2000 to read the full file)"
+
+      - name: "find_callers"
+        description: "Find all functions that call a given function."
+        parameters:
+          name: "Function name"
+          depth: "How many hops (default 1, max 3)"
+        example_result: |
+          [
+            {"caller": "BuildAll", "file": "sdk/agent/config.go", "line": 611},
+            {"caller": "TestBuildAgent", "file": "sdk/agent/config_test.go", "line": 42},
+            {"caller": "handleRunAgent", "file": "cli/cmd/run.go", "line": 87}
+          ]
+        tokens: "~30-80 tokens (vs ~6000 to grep + read all calling files)"
+
+      - name: "find_implementations"
+        description: "Find all types that implement an interface."
+        parameters:
+          name: "Interface name"
+        example_result: |
+          [
+            {"type": "sqlite.Store", "file": "storage/adapters/sqlite/store.go", "line": 25},
+            {"type": "postgres.Store", "file": "storage/adapters/postgres/store.go", "line": 30},
+            {"type": "memory.Store", "file": "storage/adapters/memory/store.go", "line": 18}
+          ]
+        tokens: "~40-100 tokens (vs ~5000 to grep + verify each implementation)"
+
+      - name: "impact_analysis"
+        description: "Before editing code at file:line_range, compute what's affected."
+        parameters:
+          file: "File path"
+          start_line: "Start of edit range"
+          end_line: "End of edit range"
+        example_result: |
+          {
+            "edited_symbols": ["BuildAgent"],
+            "direct_callers": 4,
+            "transitive_callers": 12,
+            "affected_tests": ["TestBuildAgent", "TestBuildAll"],
+            "affected_packages": ["cli/cmd", "os/dashboard"],
+            "breaking_change": false,
+            "risk": "medium"
+          }
+        tokens: "~80 tokens (vs ~10000 to manually trace all dependencies)"
+
+      - name: "test_map"
+        description: "Find which tests exercise a given function or file."
+        parameters:
+          symbol: "Function name or file path"
+        example_result: |
+          [
+            {"test": "TestBuildAgent", "file": "sdk/agent/config_test.go", "confidence": 1.0},
+            {"test": "TestBuildAll", "file": "sdk/agent/config_test.go", "confidence": 0.9}
+          ]
+        tokens: "~30-60 tokens"
+
+      - name: "co_change"
+        description: "Find files that historically change together with the given file."
+        parameters:
+          file: "File path"
+          days: "Lookback window (default 90)"
+        example_result: |
+          [
+            {"file": "sdk/agent/config_test.go", "co_change_count": 15, "correlation": 0.92},
+            {"file": "cli/cmd/run.go", "co_change_count": 8, "correlation": 0.67}
+          ]
+        tokens: "~30-60 tokens"
+
+      - name: "multi_resolution_view"
+        description: |
+          Get a multi-level view of the codebase. Inspired by cartography:
+          zoom from repo overview → package → symbol → full implementation.
+        parameters:
+          target: "Package name, file path, or symbol name"
+          level: "L0 (repo), L1 (package), L2 (symbol), L3 (implementation)"
+        example_results:
+          L0: |
+            {
+              "repo": "chronos",
+              "packages": ["sdk/agent", "sdk/harness", "sdk/memory", "engine/model", ...],
+              "total_files": 607,
+              "total_symbols": 3200
+            }
+            ~20 tokens
+
+          L1: |
+            {
+              "package": "sdk/agent",
+              "files": ["agent.go", "config.go", "builder.go", "runner.go", ...],
+              "exported_symbols": ["New", "BuildAgent", "BuildAll", "Agent", "AgentConfig", ...],
+              "imports": ["engine/model", "engine/tool", "storage", ...],
+              "imported_by": ["cli/cmd", "sdk/harness", "os/dashboard"]
+            }
+            ~80 tokens
+
+          L2: |
+            {
+              "symbol": "BuildAgent",
+              "kind": "func",
+              "signature": "func BuildAgent(ctx, *AgentConfig, ...BuildOption) (*Agent, error)",
+              "doc": "Constructs a fully-wired *Agent from an AgentConfig.",
+              "callers": 4,
+              "callees": 12,
+              "file": "sdk/agent/config.go:462"
+            }
+            ~40 tokens
+
+          L3: |
+            Full function body — only loaded when the agent explicitly
+            requests it. This is the only level that costs significant
+            tokens (~200-2000 depending on function size).
+
+      - name: "resolve_symbol"
+        description: "Go-to-definition: resolve a symbol name to its definition location."
+        parameters:
+          name: "Symbol name (optionally qualified)"
+          context_file: "File where the symbol is referenced (for disambiguation)"
+        tokens: "~20 tokens"
+
+  # ── Token Savings from Code Graph ───────────────────────────────────
+
+  token_savings_analysis:
+    description: |
+      The code graph replaces expensive LLM-driven code exploration with
+      free local queries. Here's the concrete savings per common operation:
+
+    operations:
+      - operation: "Understand a function's role"
+        without_graph: "file_read full file (~2000 tokens) + grep for callers (~1500 tokens) = ~3500 tokens"
+        with_graph: "graph_query (~50 tokens) + find_callers (~50 tokens) = ~100 tokens"
+        savings: "97%"
+
+      - operation: "Find all implementations of an interface"
+        without_graph: "grep for interface name (~500 tokens per match) × ~5 files = ~2500 tokens"
+        with_graph: "find_implementations (~60 tokens)"
+        savings: "97%"
+
+      - operation: "Assess impact of a change"
+        without_graph: "Read file + grep callers + read each caller + check tests = ~10000 tokens"
+        with_graph: "impact_analysis (~80 tokens)"
+        savings: "99%"
+
+      - operation: "Navigate from repo overview to a specific function"
+        without_graph: "file_list (~500) + file_read several files (~6000) = ~6500 tokens"
+        with_graph: "L0 (20) → L1 (80) → L2 (40) → L3 only if needed = ~140 tokens"
+        savings: "98%"
+
+      - operation: "Decide which tests to run"
+        without_graph: "grep for test files + read test file headers + guess = ~3000 tokens"
+        with_graph: "test_map (~40 tokens)"
+        savings: "99%"
+
+    aggregate_estimate: |
+      In a typical 8-turn coding session, the agent makes ~15 code exploration
+      actions. Without the graph: ~15 × ~3000 = ~45,000 tokens on exploration.
+      With the graph: ~15 × ~100 = ~1,500 tokens. Savings: ~43,500 tokens per
+      session (96% reduction on exploration). This alone accounts for most of
+      the 40-60% overall token reduction target.
+
+# ============================================================================
+# 13. NOVEL FEATURES & ADVANCED CONTEXT ENGINEERING
+# ============================================================================
+
+novel_features:
+  overview: |
+    These features go beyond what any current coding agent offers. They are
+    grounded in cognitive science research (how human developers think),
+    software engineering research (how large systems are built), and novel
+    engineering (combining known techniques in new ways).
+
+  # ── Feature 1: Spreading Activation ─────────────────────────────────
+
+  spreading_activation:
+    inspiration: "Cognitive science — Collins & Loftus (1975) spreading activation model of human memory"
+    description: |
+      When a human developer looks at a function, related concepts
+      automatically "activate" in their mind — they don't consciously
+      decide to think about callers, the interface it implements, or the
+      test that covers it. It just happens.
+
+      Chronos Code replicates this with the code graph. When the agent
+      accesses a symbol, its graph neighbors are automatically pre-fetched
+      into a "ready buffer." When the model asks for one of these neighbors
+      (which it does ~70% of the time based on code navigation patterns),
+      the answer is instant — no additional tool call, no latency, no tokens
+      spent on a "let me look that up" turn.
+
+    implementation: |
+      1. Agent calls graph_query("BuildAgent")
+      2. Engine returns the result AND pre-fetches into a buffer:
+         - Direct callers (BuildAll, handleRunAgent, ...)
+         - Direct callees (buildProvider, buildStorage, ...)
+         - The interface it implements (if any)
+         - The test that covers it (TestBuildAgent)
+         - The file's co-change partners
+      3. Next model turn: "Now let me look at buildProvider..."
+         → Instant: already in the buffer. Zero tool call overhead.
+      4. Buffer is LRU-evicted: 50 symbols max, oldest-accessed drops first.
+
+    token_savings: |
+      Eliminates ~30% of follow-up tool calls in code exploration sequences.
+      Each avoided tool call saves ~500-1000 tokens (the model's "let me
+      look that up" reasoning + the tool result). Over an 8-turn session:
+      ~5-8 avoided calls × ~700 tokens = ~3500-5600 tokens saved.
+
+  # ── Feature 2: Multi-Resolution Code Navigation ────────────────────
+
+  multi_resolution:
+    inspiration: "Cartography — Shneiderman's Visual Information Seeking Mantra: 'Overview first, zoom and filter, details on demand'"
+    description: |
+      Current agents either read full files (expensive) or grep for patterns
+      (imprecise). Human developers navigate code at multiple zoom levels:
+      first the project layout, then the package, then the type, then the
+      function, then the specific lines. They zoom in only where needed.
+
+      Multi-resolution views (L0→L1→L2→L3) let the agent navigate the same
+      way. The agent starts at L0 (repo map, ~20 tokens), zooms to the
+      relevant package at L1 (~80 tokens), inspects the symbol at L2
+      (~40 tokens), and only reads the full implementation at L3 when it
+      actually needs the code.
+
+    levels:
+      L0_repo:
+        content: "Package list, file counts, dependency overview"
+        tokens: "~20"
+        use: "Orient — where am I, what does this project contain"
+
+      L1_package:
+        content: "Files, exported symbols, imports, imported-by"
+        tokens: "~80"
+        use: "Navigate — which symbols are in this package, what does it depend on"
+
+      L2_symbol:
+        content: "Signature, doc, callers/callees count, file:line"
+        tokens: "~40"
+        use: "Inspect — what does this function do (contract, not implementation)"
+
+      L3_implementation:
+        content: "Full function/method body"
+        tokens: "~200-2000 (varies)"
+        use: "Read — only when the agent needs the actual code to edit or understand"
+
+    comparison: |
+      To understand BuildAgent's role and context:
+      - Current agents: read config.go (1276 lines, ~5000 tokens) → expensive
+      - Chronos Code: L0 → L1(sdk/agent) → L2(BuildAgent) → done (~140 tokens)
+      - Only if the agent needs to EDIT BuildAgent does it load L3 (~800 tokens)
+      - Total: ~940 tokens vs ~5000 tokens = 81% savings
+
+  # ── Feature 3: Predictive Context Loading ───────────────────────────
+
+  predictive_loading:
+    inspiration: "CPU branch prediction — speculatively execute the likely path"
+    description: |
+      When the user describes a task, the code graph can predict which files
+      and symbols the agent will need — BEFORE the agent asks for them.
+      This eliminates the "read file → think → read another file → think"
+      round-trip pattern that wastes turns and tokens.
+
+    implementation: |
+      1. User says: "fix the failing TestBuildAgent test"
+      2. BEFORE sending to the model, the orchestrator:
+         a. Resolves "TestBuildAgent" in the graph → config_test.go:42
+         b. Follows edges: TestBuildAgent calls BuildAgent → config.go:462
+         c. BuildAgent calls buildProvider, buildStorage → same file
+         d. Pre-loads L2 summaries of all resolved symbols
+      3. The first model call receives: task + pre-loaded context (~300 tokens)
+         instead of: task alone (model would spend 2-3 turns reading files)
+      4. Result: 2-3 fewer turns, ~2000-4000 tokens saved
+
+    confidence_thresholds: |
+      - Direct name match in task → graph resolve → load (confidence 1.0)
+      - Test name → tested function → load (confidence 0.9)
+      - Error message + file:line → load that file's context (confidence 0.95)
+      - Vague task ("refactor the auth") → graph search for "auth" → load
+        top 3 results at L2 (confidence 0.6 — might be wrong, but cheap)
+      - Below 0.5: don't pre-load, let the agent explore
+
+  # ── Feature 4: Change Impact Analysis ───────────────────────────────
+
+  change_impact:
+    inspiration: "Software engineering — Bohner & Arnold (1996) 'Software Change Impact Analysis'"
+    description: |
+      Before applying any edit, automatically compute its blast radius.
+      This serves two purposes: (1) the agent knows what else to check/fix,
+      and (2) it runs only the affected tests, not the full suite.
+
+      Current agents either run the full test suite (slow, expensive) or
+      guess which tests to run (unreliable). The code graph makes this
+      precise and free.
+
+    workflow: |
+      1. Agent proposes: edit BuildAgent in config.go, lines 462-480
+      2. impact_analysis(file="sdk/agent/config.go", start=462, end=480) returns:
+         - Edited symbol: BuildAgent
+         - Direct callers: BuildAll, handleRunAgent, TestBuildAgent, TestBuildAll
+         - Affected packages: sdk/agent, cli/cmd, os/dashboard
+         - Suggested test commands: "go test ./sdk/agent/ -run TestBuild"
+         - Breaking change: depends on whether signature changed
+      3. Agent applies edit → runs ONLY the suggested tests (~5 seconds)
+         instead of full suite (~60 seconds)
+      4. If tests pass: done. If not: agent knows exactly which callers broke.
+
+    token_savings: |
+      - Avoids "go test ./..." output (~2000 tokens for a large project)
+      - Targeted test runs produce ~200 tokens of output
+      - Agent doesn't need to grep for callers (~1500 tokens saved)
+      - Total: ~3000-4000 tokens per edit-test cycle
+
+  # ── Feature 5: Temporal Code Intelligence ───────────────────────────
+
+  temporal_intelligence:
+    inspiration: "Software evolution research — Zimmermann et al. (2004) 'Mining Version Histories to Guide Software Changes'"
+    description: |
+      Git history encodes valuable intelligence that no current coding agent
+      uses systematically:
+      - **Churn**: Files changed 15 times in 30 days are hot — likely buggy
+        or under active development. Treat with care.
+      - **Co-change**: Files that always change together are coupled. If the
+        agent edits A, it should check B.
+      - **Authorship**: Who wrote this code and when. Recent code by the same
+        author is likely related.
+      - **Commit messages**: Why was this code changed? The commit message
+        often explains design decisions that aren't in comments.
+
+    tools:
+      - name: "file_churn"
+        query: "git log --since=30.days --format='' -- <file> | wc -l"
+        use: "Flag high-churn files to the agent for careful handling"
+
+      - name: "co_change_analysis"
+        query: "Precomputed from git log — stored in graph.db git_history table"
+        use: "When editing file A, suggest checking co-change partners"
+
+      - name: "blame_context"
+        query: "git blame -L start,end file"
+        use: "Understand who changed this code and when"
+
+      - name: "commit_context"
+        query: "git log --oneline -5 -- <file>"
+        use: "Understand recent evolution of the file"
+
+    integration: |
+      The git analyzer runs as a background task (not on every file change).
+      Results are stored in graph.db and exposed via T0 tools. The agent
+      can ask "what's the churn on this file?" or "what files co-change
+      with this one?" at zero LLM cost.
+
+  # ── Feature 6: Attention Budgeting ──────────────────────────────────
+
+  attention_budgeting:
+    inspiration: "Cognitive science — Kahneman (2011) 'Thinking, Fast and Slow' — attention is a limited resource"
+    description: |
+      Human developers focus sharply on the code they're editing and maintain
+      peripheral awareness of surrounding code. They don't try to hold the
+      entire codebase in working memory. Current agents don't do this — they
+      either have full context or nothing.
+
+      Attention budgeting assigns a relevance weight to every piece of context
+      in the agent's window. High-weight items (the function being edited, the
+      failing test output) are kept verbatim. Low-weight items (a file read
+      from 10 turns ago that was just for orientation) are progressively
+      compressed or evicted.
+
+    weights:
+      - category: "Active edit target"
+        weight: 1.0
+        treatment: "Always verbatim. Never compress."
+
+      - category: "Plan steps (active)"
+        weight: 0.95
+        treatment: "Always present. Never summarize away."
+
+      - category: "Test output (latest)"
+        weight: 0.9
+        treatment: "Keep until next test run replaces it."
+
+      - category: "Directly called/calling code"
+        weight: 0.7
+        treatment: "Keep L2 summary. Drop L3 after 3 turns of non-access."
+
+      - category: "File reads (exploratory)"
+        weight: 0.3
+        treatment: "Compress to one-line summary after 2 turns. Evict after 5."
+
+      - category: "Old tool results"
+        weight: 0.1
+        treatment: "Evict immediately if the information is in the graph."
+
+    implementation: |
+      The attention budget is enforced during Chronos's context compaction
+      pass (Agent.enforceContextBudget). Instead of uniform summarization
+      (all old turns treated equally), the attention-weighted compactor:
+      1. Scores each turn's content by max relevance weight
+      2. Evicts lowest-weight turns first (free — no LLM call needed)
+      3. Compresses medium-weight turns via T1 summarization
+      4. Preserves high-weight turns verbatim
+      This produces a leaner, more focused context window than uniform
+      compression, improving both token efficiency and task accuracy.
+
+  # ── Feature 7: LSP Bridge (Optional, Build-Tagged) ─────────────────
+
+  lsp_bridge:
+    inspiration: "IDE intelligence — Language Server Protocol provides exact, type-aware code intelligence"
+    description: |
+      While the code graph provides fast structural queries, LSP provides
+      live, compiler-exact intelligence: diagnostics (errors before you
+      build), hover (full type info), and rename (safe, cross-file).
+      The LSP bridge is an optional feature (build-tagged) that connects
+      to a running language server and exposes its capabilities as T0 tools.
+
+    tools:
+      - name: "lsp_diagnostics"
+        description: "Get compiler errors/warnings for a file without running the build"
+        tokens: "~20-50 per diagnostic"
+        advantage: "Catch errors before `go build` — saves a build round-trip (~5 seconds + ~1000 tokens of output)"
+
+      - name: "lsp_hover"
+        description: "Get full type information for a symbol at a position"
+        tokens: "~30"
+        advantage: "Know the exact type without reading the declaration file"
+
+      - name: "lsp_references"
+        description: "Find all references to a symbol (type-aware, not text grep)"
+        tokens: "~20-80"
+        advantage: "Exact — no false positives from same-name symbols in different packages"
+
+      - name: "lsp_rename_preview"
+        description: "Preview a rename across all files — see what would change"
+        tokens: "~50-200"
+        advantage: "Safe, exhaustive rename without manual grep"
+
+    supported_servers:
+      - "gopls (Go) — best integration, auto-started"
+      - "typescript-language-server (TS/JS)"
+      - "pyright / pylsp (Python)"
+      - "rust-analyzer (Rust)"
+
+    build_tag: "lsp"
+    binary_impact: "~3-5MB additional (LSP client library)"
+
+  # ── Feature 8: Skeleton-First Code Generation ──────────────────────
+
+  skeleton_first:
+    inspiration: "Research — 'Skeleton-of-Thought' (Ning et al., 2023) — generate structure before content"
+    description: |
+      When generating new code (not editing existing code), the agent first
+      produces a skeleton — function signatures, type definitions, package
+      structure — and confirms it with the user before filling in
+      implementations. This matches how experienced architects work:
+      interface first, then implementation.
+
+    benefits:
+      - "Catches design mistakes before wasting tokens on implementation"
+      - "User can course-correct at the cheap stage (skeleton: ~200 tokens)"
+      - "Implementation is guided by approved skeleton (fewer retries)"
+      - "Natural checkpointing — skeleton → implementation → tests"
+
+    workflow: |
+      1. User: "Add a Redis storage adapter"
+      2. Agent produces skeleton:
+         ```
+         // storage/adapters/redis/store.go
+         type Store struct { client *redis.Client }
+         func New(addr string, opts ...Option) (*Store, error)
+         func (s *Store) CreateSession(ctx, session) error
+         func (s *Store) GetSession(ctx, id) (*Session, error)
+         // ... all 18 Storage methods
+         func (s *Store) Migrate(ctx) error
+         func (s *Store) Close() error
+         ```
+      3. User confirms or adjusts the skeleton (~200 tokens)
+      4. Agent implements each method (~2000 tokens total, guided by skeleton)
+      5. vs. without skeleton: agent writes full implementation (~3000 tokens),
+         user asks for changes, agent rewrites (~2500 tokens) = ~5500 tokens
+
+  # ── Feature 9: Failure-Driven Learning Priorities ───────────────────
+
+  failure_driven_learning:
+    inspiration: "Reinforcement learning — prioritized experience replay (Schaul et al., 2015)"
+    description: |
+      The self-learning loop prioritizes learning from failures over
+      successes. When the agent fails (wrong edit, failed test, user
+      correction), the failure trace is marked as high-priority for
+      distillation. The generated YAML encodes what WENT WRONG and what
+      to avoid — not just what worked.
+
+    types_of_failure_learning:
+      - type: "Tool sequence that led to a dead end"
+        learning: "Generate a 'don't-do' instruction for the agent YAML"
+        example: "'When debugging a test failure, don't read the entire test file first — use the error line number from the stack trace.'"
+
+      - type: "Guardrail violation that caught a real issue"
+        learning: "Strengthen that guardrail's config"
+        example: "Secret scanner caught an API key in output → increase sensitivity"
+
+      - type: "User correction"
+        learning: "Generate a memory entry + agent instruction"
+        example: "User said 'don't use mocks in this project' → memory + instruction"
+
+      - type: "Model hallucination (referenced non-existent file/function)"
+        learning: "Require graph_query verification before assuming a symbol exists"
+        example: "Agent assumed utils.go existed — add instruction: 'verify file existence before referencing'"
+
+  # ── Feature Summary & Priority ──────────────────────────────────────
+
+  priority_matrix:
+    - feature: "Code Graph Engine (§11)"
+      priority: "P1 — CRITICAL"
+      phase: "P1-P2"
+      reason: "Single biggest token savings (96% on exploration). Competitive differentiator."
+
+    - feature: "Multi-Resolution Views"
+      priority: "P1 — HIGH"
+      phase: "P1 (built into graph tools)"
+      reason: "Natural extension of graph. Eliminates full-file reads."
+
+    - feature: "Change Impact Analysis"
+      priority: "P2 — HIGH"
+      phase: "P2 (after graph is stable)"
+      reason: "Targeted testing saves time and tokens."
+
+    - feature: "Spreading Activation"
+      priority: "P2 — MEDIUM"
+      phase: "P2 (after graph query patterns stabilize)"
+      reason: "Nice optimization. Needs telemetry on actual query patterns first."
+
+    - feature: "Predictive Context Loading"
+      priority: "P2 — MEDIUM"
+      phase: "P2"
+      reason: "High reward but needs careful tuning to avoid loading wrong context."
+
+    - feature: "Temporal Code Intelligence"
+      priority: "P2 — MEDIUM"
+      phase: "P2 (git analyzer is lightweight)"
+      reason: "Cheap to build, valuable signal."
+
+    - feature: "Attention Budgeting"
+      priority: "P2 — MEDIUM"
+      phase: "P2 (extends existing compaction)"
+      reason: "Improves compaction quality. Needs weight tuning."
+
+    - feature: "Skeleton-First Generation"
+      priority: "P2 — MEDIUM"
+      phase: "P2 (system prompt change + workflow)"
+      reason: "Pure prompt engineering. Zero code change needed."
+
+    - feature: "Failure-Driven Learning"
+      priority: "P3 — MEDIUM"
+      phase: "P3 (extends self-learning loop)"
+      reason: "Requires the learning loop to exist first."
+
+    - feature: "LSP Bridge"
+      priority: "P3 — LOW"
+      phase: "P3-P4 (optional, build-tagged)"
+      reason: "The code graph covers 80% of the value. LSP is precision polish."
+
+# ============================================================================
+# 14. BINARY SIZE STRATEGY
+# ============================================================================
+
+binary_size:
+  target: "<20MB stripped"
+  current_chronos_binary: "71MB stripped (99MB unstripped)"
+
+  strategy:
+    - technique: "Separate go.mod"
+      impact: "~50MB reduction"
+      detail: |
+        By not importing (transitively or directly):
+        - k8s.io/client-go (~20MB) — not needed, no k8s sandbox
+        - github.com/aws/aws-sdk-go-v2 (~15MB) — not needed, no DynamoDB
+        - go.mongodb.org/mongo-driver (~8MB) — not needed, no MongoDB
+        - github.com/tetratelabs/wazero (~10MB) — not needed, no WASM sandbox
+        - github.com/swaggo/* (~5MB) — not needed, no Swagger UI
+        The binary drops from 71MB to ~20MB stripped.
+
+    - technique: "Build tags for optional features"
+      impact: "~3-5MB additional savings"
+      detail: |
+        Features that pull heavy deps are build-tagged:
+        - //go:build lsp — LSP client (go-lsp library)
+        - //go:build treesitter — tree-sitter bindings
+        - //go:build tui_fancy — rich TUI (bubbletea + lipgloss)
+        Default build includes none of these. Users opt in with:
+          go install -tags lsp,treesitter github.com/spawn08/chronos-code@latest
+
+    - technique: "Strip and compress"
+      impact: "~30% reduction"
+      detail: |
+        Build with: go build -ldflags="-s -w" -trimpath
+        Optional: UPX compression for distribution (not default)
+
+  estimated_breakdown:
+    go_runtime: "~4MB"
+    modernc_sqlite: "~7MB"
+    pgx_postgres: "~2MB"
+    yaml_parser: "~0.5MB"
+    tiktoken_tokenizer: "~1.5MB"
+    http_model_clients: "~1.5MB"
+    chronos_core_sdk: "~2MB"
+    chronos_code_logic: "~1MB"
+    total_estimated: "~20MB stripped"
+
+# ============================================================================
+# 15. IMPLEMENTATION PHASES
+# ============================================================================
+
+phases:
+  - id: P1
+    name: "Foundation"
+    duration: "2-3 weeks"
+    description: "Get the binary building, config loading, and basic REPL working"
+    items:
+      - id: P1-001
+        title: "Repository scaffold"
+        detail: |
+          Create github.com/spawn08/chronos-code with:
+          - go.mod depending on chronos
+          - cmd/chronos-code/main.go
+          - internal/ package structure
+          - Makefile with build/test/lint targets
+          - CI pipeline (GitHub Actions)
+        acceptance: "go build produces a binary <25MB stripped"
+
+      - id: P1-002
+        title: "Config resolver"
+        detail: |
+          Implement .chronos-code/ directory discovery and YAML loading.
+          Config precedence: CLI flags > env > project > user global > defaults.
+          Validate all schemas. Expand ${ENV_VAR} references.
+        acceptance: "chronos-code config show prints fully resolved config"
+
+      - id: P1-003
+        title: "Agent builder integration"
+        detail: |
+          Wire config resolver to Chronos agent.BuildAll. Load agents from
+          .chronos-code/agents/*.yaml. Connect MCP servers. Register skills.
+        acceptance: "Agents built from YAML match Go-built equivalents"
+
+      - id: P1-004
+        title: "Basic TUI REPL"
+        detail: |
+          Interactive terminal: prompt → send to agent → stream response.
+          No fancy UI yet — just readable streaming output with tool call
+          indicators.
+        acceptance: "User can chat with an agent in the terminal"
+
+      - id: P1-005
+        title: "Lean system prompts + prompt caching layout"
+        detail: |
+          Engineer the base system prompt to <800 tokens. Structure all
+          prompts for maximum cache-prefix reuse: system prompt + project
+          context + memory block (stable, cacheable) come first;
+          conversation history (changing) comes last. Add token counting
+          to every model call (Chronos tiktoken is already built).
+        acceptance: |
+          Base system prompt <800 tokens measured by tiktoken. Anthropic
+          prompt cache hit rate >60% in sessions >3 turns.
+
+      - id: P1-006
+        title: "Tool result compression"
+        detail: |
+          After every tool call whose result exceeds a configurable threshold
+          (default: 500 tokens), compress the result before storing in
+          conversation history. Compression strategies: truncation with
+          summary header (deterministic, free) for T0 results; LLM
+          summarization via T1 model for complex outputs. Track original
+          result in session store for debugging; only the compressed version
+          enters the context window.
+        acceptance: |
+          Median tool result in conversation history <500 tokens. No loss
+          of task-critical information (validated by eval suite).
+
+      - id: P1-007
+        title: "Code graph engine — Go parser + SQLite store + T0 tools"
+        detail: |
+          The single highest-impact feature. Implement the graph engine with:
+          (a) Go type-checked parser (go/packages + go/types) for Tier 1
+          analysis, (b) SQLite graph store with symbols/edges/files tables,
+          (c) background indexer with fsnotify incremental updates,
+          (d) T0 tools: graph_query, find_callers, find_implementations,
+          multi_resolution_view (L0-L3), resolve_symbol. Wire into the
+          agent as zero-LLM-cost tools.
+        acceptance: |
+          Index the Chronos repo (607 Go files) in <15 seconds. Incremental
+          update <500ms. graph_query returns in <10ms. Agent uses graph
+          tools instead of grep+read for code exploration. Measured 50%+
+          reduction in exploration tokens vs grep-only baseline.
+
+      - id: P1-008
+        title: "Init command + embedded defaults"
+        detail: |
+          All default agents (coder, planner, reviewer, debugger, researcher,
+          architect, explainer), skills (code-review, refactor, test-writer,
+          debug, explain, security-audit, migrate, optimize, document),
+          guardrail presets (default, strict, permissive), and security
+          policy are compiled into the binary via //go:embed. Running
+          without init uses embedded defaults directly (zero-config).
+          `chronos-code init` writes them to .chronos-code/ for editing.
+          Detects project type (Go/Node/Python/Rust/Java) and customizes
+          the shell allowed-commands list and language-specific instructions.
+        acceptance: |
+          `chronos-code` works with zero files on disk (uses embedded defaults).
+          `chronos-code init` writes all defaults to .chronos-code/ and the
+          result is identical behavior. User can edit any YAML to customize.
+
+  - id: P2
+    name: "Core Features"
+    duration: "3-4 weeks"
+    description: "Session management, memory, guardrails, security"
+    items:
+      - id: P2-001
+        title: "Session management"
+        detail: |
+          Full session lifecycle: create, resume, list, delete, export.
+          Checkpoint-based resumability. Session metadata tracking.
+        acceptance: "User can resume a session from yesterday with full context"
+
+      - id: P2-002
+        title: "Memory layer (YAML-backed)"
+        detail: |
+          Local memory in .chronos-code/memory/ as YAML files. Auto-extract
+          memories from sessions. Categories: project, user, feedback. CLI
+          commands for inspect/search/forget.
+        acceptance: "Agent recalls project context across sessions"
+
+      - id: P2-003
+        title: "YAML guardrail engine"
+        detail: |
+          Load guardrail configs from YAML. Map to Chronos Guardrail
+          implementations. Add: secret detection, path validation, cost caps.
+        acceptance: "Guardrails block secret leaks and enforce cost caps from YAML config"
+
+      - id: P2-004
+        title: "Security policy enforcement"
+        detail: |
+          Load security.yaml. Enforce at tool-call time: path allowlists,
+          command restrictions, MCP trust levels. Intercept before Chronos
+          tool.Registry.Execute.
+        acceptance: "Agent cannot write to .env or run sudo even if the model asks to"
+
+      - id: P2-005
+        title: "Workspace manager"
+        detail: |
+          Project detection, file indexing, .gitignore awareness. Inject
+          project context into agent system prompts.
+        acceptance: "Agent knows it's a Go project and has file index available"
+
+      - id: P2-006
+        title: "Tiered model routing"
+        detail: |
+          Implement the T0/T1/T2 routing layer. T0: deterministic tool calls
+          bypass the LLM entirely. T1: a cheap classifier model (haiku-class)
+          handles intent classification, file relevance scoring, and simple
+          edits. T2: frontier model for complex reasoning. The router adds
+          ~200-500 tokens overhead but saves 30-50% on total session tokens.
+          Routing decisions are configurable per-tool in YAML.
+        acceptance: |
+          Router correctly classifies 90%+ of intents. Total token consumption
+          30%+ lower than single-model baseline on eval suite.
+
+      - id: P2-007
+        title: "Incremental context loading"
+        detail: |
+          Implement AST-aware file summaries (Go files via go/ast, others
+          via line-count heuristic). First file access returns outline
+          (~50 tokens) instead of full content (~2000 tokens). Model
+          requests specific sections by function name or line range.
+          Diff-based editing enforced via system prompt: never rewrite
+          entire files.
+        acceptance: |
+          Average file-read token cost <200 tokens (vs ~1500 in baseline).
+          No regression in task success rate.
+
+      - id: P2-008
+        title: "Semantic dedup + file content cache"
+        detail: |
+          Track file reads per session with mtime. Second read of unchanged
+          file returns "file X read at turn N, unchanged" (15 tokens vs
+          1500). Detect when model re-asks an already-answered question
+          and short-circuit. Cache vector search results with TTL.
+        acceptance: "Zero redundant full-file reads in any eval suite session"
+
+      - id: P2-009
+        title: "Real-time budget enforcement"
+        detail: |
+          Token/cost budget tracking per session. Progressive compression
+          ramp: normal → increased compression (50%) → aggressive (75%) →
+          warn (90%) → hard stop (100%). Budget configurable in YAML.
+          Display remaining budget in TUI status bar.
+        acceptance: "Sessions hard-stop at budget with state saved and resumable"
+
+      - id: P2-010
+        title: "Enterprise authentication"
+        detail: |
+          Implement multi-provider auth: BYO API key (all providers), OAuth
+          PKCE (OpenAI, Google — Anthropic uses API key/setup-token due to
+          third-party OAuth ban), Azure device code flow, OS keychain storage
+          (macOS Keychain, Linux libsecret, Windows Credential Manager).
+          CLI commands: login, logout, auth status, auth refresh.
+          Auto-refresh OAuth tokens before expiry.
+        acceptance: |
+          chronos-code login --provider openai opens browser, completes OAuth,
+          stores token in keychain. chronos-code auth status shows all
+          configured providers with expiry. Tokens auto-refresh.
+
+      - id: P2-011
+        title: "Change impact analysis + test mapping"
+        detail: |
+          Extend code graph with: impact_analysis tool (compute blast radius
+          before edits), test_map tool (find tests for a given function/file),
+          co_change tool (git-based co-change analysis). Wire into the agent
+          workflow: before applying edits, run impact analysis; after edits,
+          run only affected tests.
+        acceptance: |
+          impact_analysis correctly identifies callers and affected tests for
+          edited symbols. Agent runs targeted tests (not full suite). Measured
+          40%+ reduction in test-run token cost.
+
+      - id: P2-012
+        title: "Tree-sitter parsers (multi-language graph)"
+        detail: |
+          Add tree-sitter-based Tier 2 parsers for TypeScript, Python, Rust,
+          Java behind the treesitter build tag. Each parser extracts function/
+          class/type symbols, import edges, and containment. Wired into the
+          same graph store and T0 tools.
+        acceptance: |
+          Graph indexes a mixed Go+TypeScript project. Multi-resolution views
+          work across languages. Binary size with tag: <22MB.
+
+      - id: P2-013
+        title: "Permission UX"
+        detail: |
+          TUI permission prompts for require_approval tools. Options:
+          approve once, approve always for this tool, deny. File diff
+          preview for file_write. Shell command preview.
+        acceptance: "User sees clear permission prompts with context before dangerous ops"
+
+  - id: P3
+    name: "Self-Learning & Polish"
+    duration: "3-4 weeks"
+    description: "Self-learning loop, server mode, built-in skills, production hardening"
+    items:
+      - id: P3-001
+        title: "Trace collection"
+        detail: |
+          Capture execution traces from sessions: tool calls, outcomes,
+          token usage, guardrail triggers, user corrections. Store alongside
+          session data.
+        acceptance: "Every session produces a queryable execution trace"
+
+      - id: P3-002
+        title: "Distillation engine"
+        detail: |
+          LLM-powered analysis of traces → pattern extraction → YAML
+          generation. Configurable prompts. Confidence scoring.
+        acceptance: "After 5 sessions, the system suggests a new specialist agent YAML"
+
+      - id: P3-003
+        title: "Human review UX"
+        detail: |
+          CLI and TUI for reviewing generated YAML. Diff view, accept/edit/
+          reject/defer. Integration with chronos-code learn commands.
+        acceptance: "User can review and approve learned YAML in the terminal"
+
+      - id: P3-004
+        title: "Server mode"
+        detail: |
+          HTTP server with REST API, SSE streaming, auth, rate limiting.
+          Multi-tenant session isolation. Same agent capabilities as CLI.
+        acceptance: "Server handles 50 concurrent sessions with PostgreSQL backend"
+
+      - id: P3-005
+        title: "Built-in skills library"
+        detail: |
+          Ship 6+ skills: code-review, refactor, test-writer, debug,
+          explain, migrate. Each as YAML + markdown manifest.
+        acceptance: "All built-in skills work out of the box after chronos-code init"
+
+      - id: P3-006
+        title: "Token efficiency eval suite + CI gate"
+        detail: |
+          Build a reproducible eval suite that measures tokens-per-task
+          against baseline tools. Curate 20-30 representative coding tasks
+          (bug fixes, features, refactors) spanning easy/medium/hard. Run
+          on the same model, compare total tokens and success rate. CI gate
+          flags PRs that regress token efficiency by >10%. Publish results
+          in a dashboard.
+        acceptance: |
+          Eval suite runs in CI. Chronos Code uses 40%+ fewer tokens than
+          Claude Code baseline at equal-or-better success rate on the suite.
+
+      - id: P3-007
+        title: "Spreading activation + predictive context loading"
+        detail: |
+          When the agent accesses a symbol via graph tools, pre-fetch its
+          graph neighbors (callers, callees, implementations, tests) into
+          a ready buffer. Next model turn requesting a neighbor gets instant
+          results. Also implement task-driven predictive loading: parse user
+          task for symbol names, resolve in graph, pre-load L2 summaries.
+        acceptance: |
+          30%+ of follow-up graph queries hit the activation buffer. 2-3
+          fewer exploration turns per session. Measurable in eval suite.
+
+      - id: P3-008
+        title: "Attention budgeting for context compaction"
+        detail: |
+          Extend Chronos context compaction with relevance-weighted eviction.
+          Assign weights by category: edit targets (1.0), plan (0.95), test
+          output (0.9), graph neighbors (0.7), exploratory reads (0.3), old
+          tool results (0.1). Evict lowest-weight first. Compress medium.
+          Keep high-weight verbatim.
+        acceptance: |
+          Context quality improves: task success rate equal or better vs
+          uniform compaction, with 15-20% fewer tokens in the context window.
+
+      - id: P3-009
+        title: "Semantic recall"
+        detail: |
+          Wire vector-based memory recall. Embed memories on write, recall
+          on read. Use Chronos sdk/memory/Manager.WithVectorIndex.
+        acceptance: "Agent recalls relevant memories by semantic similarity, not just keyword"
+
+  - id: P4
+    name: "Advanced & Scale"
+    duration: "2-3 weeks"
+    description: "Advanced features for power users and team deployments"
+    items:
+      - id: P4-001
+        title: "Multi-agent teams from YAML"
+        detail: |
+          Define teams in config YAML using Chronos team strategies. Route
+          tasks to the right team. Support all 6 strategies.
+        acceptance: "User defines a code-review team (planner→coder→reviewer) in YAML"
+
+      - id: P4-002
+        title: "MCP server auto-discovery"
+        detail: |
+          Discover MCP servers from project config files (package.json
+          mcpServers, .cursor/mcp.json, etc.) and offer to connect.
+        acceptance: "Detects and connects to MCP servers without manual config"
+
+      - id: P4-003
+        title: "Learning loop feedback"
+        detail: |
+          Close the loop: when a learned agent/skill is used and the user
+          provides feedback, update the pattern confidence and refine.
+        acceptance: "Rejected learned YAML reduces pattern confidence; approved increases it"
+
+      - id: P4-004
+        title: "LSP bridge (optional, build-tagged)"
+        detail: |
+          Connect to language servers (gopls, typescript-language-server,
+          pyright, rust-analyzer) and expose as T0 tools: lsp_diagnostics,
+          lsp_hover, lsp_references, lsp_rename_preview. Behind the lsp
+          build tag. Auto-start gopls for Go projects.
+        acceptance: |
+          lsp_diagnostics returns compiler errors without running go build.
+          lsp_references returns exact (not grep) references. Build-tagged
+          binary with lsp: <25MB.
+
+      - id: P4-005
+        title: "Enterprise SSO for server mode"
+        detail: |
+          OIDC/SAML SSO federation for server mode. Users authenticate via
+          corporate identity provider; server exchanges SSO token for
+          provider API tokens. Token exchange service configurable by admin.
+        acceptance: |
+          User logs in via corporate SSO, gets routed to their org's
+          configured model provider. Per-user session isolation.
+
+      - id: P4-006
+        title: "Horizontal scaling"
+        detail: |
+          Server mode with multiple instances behind a load balancer.
+          PostgreSQL for shared state. Sticky sessions or session-store
+          routing.
+        acceptance: "3 server instances share sessions via PostgreSQL"
+
+# ============================================================================
+# 16. SUCCESS METRICS
+# ============================================================================
+
+success_metrics:
+  - metric: "Binary size"
+    target: "<20MB stripped"
+    measurement: "ls -la on stripped binary"
+
+  - metric: "Startup time"
+    target: "<500ms to first prompt"
+    measurement: "time chronos-code --help"
+
+  - metric: "Session resume latency"
+    target: "<2s to restore context and show last message"
+    measurement: "time from resume command to ready prompt"
+
+  - metric: "Memory recall relevance"
+    target: ">80% of recalled memories are relevant to current task"
+    measurement: "human eval on sample of 50 recall events"
+
+  - metric: "Self-learning adoption"
+    target: ">60% of suggested YAML accepted by users"
+    measurement: "accepted / (accepted + rejected) from learn review"
+
+  - metric: "Server concurrent sessions"
+    target: "50+ concurrent sessions per instance"
+    measurement: "load test with k6"
+
+  - metric: "Config-to-running-agent time"
+    target: "<10 min from chronos-code init to first useful session"
+    measurement: "new user onboarding test"
+
+  - metric: "Token efficiency vs baseline"
+    target: "40-60% fewer tokens per successful task vs Claude Code"
+    measurement: |
+      Run eval suite (SWE-bench Lite subset or curated tasks) on same model.
+      Compare total tokens (prompt + completion) at equal-or-better success rate.
+
+  - metric: "System prompt size"
+    target: "<800 tokens base, <1200 with skills/memory"
+    measurement: "tiktoken count of assembled system prompt"
+
+  - metric: "Average tool result size"
+    target: "<500 tokens after compression (vs ~1500 in baseline tools)"
+    measurement: "median compressed tool result size across eval suite"
+
+  - metric: "Turns per task"
+    target: "20-30% fewer turns than baseline for equivalent tasks"
+    measurement: "turn count comparison on eval suite"
+
+  - metric: "Cache hit rate"
+    target: ">70% prompt cache hit rate in sessions >5 turns"
+    measurement: "Anthropic cache_read_input_tokens / total prompt tokens"
+
+  - metric: "Code graph index speed"
+    target: "<30s full index on 50K-file project, <500ms incremental"
+    measurement: "Wall-clock time on Chronos repo (607 files) and a large OSS project"
+
+  - metric: "Graph query latency"
+    target: "<10ms per query"
+    measurement: "p99 latency on 1000 random graph queries"
+
+  - metric: "Graph-driven exploration savings"
+    target: "95%+ token reduction on code exploration vs grep+read baseline"
+    measurement: "A/B eval: same tasks with graph tools enabled vs disabled"
+
+  - metric: "Spreading activation hit rate"
+    target: ">50% of follow-up queries served from activation buffer"
+    measurement: "Buffer hits / total graph queries in eval sessions"
+
+  - metric: "Enterprise auth success rate"
+    target: "OAuth login completes in <30 seconds with zero manual token pasting"
+    measurement: "End-to-end login flow timing for OpenAI, Google, Azure"
+
+# ============================================================================
+# 17. DEPENDENCIES ON CHRONOS FRAMEWORK
+# ============================================================================
+
+chronos_dependencies:
+  description: |
+    These are the Chronos packages chronos-code imports. All exist today.
+    No framework changes are required for P1-P2. Minor additions may be
+    needed for P3-P4.
+
+  required_packages:
+    - package: "sdk/agent"
+      used_for: "Agent builder, YAML config, BuildAgent/BuildAll"
+      exists: true
+
+    - package: "sdk/harness"
+      used_for: "DeepAgent preset, subagent service, planning, VFS"
+      exists: true
+
+    - package: "sdk/memory"
+      used_for: "Memory Store, Manager, LLM extraction, vector recall"
+      exists: true
+
+    - package: "sdk/skill"
+      used_for: "Skill registry, SKILL.md loader"
+      exists: true
+
+    - package: "sdk/team"
+      used_for: "Multi-agent strategies (sequential, parallel, router, etc.)"
+      exists: true
+
+    - package: "engine/model"
+      used_for: "Provider interface, all 15 model providers, embeddings"
+      exists: true
+
+    - package: "engine/tool"
+      used_for: "Tool registry, permission model, built-in tools"
+      exists: true
+
+    - package: "engine/tool/builtins"
+      used_for: "File tools, shell, plan, VFS"
+      exists: true
+
+    - package: "engine/mcp"
+      used_for: "MCP client (stdio + SSE), server config"
+      exists: true
+
+    - package: "engine/guardrails"
+      used_for: "Guardrail interface, engine, built-in guards"
+      exists: true
+
+    - package: "engine/hooks"
+      used_for: "Before/After middleware hooks"
+      exists: true
+
+    - package: "engine/graph"
+      used_for: "StateGraph for durable workflows (optional)"
+      exists: true
+
+    - package: "engine/stream"
+      used_for: "SSE broker for streaming"
+      exists: true
+
+    - package: "os/trace"
+      used_for: "Trace collector for learning loop"
+      exists: true
+
+    - package: "storage"
+      used_for: "Storage + VectorStore interfaces"
+      exists: true
+
+    - package: "storage/adapters/sqlite"
+      used_for: "Local dev storage"
+      exists: true
+
+    - package: "storage/adapters/postgres"
+      used_for: "Server/production storage"
+      exists: true
+
+  potential_framework_additions:
+    - description: |
+        YAML-configurable guardrails: the current guardrails are Go-only.
+        We may want to add a YAML→Guardrail builder to Chronos itself
+        (similar to how config.go builds providers from YAML). This would
+        benefit all Chronos users, not just chronos-code.
+      priority: "nice-to-have (P3)"
+      workaround: "chronos-code implements its own YAML→Guardrail mapping"
+
+    - description: |
+        Trace export API: os/trace Collector stores traces but doesn't
+        expose a structured export API for external analysis. The learning
+        loop needs to query traces by session, time range, and outcome.
+      priority: "needed for P3"
+      workaround: "Query storage directly via Storage.ListTraces"
+
+    - description: |
+        Tool call hooks with veto: engine/hooks has Before/After but
+        no way to veto (block) a tool call mid-flight. The security
+        policy enforcement needs this.
+      priority: "needed for P2"
+      workaround: |
+        Use tool.RequiresConfirmation + a custom approval handler that
+        checks security policy. Chronos already has this seam via the
+        tool permission model.
+
+# ============================================================================
+# 18. RISKS & MITIGATIONS
+# ============================================================================
+
+risks:
+  - risk: "Self-learning loop produces low-quality YAML"
+    severity: "medium"
+    mitigation: |
+      Mandatory human review gate. Confidence scoring. Minimum session
+      threshold before distillation. Generated YAML goes to learned/pending/
+      and is never auto-applied without approval.
+
+  - risk: "Binary size creeps past target"
+    severity: "low"
+    mitigation: |
+      CI job that builds and checks binary size on every PR. Build tags
+      for optional features. Dependency review on every go.mod change.
+
+  - risk: "Chronos framework breaking changes"
+    severity: "medium"
+    mitigation: |
+      Pin Chronos at a tested version in go.mod. Run chronos-code CI
+      against both pinned and tip-of-main. Chronos interfaces are stable
+      (Storage, Provider, Guardrail) — implementations may change but
+      the contracts won't.
+
+  - risk: "Security policy bypass via prompt injection"
+    severity: "high"
+    mitigation: |
+      Security policies are enforced at the tool execution layer (Go code),
+      not in the prompt. Even if the model is convinced to try, the tool
+      handler checks the allowlist before executing. Defense in depth:
+      injection detection guardrail + execution-time policy enforcement.
+
+  - risk: "Token efficiency regresses as features are added"
+    severity: "high"
+    mitigation: |
+      CI eval gate measures tokens-per-task on every PR. Any regression >10%
+      blocks merge. Token budgets are enforced at runtime. The efficiency
+      engine is a separate component (C-010) so optimizations are localized,
+      not scattered across the codebase.
+
+  - risk: "Tiered routing misclassifies and sends complex tasks to T1"
+    severity: "medium"
+    mitigation: |
+      Conservative default: when the router is uncertain, escalate to T2.
+      Router accuracy is measured in the eval suite (target >90%). Users
+      can override per-tool routing in YAML. Router errors are logged and
+      fed into the self-learning loop for improvement.
+
+  - risk: "Tool result compression loses critical information"
+    severity: "medium"
+    mitigation: |
+      Compression is validated in the eval suite: task success rate must
+      not drop vs uncompressed baseline. Full uncompressed results are
+      always persisted in the session store for debugging. Compression
+      level is configurable (off / light / aggressive) and defaults to
+      light. Users see a "compressed" indicator in the TUI.
+
+  - risk: "Memory YAML files grow unbounded"
+    severity: "low"
+    mitigation: |
+      Retention policy with configurable TTL. Memory consolidation
+      (merge related, prune stale). Size cap per memory category.
+
+# ============================================================================
+# 19. OPEN QUESTIONS
+# ============================================================================
+
+open_questions:
+  - question: "Should the TUI use bubbletea or a simpler approach (raw ANSI)?"
+    options:
+      - "bubbletea: rich, polished, but adds ~2MB to binary and a learning curve"
+      - "raw ANSI: smaller binary, simpler, but less polish"
+      - "both via build tag: default raw ANSI, opt-in bubbletea with -tags tui_fancy"
+    recommendation: "Build-tagged approach — keep default binary lean"
+
+  - question: "Should learned YAML be version-controlled (git commit after approval)?"
+    options:
+      - "Yes: git add + commit in .chronos-code/learned/ after approval"
+      - "No: just write files, let user manage version control"
+    recommendation: "Yes — makes learning reviewable and revertable"
+
+  - question: "Should the server mode support WebSocket in addition to SSE?"
+    options:
+      - "SSE only: simpler, works everywhere, sufficient for streaming text"
+      - "SSE + WebSocket: needed for bidirectional comms (user typing indicators, cancel)"
+    recommendation: "SSE for P3, add WebSocket in P4 if needed"
+
+  - question: "How should multi-project memory isolation work?"
+    options:
+      - "Strict: each project has its own .chronos-code/ with no cross-project sharing"
+      - "Hierarchical: project memories + user-global memories (~/.chronos-code/memory/)"
+    recommendation: "Hierarchical — user preferences are cross-project, project facts are scoped"
+
+##############################################################################
+# END OF PRD
+##############################################################################

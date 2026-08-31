@@ -9,11 +9,14 @@ import (
 	"strings"
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
+	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 
+	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/defaults"
@@ -68,6 +71,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
 
+	applyStoredCredentials(cfg)
+
 	agents, err := agent.BuildAll(ctx, &cfg.FileConfig)
 	if err != nil {
 		return nil, fmt.Errorf("build agents: %w", err)
@@ -87,7 +92,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		}
 	}
 
-	projectDir, _, _ := config.Discover()
+	projectDir, _, discoverErr := config.Discover()
+	if discoverErr != nil {
+		fmt.Printf("warning: discover project config dir: %v (falling back to embedded defaults)\n", discoverErr)
+	}
 
 	sessionMgr := session.NewManager(store, dsn)
 	sessions := setupSessions(ctx, cfg, sessionMgr, agents, resumeSessionID)
@@ -111,17 +119,27 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	maxTokens, _ := grCfg.TokenBudget()
 	tracker := budget.NewTracker(maxTokens, cfg.Tools.CompressionThresholdTokens)
 	for _, a := range agents {
-		a.Hooks = append(a.Hooks, tracker)
+		agentID := a.ID
+		// budgetHook forces a session id onto ctx before delegating to the
+		// shared tracker, so its "no session in context" fallback resolves to
+		// this agent's id — consistent with sessionOrAgentKey below, which
+		// toolcompress and incctx also use as their fallback. (budget.Tracker
+		// itself has no way to know which agent a hooks.Event came from; it
+		// only sees a *hooks.Event and a shared ctx.)
+		a.Hooks = append(a.Hooks, budgetHook{tracker: tracker, agentID: agentID})
 	}
 
 	for _, a := range agents {
+		if err := a.ConnectMCP(ctx); err != nil {
+			fmt.Printf("warning: MCP connect for %s: %v\n", a.ID, err)
+		}
+		// Wrap tool handlers (compression + incremental context) only after
+		// ConnectMCP so MCP-server tools are covered too, not just the
+		// built-in/YAML-declared ones registered before this point.
 		agentID := a.ID
 		toolcompress.WrapDynamic(a, func(ctx context.Context) int {
 			return tracker.CompressionThreshold(sessionOrAgentKey(ctx, agentID))
 		})
-		if err := a.ConnectMCP(ctx); err != nil {
-			fmt.Printf("warning: MCP connect for %s: %v\n", a.ID, err)
-		}
 		incctx.Wrap(a, root)
 	}
 
@@ -147,6 +165,49 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	}, nil
 }
 
+// applyStoredCredentials fills in ModelConfig.APIKey from a stored
+// internal/auth credential (PRD P2-010) for any agent (or the shared
+// Defaults block) whose provider has no api_key set in YAML and no
+// corresponding env var override at the point buildProvider resolves it —
+// without this, `chronos-code auth login <provider> --api-key ...` stores a
+// credential that nothing ever reads back, silently having no effect on
+// actual model calls. Only API-key credentials are applied here; OAuth
+// credentials (access tokens) aren't a drop-in replacement for the api_key
+// field chronos's provider constructors expect, so they're left for a
+// future provider-level integration.
+func applyStoredCredentials(cfg *config.Config) {
+	store := auth.NewStore()
+	resolved := make(map[string]string) // provider -> API key (may be "")
+
+	resolve := func(provider string) string {
+		key, cached := resolved[provider]
+		if cached {
+			return key
+		}
+		if cred, err := store.Load(provider); err == nil && cred != nil && cred.Method == auth.MethodAPIKey {
+			key = cred.APIKey
+		}
+		resolved[provider] = key
+		return key
+	}
+
+	apply := func(mc *agent.ModelConfig) {
+		if mc.APIKey != "" || mc.Provider == "" {
+			return
+		}
+		if key := resolve(mc.Provider); key != "" {
+			mc.APIKey = key
+		}
+	}
+
+	if cfg.Defaults != nil {
+		apply(&cfg.Defaults.Model)
+	}
+	for i := range cfg.Agents {
+		apply(&cfg.Agents[i].Model)
+	}
+}
+
 // sessionOrAgentKey resolves the same per-conversation cache/tracking key
 // toolcompress and incctx already use internally: the in-context session ID
 // if present, falling back to the agent ID.
@@ -155,6 +216,33 @@ func sessionOrAgentKey(ctx context.Context, agentID string) string {
 		return id
 	}
 	return agentID
+}
+
+// budgetHook adapts a single shared *budget.Tracker into a per-agent
+// hooks.Hook: it forces agentID onto ctx as the session id (via
+// storage.WithSession) whenever ctx doesn't already carry one, before
+// delegating to the tracker. This keeps the tracker's fallback-key behavior
+// consistent with sessionOrAgentKey above (agent ID, not the model name
+// budget.Tracker would otherwise fall back to when it can't see which agent
+// a *hooks.Event came from).
+type budgetHook struct {
+	tracker *budget.Tracker
+	agentID string
+}
+
+func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
+	if storage.SessionFromContext(ctx) == "" {
+		return storage.WithSession(ctx, h.agentID)
+	}
+	return ctx
+}
+
+func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
+	return h.tracker.Before(h.withFallbackSession(ctx), evt)
+}
+
+func (h budgetHook) After(ctx context.Context, evt *hooks.Event) error {
+	return h.tracker.After(h.withFallbackSession(ctx), evt)
 }
 
 // setupSessions establishes a persistent session id per agent (PRD P2-001).
@@ -459,6 +547,26 @@ func (o *Orchestrator) Route(ctx context.Context, message string) (agentID strin
 		return o.active, false
 	}
 	return agentID, matched
+}
+
+// SetPermissionMode applies mode (one of "prompt", "auto_approve", "deny" —
+// see tool.ParsePermissionMode for accepted aliases) to every agent's tool
+// registry. This is how the CLI's `--permission-mode` flag takes effect;
+// without a call to this, the flag was parsed but silently had no effect.
+func (o *Orchestrator) SetPermissionMode(mode string) error {
+	if mode == "" {
+		return nil
+	}
+	parsed, err := tool.ParsePermissionMode(mode)
+	if err != nil {
+		return err
+	}
+	for _, a := range o.agents {
+		if err := a.Tools.SetPermissionMode(parsed); err != nil {
+			return fmt.Errorf("set permission mode for agent %q: %w", a.ID, err)
+		}
+	}
+	return nil
 }
 
 func (o *Orchestrator) SwitchAgent(id string) error {

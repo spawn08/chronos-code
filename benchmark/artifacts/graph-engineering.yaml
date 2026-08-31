@@ -1,0 +1,262 @@
+# Chronos Code — Graph Engineering Patterns
+# Defines how agents use the code graph for maximum token efficiency.
+
+meta:
+  description: "Code graph usage patterns and anti-patterns for chronos-code agents"
+  version: "1.0.0"
+  principle: |
+    The code graph is chronos-code's primary competitive advantage. It
+    replaces expensive LLM-driven code exploration (grep → read → reason)
+    with free, instant, precise local queries. Every graph query costs
+    ~50 tokens in the response. Every file_read costs ~500-2000 tokens.
+    Using the graph first, files second, is the single biggest lever for
+    token efficiency.
+
+# ── Pattern 1: Multi-Resolution Navigation ───────────────────────────
+
+patterns:
+
+  - name: "Multi-Resolution Navigation"
+    id: MRN
+    description: |
+      Navigate the codebase like a cartographer: start at the overview
+      (L0), zoom into the relevant region (L1), inspect the specific
+      symbol (L2), and only load the full implementation (L3) when you
+      need to read or edit the actual code.
+    levels:
+      L0_repo:
+        tool: "multi_resolution_view(target='.', level='L0')"
+        returns: "Package list, file counts, top-level structure"
+        tokens: "~20"
+        use_when: "Starting a new task — orient yourself"
+      L1_package:
+        tool: "multi_resolution_view(target='sdk/agent', level='L1')"
+        returns: "Files, exported symbols, imports, imported-by"
+        tokens: "~80"
+        use_when: "You know which package, need to find which symbol"
+      L2_symbol:
+        tool: "graph_query(name='BuildAgent')"
+        returns: "Kind, file, line, signature, doc, callers/callees count"
+        tokens: "~40"
+        use_when: "You know the symbol, need to understand its contract"
+      L3_implementation:
+        tool: "file_read(path='sdk/agent/config.go', start_line=462, end_line=590)"
+        returns: "Full function body"
+        tokens: "~200-2000"
+        use_when: "You need to edit the code or understand its internal logic"
+
+    rules:
+      - "Always start at the highest useful level, not L3"
+      - "L2 (graph_query) answers most questions about what a function does"
+      - "L3 (file_read) is for editing or when L2 is insufficient"
+      - "Never file_read a full file when you only need one function — use line ranges"
+
+    example:
+      task: "Add a timeout parameter to BuildAgent"
+      steps:
+        - "L1: multi_resolution_view('sdk/agent') → see BuildAgent is in config.go"
+        - "L2: graph_query('BuildAgent') → see signature, 4 callers, 12 callees"
+        - "L2: find_callers('BuildAgent') → see which callers need updating"
+        - "L3: file_read config.go:462-590 → read only BuildAgent body for editing"
+        - "Total: ~180 tokens exploration vs ~5000 if we read the entire file"
+
+  # ── Pattern 2: Spreading Activation ─────────────────────────────────
+
+  - name: "Spreading Activation"
+    id: SA
+    description: |
+      When you access a symbol, the graph engine pre-fetches its neighbors
+      (callers, callees, implementations, tests) into a ready buffer. The
+      next time you ask for one of these neighbors, it's instant — no
+      additional tool call.
+    how_it_works:
+      - "Agent calls graph_query('BuildAgent')"
+      - "Engine returns result + pre-fetches: BuildAll, buildProvider, buildStorage, TestBuildAgent into buffer"
+      - "Agent's next turn: 'What does buildProvider do?' → instant from buffer"
+      - "Buffer: LRU, 50 symbols max, oldest-accessed evicted first"
+    agent_instruction: |
+      You don't need to do anything special to use spreading activation.
+      It happens automatically. Just use graph tools naturally — the
+      system pre-fetches neighbors for you. If a graph_query returns
+      unusually fast, it was pre-fetched.
+    token_savings: "~30% fewer follow-up tool calls in exploration sequences"
+
+  # ── Pattern 3: Impact-First Editing ─────────────────────────────────
+
+  - name: "Impact-First Editing"
+    id: IFE
+    description: |
+      BEFORE making any code change, run impact_analysis on the target
+      lines. Know the blast radius before you create it.
+    workflow:
+      - step: 1
+        action: "impact_analysis(file='sdk/agent/config.go', start=462, end=480)"
+        returns: "Edited symbols, direct callers, transitive callers, affected tests, risk level"
+      - step: 2
+        action: "Review the impact. If high-risk (many callers, signature change), plan carefully."
+      - step: 3
+        action: "Make the edit"
+      - step: 4
+        action: "Run only the affected tests from the impact analysis"
+    rules:
+      - "Always run impact_analysis before editing exported functions or types"
+      - "If impact shows >5 callers, consider whether a backward-compatible approach exists"
+      - "If impact shows 0 callers (unexported, unused), the change is safe — proceed"
+    token_savings: |
+      Avoids: grep for callers (~1500 tokens) + manual analysis of each caller (~500/caller)
+      Cost: impact_analysis returns ~80 tokens. Saves ~3000-8000 tokens per edit.
+
+  # ── Pattern 4: Test-Map Verification ────────────────────────────────
+
+  - name: "Test-Map Verification"
+    id: TMV
+    description: |
+      After any edit, use test_map to find which tests cover the edited
+      code, and run ONLY those tests. Never run the full test suite for
+      a single-function change.
+    workflow:
+      - step: 1
+        action: "test_map(symbol='BuildAgent')"
+        returns: "TestBuildAgent (config_test.go, confidence 1.0), TestBuildAll (config_test.go, 0.9)"
+      - step: 2
+        action: "shell: go test ./sdk/agent/ -run 'TestBuild(Agent|All)' -v"
+        note: "Targeted: ~5 seconds, ~200 tokens of output"
+      - step: 3
+        action: "If all pass: done. If fail: diagnose from the error output."
+    comparison:
+      targeted: "5 seconds, ~200 tokens output"
+      full_suite: "60 seconds, ~2000 tokens output"
+      savings: "90% time, 90% tokens"
+    rules:
+      - "Use test_map after every edit"
+      - "Run full suite only at the very end of a multi-step task, or before committing"
+      - "If test_map returns empty (no tests cover this code), say so — suggest writing a test"
+
+  # ── Pattern 5: Co-Change Analysis ───────────────────────────────────
+
+  - name: "Co-Change Analysis"
+    id: CCA
+    description: |
+      Check which files historically change together with the file you're
+      editing. If file A and file B have a 0.9 co-change correlation,
+      you probably need to update B too.
+    workflow:
+      - step: 1
+        action: "co_change(file='sdk/agent/config.go')"
+        returns: "config_test.go (0.92), cli/cmd/run.go (0.67), ..."
+      - step: 2
+        action: "For correlation >0.7: check if your change requires updating the co-change partner"
+    use_cases:
+      - "After editing a struct: co-change reveals the test file and the CLI command that uses it"
+      - "After editing an interface: co-change reveals all implementations"
+      - "After editing a config parser: co-change reveals the example YAML"
+    rules:
+      - "Check co_change after major structural changes (new fields, changed signatures)"
+      - "Don't blindly edit co-change partners — they need updating only if your change affects them"
+      - "Correlation <0.5 is noise. Ignore it."
+
+  # ── Pattern 6: Symbol Resolution ────────────────────────────────────
+
+  - name: "Precise Symbol Resolution"
+    id: PSR
+    description: |
+      Use resolve_symbol instead of grep when looking for a definition.
+      Grep finds text matches (including comments, strings, variable names).
+      resolve_symbol finds the actual definition, type-aware.
+    comparison:
+      grep: "file_grep('BuildAgent') → 15 matches across 8 files, ~500 tokens"
+      resolve: "resolve_symbol('BuildAgent') → 1 result: config.go:462, ~20 tokens"
+    rules:
+      - "Use resolve_symbol for 'where is X defined?'"
+      - "Use find_callers for 'who calls X?'"
+      - "Use find_implementations for 'what implements interface X?'"
+      - "Use file_grep only for text patterns that aren't symbols (error messages, constants, comments)"
+
+# ── Anti-Patterns ─────────────────────────────────────────────────────
+
+anti_patterns:
+
+  - name: "Reading Full Files for Orientation"
+    symptom: "file_read('config.go') → 1276 lines, ~5000 tokens — just to find a function"
+    fix: "graph_query('FunctionName') → 1 result, ~50 tokens"
+    token_waste: "~4950 tokens per occurrence"
+
+  - name: "Running Full Test Suite After Every Edit"
+    symptom: "shell: go test ./... → 60 seconds, 2000 tokens — for a one-line change"
+    fix: "test_map('EditedFunction') → targeted test → 5 seconds, 200 tokens"
+    token_waste: "~1800 tokens per occurrence"
+
+  - name: "Grepping for Symbol Definitions"
+    symptom: "file_grep('BuildAgent') → 15 matches across 8 files"
+    fix: "resolve_symbol('BuildAgent') → exact definition location, 20 tokens"
+    token_waste: "~480 tokens per occurrence"
+
+  - name: "Grepping for Interface Implementations"
+    symptom: "file_grep('func.*Storage') → dozens of false positives"
+    fix: "find_implementations('Storage') → exact list of implementing types"
+    token_waste: "~1000+ tokens per occurrence"
+
+  - name: "Editing Without Impact Analysis"
+    symptom: "Change a function signature → 7 callers break → discover one at a time"
+    fix: "impact_analysis before editing → know all callers upfront → fix them all in one pass"
+    token_waste: "~5000+ tokens (discovery + backtracking + re-reading)"
+
+# ── Token Cost Reference ──────────────────────────────────────────────
+
+token_costs:
+  description: "Approximate token costs for common operations"
+  operations:
+    - operation: "graph_query (symbol lookup)"
+      tokens: 50
+      tier: T0
+    - operation: "find_callers (1 hop)"
+      tokens: 80
+      tier: T0
+    - operation: "find_implementations"
+      tokens: 60
+      tier: T0
+    - operation: "impact_analysis"
+      tokens: 80
+      tier: T0
+    - operation: "test_map"
+      tokens: 40
+      tier: T0
+    - operation: "co_change"
+      tokens: 50
+      tier: T0
+    - operation: "multi_resolution_view L0"
+      tokens: 20
+      tier: T0
+    - operation: "multi_resolution_view L1"
+      tokens: 80
+      tier: T0
+    - operation: "resolve_symbol"
+      tokens: 20
+      tier: T0
+    - operation: "file_list"
+      tokens: 100
+      tier: T0
+    - operation: "file_grep (small result)"
+      tokens: 200
+      tier: T0
+    - operation: "file_grep (large result)"
+      tokens: 1000
+      tier: T0
+    - operation: "file_read (line range, ~30 lines)"
+      tokens: 300
+      tier: T1
+    - operation: "file_read (full file, ~200 lines)"
+      tokens: 1500
+      tier: T1
+    - operation: "file_read (full file, ~500 lines)"
+      tokens: 3500
+      tier: T1
+    - operation: "file_write (diff)"
+      tokens: 200
+      tier: T2
+    - operation: "shell (go test targeted)"
+      tokens: 200
+      tier: T2
+    - operation: "shell (go test ./...)"
+      tokens: 2000
+      tier: T2

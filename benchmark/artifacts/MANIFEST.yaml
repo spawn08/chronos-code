@@ -1,0 +1,80 @@
+# Chronos Code — Implementation Artifacts Manifest
+# These artifacts implement the PRD at PRD-chronos-code.yaml.
+# They are the source of truth for system prompts, configs, and patterns.
+# When copying to the chronos-code repo, use this manifest to know what goes where.
+
+meta:
+  prd_source: "../PRD-chronos-code.yaml"
+  version: "1.0.0"
+  status: "ready-for-implementation"
+
+# Where each artifact maps in the chronos-code repository
+artifact_mapping:
+
+  # System prompts → embedded in binary, written to .chronos-code/agents/ on init
+  system_prompts:
+    source_dir: "autoresearch/artifacts/"
+    target_dir: "internal/defaults/agents/"
+    files:
+      - source: "system-prompt-coder.yaml"
+        target: "coder.yaml"
+        prd_section: "§7 Default Agents — coder"
+      - source: "system-prompt-planner.yaml"
+        target: "planner.yaml"
+        prd_section: "§7 Default Agents — planner"
+      - source: "system-prompt-reviewer.yaml"
+        target: "reviewer.yaml"
+        prd_section: "§7 Default Agents — reviewer"
+      - source: "system-prompt-debugger.yaml"
+        target: "debugger.yaml"
+        prd_section: "§7 Default Agents — debugger"
+      - source: "system-prompt-researcher.yaml"
+        target: "researcher.yaml"
+        prd_section: "§7 Default Agents — researcher"
+      - source: "system-prompt-architect.yaml"
+        target: "architect.yaml"
+        prd_section: "§7 Default Agents — architect"
+      - source: "system-prompt-explainer.yaml"
+        target: "explainer.yaml"
+        prd_section: "§7 Default Agents — explainer"
+
+  # Skills → embedded in binary, written to .chronos-code/skills/ on init
+  skills:
+    source: "default-skills.yaml"
+    target_dir: "internal/defaults/skills/"
+    prd_section: "§7 Default Agents — skills"
+
+  # Engineering patterns → compiled into the orchestrator and token efficiency engine
+  engineering:
+    files:
+      - source: "loop-engineering.yaml"
+        target: "internal/orchestrator/loops.go (constants + loop configs)"
+        prd_section: "§13 Novel Features — loops"
+      - source: "graph-engineering.yaml"
+        target: "internal/graph/patterns.go (graph query patterns)"
+        prd_section: "§12 Code Graph Engine"
+      - source: "context-engineering.yaml"
+        target: "internal/efficiency/context.go (prompt assembly + compression)"
+        prd_section: "§11 Token Efficiency Architecture"
+
+  # Infrastructure configs → embedded defaults + config schema
+  infrastructure:
+    files:
+      - source: "mcp-configs.yaml"
+        target: "internal/defaults/mcp-servers.yaml"
+        prd_section: "§6 Configuration Schema — mcp_servers"
+      - source: "enterprise-auth.yaml"
+        target: "internal/auth/ (auth package implementation)"
+        prd_section: "§6 Configuration Schema — auth_config"
+      - source: "tool-definitions.yaml"
+        target: "internal/defaults/tools.yaml + internal/tools/ (tool registry)"
+        prd_section: "§6 Configuration Schema — tool definitions"
+      - source: "agent-routing.yaml"
+        target: "internal/orchestrator/routing.go"
+        prd_section: "§7 Default Agents — agent_routing"
+
+# Implementation workflow for an agent harness:
+# 1. Read PRD-chronos-code.yaml for architecture and phases
+# 2. For each phase item, find the corresponding artifact(s) in this manifest
+# 3. The artifact contains the actual content to implement (prompts, configs, schemas)
+# 4. The PRD contains the acceptance criteria to verify against

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/spawn08/chronos/engine/tool"
@@ -77,13 +78,18 @@ func printFileWritePreview(w io.Writer, args map[string]any) {
 }
 
 // printShellPreview renders a shell tool call, surfacing the command and
-// working directory prominently since it's the highest-risk tool.
+// working directory prominently since it's the highest-risk tool, while
+// still showing any other args (e.g. timeout_sec) so nothing the model set
+// is hidden from the approver.
 func printShellPreview(w io.Writer, args map[string]any) {
 	command, _ := args["command"].(string)
 	workingDir, _ := args["working_dir"].(string)
 	fmt.Fprintf(w, "\033[31mCommand:\033[0m %s\n", command)
 	if workingDir != "" {
 		fmt.Fprintf(w, "Dir:     %s\n", workingDir)
+	}
+	if rest := formatApprovalArgsExcept(args, "command", "working_dir"); rest != "" {
+		fmt.Fprintf(w, "Other:   %s\n", rest)
 	}
 }
 
@@ -104,16 +110,32 @@ func truncatedLines(s string, maxLines int) []string {
 }
 
 func formatApprovalArgs(args map[string]any) string {
+	return formatApprovalArgsExcept(args)
+}
+
+// formatApprovalArgsExcept is formatApprovalArgs but skipping keys already
+// rendered explicitly by a tool-specific preview (e.g. "command",
+// "working_dir"), so nothing the model set is silently hidden from the
+// approver while avoiding duplicate display of fields already shown.
+func formatApprovalArgsExcept(args map[string]any, skip ...string) string {
 	if len(args) == 0 {
 		return ""
 	}
+	skipSet := make(map[string]bool, len(skip))
+	for _, k := range skip {
+		skipSet[k] = true
+	}
 	parts := make([]string, 0, len(args))
 	for k, v := range args {
+		if skipSet[k] {
+			continue
+		}
 		s := fmt.Sprintf("%v", v)
 		if len(s) > 60 {
 			s = s[:57] + "..."
 		}
 		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
 	}
+	sort.Strings(parts)
 	return strings.Join(parts, ", ")
 }

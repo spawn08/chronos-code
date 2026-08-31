@@ -184,6 +184,9 @@ func loadAndBuild() (*orchestrator.Orchestrator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build orchestrator: %w", err)
 	}
+	if err := orch.SetPermissionMode(permissionMode); err != nil {
+		return nil, fmt.Errorf("apply --permission-mode: %w", err)
+	}
 	return orch, nil
 }
 

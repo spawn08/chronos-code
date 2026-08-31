@@ -1,0 +1,351 @@
+# Chronos Code — Context Engineering
+# How chronos-code assembles context windows for maximum signal/token ratio.
+
+meta:
+  description: "Context window assembly, compression, and management for chronos-code"
+  version: "1.0.0"
+  core_principle: |
+    "More tokens makes agents worse." — Martin Fowler, Sequoia Capital research, Augment Code.
+    A weaker model with excellent context outperforms a stronger model with poor context.
+    Every token in the context window must earn its place. Irrelevant context is
+    actively harmful — it dilutes attention and degrades accuracy.
+
+# ── Prompt Assembly Order ─────────────────────────────────────────────
+
+prompt_assembly:
+  description: |
+    The order of prompt sections is critical for Anthropic prompt cache
+    efficiency. Stable content comes first (cached for 5 minutes at 90%
+    discount). Changing content comes last.
+
+  order:
+    - position: 1
+      section: "System prompt"
+      stability: "Static (changes only on binary update)"
+      cacheable: true
+      target_tokens: 800
+      content: "The agent's identity, execution model, tool hierarchy, and rules"
+
+    - position: 2
+      section: "Project context"
+      stability: "Stable (changes on project switch or index rebuild)"
+      cacheable: true
+      target_tokens: 200
+      content: |
+        Project type, language, key conventions. Assembled from:
+        - Code graph L0 summary (package list, ~20 tokens)
+        - .chronos-code/config.yaml project overrides (~50 tokens)
+        - Detected conventions (test framework, import style, ~50 tokens)
+        - .editorconfig / .golangci.yml constraints (~50 tokens)
+
+    - position: 3
+      section: "Active skills"
+      stability: "Stable per task (selected at routing time)"
+      cacheable: true
+      target_tokens: 100-300
+      content: "Only the skills relevant to the current task. NOT all skills."
+      rules:
+        - "If the task is 'fix the bug' → include debug skill, not code-review"
+        - "If the task is 'review my changes' → include code-review, not test-writer"
+        - "Never include >3 skills in one prompt"
+
+    - position: 4
+      section: "Memory block"
+      stability: "Semi-stable (changes when memories are added/evicted)"
+      cacheable: "Partially (stable memories are cacheable)"
+      target_tokens: 100-300
+      content: "Relevant memories recalled via semantic search. NOT all memories."
+      rules:
+        - "Recall top 3-5 memories by relevance score"
+        - "Skip memories with relevance score <0.5"
+        - "If no memories are relevant, omit this section entirely"
+        - "Never dump all memories — that's context pollution"
+
+    - position: 5
+      section: "Active plan"
+      stability: "Changes frequently (after each step)"
+      cacheable: false
+      target_tokens: 50-200
+      content: "The current plan from update_plan. Shows completed, in-progress, and remaining steps."
+      rules:
+        - "Always present when a plan exists (it's the agent's working memory)"
+        - "Pinned — never evicted by compaction"
+
+    - position: 6
+      section: "Conversation history"
+      stability: "Changes every turn"
+      cacheable: false
+      target_tokens: "Variable (fills remaining budget)"
+      content: "Previous turns, compressed per attention budgeting rules"
+
+  cache_optimization: |
+    Sections 1-3 are stable and form the cache prefix. On a typical 8-turn
+    session, sections 1-3 are sent 8 times but cached after the first.
+    At Anthropic's 90% cache discount: 800 tokens × 8 turns = 6400 tokens
+    billed as 800 + (7 × 80) = 1360 tokens. Savings: 79%.
+
+    To maximize cache hits:
+    - Never add dynamic content (timestamps, session IDs) to sections 1-3
+    - Keep section ordering deterministic (same skills → same prompt prefix)
+    - Pad section boundaries to align with cache block size if needed
+
+# ── Attention Budgeting ───────────────────────────────────────────────
+
+attention_budgeting:
+  description: |
+    Not all context is equally important. Attention budgeting assigns a
+    relevance weight to each piece of content. When the context window fills,
+    low-weight content is evicted first, then medium-weight is compressed,
+    while high-weight content is preserved verbatim. This produces a leaner,
+    more focused window than uniform compression.
+
+  weight_categories:
+    - category: "Active edit target (the function/file being modified)"
+      weight: 1.0
+      treatment: "Always verbatim. Never compress or evict."
+      example: "The file_read result for the function the agent is currently editing"
+
+    - category: "Plan (active steps)"
+      weight: 0.95
+      treatment: "Always present. Pinned by Chronos harness."
+      example: "The current plan with step statuses"
+
+    - category: "Latest test output"
+      weight: 0.9
+      treatment: "Keep until next test run replaces it."
+      example: "The go test output from the last verification step"
+
+    - category: "Error message / stack trace (active diagnosis)"
+      weight: 0.9
+      treatment: "Keep while debugging. Evict when the bug is fixed."
+
+    - category: "User's original request"
+      weight: 0.85
+      treatment: "Always present. The task description must survive compaction."
+
+    - category: "Graph query results (recent)"
+      weight: 0.7
+      treatment: "Keep L2 summaries. Drop raw results after 3 turns of non-access."
+      example: "graph_query('BuildAgent') result showing signature and callers"
+
+    - category: "File reads (for editing — code the agent will modify)"
+      weight: 0.7
+      treatment: "Keep the relevant section. Compress surrounding context."
+
+    - category: "File reads (exploratory — read but not modified)"
+      weight: 0.3
+      treatment: "Compress to 1-line summary after 2 turns. Evict after 5 turns."
+      example: "A file read that was just for understanding, not editing"
+
+    - category: "Old tool results (superseded by newer information)"
+      weight: 0.1
+      treatment: "Evict immediately if the information is available in the graph or a newer result."
+      example: "A grep result from 6 turns ago, before the agent found the answer"
+
+    - category: "Agent narration (explanations of what it did)"
+      weight: 0.05
+      treatment: "Evict first. The tool calls + results tell the story."
+
+  eviction_algorithm: |
+    1. Score each message/turn: max(weight of all content in that turn)
+    2. Sort by score ascending (lowest first)
+    3. Evict lowest-scored turns until context usage is below threshold
+    4. For medium-scored turns (0.3-0.7): compress via T1 summarization
+    5. High-scored turns (>0.7): preserve verbatim
+
+# ── Tool Result Compression ───────────────────────────────────────────
+
+tool_result_compression:
+  description: |
+    Large tool results are compressed before entering conversation history.
+    The full result is stored in the session database (for debugging and
+    learning); only the compressed version enters the context window.
+
+  rules:
+    - threshold_tokens: 500
+      action: "Results under 500 tokens are kept verbatim"
+
+    - threshold_tokens: 2000
+      action: "Results 500-2000 tokens: deterministic compression (no LLM call)"
+      strategy: |
+        - Shell output: keep first 5 lines + last 5 lines + summary line
+          ("47 tests passed, 0 failed, 3 skipped in 2.3s")
+        - File reads: keep function signatures + first/last 3 lines of each function
+        - Grep results: keep first 10 matches + count of remaining
+        - JSON output: keep top-level keys + first value of each
+
+    - threshold_tokens: 5000
+      action: "Results >2000 tokens: LLM compression via T1 (cheap model)"
+      strategy: |
+        Send to the router model with: "Compress this tool result to the
+        essential facts. Keep: pass/fail status, error messages with file:line,
+        counts, key names. Drop: full file contents, verbose logs, stack traces
+        beyond the first frame."
+      target: "<300 tokens compressed"
+
+  per_tool_rules:
+    shell:
+      keep: "Exit code, first error line, pass/fail summary, timing"
+      drop: "Verbose build logs, full test output, progress bars"
+      example: |
+        Original (1500 tokens): "=== RUN TestBuildAgent\n--- PASS: TestBuildAgent (0.02s)\n=== RUN ..."
+        Compressed (50 tokens): "go test ./sdk/agent/ -run TestBuild: 2/2 passed in 0.05s. Exit 0."
+
+    file_read:
+      keep: "Function signatures, key logic, the lines the agent will edit"
+      drop: "Import blocks (agent knows the language), boilerplate, comments"
+      example: |
+        Original (2000 tokens): full 120-line file
+        Compressed (200 tokens): 3 function signatures + the 15 lines around the target
+
+    file_grep:
+      keep: "First 10 matches with file:line"
+      drop: "Duplicate matches in the same function, matches in test files (unless debugging tests)"
+
+    graph_query:
+      keep: "All fields (already compact at ~50 tokens)"
+      drop: "Nothing — graph results are pre-compressed"
+
+# ── Semantic Deduplication ────────────────────────────────────────────
+
+semantic_dedup:
+  description: |
+    Track what the agent has already seen in this session. Don't re-send
+    content that hasn't changed.
+
+  rules:
+    - type: "File re-read"
+      detection: "Same file path, file mtime unchanged since last read"
+      response: |
+        Return: "file sdk/agent/config.go was read at turn 3 (unchanged, 1276 lines).
+        Use file_read with line range if you need a specific section."
+      tokens_saved: "~1500-3500 per duplicate read"
+
+    - type: "Duplicate graph query"
+      detection: "Same symbol name, graph DB version unchanged"
+      response: "Return cached result from the session-level query cache"
+      tokens_saved: "~50 per duplicate (small, but adds up)"
+
+    - type: "Re-asked question"
+      detection: "Semantic similarity >0.95 with a previous user turn"
+      response: |
+        Note to agent: "You answered a similar question at turn N. If the
+        answer hasn't changed, reference that. If new information is needed,
+        proceed."
+      tokens_saved: "Prevents full re-exploration"
+
+# ── Dynamic Prompt Sections ───────────────────────────────────────────
+
+dynamic_sections:
+  description: |
+    Not all prompt sections are needed for every task. Including irrelevant
+    sections wastes tokens and dilutes the model's attention.
+
+  rules:
+    - section: "RAG / Knowledge base instructions"
+      include_when: "Agent has a configured knowledge base"
+      skip_when: "No knowledge base configured"
+      tokens_saved: "~100 tokens"
+
+    - section: "Memory block"
+      include_when: "Relevant memories exist (recall score >0.5)"
+      skip_when: "No memories, or all memories below relevance threshold"
+      tokens_saved: "~100-300 tokens"
+
+    - section: "Subagent delegation instructions"
+      include_when: "Agent has subagents configured"
+      skip_when: "No subagents (e.g., the explainer agent doesn't delegate)"
+      tokens_saved: "~80 tokens"
+
+    - section: "Graph tool instructions"
+      include_when: "Code graph is available and indexed"
+      skip_when: "Graph not built yet (first run, or non-code project)"
+      tokens_saved: "~100 tokens"
+
+    - section: "VFS / plan instructions"
+      include_when: "Agent uses the deep-agent harness"
+      skip_when: "Lightweight agents (researcher, explainer)"
+      tokens_saved: "~80 tokens"
+
+# ── Context Budget Tiers ──────────────────────────────────────────────
+
+budget_tiers:
+  description: |
+    As the session consumes tokens, the context engine gets progressively
+    more aggressive about compression to stay within budget.
+
+  tiers:
+    - name: "Normal"
+      budget_range: "0-50%"
+      behavior:
+        compression: "Standard (compress tool results >500 tokens)"
+        eviction: "Evict only weight <0.1 content"
+        model_routing: "Normal tier selection"
+        file_reads: "Full line-range reads allowed"
+
+    - name: "Increased Compression"
+      budget_range: "50-75%"
+      behavior:
+        compression: "Aggressive (compress tool results >200 tokens)"
+        eviction: "Evict weight <0.3 content. Compress weight 0.3-0.5."
+        model_routing: "Prefer T1 for non-critical calls"
+        file_reads: "Graph queries preferred over file reads"
+
+    - name: "Aggressive"
+      budget_range: "75-90%"
+      behavior:
+        compression: "Maximum (all tool results compressed to <100 tokens)"
+        eviction: "Evict weight <0.5. Compress weight 0.5-0.7."
+        model_routing: "T1 for all non-edit calls"
+        file_reads: "Only L2 (graph) unless actively editing. No exploratory reads."
+
+    - name: "Wrap Up"
+      budget_range: "90-100%"
+      behavior:
+        compression: "Everything compressed"
+        eviction: "Keep only: plan, current edit, latest test result, user request"
+        model_routing: "T1 only"
+        file_reads: "None — use only what's in context"
+        user_notification: "Warning: '90% of budget consumed. Completing current step.'"
+
+    - name: "Hard Stop"
+      budget_range: "100%"
+      behavior:
+        action: "Stop all work. Save session state (plan, checkpoints)."
+        user_notification: "'Budget exhausted. Session saved. Resume with: chronos-code --session <id>'"
+        what_is_saved: "Plan state, last checkpoint, session metadata"
+
+# ── The Less-Is-More Principle ────────────────────────────────────────
+
+less_is_more:
+  description: |
+    Research consistently shows that over-stuffing the context window
+    degrades agent performance. These are the specific mechanisms:
+
+  mechanisms:
+    - name: "Attention dilution"
+      detail: |
+        Transformer attention is distributed across all tokens. More
+        irrelevant tokens → less attention on the relevant ones → lower
+        accuracy on the actual task.
+
+    - name: "Instruction following degradation"
+      detail: |
+        As context grows, models become worse at following system prompt
+        instructions (the 'lost in the middle' effect). Keeping context
+        lean keeps instruction adherence high.
+
+    - name: "Hallucination from context noise"
+      detail: |
+        Irrelevant code in context can cause the model to reference
+        patterns from the wrong file, use the wrong variable names, or
+        confuse similar-but-different functions.
+
+  practical_limits:
+    optimal_context_fill: "40-60% of the context window"
+    danger_zone: ">80% fill — accuracy degrades measurably"
+    rules:
+      - "Never pre-load more than 5 files into context"
+      - "Prefer graph summaries (50 tokens) over file reads (2000 tokens)"
+      - "Compress everything older than 4 turns"
+      - "If context is >60% full and you haven't started editing yet, you're reading too much"

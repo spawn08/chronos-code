@@ -1,0 +1,161 @@
+# Chronos Code — Default MCP Server Configurations
+# Shipped embedded in the binary. Users override in .chronos-code/config.yaml.
+
+meta:
+  version: "1.0.0"
+  description: "Pre-configured MCP servers for common development workflows"
+
+# Global MCP settings
+settings:
+  max_concurrent_connections: 5
+  per_call_timeout_sec: 30
+  reconnect_on_failure: true
+  reconnect_max_retries: 3
+  reconnect_backoff_sec: 2
+
+  # Permission model for MCP servers
+  permission_model:
+    trusted_default: "allow"
+    untrusted_default: "require_approval"
+    description: |
+      MCP servers listed in security.yaml under mcp.trusted_servers get
+      their configured permission level. All others default to
+      require_approval. A server marked "deny" is never connected.
+
+# Pre-configured MCP servers
+servers:
+
+  - name: "filesystem"
+    description: "Read and write project files via MCP. Primary file access for agents."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "${WORKSPACE_ROOT:-.}"]
+    permission: "allow"
+    trusted: true
+    used_by: [coder, reviewer, debugger, planner, researcher, architect, explainer]
+    notes: |
+      The filesystem server provides file read/write/search/move/info tools.
+      Agents that only need read access should use the built-in file_read
+      tool instead — it's lighter and doesn't require an MCP connection.
+      Use this server when you need MCP-native file operations or when
+      integrating with other MCP-aware tools that expect filesystem access.
+
+  - name: "git"
+    description: "Git operations — status, diff, log, blame, branch, commit."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-git", "--repository", "${WORKSPACE_ROOT:-.}"]
+    permission: "require_approval"
+    trusted: true
+    used_by: [coder, reviewer, debugger]
+    notes: |
+      Destructive git operations (commit, push, reset, checkout) require
+      user approval. Read-only operations (status, diff, log, blame) are
+      allowed. The security.yaml can further restrict which git commands
+      are permitted.
+
+  - name: "github"
+    description: "GitHub PR/issue management — create PRs, comment, review, list issues."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    permission: "require_approval"
+    trusted: false
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}"
+    used_by: [coder, reviewer]
+    notes: |
+      Requires a GitHub PAT or GitHub App token. All operations that
+      modify state (create PR, post comment, merge) require approval.
+      Read operations (list PRs, get issue) are allowed after initial
+      server trust is granted.
+
+  - name: "postgres"
+    description: "PostgreSQL database access — query, schema inspection."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-postgres"]
+    permission: "require_approval"
+    trusted: false
+    env:
+      POSTGRES_CONNECTION_STRING: "${DATABASE_URL}"
+    used_by: [coder, debugger]
+    notes: |
+      All queries require approval by default. Read-only SELECT queries
+      can be auto-approved via security.yaml. DDL (CREATE, ALTER, DROP)
+      always requires approval regardless of config.
+
+  - name: "sqlite"
+    description: "Local SQLite database access — useful for inspecting app databases."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-sqlite", "--db-path", "${SQLITE_DB_PATH:-./dev.db}"]
+    permission: "require_approval"
+    trusted: false
+    used_by: [coder, debugger]
+    notes: |
+      Useful for debugging data-layer issues. Points at the project's
+      local development database by default. Change SQLITE_DB_PATH to
+      target a different database.
+
+  - name: "fetch"
+    description: "HTTP requests — fetch URLs, APIs, documentation."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-fetch"]
+    permission: "require_approval"
+    trusted: false
+    used_by: [researcher, coder]
+    notes: |
+      Network access is off by default in security.yaml. Enable by
+      setting shell.allow_network: true or adding fetch to
+      mcp.trusted_servers. Useful for checking API documentation,
+      downloading schemas, or verifying endpoints.
+
+  - name: "memory"
+    description: "Persistent knowledge graph memory via MCP. Stores entities and relations."
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-memory"]
+    permission: "allow"
+    trusted: true
+    used_by: [coder, planner, researcher]
+    notes: |
+      The memory server maintains a knowledge graph of entities and their
+      relationships. It complements chronos-code's built-in YAML-backed
+      memory layer with a graph-structured alternative. Useful for
+      storing and recalling complex project relationships (e.g., "service
+      A depends on service B via gRPC, deployed on cluster C").
+
+# How to add custom MCP servers
+custom_servers_guide: |
+  Add custom MCP servers in .chronos-code/config.yaml under the
+  mcp_servers key on any agent:
+
+    agents:
+      - id: coder
+        mcp_servers:
+          - name: "my-custom-server"
+            transport: "stdio"          # stdio or sse
+            command: "path/to/server"
+            args: ["--flag", "value"]
+            permission: "require_approval"
+            env:
+              MY_API_KEY: "${MY_API_KEY}"
+
+          - name: "remote-server"
+            transport: "sse"
+            url: "http://localhost:3001/sse"
+            permission: "require_approval"
+
+  For SSE transport, set url instead of command/args. The server must
+  implement the MCP SSE protocol.
+
+  To trust a custom server (allow its tools without per-call approval),
+  add its name to security.yaml:
+
+    mcp:
+      trusted_servers:
+        - "filesystem"
+        - "git"
+        - "my-custom-server"

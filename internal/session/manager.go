@@ -50,10 +50,17 @@ func NewManager(store storage.Storage, dsn string) *Manager {
 // Ensure guarantees a session with the given sessionID exists and belongs to
 // agentID. If no such session exists, one is created with Status "running".
 // If a session with sessionID already exists but belongs to a different
-// agent, an error is returned.
+// agent, an error is returned. A transient/genuine error from GetSession
+// (anything other than "no such row") is propagated rather than treated as
+// "session doesn't exist," so it can't be masked by a confusing
+// CreateSession failure (e.g. a UNIQUE-constraint error on a row that
+// actually exists under a different agent).
 func (m *Manager) Ensure(ctx context.Context, sessionID, agentID string) error {
 	existing, err := m.store.GetSession(ctx, sessionID)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("get session %q: %w", sessionID, err)
+		}
 		now := time.Now()
 		return m.store.CreateSession(ctx, &storage.Session{
 			ID:        sessionID,

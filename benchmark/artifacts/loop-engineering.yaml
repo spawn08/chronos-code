@@ -1,0 +1,269 @@
+# Chronos Code — Loop Engineering Patterns
+# Defines the iterative execution loops each agent uses.
+# Every loop has: phases, transition rules, max iterations, and escape conditions.
+
+meta:
+  description: "Execution loop patterns for chronos-code agents"
+  version: "1.0.0"
+  principle: |
+    Loops are the engine of agentic work. A well-designed loop converges
+    toward a solution; a poorly designed one burns tokens in circles.
+    Every loop has a bounded iteration count, clear phase transitions,
+    and an explicit escape hatch when progress stalls.
+
+loops:
+
+  # ── Primary Coding Loop ─────────────────────────────────────────────
+
+  coder_loop:
+    name: "ORIENT → PLAN → EXECUTE → VERIFY → REPORT"
+    agent: coder
+    max_iterations: 10
+    description: "The main execution loop for coding tasks"
+
+    phases:
+      - name: ORIENT
+        purpose: "Understand the landscape before acting"
+        actions:
+          - "Parse user request — identify: what to change, where, why"
+          - "Use graph tools (graph_query, multi_resolution_view L0→L1→L2) to map the relevant code"
+          - "Use find_callers, find_implementations to understand dependencies"
+          - "Check co_change for historically coupled files"
+          - "Read the specific code only if the graph doesn't answer your question"
+        token_budget: "~200-500 tokens (mostly graph queries at ~50 each)"
+        transition: "→ PLAN if task involves >1 file or >1 concern. → EXECUTE if trivial (single edit, obvious fix)."
+
+      - name: PLAN
+        purpose: "Decompose the task into ordered, verifiable steps"
+        actions:
+          - "Call update_plan with a step-by-step plan"
+          - "Each step: what to change, which file, expected outcome, how to verify"
+          - "Order by dependency (leaf changes first, callers last)"
+          - "Include a verification step after each group of related edits"
+        token_budget: "~200-400 tokens"
+        transition: "→ EXECUTE. Start with the first incomplete step."
+        skip_when: "Task is a single-file, single-function edit"
+
+      - name: EXECUTE
+        purpose: "Make one change at a time"
+        actions:
+          - "Mark current plan step as in_progress"
+          - "Read the specific code to edit (file_read with line range, NOT full file)"
+          - "Apply the edit via file_write with diff (old_content → new_content)"
+          - "Run impact_analysis to check what might be affected"
+          - "Mark plan step as completed"
+        token_budget: "~500-1500 tokens per edit"
+        transition: "→ VERIFY after each edit (or batch of related edits to the same file)"
+
+      - name: VERIFY
+        purpose: "Prove the change works"
+        actions:
+          - "Run affected tests (from test_map), NOT the full suite"
+          - "If tests pass: → next EXECUTE step or → REPORT if done"
+          - "If tests fail: read error output, diagnose, fix, re-verify"
+          - "If build fails: read error, fix import/signature issues"
+        token_budget: "~300-800 tokens (compressed test output)"
+        transition: "→ EXECUTE if more steps. → REPORT if all steps done."
+        retry_limit: 3
+        retry_escalation: "After 3 failed verify attempts on the same step, STOP and report the failure to the user with context."
+
+      - name: REPORT
+        purpose: "Summarize what changed and what was verified"
+        actions:
+          - "One paragraph: what changed, what tests passed, what's left (if anything)"
+          - "If delegating review: spawn @reviewer subagent"
+        token_budget: "~100-200 tokens"
+        transition: "→ END or → user input"
+
+    escape_conditions:
+      - condition: "3 consecutive failed verify attempts on the same step"
+        action: "Stop. Report the failure with full context. Ask the user for guidance."
+      - condition: "Max iterations (10) reached"
+        action: "Stop. Report progress so far. List remaining plan steps."
+      - condition: "User interrupts"
+        action: "Save plan state. Report current status. Await instruction."
+      - condition: "Token budget at 90%"
+        action: "Complete current step. Report progress. Save plan for resume."
+
+  # ── Debug Loop ──────────────────────────────────────────────────────
+
+  debug_loop:
+    name: "REPRODUCE → PARSE → TRACE → ROOT_CAUSE → FIX → VERIFY"
+    agent: debugger
+    max_iterations: 8
+    description: "Systematic debugging — trace from error to root cause"
+
+    phases:
+      - name: REPRODUCE
+        purpose: "Run the exact failing command to see the error"
+        actions:
+          - "Execute the command/test that fails"
+          - "Capture the full error output"
+          - "If cannot reproduce: report this and ask for more context"
+        transition: "→ PARSE if error reproduced. → REPORT if cannot reproduce."
+
+      - name: PARSE
+        purpose: "Extract structured information from the error"
+        actions:
+          - "Identify: error type, message, file, line number"
+          - "Extract the call stack if present"
+          - "Identify the innermost frame (where the error originated)"
+        transition: "→ TRACE"
+
+      - name: TRACE
+        purpose: "Follow the data flow backward from the error to its source"
+        actions:
+          - "Read the error line + ~10 surrounding lines (NOT the whole file)"
+          - "Use resolve_symbol and find_callers to trace the call chain"
+          - "Identify where the bad value (nil, wrong type, invalid state) was introduced"
+          - "If unclear: use binary search — add a temporary log at the midpoint, re-run"
+        transition: "→ ROOT_CAUSE when you've found where the bad state originates"
+        max_depth: 5
+
+      - name: ROOT_CAUSE
+        purpose: "Distinguish the root cause from the symptom"
+        actions:
+          - "State the root cause in one sentence: 'X happens because Y'"
+          - "Verify: if you fix Y, does X go away? (reasoning, not code yet)"
+          - "Check: is there a pattern? Same bug elsewhere? (grep for the pattern)"
+        transition: "→ FIX"
+
+      - name: FIX
+        purpose: "Apply the minimal fix for the root cause"
+        actions:
+          - "Edit the root cause location, not the crash site (unless they're the same)"
+          - "Minimal change — don't refactor while debugging"
+          - "If the fix is non-obvious, add a 1-line comment explaining WHY"
+        transition: "→ VERIFY"
+
+      - name: VERIFY
+        purpose: "Confirm the original error is gone and nothing else broke"
+        actions:
+          - "Run the originally failing command — must pass"
+          - "Run related tests (test_map) — must pass"
+          - "Remove any temporary debug logs"
+        transition: "→ REPORT if fixed. → TRACE if still failing (different error)."
+        retry_limit: 2
+
+    escape_conditions:
+      - condition: "Root cause is in third-party code or infrastructure"
+        action: "Report the finding. Suggest a workaround. Don't try to fix external code."
+      - condition: "2 fix attempts failed"
+        action: "Report what you've found so far. Share the trace. Ask for human guidance."
+
+  # ── Review Loop ─────────────────────────────────────────────────────
+
+  review_loop:
+    name: "READ → CLASSIFY → FIND → VERIFY → REPORT"
+    agent: reviewer
+    max_iterations: 5
+    description: "Systematic code review — classify then hunt"
+
+    phases:
+      - name: READ
+        purpose: "Understand what changed"
+        actions:
+          - "Get the diff (shell: git diff)"
+          - "List changed files and their sizes"
+          - "Use graph_query on changed functions to understand their role"
+        transition: "→ CLASSIFY"
+
+      - name: CLASSIFY
+        purpose: "Prioritize review focus"
+        actions:
+          - "Classify each changed file: new code, modified logic, refactor-only, test, config"
+          - "Prioritize: new logic > modified logic > refactor > test > config"
+          - "Use impact_analysis on modified functions to assess blast radius"
+        transition: "→ FIND"
+
+      - name: FIND
+        purpose: "Hunt for issues in priority order"
+        actions:
+          - "Review each change against the code-review skill checklist"
+          - "For each potential finding: verify it's real (read the surrounding code)"
+          - "Don't invent findings — if the code is clean, say so"
+        transition: "→ VERIFY for each finding"
+
+      - name: VERIFY
+        purpose: "Confirm each finding is real, not a false positive"
+        actions:
+          - "For each finding: can you construct a scenario where it fails?"
+          - "Check: does existing code already handle this case elsewhere?"
+          - "Check: is there a test that covers this? (test_map)"
+        transition: "→ REPORT when all findings are verified"
+
+      - name: REPORT
+        purpose: "Deliver structured findings"
+        actions:
+          - "Report findings in severity order: critical → high → medium → low"
+          - "Include file:line, description, and suggested fix for each"
+          - "If no findings: explicitly say 'LGTM — no issues found'"
+
+  # ── Planner Loop ────────────────────────────────────────────────────
+
+  planner_loop:
+    name: "DECOMPOSE → ORDER → VALIDATE → EMIT"
+    agent: planner
+    max_iterations: 3
+    description: "Task decomposition — break complex work into executable steps"
+
+    phases:
+      - name: DECOMPOSE
+        purpose: "Break the task into atomic steps"
+        actions:
+          - "Identify all files that need to change (graph_query, find_callers)"
+          - "For each file: what specific change is needed?"
+          - "Each step must be independently verifiable (has a test or build check)"
+        transition: "→ ORDER"
+
+      - name: ORDER
+        purpose: "Sequence steps by dependency"
+        actions:
+          - "Leaf changes first (types, interfaces, utilities)"
+          - "Then consumers of those changes (callers, implementations)"
+          - "Tests last (they depend on the implementation)"
+          - "Group related steps that must be atomic"
+        transition: "→ VALIDATE"
+
+      - name: VALIDATE
+        purpose: "Sanity-check the plan"
+        actions:
+          - "Does each step have a clear verification method?"
+          - "Are there missing steps? (use impact_analysis to check)"
+          - "Is the plan achievable in one session? If not, identify a shippable subset."
+        transition: "→ EMIT"
+
+      - name: EMIT
+        purpose: "Output the plan in structured format"
+        actions:
+          - "Output as a numbered list with: step, file, change, verification"
+          - "Estimate complexity: trivial / moderate / complex per step"
+
+  # ── Anti-Patterns ───────────────────────────────────────────────────
+
+  anti_patterns:
+
+    - name: "Infinite Retry Loop"
+      description: "Same fix attempted 3+ times with the same error"
+      symptom: "EXECUTE → VERIFY(fail) → EXECUTE(same fix) → VERIFY(fail) → ..."
+      fix: "After 2 identical failures, try a DIFFERENT approach. After 3, escalate to user."
+
+    - name: "Scope Creep Loop"
+      description: "Task expands beyond original request during execution"
+      symptom: "Fix bug → notice nearby code smell → refactor it → notice another → ..."
+      fix: "Complete the original task first. Note observed issues in the report. Don't fix them unless asked."
+
+    - name: "Read-Everything-First Syndrome"
+      description: "Agent reads 10+ files before making any change"
+      symptom: "file_read → file_read → file_read → file_read → ... → finally edits one line"
+      fix: "Use graph tools for orientation. Read only the specific code you need to edit. 3 reads before first edit is the max."
+
+    - name: "Full-Suite-Every-Time"
+      description: "Running `go test ./...` after every small change"
+      symptom: "edit → go test ./... (60s, 2000 tokens) → edit → go test ./... → ..."
+      fix: "Use test_map to run ONLY affected tests. Full suite once at the end."
+
+    - name: "Narration Loop"
+      description: "Agent explains what it's about to do instead of doing it"
+      symptom: "'I will now read the file...' → reads file → 'I have read the file and it contains...' → 'I will now edit...'"
+      fix: "Do it. Don't narrate. The tool calls are the narration."
