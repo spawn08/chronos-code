@@ -1,6 +1,11 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Note: lipgloss auto-detects color-profile support and disables styling
 // entirely when stdout isn't a terminal (true for `go test`), so under test
@@ -51,11 +56,19 @@ func TestRenderMarkdownLite_Blockquote(t *testing.T) {
 }
 
 func TestRenderMarkdownLite_FencedCodeBlockVerbatim(t *testing.T) {
-	src := "before\n```\nfunc f() **not bold** { }\n```\nafter"
+	src := "before\n```go\nfunc f() **not bold** { }\n```\nafter"
 	got := RenderMarkdownLite(src, 0)
-	want := "before\n```\nfunc f() **not bold** { }\n```\nafter"
-	if got != want {
-		t.Errorf("RenderMarkdownLite(fenced) = %q, want %q (code block contents must not be inline-processed)", got, want)
+	if !contains(got, "func f() **not bold** { }") {
+		t.Errorf("RenderMarkdownLite(fenced) = %q, code content must be preserved verbatim (no inline markdown processing)", got)
+	}
+	if contains(got, "```") {
+		t.Errorf("RenderMarkdownLite(fenced) = %q, fence delimiters should not appear in output", got)
+	}
+	if !contains(got, "go") {
+		t.Errorf("RenderMarkdownLite(fenced) = %q, want the fence's language tag %q rendered", got, "go")
+	}
+	if !contains(got, "before") || !contains(got, "after") {
+		t.Errorf("RenderMarkdownLite(fenced) = %q, surrounding text must be preserved", got)
 	}
 }
 
@@ -114,6 +127,36 @@ func TestRenderFileWriteDiff_Replace(t *testing.T) {
 	got := RenderFileWriteDiff(args)
 	if !contains(got, "- old") || !contains(got, "+ new") {
 		t.Errorf("RenderFileWriteDiff(replace) = %q, want lines containing '- old' and '+ new'", got)
+	}
+}
+
+// TestRenderMarkdownLite_NeverExceedsWidth guards against the class of bug
+// that made the status bar overflow its budget and wrap onto a second line,
+// corrupting the fixed-height layout around it (see styles.go's comment on
+// styleHeaderBar): every rendered line — headers, blockquotes, bullets,
+// plain paragraphs, and code blocks — must fit within width, since the
+// interactive REPL's viewport never wraps long lines itself.
+func TestRenderMarkdownLite_NeverExceedsWidth(t *testing.T) {
+	const width = 20
+	src := strings.Join([]string{
+		"# A heading that is much longer than the available width",
+		"",
+		"A plain paragraph sentence that also runs well past the configured width limit.",
+		"",
+		"> A blockquote line that likewise exceeds the width budget by a wide margin.",
+		"",
+		"- A bullet point whose text is longer than the width so it must wrap or truncate",
+		"",
+		"```go",
+		"aVeryLongUnbrokenIdentifierNameThatCannotBeWrapped := 1",
+		"```",
+	}, "\n")
+
+	got := RenderMarkdownLite(src, width)
+	for i, line := range strings.Split(got, "\n") {
+		if w := lipgloss.Width(line); w > width {
+			t.Errorf("line %d exceeds width %d (got %d): %q", i, width, w, line)
+		}
 	}
 }
 

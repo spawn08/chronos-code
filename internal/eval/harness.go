@@ -34,6 +34,12 @@ const outlineThresholdBytes = 2000
 // used at a fixed (non-budget-ramped) value so results are deterministic.
 const compressionThresholdTokens = toolcompress.DefaultThresholdTokens
 
+// workspacePlaceholder replaces each task's real temp workspace directory in
+// every tool result (see wrapNormalize) so token counts and content hashes
+// never depend on os.MkdirTemp's random suffix or the OS's temp dir prefix,
+// both of which vary run-to-run and machine-to-machine.
+const workspacePlaceholder = "/workspace"
+
 // stubProvider is a model.Provider that is never actually invoked. RunTask
 // needs a.Model.Model() only so toolcompress.WrapDynamic can pick a
 // tokenizer; Chat/StreamChat exist solely to satisfy the interface.
@@ -88,6 +94,54 @@ func newRegistry(dir string, difficulty Difficulty) *tool.Registry {
 	reg.Register(builtins.NewFileGrepTool(dir))
 	reg.Register(shellTool(difficulty))
 	return reg
+}
+
+// normalizeResult recursively rewrites any string in v that contains dir,
+// replacing it with placeholder. It only needs to handle the concrete shapes
+// chronos's builtin file tools and the synthetic shell tool actually return:
+// map[string]any, []map[string]any, and string leaves.
+func normalizeResult(v any, dir, placeholder string) any {
+	switch val := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, vv := range val {
+			out[k] = normalizeResult(vv, dir, placeholder)
+		}
+		return out
+	case []map[string]any:
+		out := make([]map[string]any, len(val))
+		for i, vv := range val {
+			out[i], _ = normalizeResult(vv, dir, placeholder).(map[string]any)
+		}
+		return out
+	case string:
+		return strings.ReplaceAll(val, dir, placeholder)
+	default:
+		return val
+	}
+}
+
+// wrapNormalize wraps every handler currently registered on reg so its
+// result has dir replaced with placeholder before any other wrapper
+// (toolcompress, incctx) or this package's own token counting ever observes
+// it. This must run before toolcompress.WrapDynamic/incctx.Wrap are applied
+// (see RunTask): toolcompress's content hash and preview truncation
+// (agent.EvictLargeResult) operate on whatever value reaches them, and
+// os.MkdirTemp's random per-run directory name — embedded verbatim in
+// file_read/file_list/file_grep's "path" field — would otherwise make the
+// hash, the preview text, and this suite's token counts nondeterministic
+// across runs and machines.
+func wrapNormalize(reg *tool.Registry, dir, placeholder string) {
+	for _, def := range reg.List() {
+		orig := def.Handler
+		def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+			result, err := orig(ctx, args)
+			if err != nil {
+				return result, err
+			}
+			return normalizeResult(result, dir, placeholder), nil
+		}
+	}
 }
 
 // shellTool returns a deterministic synthetic "shell" tool standing in for
@@ -165,10 +219,13 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 	}
 
 	baselineReg := newRegistry(dir, t.Difficulty)
+	wrapNormalize(baselineReg, dir, workspacePlaceholder)
 
+	optReg := newRegistry(dir, t.Difficulty)
+	wrapNormalize(optReg, dir, workspacePlaceholder)
 	optAgent := &agent.Agent{
 		ID:      t.ID + "-optimized",
-		Tools:   newRegistry(dir, t.Difficulty),
+		Tools:   optReg,
 		Storage: memory.New(),
 		Model:   stubProvider{evalModelName},
 	}
@@ -176,7 +233,9 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 	// wraps the raw handlers first, then incctx wraps file_read again on top
 	// — so a first-time large-file read short-circuits at the incctx layer
 	// (outline) before ever reaching the toolcompress layer beneath it,
-	// exactly like a real agent's tool call.
+	// exactly like a real agent's tool call. wrapNormalize sits beneath both
+	// (applied first), so toolcompress's content hash/preview and incctx's
+	// fallback full-content reads only ever see the normalized path.
 	toolcompress.WrapDynamic(optAgent, func(context.Context) int { return compressionThresholdTokens })
 	incctx.Wrap(optAgent, dir)
 
@@ -203,9 +262,9 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 			return TaskResult{}, fmt.Errorf("eval: task %s: optimized %s: %w", t.ID, step.Tool, err)
 		}
 
-		baseTokens := jsonTokens(counter, baseOut)
+		baseTokens := jsonTokens(counter, baseOut, dir)
 		res.BaselineTokens += baseTokens
-		res.OptimizedTokens += jsonTokens(counter, optOut)
+		res.OptimizedTokens += jsonTokens(counter, optOut, dir)
 		res.Violations = append(res.Violations, checkContract(step, optOut, baseTokens, seen, sizes)...)
 
 		if step.Tool == "file_read" {
@@ -225,12 +284,20 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 
 // jsonTokens returns the tokenized size of v's JSON encoding, matching how
 // toolcompress measures a tool result (encoding/json marshal, then count).
-func jsonTokens(counter model.TokenCounter, v any) int {
+// Any occurrence of dir (the task's temp workspace, e.g. from
+// os.MkdirTemp) is replaced with a fixed placeholder first: dir's absolute
+// path is both random per run and environment-dependent (differs between a
+// locally-generated baseline snapshot and CI's own temp dir), and several
+// builtin tool results embed it verbatim (file_read/file_list/file_grep's
+// "path" field) — left unnormalized, the suite's token counts would be
+// nondeterministic and the CI gate would flag spurious regressions.
+func jsonTokens(counter model.TokenCounter, v any, dir string) int {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return 0
 	}
-	return counter.CountString(string(data))
+	normalized := strings.ReplaceAll(string(data), dir, "/workspace")
+	return counter.CountString(normalized)
 }
 
 // checkContract verifies that the optimized path's efficiency machinery

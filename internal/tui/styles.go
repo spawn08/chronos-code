@@ -27,12 +27,25 @@ var (
 	styleBold        = lipgloss.NewStyle().Bold(true)
 	styleItalic      = lipgloss.NewStyle().Italic(true)
 	styleInlineCode  = lipgloss.NewStyle().Foreground(colorCodeFg).Background(colorCodeBg)
-	styleCodeBlock   = lipgloss.NewStyle().Foreground(colorDim)
+	styleCodeBlock   = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(colorCodeBg)
+	styleCodeLang    = lipgloss.NewStyle().Italic(true).Foreground(colorDim)
 	styleBlockquote  = lipgloss.NewStyle().Italic(true).Foreground(colorDim)
 	styleBullet      = lipgloss.NewStyle().Foreground(colorAccent)
 	styleDiffAdded   = lipgloss.NewStyle().Foreground(colorAdded)
 	styleDiffRemoved = lipgloss.NewStyle().Foreground(colorRemoved)
-	styleStatusBar   = lipgloss.NewStyle().Foreground(lipgloss.Color("235")).Background(lipgloss.Color("252")).Padding(0, 1)
 	styleInputBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorAccent).Padding(0, 1)
 	styleModal       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorError).Padding(1, 2)
+
+	// Header/status bar segments are rendered by directly concatenating
+	// already-fully-sized strings (see app.go's renderHeaderBar/
+	// renderStatusBar) rather than lipgloss's own Width()-based auto-fill —
+	// mixing manual width bookkeeping with Width()'s "content area excludes
+	// padding, but the total includes it" rule is exactly what caused the
+	// status bar to overflow by its own padding and wrap onto a second line,
+	// corrupting the fixed-height layout below it. These styles therefore
+	// intentionally carry no Width()/Padding of their own.
+	styleHeaderBar   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(colorAccent)
+	styleStatusLeft  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("16")).Background(colorAccent)
+	styleStatusRight = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Background(lipgloss.Color("238"))
+	styleStatusFill  = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 )

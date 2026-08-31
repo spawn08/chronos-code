@@ -13,7 +13,7 @@ LDFLAGS  := -s -w \
 
 CGO_ENABLED := 1
 
-.PHONY: build test fmt vet tidy clean install
+.PHONY: build test fmt vet tidy clean install eval
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -21,6 +21,13 @@ build:
 
 test:
 	go test ./... -race -count=1
+
+# eval runs the token-efficiency eval suite (PRD P3-006) against the
+# checked-in baseline (benchmark/eval/baseline.json) and fails if any task's
+# efficiency contract broke or optimized tokens regressed >10%. It is fully
+# offline/deterministic — no API key or network access required.
+eval: build
+	$(BIN_DIR)/$(BINARY) eval run --md benchmark/eval/report.md
 
 fmt:
 	gofmt -s -w .

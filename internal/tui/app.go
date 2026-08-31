@@ -22,12 +22,19 @@ import (
 )
 
 // Layout constants for the fixed chrome around the scrollback viewport: the
-// input textarea's visible row count, the rounded border it's wrapped in
-// (top + bottom line), and the one-line status bar footer.
+// one-line title bar, the input textarea's visible row count plus the
+// rounded border it's wrapped in (top + bottom line, styleInputBox) and its
+// horizontal padding (styleInputBox's Padding(0,1)), and the one-line status
+// bar footer. inputBoxBorderWidth/inputBoxPaddingWidth mirror styleInputBox's
+// own border/padding so the textarea's content width and the box's outer
+// Width() call stay derived from the same numbers instead of separate magic
+// constants that can drift out of sync.
 const (
-	inputRows    = 2
-	inputBorder  = 2
-	statusHeight = 1
+	headerHeight         = 1
+	inputRows            = 2
+	inputBoxBorderWidth  = 2 // rounded border, left + right
+	inputBoxPaddingWidth = 2 // styleInputBox.Padding(0, 1), left + right
+	statusHeight         = 1
 )
 
 // pendingApproval mirrors an in-flight approvalRequestMsg while the modal is
@@ -163,7 +170,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		vh := msg.Height - (inputRows + inputBorder) - statusHeight
+		vh := msg.Height - headerHeight - (inputRows + inputBoxBorderWidth) - statusHeight
 		if vh < 1 {
 			vh = 1
 		}
@@ -174,7 +181,8 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.Width = msg.Width
 			m.viewport.Height = vh
 		}
-		m.input.SetWidth(msg.Width - 4)
+		m.input.SetWidth(msg.Width - inputBoxBorderWidth - inputBoxPaddingWidth)
+		m.refreshPrompt()
 		m.viewport.SetContent(m.renderTranscript())
 		return m, nil
 
@@ -354,6 +362,7 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	m.history.Add(line)
 	autoRemember(m.orch, line)
 	m.appendUserTurn(line)
+	m.refreshPrompt()
 
 	m.sending = true
 	m.activeAgentText.Reset()
@@ -460,6 +469,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.appendError(err)
 		} else {
 			m.appendSystem(fmt.Sprintf("switched to %s", arg))
+			m.refreshPrompt()
 		}
 	case "/stream":
 		m.stream = !m.stream
@@ -511,18 +521,35 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// refreshPrompt updates the input box's prompt to show the currently active
+// agent (e.g. after /agent, @agent, or auto-routing switches it), matching
+// textarea's documented requirement to re-call SetWidth after changing
+// Prompt so its internal wrap-width cache stays correct.
+func (m *appModel) refreshPrompt() {
+	m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " › "
+	if m.width > 0 {
+		m.input.SetWidth(m.width - inputBoxBorderWidth - inputBoxPaddingWidth)
+	}
+}
+
+// appendUserTurn, appendSystem and appendError all wrap to m.viewport.Width:
+// the viewport itself never wraps long lines, so an unwrapped line can
+// overflow into and visually corrupt the fixed-height chrome below it — the
+// same class of bug that made the status bar wrap onto a second line (see
+// styleHeaderBar's comment in styles.go).
 func (m *appModel) appendUserTurn(line string) {
-	m.blocks = append(m.blocks, styleUserPrefix.Render("you:")+"\n"+line)
+	body := wrapText(line, m.viewport.Width)
+	m.blocks = append(m.blocks, styleUserPrefix.Render("you")+"\n"+body)
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 }
 
 func (m *appModel) appendSystem(s string) {
-	m.blocks = append(m.blocks, styleDim.Render(s))
+	m.blocks = append(m.blocks, wrapText(styleDim.Render(s), m.viewport.Width))
 }
 
 func (m *appModel) appendError(err error) {
-	m.blocks = append(m.blocks, styleError.Render("error: "+err.Error()))
+	m.blocks = append(m.blocks, wrapText(styleError.Render("error: ")+err.Error(), m.viewport.Width))
 }
 
 // finalizeTurn closes out the in-progress agent turn (streamed or not),
@@ -587,10 +614,25 @@ func (m *appModel) View() string {
 	case m.searching:
 		bottom = m.renderSearchOverlay()
 	default:
-		bottom = styleInputBox.Width(m.width - 2).Render(m.input.View())
+		bottom = styleInputBox.Width(m.width - inputBoxBorderWidth).Render(m.input.View())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, m.viewport.View(), bottom, m.renderStatusBar())
+	return lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar())
+}
+
+// renderHeaderBar and renderStatusBar build their output by concatenating
+// already-fully-sized plain strings and measuring visible width with
+// lipgloss.Width, rather than handing a manually-padded string to a style's
+// own Width() (which measures its budget net of padding/border — mixing the
+// two bookkeeping styles is what originally caused the status bar to
+// overflow by its padding width and wrap onto a second line).
+func (m *appModel) renderHeaderBar() string {
+	title := " chronos-code "
+	pad := m.width - lipgloss.Width(title)
+	if pad < 0 {
+		pad = 0
+	}
+	return styleHeaderBar.Render(title + strings.Repeat(" ", pad))
 }
 
 func (m *appModel) renderApprovalModal() string {
@@ -609,7 +651,7 @@ func (m *appModel) renderApprovalModal() string {
 		}
 	}
 	b.WriteString("\n[y]es  [n]o  [a]lways")
-	width := m.width - 4
+	width := m.width - inputBoxBorderWidth
 	if width < 1 {
 		width = 1
 	}
@@ -622,7 +664,7 @@ func (m *appModel) renderSearchOverlay() string {
 	if len(m.searchResults) > 0 {
 		b.WriteString(m.searchResults[m.searchIdx])
 	}
-	width := m.width - 2
+	width := m.width - inputBoxBorderWidth
 	if width < 1 {
 		width = 1
 	}
@@ -630,14 +672,15 @@ func (m *appModel) renderSearchOverlay() string {
 }
 
 func (m *appModel) renderStatusBar() string {
-	left := fmt.Sprintf(" %s ", m.orch.ActiveID())
-	right := m.statusMsg
-	if right != "" {
-		right = right + " "
+	leftSeg := styleStatusLeft.Render(" " + m.orch.ActiveID() + " ")
+	rightText := m.statusMsg
+	if rightText != "" {
+		rightText = " " + rightText + " "
 	}
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
+	rightSeg := styleStatusRight.Render(rightText)
+	gap := m.width - lipgloss.Width(leftSeg) - lipgloss.Width(rightSeg)
+	if gap < 0 {
+		gap = 0
 	}
-	return styleStatusBar.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)
+	return leftSeg + styleStatusFill.Render(strings.Repeat(" ", gap)) + rightSeg
 }

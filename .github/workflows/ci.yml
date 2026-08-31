@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout chronos-code
+        uses: actions/checkout@v4
+        with:
+          path: chronos-code
+
+      # go.mod has `replace github.com/spawn08/chronos => ../chronos` for
+      # local development against an unreleased chronos version, so CI needs
+      # the same sibling layout. If spawn08/chronos is private, this step
+      # needs a PAT with read access to it, supplied as a
+      # CHRONOS_CHECKOUT_TOKEN repo secret, in place of the default
+      # GITHUB_TOKEN (which can't read other repos).
+      - name: Checkout chronos (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: spawn08/chronos
+          path: chronos
+          token: ${{ secrets.CHRONOS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        working-directory: chronos-code
+        run: make build
+
+      - name: Test
+        working-directory: chronos-code
+        run: make test
+
+      # PRD P3-006: fully offline/deterministic token-efficiency eval suite.
+      # Fails the build if any task's efficiency contract (P1-006/P2-007/
+      # P2-008) breaks, or if optimized tokens-per-suite regress >10% versus
+      # the checked-in benchmark/eval/baseline.json.
+      - name: Token efficiency eval gate
+        working-directory: chronos-code
+        run: make eval
+
+      - name: Upload eval dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: chronos-code/benchmark/eval/report.md

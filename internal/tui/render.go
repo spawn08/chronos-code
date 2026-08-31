@@ -16,16 +16,19 @@ var (
 	reHeader     = regexp.MustCompile(`^(#{1,6})\s+(.*)$`)
 	reBullet     = regexp.MustCompile(`^(\s*)([-*]|\d+\.)\s+(.*)$`)
 	reBlockquote = regexp.MustCompile(`^>\s?(.*)$`)
-	reFence      = regexp.MustCompile("^```")
 )
 
 // RenderMarkdownLite converts a small, deliberately restricted markdown
 // subset (headers, **bold**, _italic_, `inline code`, fenced code blocks,
 // bullet/numbered lists, blockquotes) to ANSI via lipgloss, in place of
 // pulling in a full markdown+syntax-highlighting engine (glamour) — see
-// ROADMAP.md's binary-size goal. Fenced code block contents are rendered
-// verbatim (no inline processing, no wrapping); everything else is
-// word-wrapped to width when width > 0.
+// ROADMAP.md's binary-size goal. Fence delimiters are hidden and the
+// language tag (if any) is shown as a small label; code content itself is
+// rendered verbatim (no inline processing) in a shaded "card" and truncated
+// (not wrapped) to width, since re-wrapping code corrupts it. Everything
+// else is word-wrapped to width when width > 0 — every branch must wrap,
+// since the interactive REPL's viewport does not wrap long lines itself and
+// an overflowing line can visually corrupt the fixed-height layout around it.
 func RenderMarkdownLite(s string, width int) string {
 	if s == "" {
 		return ""
@@ -34,21 +37,26 @@ func RenderMarkdownLite(s string, width int) string {
 	var out []string
 	inFence := false
 	for _, line := range lines {
-		if reFence.MatchString(strings.TrimSpace(line)) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if !inFence {
+				if lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```")); lang != "" {
+					out = append(out, truncateToWidth(styleCodeLang.Render(lang), width))
+				}
+			}
 			inFence = !inFence
-			out = append(out, styleDim.Render(line))
 			continue
 		}
 		if inFence {
-			out = append(out, styleCodeBlock.Render(line))
+			out = append(out, styleCodeBlock.Render(truncateToWidth(" "+line, width)))
 			continue
 		}
 		if m := reHeader.FindStringSubmatch(line); m != nil {
-			out = append(out, styleHeader.Render(m[2]))
+			out = append(out, wrapText(styleHeader.Render(m[2]), width))
 			continue
 		}
 		if m := reBlockquote.FindStringSubmatch(line); m != nil {
-			out = append(out, styleBlockquote.Render("│ "+inlineStyle(m[1])))
+			out = append(out, wrapText(styleBlockquote.Render("│ "+inlineStyle(m[1])), width))
 			continue
 		}
 		if m := reBullet.FindStringSubmatch(line); m != nil {
@@ -91,6 +99,16 @@ func wrapText(s string, width int) string {
 		return s
 	}
 	return lipgloss.NewStyle().Width(width).Render(s)
+}
+
+// truncateToWidth clips s to width columns (ANSI-aware) instead of wrapping
+// it — used for code block lines, where word-wrapping would corrupt the
+// code. width <= 0 disables truncation.
+func truncateToWidth(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	return lipgloss.NewStyle().MaxWidth(width).Render(s)
 }
 
 // SummarizeArgs compacts a tool call's JSON arguments string for a one-line
