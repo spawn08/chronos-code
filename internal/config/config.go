@@ -23,6 +23,18 @@ type Config struct {
 	Workspace WorkspaceConfig `yaml:"workspace,omitempty"`
 	Tools     ToolsConfig     `yaml:"tools,omitempty"`
 	Learning  LearningConfig  `yaml:"learning,omitempty"`
+	Server    ServerConfig    `yaml:"server,omitempty"`
+}
+
+// ServerConfig controls the HTTP server mode (PRD P3-004).
+type ServerConfig struct {
+	Enabled         bool   `yaml:"enabled,omitempty"`
+	Listen          string `yaml:"listen,omitempty"`
+	AuthType        string `yaml:"auth_type,omitempty"`
+	APIKey          string `yaml:"api_key,omitempty"`
+	CORSOrigins     string `yaml:"cors_origins,omitempty"`
+	MaxConcurrent   int    `yaml:"max_concurrent,omitempty"`
+	RateLimitPerMin int    `yaml:"rate_limit_per_min,omitempty"`
 }
 
 // WorkspaceConfig controls project-root detection and the code graph indexer.

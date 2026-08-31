@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
+	"github.com/spawn08/chronos-code/internal/server"
 	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos-code/internal/tui"
 	"github.com/spawn08/chronos/engine/model"
@@ -62,6 +64,8 @@ func Execute() error {
 		return runLearn()
 	case "eval":
 		return runEval()
+	case "serve":
+		return runServe()
 	case "version":
 		return printVersion()
 	case "help", "-h", "--help":
@@ -170,6 +174,7 @@ Usage:
   chronos-code learn accept <id>                         Apply a suggestion (agent or pattern)
   chronos-code learn reject <id>                          Discard a suggestion
   chronos-code eval run [--update-baseline] [--md <path>]  Run the token-efficiency eval suite
+  chronos-code serve [--listen :8430] [--auth api_key]     Start HTTP server for team deployment
   chronos-code version            Print version information
   chronos-code help               Show this help
 
@@ -580,4 +585,50 @@ func resolveStorage(cfg *config.Config) string {
 		return cfg.Defaults.Storage.Backend + " (" + cfg.Defaults.Storage.DSN + ")"
 	}
 	return "sqlite (default)"
+}
+
+func runServe() error {
+	args := os.Args[2:]
+
+	orch, err := loadAndBuild()
+	if err != nil {
+		return err
+	}
+	defer orch.Close()
+
+	cfg := server.ServerConfig{
+		Listen:          flagValue(args, "listen", ":8430"),
+		AuthType:        flagValue(args, "auth", "api_key"),
+		APIKey:          flagValue(args, "api-key", os.Getenv("CHRONOS_CODE_API_KEY")),
+		CORSOrigins:     flagValue(args, "cors-origins", "*"),
+		RateLimitPerMin: 60,
+	}
+	if rateStr := flagValue(args, "rate-limit", ""); rateStr != "" {
+		var rate int
+		fmt.Sscanf(rateStr, "%d", &rate)
+		if rate > 0 {
+			cfg.RateLimitPerMin = rate
+		}
+	}
+	if cfg.AuthType == "api_key" && cfg.APIKey == "" {
+		return fmt.Errorf("serve: --api-key or CHRONOS_CODE_API_KEY required when --auth=api_key; use --auth=none to disable")
+	}
+
+	srv := server.New(orch, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start() }()
+
+	// Block until the server returns (or is interrupted).
+	select {
+	case e := <-errCh:
+		return e
+	case <-ctx.Done():
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		return srv.Shutdown(shutCtx)
+	}
 }

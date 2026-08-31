@@ -324,9 +324,15 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 	return info
 }
 
+// messageKey is a context key for the current user message, set by Chat so
+// ContextPinsFn can use it for relevance-ranked memory recall (P3-009).
+type messageKey struct{}
+
 // setupMemory wires chronos-code's YAML-backed memory store (PRD P2-002)
 // into every agent via ContextPinsFn, which chronos's sdk/agent evaluates
-// fresh on every turn and injects as pinned (never-summarized) context. A nil
+// fresh on every turn and injects as pinned (never-summarized) context.
+// When the context carries a user message (set by Chat), memories are
+// ranked by semantic relevance (PRD P3-009) instead of recency. A nil
 // return (when memory is disabled in config) means callers must check before
 // dereferencing.
 func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Store {
@@ -337,6 +343,12 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 	store := memory.NewStore(dir)
 	for _, a := range agents {
 		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			if msg, ok := ctx.Value(messageKey{}).(string); ok && msg != "" {
+				scored, err := store.Recall(msg, 5)
+				if err == nil && len(scored) > 0 {
+					return []model.Message{{Role: model.RoleSystem, Content: formatScoredMemories(scored)}}
+				}
+			}
 			block, err := store.ContextBlock(5)
 			if err != nil || block == "" {
 				return nil
@@ -345,6 +357,19 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 		}
 	}
 	return store
+}
+
+func formatScoredMemories(scored []memory.ScoredRecord) string {
+	var b strings.Builder
+	b.WriteString("Known project/user/feedback notes (relevance-ranked):")
+	for _, sr := range scored {
+		content := sr.Record.Content
+		if len(content) > 120 {
+			content = content[:120] + "..."
+		}
+		fmt.Fprintf(&b, "\n- [%s] %s", sr.Record.Category, content)
+	}
+	return b.String()
 }
 
 // setupRouter loads routing.yaml (project override at
@@ -538,6 +563,9 @@ func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatRes
 	if a == nil {
 		return nil, fmt.Errorf("no active agent")
 	}
+	// Inject user message into context so ContextPinsFn can use it for
+	// relevance-ranked memory recall (PRD P3-009).
+	ctx = context.WithValue(ctx, messageKey{}, message)
 	// Predictive context loading (PRD P3-007): resolve symbol names from the
 	// user message in the code graph and pre-load L2 summaries so the model's
 	// first turn starts with relevant code context instead of spending extra
