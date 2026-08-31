@@ -58,6 +58,8 @@ func Execute() error {
 		return runSession()
 	case "memory":
 		return runMemory()
+	case "eval":
+		return runEval()
 	case "version":
 		return printVersion()
 	case "help", "-h", "--help":
@@ -160,6 +162,7 @@ Usage:
   chronos-code memory list [category]                   List remembered notes
   chronos-code memory search <query>                    Search remembered notes
   chronos-code memory forget <id>                        Remove a remembered note
+  chronos-code eval run [--update-baseline] [--md <path>]  Run the token-efficiency eval suite
   chronos-code version            Print version information
   chronos-code help               Show this help
 
@@ -197,8 +200,7 @@ func runREPL() error {
 	}
 	defer orch.Close()
 
-	r := tui.NewREPL(orch, streamMode)
-	return r.Start()
+	return tui.RunTUI(orch, streamMode)
 }
 
 func runHeadless() error {
