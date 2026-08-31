@@ -59,6 +59,9 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	mux.HandleFunc("DELETE /v1/memory/{id}", s.handleDeleteMemory)
 	mux.HandleFunc("POST /v1/memory/search", s.handleSearchMemory)
 
+	mux.HandleFunc("GET /v1/teams", s.handleListTeams)
+	mux.HandleFunc("POST /v1/teams/{id}/run", s.handleRunTeam)
+
 	var handler http.Handler = mux
 	if s.limiter != nil {
 		handler = rateLimitMiddleware(s.limiter)(handler)

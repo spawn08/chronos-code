@@ -10,6 +10,7 @@ import (
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/mcp"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	chronostrace "github.com/spawn08/chronos/os/trace"
@@ -26,12 +27,16 @@ import (
 	"github.com/spawn08/chronos-code/internal/graph"
 	"github.com/spawn08/chronos-code/internal/guardrail"
 	"github.com/spawn08/chronos-code/internal/incctx"
+	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/session"
+	"github.com/spawn08/chronos-code/internal/teambuilder"
 	"github.com/spawn08/chronos-code/internal/toolcompress"
 	"github.com/spawn08/chronos-code/internal/workspace"
+
+	"github.com/spawn08/chronos/sdk/team"
 )
 
 type Orchestrator struct {
@@ -52,6 +57,7 @@ type Orchestrator struct {
 	workspace  *workspace.Info
 	actBuf     *activation.Buffer
 	attBudget  *attention.Budgeter
+	teams      map[string]*team.Team
 }
 
 // OpenStorageForCLI opens the same storage.Storage backend New would (per
@@ -157,6 +163,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		}
 	}
 
+	teams := setupTeams(cfg, agents)
+
+	discoverMCPServers(ctx, root, agents)
+
 	active := "coder"
 	if _, ok := agents[active]; !ok && len(order) > 0 {
 		active = order[0]
@@ -178,6 +188,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		workspace:  wsInfo,
 		actBuf:     actBuf,
 		attBudget:  attBudget,
+		teams:      teams,
 	}, nil
 }
 
@@ -715,6 +726,81 @@ func (o *Orchestrator) ActivationBuffer() *activation.Buffer {
 // AttentionBudgeter returns the attention budgeter (PRD P3-008).
 func (o *Orchestrator) AttentionBudgeter() *attention.Budgeter {
 	return o.attBudget
+}
+
+// Teams returns all built teams (PRD P4-001).
+func (o *Orchestrator) Teams() map[string]*team.Team {
+	return o.teams
+}
+
+// GetTeam returns a team by ID.
+func (o *Orchestrator) GetTeam(id string) (*team.Team, bool) {
+	t, ok := o.teams[id]
+	return t, ok
+}
+
+// ListTeams returns all team IDs.
+func (o *Orchestrator) ListTeams() []string {
+	ids := make([]string, 0, len(o.teams))
+	for id := range o.teams {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// RunTeam executes a team with a user message (PRD P4-001).
+func (o *Orchestrator) RunTeam(ctx context.Context, teamID, message string) (string, error) {
+	t, ok := o.teams[teamID]
+	if !ok {
+		return "", fmt.Errorf("team %q not found (available: %v)", teamID, o.ListTeams())
+	}
+	return teambuilder.Run(ctx, t, message)
+}
+
+// setupTeams builds Team instances from YAML config (PRD P4-001). Teams
+// defined in .chronos-code/teams/ or the embedded defaults are assembled
+// from the pre-built agents map. Failures are non-fatal: a misconfigured
+// team doesn't prevent the harness from starting.
+func setupTeams(cfg *config.Config, agents map[string]*agent.Agent) map[string]*team.Team {
+	if len(cfg.Teams) == 0 {
+		return nil
+	}
+	teams, err := teambuilder.BuildAll(cfg.Teams, agents)
+	if err != nil {
+		fmt.Printf("warning: build teams: %v\n", err)
+		return nil
+	}
+	if len(teams) > 0 {
+		ids := make([]string, 0, len(teams))
+		for id := range teams {
+			ids = append(ids, id)
+		}
+		fmt.Printf("teams: built %d (%v)\n", len(teams), ids)
+	}
+	return teams
+}
+
+// discoverMCPServers scans the workspace for MCP server configs from other
+// tools (Cursor, VS Code, Claude Code, package.json) and appends them to
+// each agent's MCP client list (PRD P4-002). Discovered servers default to
+// require_approval permission. Client creation errors are logged and skipped.
+func discoverMCPServers(_ context.Context, root string, agents map[string]*agent.Agent) {
+	discovered := mcpdiscover.Discover(root)
+	if len(discovered) == 0 {
+		return
+	}
+	fmt.Printf("mcp: discovered %d server(s) from project config\n", len(discovered))
+	for _, sc := range discovered {
+		client, err := mcp.NewClient(sc)
+		if err != nil {
+			fmt.Printf("warning: mcp client for %q: %v\n", sc.Name, err)
+			continue
+		}
+		for _, a := range agents {
+			a.MCPClients = append(a.MCPClients, client)
+		}
+	}
 }
 
 func (o *Orchestrator) Close() error {

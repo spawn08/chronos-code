@@ -294,6 +294,50 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, scored)
 }
 
+func (s *Server) handleListTeams(w http.ResponseWriter, _ *http.Request) {
+	ids := s.orch.ListTeams()
+	teams := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		t, ok := s.orch.GetTeam(id)
+		if !ok {
+			continue
+		}
+		teams = append(teams, map[string]string{
+			"id":       id,
+			"name":     t.Name,
+			"strategy": string(t.Strategy),
+		})
+	}
+	writeJSON(w, http.StatusOK, teams)
+}
+
+type runTeamRequest struct {
+	Message string `json:"message"`
+}
+
+func (s *Server) handleRunTeam(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "team id is required"})
+		return
+	}
+	var req runTeamRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if req.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+	result, err := s.orch.RunTeam(r.Context(), id, req.Message)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"result": result, "team_id": id})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

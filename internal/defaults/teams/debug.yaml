@@ -1,0 +1,7 @@
+id: debug-team
+name: Debug Team
+strategy: coordinator
+agents: [debugger, researcher, coder]
+coordinator: debugger
+max_iterations: 5
+error_strategy: best_effort

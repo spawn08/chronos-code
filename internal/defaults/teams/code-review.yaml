@@ -1,0 +1,5 @@
+id: code-review-team
+name: Code Review Pipeline
+strategy: sequential
+agents: [planner, coder, reviewer]
+error_strategy: fail_fast

@@ -64,6 +64,8 @@ func Execute() error {
 		return runLearn()
 	case "eval":
 		return runEval()
+	case "team":
+		return runTeam()
 	case "serve":
 		return runServe()
 	case "version":
@@ -174,6 +176,8 @@ Usage:
   chronos-code learn accept <id>                         Apply a suggestion (agent or pattern)
   chronos-code learn reject <id>                          Discard a suggestion
   chronos-code eval run [--update-baseline] [--md <path>]  Run the token-efficiency eval suite
+  chronos-code team list                                   List configured teams
+  chronos-code team run <team_id> <message>                Run a team on a task
   chronos-code serve [--listen :8430] [--auth api_key]     Start HTTP server for team deployment
   chronos-code version            Print version information
   chronos-code help               Show this help
@@ -547,6 +551,49 @@ func runMemory() error {
 		return nil
 	default:
 		return fmt.Errorf("unknown memory command: %s", os.Args[2])
+	}
+}
+
+func runTeam() error {
+	if len(os.Args) < 3 {
+		return fmt.Errorf("usage: chronos-code team [list|run]")
+	}
+	switch os.Args[2] {
+	case "list":
+		orch, err := loadAndBuild()
+		if err != nil {
+			return err
+		}
+		defer orch.Close()
+		teams := orch.ListTeams()
+		if len(teams) == 0 {
+			fmt.Println("no teams configured")
+			return nil
+		}
+		for _, id := range teams {
+			t, _ := orch.GetTeam(id)
+			fmt.Printf("%-20s %s (%s)\n", id, t.Name, t.Strategy)
+		}
+		return nil
+	case "run":
+		if len(os.Args) < 5 {
+			return fmt.Errorf("usage: chronos-code team run <team_id> <message>")
+		}
+		teamID := os.Args[3]
+		message := strings.Join(os.Args[4:], " ")
+		orch, err := loadAndBuild()
+		if err != nil {
+			return err
+		}
+		defer orch.Close()
+		result, err := orch.RunTeam(context.Background(), teamID, message)
+		if err != nil {
+			return err
+		}
+		fmt.Println(result)
+		return nil
+	default:
+		return fmt.Errorf("unknown team command: %s", os.Args[2])
 	}
 }
 

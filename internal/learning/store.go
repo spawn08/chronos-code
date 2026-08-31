@@ -152,6 +152,27 @@ func (s *Store) appendPattern(sug *Suggestion) error {
 	return writeFileAtomic(s.dir, path, data)
 }
 
+// UpdateConfidence adjusts the confidence of a pending suggestion by delta
+// (positive for positive feedback, negative for negative). Confidence is
+// clamped to [0.0, 1.0]. Returns the updated suggestion.
+func (s *Store) UpdateConfidence(id string, delta float64) (*Suggestion, error) {
+	sug, err := s.Get(id)
+	if err != nil {
+		return nil, fmt.Errorf("learning: update confidence for %q: %w", id, err)
+	}
+	sug.Confidence += delta
+	if sug.Confidence > 1.0 {
+		sug.Confidence = 1.0
+	}
+	if sug.Confidence < 0.0 {
+		sug.Confidence = 0.0
+	}
+	if err := s.Save(sug); err != nil {
+		return nil, err
+	}
+	return sug, nil
+}
+
 // writeFileAtomic marshals data to a temp file inside dir, then renames it
 // over path, so a crash mid-write never leaves a corrupted file in place
 // (same pattern as internal/memory.Store.save).
