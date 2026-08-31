@@ -5,6 +5,18 @@ workspace:
 tools:
   compression_threshold_tokens: 500
 
+memory:
+  enabled: true
+  backend: "yaml"
+  auto_extract: true
+
+router:
+  enabled: true
+
+session:
+  auto_resume: true
+  max_history_turns: 0
+
 defaults:
   model:
     provider: "anthropic"

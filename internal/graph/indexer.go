@@ -57,8 +57,56 @@ func (ix *Indexer) IndexAll(ctx context.Context) (*IndexStats, error) {
 		}
 		stats.Packages++
 	}
+	if err := ix.indexNonGoFiles(ctx, stats); err != nil {
+		return nil, fmt.Errorf("index non-go files: %w", err)
+	}
 	stats.Elapsed = time.Since(start)
 	return stats, nil
+}
+
+// indexNonGoFiles walks Root for files matching the Tier-2 tree-sitter
+// parsers' supported extensions (PRD P2-012) and indexes each one. In the
+// default build (no "treesitter" tag), SupportedTreeSitterExtensions returns
+// nil, so this is a no-op — no extra filesystem walk happens at all.
+func (ix *Indexer) indexNonGoFiles(ctx context.Context, stats *IndexStats) error {
+	exts := SupportedTreeSitterExtensions()
+	if len(exts) == 0 {
+		return nil
+	}
+	extSet := make(map[string]bool, len(exts))
+	for _, e := range exts {
+		extSet[e] = true
+	}
+
+	return filepath.WalkDir(ix.Root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != ix.Root && (name == ".git" || name == "node_modules" || name == "vendor" || strings.HasPrefix(name, ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !extSet[strings.ToLower(filepath.Ext(path))] {
+			return nil
+		}
+		rel, relErr := filepath.Rel(ix.Root, path)
+		if relErr != nil {
+			return relErr
+		}
+		symbols, edges, indexErr := IndexNonGoFile(ctx, ix.Store, ix.Root, rel)
+		if indexErr != nil {
+			// Non-fatal per file: a single unparseable file shouldn't abort
+			// the whole indexing pass.
+			return nil
+		}
+		stats.Files++
+		stats.Symbols += symbols
+		stats.Edges += edges
+		return nil
+	})
 }
 
 // IndexFile incrementally reindexes the package containing path: it clears

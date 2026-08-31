@@ -8,8 +8,24 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
+
+// autoRemember best-effort extracts a standing instruction/correction from
+// the user's message (PRD P2-002's heuristic auto-extraction) and saves it to
+// the orchestrator's memory store. Errors and a disabled/nil memory store are
+// both silently ignored — this is a background convenience, never something
+// that should interrupt the conversation.
+func autoRemember(orch *orchestrator.Orchestrator, message string) {
+	store := orch.MemoryStore()
+	if store == nil {
+		return
+	}
+	if category, content, ok := memory.ExtractFromMessage(message); ok {
+		_, _ = store.Add(category, content)
+	}
+}
 
 type REPL struct {
 	orch    *orchestrator.Orchestrator
@@ -71,10 +87,17 @@ func (r *REPL) Start() error {
 				}
 				line = parts[1]
 			}
+		} else if agentID, matched := r.orch.Route(r.ctx, line); matched {
+			_ = r.orch.SwitchAgent(agentID)
 		}
+
+		autoRemember(r.orch, line)
 
 		if err := r.sendMessage(line); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		}
+		if status := r.orch.BudgetStatusLine(); status != "" {
+			fmt.Fprintf(os.Stderr, "\033[2m%s\033[0m\n", status)
 		}
 	}
 
@@ -143,6 +166,39 @@ func (r *REPL) handleSlashCommand(line string) (quit bool) {
 		fmt.Printf("streaming: %v\n", r.stream)
 	case "/clear":
 		fmt.Print("\033[H\033[2J")
+	case "/session":
+		fmt.Printf("current session: %s\n", r.orch.CurrentSessionID())
+		if sessions, err := r.orch.SessionManager().List(context.Background(), r.orch.ActiveID(), 10, 0); err == nil {
+			for _, s := range sessions {
+				fmt.Printf("  %s  %-10s updated %s\n", s.ID, s.Status, s.UpdatedAt.Format("2006-01-02 15:04"))
+			}
+		}
+	case "/memory":
+		store := r.orch.MemoryStore()
+		if store == nil {
+			fmt.Println("memory is disabled")
+			return false
+		}
+		records, err := store.List("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return false
+		}
+		if len(records) == 0 {
+			fmt.Println("no memory records")
+			return false
+		}
+		for _, rec := range records {
+			fmt.Printf("  %s  [%-8s] %s\n", rec.ID, rec.Category, rec.Content)
+		}
+	case "/budget":
+		if status := r.orch.BudgetStatusLine(); status != "" {
+			fmt.Println(status)
+		}
+	case "/workspace":
+		if ws := r.orch.Workspace(); ws != nil {
+			fmt.Println(ws.Banner())
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s (try /help)\n", cmd)
 	}
@@ -182,6 +238,10 @@ func (r *REPL) printHelp() {
   /agents            List all agents
   /agent <id>        Switch to agent
   /stream            Toggle streaming on/off
+  /session           Show current session and recent history
+  /memory            List remembered project/user/feedback notes
+  /budget            Show token budget status
+  /workspace         Show detected workspace info
   /clear             Clear screen
   /quit              Exit
 

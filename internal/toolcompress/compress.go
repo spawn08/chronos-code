@@ -32,11 +32,20 @@ const ReadStoredResultTool = "read_stored_result"
 // before calling Wrap; if it is nil, Wrap is a no-op (compression requires
 // somewhere to put the evicted data).
 func Wrap(a *agent.Agent, thresholdTokens int) {
-	if a.Storage == nil {
-		return
-	}
 	if thresholdTokens <= 0 {
 		thresholdTokens = DefaultThresholdTokens
+	}
+	WrapDynamic(a, func(context.Context) int { return thresholdTokens })
+}
+
+// WrapDynamic is Wrap with a per-call threshold: thresholdFn is invoked on
+// every tool result (with the call's context) to decide the compression
+// threshold for that call, letting a caller ramp compression up as a
+// session's budget usage grows (PRD P2-009's progressive compression ramp)
+// instead of fixing the threshold for the agent's whole lifetime.
+func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
+	if a.Storage == nil {
+		return
 	}
 	counter := model.NewTokenCounter(a.Model.Model())
 	agentID := a.ID
@@ -52,6 +61,10 @@ func Wrap(a *agent.Agent, thresholdTokens int) {
 			result, err := orig(ctx, args)
 			if err != nil || result == nil {
 				return result, err
+			}
+			thresholdTokens := thresholdFn(ctx)
+			if thresholdTokens <= 0 {
+				thresholdTokens = DefaultThresholdTokens
 			}
 			data, mErr := json.Marshal(result)
 			if mErr != nil || counter.CountString(string(data)) <= thresholdTokens {
