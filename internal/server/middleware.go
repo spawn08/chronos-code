@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/spawn08/chronos-code/internal/auth"
 )
 
 // authMiddleware returns middleware that enforces API-key authentication.
@@ -56,6 +58,31 @@ func corsMiddleware(origins string) func(http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// oidcAuthMiddleware returns middleware that validates Bearer tokens as OIDC
+// JWTs using the given OIDCValidator. Health and ready probes are exempt.
+func oidcAuthMiddleware(validator *auth.OIDCValidator) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/health" || r.URL.Path == "/ready" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			header := r.Header.Get("Authorization")
+			if !strings.HasPrefix(header, "Bearer ") {
+				http.Error(w, `{"error":"missing or invalid Authorization header"}`, http.StatusUnauthorized)
+				return
+			}
+			token := strings.TrimPrefix(header, "Bearer ")
+			_, err := validator.Validate(token)
+			if err != nil {
+				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusUnauthorized)
 				return
 			}
 			next.ServeHTTP(w, r)

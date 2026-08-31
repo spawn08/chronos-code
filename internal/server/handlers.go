@@ -80,6 +80,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if s.router != nil {
+		s.router.Claim(sid)
+	}
 
 	resp, err := a.ChatWithSession(r.Context(), sid, req.Message)
 	if err != nil {

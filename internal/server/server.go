@@ -10,17 +10,21 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 // ServerConfig holds configuration for the HTTP server.
 type ServerConfig struct {
 	Listen          string // address to listen on, e.g. ":8430"
-	AuthType        string // "api_key" or "none"
+	AuthType        string // "api_key", "oidc", or "none"
 	APIKey          string // required when AuthType is "api_key"
+	OIDCIssuer      string // required when AuthType is "oidc"
+	OIDCClientID    string // required when AuthType is "oidc"
 	CORSOrigins     string // comma-separated allowed origins; "*" for all
 	MaxConcurrent   int    // max concurrent sessions (unused placeholder)
 	RateLimitPerMin int    // per-IP requests per minute; 0 disables
+	InstanceID      string // unique ID for this instance; auto-generated if empty
 }
 
 // Server wraps an Orchestrator in an HTTP server with REST API endpoints.
@@ -29,6 +33,7 @@ type Server struct {
 	cfg     ServerConfig
 	srv     *http.Server
 	limiter *rateLimiter
+	router  *SessionRouter
 }
 
 // New creates a Server wired to orch. Call Start to begin serving.
@@ -36,7 +41,7 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8430"
 	}
-	s := &Server{orch: orch, cfg: cfg}
+	s := &Server{orch: orch, cfg: cfg, router: NewSessionRouter(cfg.InstanceID)}
 	if cfg.RateLimitPerMin > 0 {
 		s.limiter = newRateLimiter(cfg.RateLimitPerMin, time.Minute)
 	}
@@ -66,7 +71,21 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	if s.limiter != nil {
 		handler = rateLimitMiddleware(s.limiter)(handler)
 	}
-	handler = authMiddleware(cfg.AuthType, cfg.APIKey)(handler)
+	switch cfg.AuthType {
+	case "oidc":
+		validator, err := auth.NewOIDCValidator(auth.OIDCConfig{
+			Issuer:   cfg.OIDCIssuer,
+			ClientID: cfg.OIDCClientID,
+		})
+		if err != nil {
+			fmt.Printf("warning: OIDC validator: %v (falling back to no auth)\n", err)
+			handler = authMiddleware("none", "")(handler)
+		} else {
+			handler = oidcAuthMiddleware(validator)(handler)
+		}
+	default:
+		handler = authMiddleware(cfg.AuthType, cfg.APIKey)(handler)
+	}
 	handler = corsMiddleware(cfg.CORSOrigins)(handler)
 
 	s.srv = &http.Server{

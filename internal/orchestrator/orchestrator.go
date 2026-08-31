@@ -16,6 +16,7 @@ import (
 	chronostrace "github.com/spawn08/chronos/os/trace"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
+	"github.com/spawn08/chronos/storage/adapters/postgres"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 
 	"github.com/spawn08/chronos-code/internal/activation"
@@ -843,6 +844,15 @@ func openStorage(cfg *config.Config) (storage.Storage, string, error) {
 		}
 		if err := store.Migrate(context.Background()); err != nil {
 			return nil, "", fmt.Errorf("sqlite migrate: %w", err)
+		}
+		return store, dsn, nil
+	case "postgres":
+		store, err := postgres.New(dsn)
+		if err != nil {
+			return nil, "", fmt.Errorf("postgres: %w", err)
+		}
+		if err := store.Migrate(context.Background()); err != nil {
+			return nil, "", fmt.Errorf("postgres migrate: %w", err)
 		}
 		return store, dsn, nil
 	default:
