@@ -1,0 +1,9 @@
+bin/
+*.db
+.env
+*.exe
+.chronos-code/sessions.db
+vendor/
+autoresearch/
+PRD-chronos-code.yaml
+.ppd/*

@@ -1,0 +1,100 @@
+// Package toolcompress implements PRD P1-006: tool result compression. Any
+// tool result whose JSON encoding exceeds a token budget is evicted to
+// storage and replaced in the conversation history with a short preview plus
+// a reference key, retrievable via the read_stored_result tool. This keeps
+// the median tool result in context small without discarding information the
+// agent might need later.
+package toolcompress
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/spawn08/chronos/engine/model"
+	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/storage"
+)
+
+// DefaultThresholdTokens is the token budget above which a tool result is
+// compressed (PRD P1-006 default).
+const DefaultThresholdTokens = 500
+
+// ReadStoredResultTool is the name of the tool registered by Wrap to retrieve
+// a previously evicted result.
+const ReadStoredResultTool = "read_stored_result"
+
+// Wrap wraps every handler currently registered on a so results exceeding
+// thresholdTokens (0 uses DefaultThresholdTokens) are evicted to a.Storage
+// and replaced with a compact preview, and registers ReadStoredResultTool so
+// the agent can pull the full result back on demand. a.Storage must be set
+// before calling Wrap; if it is nil, Wrap is a no-op (compression requires
+// somewhere to put the evicted data).
+func Wrap(a *agent.Agent, thresholdTokens int) {
+	if a.Storage == nil {
+		return
+	}
+	if thresholdTokens <= 0 {
+		thresholdTokens = DefaultThresholdTokens
+	}
+	counter := model.NewTokenCounter(a.Model.Model())
+	agentID := a.ID
+	store := a.Storage
+
+	for _, def := range a.Tools.List() {
+		if def.Name == ReadStoredResultTool || def.Handler == nil {
+			continue
+		}
+		orig := def.Handler
+		name := def.Name
+		def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+			result, err := orig(ctx, args)
+			if err != nil || result == nil {
+				return result, err
+			}
+			data, mErr := json.Marshal(result)
+			if mErr != nil || counter.CountString(string(data)) <= thresholdTokens {
+				return result, nil
+			}
+			sessionID := sessionOrAgent(ctx, agentID)
+			evicted, evErr := agent.EvictLargeResult(ctx, store, sessionID, name, result)
+			if evErr != nil || evicted == nil {
+				return result, nil
+			}
+			return map[string]any{
+				"compressed":      true,
+				"preview":         evicted.Preview,
+				"full_size_bytes": evicted.FullSize,
+				"storage_key":     evicted.StorageKey,
+			}, nil
+		}
+	}
+
+	a.Tools.Register(&tool.Definition{
+		Name:        ReadStoredResultTool,
+		Description: "Retrieve the full content of a tool result that was compressed because it was too large.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"key": map[string]any{"type": "string", "description": "The storage_key returned alongside a compressed tool result"},
+			},
+			"required": []string{"key"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			key, _ := args["key"].(string)
+			if key == "" {
+				return nil, fmt.Errorf("read_stored_result: key is required")
+			}
+			return agent.ReadStoredResult(ctx, store, sessionOrAgent(ctx, agentID), key)
+		},
+	})
+}
+
+func sessionOrAgent(ctx context.Context, agentID string) string {
+	if id := storage.SessionFromContext(ctx); id != "" {
+		return id
+	}
+	return agentID
+}

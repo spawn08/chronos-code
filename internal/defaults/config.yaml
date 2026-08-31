@@ -1,0 +1,137 @@
+workspace:
+  index_on_start: true
+  graph_db: ".chronos-code/graph.db"
+
+tools:
+  compression_threshold_tokens: 500
+
+defaults:
+  model:
+    provider: "anthropic"
+    model: "claude-sonnet-4-6"
+  storage:
+    backend: "sqlite"
+    dsn: ".chronos-code/sessions.db"
+  stream: true
+  permission_mode: "prompt"
+  reasoning:
+    strategy: "cot"
+    effort: "medium"
+  context:
+    max_tokens: 128000
+    summarize_threshold: 0.8
+    preserve_recent_turns: 6
+
+agents:
+  - id: coder
+    name: Coding Agent
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_write
+        permission: require_approval
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow
+      - name: shell
+        permission: require_approval
+    sub_agents:
+      - reviewer
+      - planner
+      - researcher
+
+  - id: planner
+    name: Planner
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow
+
+  - id: reviewer
+    name: Code Reviewer
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_grep
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: shell
+        permission: allow
+
+  - id: debugger
+    name: Debugger
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_grep
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: shell
+        permission: allow
+
+  - id: researcher
+    name: Researcher
+    model:
+      provider: "anthropic"
+      model: "claude-haiku-4-5"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow
+
+  - id: architect
+    name: Architect
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow
+
+  - id: explainer
+    name: Explainer
+    model:
+      provider: "anthropic"
+      model: "claude-haiku-4-5"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow

@@ -1,0 +1,14 @@
+name: default
+description: Standard guardrails for coding agents
+
+input:
+  - type: max_length
+    max_chars: 100000
+
+output:
+  - type: max_length
+    max_chars: 200000
+
+cost:
+  max_tokens_per_session: 500000
+  warn_at_percent: 80

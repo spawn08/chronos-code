@@ -1,0 +1,47 @@
+version: "v1"
+
+filesystem:
+  writable_paths: ["."]
+  readable_paths: [".", "~/.chronos-code/"]
+  denied_paths:
+    - ".env"
+    - ".env.*"
+    - ".git/config"
+    - "**/*.pem"
+    - "**/*.key"
+    - "**/credentials*"
+    - "**/secrets/**"
+
+shell:
+  allowed_commands:
+    - "go"
+    - "git"
+    - "make"
+    - "npm"
+    - "node"
+    - "python"
+    - "pip"
+    - "cargo"
+    - "rustc"
+    - "ls"
+    - "cat"
+    - "grep"
+    - "rg"
+    - "find"
+    - "wc"
+    - "diff"
+    - "jq"
+  denied_patterns:
+    - "rm -rf /"
+    - "sudo"
+    - "curl | sh"
+    - "wget | sh"
+  max_execution_time_sec: 300
+
+secrets:
+  scan_output: true
+  patterns:
+    - "AKIA[0-9A-Z]{16}"
+    - "ghp_[a-zA-Z0-9]{36}"
+    - "sk-[a-zA-Z0-9]{48}"
+    - "-----BEGIN.*PRIVATE KEY-----"

@@ -1,0 +1,379 @@
+# Chronos Code — Tool Definitions
+# Every tool available to agents, organized by category and model tier.
+
+meta:
+  version: "1.0.0"
+  description: "Complete tool registry for chronos-code agents"
+
+# Permission model
+permission_model:
+  description: |
+    Tools have a default permission level. security.yaml can override
+    any tool's permission to a stricter level. The hierarchy:
+      allow > require_approval > deny
+    security.yaml can only tighten (never loosen) a tool's permission.
+  levels:
+    allow: "Execute without asking the user"
+    require_approval: "Show the user what will happen, wait for approval"
+    deny: "Never execute, even if the model asks"
+  security_yaml_overrides:
+    filesystem:
+      writable_paths: ["."]
+      denied_paths: [".env", ".git/config", "**/*.pem", "**/*.key"]
+    shell:
+      allowed_commands: ["go", "git", "make", "npm", "node", "python", "cargo", "rustc", "ls", "cat", "grep", "find", "wc", "diff", "rg", "jq"]
+      denied_patterns: ["rm -rf /", "sudo", "curl | sh", "wget | sh", "> /dev/sd*"]
+      max_execution_time_sec: 300
+
+# ── Code Graph Tools (T0 — Zero LLM Cost) ─────────────────────────
+
+graph_tools:
+  tier: "T0"
+  cost: "0 tokens (local SQLite query)"
+  description: "Query the code graph for structural code intelligence. Always prefer these over file reads for navigation."
+
+  tools:
+    - name: "graph_query"
+      description: "Look up a symbol by name. Returns kind, location, signature, doc, caller/callee counts."
+      permission: "allow"
+      token_cost_estimate: "~50 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          name:
+            type: "string"
+            description: "Symbol name (exact or fuzzy match)"
+          kind:
+            type: "string"
+            enum: ["func", "method", "type", "interface", "struct", "var", "const", "package"]
+            description: "Filter by symbol kind"
+        required: ["name"]
+
+    - name: "find_callers"
+      description: "Find all functions that call a given function. Returns caller name, file, line."
+      permission: "allow"
+      token_cost_estimate: "~30-80 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          name:
+            type: "string"
+            description: "Function or method name"
+          depth:
+            type: "integer"
+            description: "Call chain depth (default 1, max 3)"
+            default: 1
+        required: ["name"]
+
+    - name: "find_implementations"
+      description: "Find all types that implement an interface."
+      permission: "allow"
+      token_cost_estimate: "~40-100 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          name:
+            type: "string"
+            description: "Interface name"
+        required: ["name"]
+
+    - name: "impact_analysis"
+      description: "Before editing code, compute blast radius: callers, affected tests, breaking changes."
+      permission: "allow"
+      token_cost_estimate: "~80 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          file:
+            type: "string"
+            description: "File path"
+          start_line:
+            type: "integer"
+            description: "Start of edit range"
+          end_line:
+            type: "integer"
+            description: "End of edit range"
+        required: ["file", "start_line", "end_line"]
+
+    - name: "test_map"
+      description: "Find which tests exercise a function or file."
+      permission: "allow"
+      token_cost_estimate: "~30-60 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          symbol:
+            type: "string"
+            description: "Function name or file path"
+        required: ["symbol"]
+
+    - name: "co_change"
+      description: "Find files that historically change together (from git log)."
+      permission: "allow"
+      token_cost_estimate: "~30-60 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          file:
+            type: "string"
+            description: "File path"
+          days:
+            type: "integer"
+            description: "Lookback window in days"
+            default: 90
+        required: ["file"]
+
+    - name: "multi_resolution_view"
+      description: "Get code at chosen zoom level. L0=repo, L1=package, L2=symbol, L3=implementation."
+      permission: "allow"
+      token_cost_estimate: "L0: ~20, L1: ~80, L2: ~40, L3: varies"
+      parameters:
+        type: "object"
+        properties:
+          target:
+            type: "string"
+            description: "Package name, file path, or symbol name"
+          level:
+            type: "string"
+            enum: ["L0", "L1", "L2", "L3"]
+            description: "Zoom level"
+        required: ["target", "level"]
+
+    - name: "resolve_symbol"
+      description: "Go-to-definition: resolve a symbol to its definition location."
+      permission: "allow"
+      token_cost_estimate: "~20 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          name:
+            type: "string"
+            description: "Symbol name"
+          context_file:
+            type: "string"
+            description: "File where the symbol is referenced (for disambiguation)"
+        required: ["name"]
+
+# ── File Tools ─────────────────────────────────────────────────────
+
+file_tools:
+  tier: "T0 (list/glob/grep) or T1 (read/write)"
+  description: "Filesystem access scoped to workspace root."
+
+  tools:
+    - name: "file_read"
+      description: "Read file contents. Prefer line ranges over full reads."
+      permission: "allow"
+      token_cost_estimate: "~20-2000 tokens depending on range"
+      parameters:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "File path relative to workspace root"
+          start_line:
+            type: "integer"
+            description: "Start line (1-indexed). Omit to read from beginning."
+          end_line:
+            type: "integer"
+            description: "End line. Omit to read to end."
+          outline_only:
+            type: "boolean"
+            description: "If true, return AST-based outline (signatures only, no bodies)"
+            default: false
+        required: ["path"]
+
+    - name: "file_write"
+      description: "Write to a file using targeted diffs. Never rewrite entire files."
+      permission: "require_approval"
+      token_cost_estimate: "~50-500 tokens for diff"
+      parameters:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "File path relative to workspace root"
+          old_content:
+            type: "string"
+            description: "Exact text to replace (must exist in the file)"
+          new_content:
+            type: "string"
+            description: "Replacement text"
+          create:
+            type: "boolean"
+            description: "If true and file doesn't exist, create it with new_content as full contents"
+            default: false
+        required: ["path"]
+
+    - name: "file_list"
+      description: "List directory contents."
+      permission: "allow"
+      token_cost_estimate: "~20-100 tokens"
+      parameters:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "Directory path"
+            default: "."
+          recursive:
+            type: "boolean"
+            default: false
+        required: []
+
+    - name: "file_glob"
+      description: "Find files matching a glob pattern."
+      permission: "allow"
+      token_cost_estimate: "~20-200 tokens"
+      parameters:
+        type: "object"
+        properties:
+          pattern:
+            type: "string"
+            description: "Glob pattern, e.g. '**/*_test.go'"
+        required: ["pattern"]
+
+    - name: "file_grep"
+      description: "Search for text in files. Use for text patterns; use graph tools for symbol lookups."
+      permission: "allow"
+      token_cost_estimate: "~50-500 tokens"
+      parameters:
+        type: "object"
+        properties:
+          pattern:
+            type: "string"
+            description: "Regex pattern to search for"
+          path:
+            type: "string"
+            description: "Directory or file to search in"
+            default: "."
+          include:
+            type: "string"
+            description: "File glob filter, e.g. '*.go'"
+        required: ["pattern"]
+
+# ── Shell Tool ─────────────────────────────────────────────────────
+
+shell_tools:
+  tier: "T2 (expensive — executes external processes)"
+  description: "Execute shell commands. Subject to security.yaml restrictions."
+
+  tools:
+    - name: "shell"
+      description: "Run a shell command. Subject to allowed/denied command lists."
+      permission: "require_approval"
+      token_cost_estimate: "~100-2000 tokens (output is auto-compressed if large)"
+      parameters:
+        type: "object"
+        properties:
+          command:
+            type: "string"
+            description: "Shell command to execute"
+          timeout_sec:
+            type: "integer"
+            description: "Max execution time in seconds"
+            default: 120
+          working_dir:
+            type: "string"
+            description: "Working directory (default: workspace root)"
+        required: ["command"]
+
+# ── Search Tools ───────────────────────────────────────────────────
+
+search_tools:
+  tier: "T0 (embedding lookup, no LLM call)"
+  description: "Semantic code search using vector embeddings."
+
+  tools:
+    - name: "semantic_search"
+      description: "Search codebase by meaning, not just text. Returns ranked code snippets."
+      permission: "allow"
+      token_cost_estimate: "~100-500 tokens result"
+      parameters:
+        type: "object"
+        properties:
+          query:
+            type: "string"
+            description: "Natural language query"
+          top_k:
+            type: "integer"
+            description: "Number of results"
+            default: 5
+        required: ["query"]
+
+# ── Harness Tools ──────────────────────────────────────────────────
+
+harness_tools:
+  tier: "T0 (plan/VFS) or T2 (subagent)"
+  description: "Agent harness primitives: planning, virtual filesystem, delegation."
+
+  tools:
+    - name: "update_plan"
+      description: "Create or update the task plan. The plan persists across context compaction."
+      permission: "allow"
+      token_cost_estimate: "~50-200 tokens"
+      parameters:
+        type: "object"
+        properties:
+          tasks:
+            type: "array"
+            items:
+              type: "object"
+              properties:
+                id:
+                  type: "string"
+                title:
+                  type: "string"
+                status:
+                  type: "string"
+                  enum: ["todo", "in_progress", "completed", "blocked"]
+              required: ["id", "title", "status"]
+        required: ["tasks"]
+
+    - name: "fs_write"
+      description: "Write to the virtual filesystem. For intermediate artifacts, not project files."
+      permission: "allow"
+      token_cost_estimate: "0 tokens (stored, not returned)"
+      parameters:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+            description: "Virtual path (e.g., 'research/findings.md')"
+          content:
+            type: "string"
+        required: ["path", "content"]
+
+    - name: "fs_read"
+      description: "Read from the virtual filesystem."
+      permission: "allow"
+      token_cost_estimate: "~variable (file content)"
+      parameters:
+        type: "object"
+        properties:
+          path:
+            type: "string"
+        required: ["path"]
+
+    - name: "spawn_subagent"
+      description: "Delegate a task to an isolated subagent. Returns only the result."
+      permission: "allow"
+      token_cost_estimate: "~variable (subagent runs its own token budget)"
+      parameters:
+        type: "object"
+        properties:
+          name:
+            type: "string"
+            description: "Registered subagent name (reviewer, planner, etc.) or empty for dynamic"
+          task:
+            type: "string"
+            description: "Task description for the subagent"
+          system_prompt:
+            type: "string"
+            description: "System prompt (for dynamic subagents only)"
+          tool_names:
+            type: "array"
+            items:
+              type: "string"
+            description: "Which parent tools the subagent can use"
+        required: ["task"]

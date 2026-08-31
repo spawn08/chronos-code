@@ -1,0 +1,329 @@
+package graph
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spawn08/chronos/engine/tool"
+)
+
+// Tools returns the five T0 (zero-LLM-cost) graph navigation tools defined by
+// PRD P1-007: graph_query, find_callers, find_implementations,
+// multi_resolution_view, and resolve_symbol. root is the workspace root,
+// used to resolve relative file paths for L3 source snippets.
+func Tools(store *Store, root string) []*tool.Definition {
+	return []*tool.Definition{
+		graphQueryTool(store),
+		findCallersTool(store),
+		findImplementationsTool(store),
+		multiResolutionViewTool(store, root),
+		resolveSymbolTool(store),
+	}
+}
+
+func graphQueryTool(store *Store) *tool.Definition {
+	return &tool.Definition{
+		Name:        "graph_query",
+		Description: "Look up a symbol by name. Returns kind, location, signature, and doc for every match.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string", "description": "Symbol name (exact match)"},
+				"kind": map[string]any{"type": "string", "description": "Optional filter: func, method, type, interface, struct, var, const"},
+			},
+			"required": []string{"name"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			name, _ := args["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("graph_query: name is required")
+			}
+			kind, _ := args["kind"].(string)
+			syms, err := store.FindSymbols(ctx, name, kind)
+			if err != nil {
+				return nil, err
+			}
+			if len(syms) == 0 {
+				fuzzy, ferr := store.FindSymbolsFuzzy(ctx, name)
+				if ferr == nil && len(fuzzy) > 0 {
+					return map[string]any{"found": false, "did_you_mean": symbolSummaries(fuzzy)}, nil
+				}
+				return map[string]any{"found": false}, nil
+			}
+			return map[string]any{"found": true, "symbols": symbolSummaries(syms)}, nil
+		},
+	}
+}
+
+func findCallersTool(store *Store) *tool.Definition {
+	return &tool.Definition{
+		Name:        "find_callers",
+		Description: "Find functions that call a given function or method, up to a bounded call-chain depth.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":  map[string]any{"type": "string", "description": "Function or method name"},
+				"depth": map[string]any{"type": "integer", "description": "Call chain depth (default 1, max 3)"},
+			},
+			"required": []string{"name"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			name, _ := args["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("find_callers: name is required")
+			}
+			depth := intArg(args["depth"], 1)
+			if depth < 1 {
+				depth = 1
+			}
+			if depth > 3 {
+				depth = 3
+			}
+			frontier := []string{name}
+			seen := map[string]bool{name: true}
+			levels := make([]map[string][]string, 0, depth)
+			for d := 0; d < depth; d++ {
+				level := make(map[string][]string)
+				var next []string
+				for _, n := range frontier {
+					callers, err := store.CallersOf(ctx, n)
+					if err != nil {
+						return nil, err
+					}
+					level[n] = callers
+					for _, c := range callers {
+						if !seen[c] {
+							seen[c] = true
+							next = append(next, c)
+						}
+					}
+				}
+				levels = append(levels, level)
+				if len(next) == 0 {
+					break
+				}
+				frontier = next
+			}
+			return map[string]any{"name": name, "callers_by_depth": levels}, nil
+		},
+	}
+}
+
+func findImplementationsTool(store *Store) *tool.Definition {
+	return &tool.Definition{
+		Name:        "find_implementations",
+		Description: "Find concrete types that implement a given interface.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name": map[string]any{"type": "string", "description": "Interface name"},
+			},
+			"required": []string{"name"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			name, _ := args["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("find_implementations: name is required")
+			}
+			impls, err := store.ImplementationsOf(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"interface": name, "implementations": impls}, nil
+		},
+	}
+}
+
+func resolveSymbolTool(store *Store) *tool.Definition {
+	return &tool.Definition{
+		Name:        "resolve_symbol",
+		Description: "Go-to-definition: resolve a symbol name to its definition location(s).",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":         map[string]any{"type": "string", "description": "Symbol name"},
+				"context_file": map[string]any{"type": "string", "description": "File referencing the symbol, for disambiguation when multiple matches exist"},
+			},
+			"required": []string{"name"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			name, _ := args["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("resolve_symbol: name is required")
+			}
+			syms, err := store.FindSymbols(ctx, name, "")
+			if err != nil {
+				return nil, err
+			}
+			if len(syms) == 0 {
+				return map[string]any{"found": false}, nil
+			}
+			if len(syms) > 1 {
+				if ctxFile, _ := args["context_file"].(string); ctxFile != "" {
+					ctxDir := filepath.Dir(ctxFile)
+					for _, s := range syms {
+						if filepath.Dir(s.File) == ctxDir {
+							return map[string]any{"found": true, "symbol": symbolSummary(s)}, nil
+						}
+					}
+				}
+				return map[string]any{"found": true, "ambiguous": true, "candidates": symbolSummaries(syms)}, nil
+			}
+			return map[string]any{"found": true, "symbol": symbolSummary(syms[0])}, nil
+		},
+	}
+}
+
+func multiResolutionViewTool(store *Store, root string) *tool.Definition {
+	return &tool.Definition{
+		Name:        "multi_resolution_view",
+		Description: "View code at a chosen zoom level. L0=repo overview, L1=package summary, L2=symbol summary, L3=source snippet.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"target": map[string]any{"type": "string", "description": "Package name, file path, or symbol name (ignored for L0)"},
+				"level":  map[string]any{"type": "string", "description": "L0, L1, L2, or L3"},
+			},
+			"required": []string{"target", "level"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			level, _ := args["level"].(string)
+			target, _ := args["target"].(string)
+			switch strings.ToUpper(level) {
+			case "L0":
+				pkgs, err := store.Packages(ctx)
+				if err != nil {
+					return nil, err
+				}
+				stats, err := store.Stats(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"level": "L0", "packages": pkgs, "stats": stats}, nil
+			case "L1":
+				if target == "" {
+					return nil, fmt.Errorf("multi_resolution_view: target is required for L1")
+				}
+				syms, err := store.SymbolsInPackage(ctx, target)
+				if err != nil {
+					return nil, err
+				}
+				imports, err := store.PackageImports(ctx, target)
+				if err != nil {
+					return nil, err
+				}
+				var importList []string
+				if imports != "" {
+					importList = strings.Split(imports, ",")
+				}
+				return map[string]any{"level": "L1", "package": target, "imports": importList, "symbols": symbolSummaries(syms)}, nil
+			case "L2":
+				if target == "" {
+					return nil, fmt.Errorf("multi_resolution_view: target is required for L2")
+				}
+				syms, err := store.FindSymbols(ctx, target, "")
+				if err != nil {
+					return nil, err
+				}
+				if len(syms) == 0 {
+					return map[string]any{"level": "L2", "found": false}, nil
+				}
+				out := make([]map[string]any, 0, len(syms))
+				for _, s := range syms {
+					callers, _ := store.CallersOf(ctx, s.Name)
+					callees, _ := store.CalleesOf(ctx, s.Name)
+					sum := symbolSummary(s)
+					sum["caller_count"] = len(callers)
+					sum["callee_count"] = len(callees)
+					out = append(out, sum)
+				}
+				return map[string]any{"level": "L2", "symbols": out}, nil
+			case "L3":
+				if target == "" {
+					return nil, fmt.Errorf("multi_resolution_view: target is required for L3")
+				}
+				return l3Snippet(ctx, store, root, target)
+			default:
+				return nil, fmt.Errorf("multi_resolution_view: unknown level %q (want L0, L1, L2, L3)", level)
+			}
+		},
+	}
+}
+
+// l3Snippet resolves target (a symbol name or file path) to source text.
+func l3Snippet(ctx context.Context, store *Store, root, target string) (any, error) {
+	path := target
+	startLine, endLine := 0, 0
+	if !strings.Contains(target, string(os.PathSeparator)) && !strings.HasSuffix(target, ".go") {
+		syms, err := store.FindSymbols(ctx, target, "")
+		if err != nil {
+			return nil, err
+		}
+		if len(syms) == 0 {
+			return map[string]any{"level": "L3", "found": false}, nil
+		}
+		path = syms[0].File
+		startLine, endLine = syms[0].Line, syms[0].EndLine
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if startLine == 0 {
+		return map[string]any{"level": "L3", "found": true, "file": target, "content": string(data)}, nil
+	}
+	lines := strings.Split(string(data), "\n")
+	if startLine < 1 {
+		startLine = 1
+	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	snippet := strings.Join(lines[startLine-1:endLine], "\n")
+	return map[string]any{"level": "L3", "found": true, "file": target, "start_line": startLine, "end_line": endLine, "content": snippet}, nil
+}
+
+func symbolSummary(s Symbol) map[string]any {
+	return map[string]any{
+		"name":      s.Name,
+		"kind":      string(s.Kind),
+		"package":   s.Package,
+		"file":      s.File,
+		"line":      s.Line,
+		"signature": s.Signature,
+		"doc":       s.Doc,
+		"receiver":  s.Receiver,
+	}
+}
+
+func symbolSummaries(syms []Symbol) []map[string]any {
+	out := make([]map[string]any, 0, len(syms))
+	for _, s := range syms {
+		out = append(out, symbolSummary(s))
+	}
+	return out
+}
+
+func intArg(v any, def int) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return def
+	}
+}
