@@ -124,7 +124,18 @@ func SummarizeArgs(args string) string {
 
 // RenderToolCall renders a single tool-call line (name + summarized args).
 func RenderToolCall(name, argSummary string) string {
-	return styleTool.Render(fmt.Sprintf("→ %s(%s)", name, argSummary))
+	return fmt.Sprintf("  %s %s %s", styleTool.Render("⎿"), styleBold.Render(name), styleDim.Render(argSummary))
+}
+
+// RenderTurnHeader renders a turn header line: icon + styled name + trailing separator.
+func RenderTurnHeader(icon, name string, nameStyle lipgloss.Style, width int) string {
+	prefix := icon + " " + nameStyle.Render(name) + " "
+	prefixWidth := lipgloss.Width(prefix)
+	remaining := width - prefixWidth
+	if remaining < 0 {
+		remaining = 0
+	}
+	return prefix + styleSeparator.Render(strings.Repeat("─", remaining))
 }
 
 // RenderFileWriteDiff renders a file_write tool call as a compact diff:
@@ -139,7 +150,7 @@ func RenderFileWriteDiff(args map[string]any) string {
 	create, _ := args["create"].(bool)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "Path:  %s\n", path)
+	fmt.Fprintf(&b, "%s  %s\n", styleDim.Render("Path:"), path)
 	if create || oldContent == "" {
 		b.WriteString(styleDiffAdded.Render("+++ new file") + "\n")
 		for _, line := range truncatedLines(newContent, 40) {
@@ -165,12 +176,12 @@ func RenderShellPreview(args map[string]any) string {
 	workingDir, _ := args["working_dir"].(string)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s\n", styleError.Render("Command:"), command)
+	fmt.Fprintf(&b, "%s  %s\n", styleDim.Render("Command:"), styleBold.Render(command))
 	if workingDir != "" {
-		fmt.Fprintf(&b, "Dir:     %s\n", workingDir)
+		fmt.Fprintf(&b, "%s      %s\n", styleDim.Render("Dir:"), workingDir)
 	}
 	if rest := FormatArgsExcept(args, "command", "working_dir"); rest != "" {
-		fmt.Fprintf(&b, "Other:   %s\n", rest)
+		fmt.Fprintf(&b, "%s    %s\n", styleDim.Render("Other:"), rest)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

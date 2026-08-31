@@ -58,6 +58,8 @@ func Execute() error {
 		return runSession()
 	case "memory":
 		return runMemory()
+	case "learn":
+		return runLearn()
 	case "eval":
 		return runEval()
 	case "version":
@@ -162,6 +164,11 @@ Usage:
   chronos-code memory list [category]                   List remembered notes
   chronos-code memory search <query>                    Search remembered notes
   chronos-code memory forget <id>                        Remove a remembered note
+  chronos-code learn suggest [agent]                     Distill traced sessions into a reviewable suggestion
+  chronos-code learn list                                List pending suggestions
+  chronos-code learn show <id>                           Show a suggestion's full YAML and rationale
+  chronos-code learn accept <id>                         Apply a suggestion (agent or pattern)
+  chronos-code learn reject <id>                          Discard a suggestion
   chronos-code eval run [--update-baseline] [--md <path>]  Run the token-efficiency eval suite
   chronos-code version            Print version information
   chronos-code help               Show this help

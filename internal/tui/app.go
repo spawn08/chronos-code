@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -85,6 +86,7 @@ type appModel struct {
 	history  *History
 
 	width, height int
+	workDir       string
 	ready         bool
 
 	blocks          []string // finalized, already-rendered transcript entries
@@ -115,12 +117,14 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	defer cancel()
 
 	ta := textarea.New()
-	ta.Placeholder = "Send a message... (/help for commands)"
-	ta.Prompt = "› "
+	ta.Placeholder = "Message chronos-code..."
+	ta.Prompt = "❯ "
 	ta.ShowLineNumbers = false
 	ta.SetHeight(inputRows)
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
 	ta.Focus()
+
+	wd, _ := os.Getwd()
 
 	m := &appModel{
 		orch:    orch,
@@ -128,8 +132,9 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		ctx:     ctx,
 		cancel:  cancel,
 		input:   ta,
-		spin:    spinner.New(spinner.WithSpinner(spinner.Dot)),
+		spin:    spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		history: NewHistory(),
+		workDir: wd,
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
@@ -526,7 +531,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 // textarea's documented requirement to re-call SetWidth after changing
 // Prompt so its internal wrap-width cache stays correct.
 func (m *appModel) refreshPrompt() {
-	m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " › "
+	m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " ❯ "
 	if m.width > 0 {
 		m.input.SetWidth(m.width - inputBoxBorderWidth - inputBoxPaddingWidth)
 	}
@@ -538,8 +543,9 @@ func (m *appModel) refreshPrompt() {
 // same class of bug that made the status bar wrap onto a second line (see
 // styleHeaderBar's comment in styles.go).
 func (m *appModel) appendUserTurn(line string) {
+	header := RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width)
 	body := wrapText(line, m.viewport.Width)
-	m.blocks = append(m.blocks, styleUserPrefix.Render("you")+"\n"+body)
+	m.blocks = append(m.blocks, header+"\n"+body)
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 }
@@ -562,7 +568,7 @@ func (m *appModel) finalizeTurn(err error) {
 		m.blocks = append(m.blocks, styleError.Render("error: "+err.Error()))
 	} else {
 		var b strings.Builder
-		b.WriteString(styleAgentName.Render(m.orch.ActiveID() + ":"))
+		b.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width))
 		b.WriteString("\n")
 		for _, l := range m.activeToolLines {
 			b.WriteString(l)
@@ -593,9 +599,9 @@ func (m *appModel) renderTranscript() string {
 		var cur []string
 		cur = append(cur, m.activeToolLines...)
 		if txt := m.activeAgentText.String(); txt != "" {
-			cur = append(cur, styleAgentName.Render(m.orch.ActiveID()+":")+"\n"+RenderMarkdownLite(txt, m.viewport.Width))
+			cur = append(cur, RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width)+"\n"+RenderMarkdownLite(txt, m.viewport.Width))
 		} else {
-			cur = append(cur, m.spin.View()+" thinking...")
+			cur = append(cur, styleDim.Render(m.spin.View()+" thinking..."))
 		}
 		parts = append(parts, strings.Join(cur, "\n"))
 	}
@@ -627,17 +633,28 @@ func (m *appModel) View() string {
 // two bookkeeping styles is what originally caused the status bar to
 // overflow by its padding width and wrap onto a second line).
 func (m *appModel) renderHeaderBar() string {
-	title := " chronos-code "
-	pad := m.width - lipgloss.Width(title)
-	if pad < 0 {
-		pad = 0
+	left := " ◆ chronos-code "
+	right := ""
+	if m.workDir != "" {
+		dir := m.workDir
+		if home, err := os.UserHomeDir(); err == nil {
+			if rel, err := filepath.Rel(home, dir); err == nil && !strings.HasPrefix(rel, "..") {
+				dir = "~/" + rel
+			}
+		}
+		right = " " + dir + " "
 	}
-	return styleHeaderBar.Render(title + strings.Repeat(" ", pad))
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 0 {
+		gap = 0
+	}
+	return styleHeaderBar.Render(left + strings.Repeat(" ", gap) + right)
 }
 
 func (m *appModel) renderApprovalModal() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\nTool: %s\n", styleHeader.Render("Permission Required"), m.approval.toolName)
+	fmt.Fprintf(&b, "%s\n\n", styleHeader.Render("⚠ Permission Required"))
+	fmt.Fprintf(&b, "%s  %s\n\n", styleDim.Render("Tool:"), styleBold.Render(m.approval.toolName))
 	switch m.approval.toolName {
 	case "file_write":
 		b.WriteString(RenderFileWriteDiff(m.approval.args))
@@ -647,10 +664,13 @@ func (m *appModel) renderApprovalModal() string {
 		b.WriteString("\n")
 	default:
 		if s := FormatArgs(m.approval.args); s != "" {
-			fmt.Fprintf(&b, "Args: %s\n", s)
+			fmt.Fprintf(&b, "%s  %s\n", styleDim.Render("Args:"), s)
 		}
 	}
-	b.WriteString("\n[y]es  [n]o  [a]lways")
+	b.WriteString("\n")
+	b.WriteString(styleAgentName.Render("y") + styleDim.Render(" allow") + "  ")
+	b.WriteString(styleError.Render("n") + styleDim.Render(" deny") + "  ")
+	b.WriteString(styleUserPrefix.Render("a") + styleDim.Render(" always"))
 	width := m.width - inputBoxBorderWidth
 	if width < 1 {
 		width = 1
@@ -672,12 +692,21 @@ func (m *appModel) renderSearchOverlay() string {
 }
 
 func (m *appModel) renderStatusBar() string {
-	leftSeg := styleStatusLeft.Render(" " + m.orch.ActiveID() + " ")
-	rightText := m.statusMsg
-	if rightText != "" {
-		rightText = " " + rightText + " "
+	streamLabel := "batch"
+	if m.stream {
+		streamLabel = "stream"
 	}
+	leftText := " ● " + m.orch.ActiveID() + " │ " + streamLabel + " "
+	leftSeg := styleStatusLeft.Render(leftText)
+
+	var rightParts []string
+	if m.statusMsg != "" {
+		rightParts = append(rightParts, m.statusMsg)
+	}
+	rightParts = append(rightParts, "ctrl+c quit")
+	rightText := " " + strings.Join(rightParts, " │ ") + " "
 	rightSeg := styleStatusRight.Render(rightText)
+
 	gap := m.width - lipgloss.Width(leftSeg) - lipgloss.Width(rightSeg)
 	if gap < 0 {
 		gap = 0

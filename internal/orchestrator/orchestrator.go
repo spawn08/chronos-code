@@ -12,6 +12,7 @@ import (
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
+	chronostrace "github.com/spawn08/chronos/os/trace"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
@@ -91,6 +92,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 			a.Storage = store
 		}
 	}
+	setupTracing(store, agents)
 
 	projectDir, _, discoverErr := config.Discover()
 	if discoverErr != nil {
@@ -271,6 +273,22 @@ func setupSessions(ctx context.Context, cfg *config.Config, mgr *session.Manager
 		sessions[id] = sid
 	}
 	return sessions
+}
+
+// setupTracing wires chronos's span-based execution tracer into every agent
+// (PRD P3-001), persisting model_call/tool_call/approval spans via the same
+// Storage backend sessions/memory/audit already use. Without this, every
+// agent's Tracer field stays nil and chronos never writes to the traces
+// table — internal/learning.Analyze (and hence `chronos-code learn
+// suggest`, PRD P3-002) would have nothing to read. A single Collector is
+// shared across all agents; it carries no per-agent state of its own.
+func setupTracing(store storage.Storage, agents map[string]*agent.Agent) {
+	tracer := chronostrace.NewCollector(store)
+	for _, a := range agents {
+		if a.Tracer == nil {
+			a.Tracer = tracer
+		}
+	}
 }
 
 // setupWorkspace detects the project's language(s) and file index (PRD
