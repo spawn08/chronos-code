@@ -10,17 +10,65 @@ import (
 	"github.com/spawn08/chronos/engine/tool"
 )
 
-// Tools returns the five T0 (zero-LLM-cost) graph navigation tools defined by
+// Tools returns the T0 (zero-LLM-cost) graph navigation tools defined by
 // PRD P1-007: graph_query, find_callers, find_implementations,
 // multi_resolution_view, and resolve_symbol. root is the workspace root,
 // used to resolve relative file paths for L3 source snippets.
 func Tools(store *Store, root string) []*tool.Definition {
 	return []*tool.Definition{
 		graphQueryTool(store),
+		codebaseSearchTool(store),
 		findCallersTool(store),
 		findImplementationsTool(store),
 		multiResolutionViewTool(store, root),
 		resolveSymbolTool(store),
+	}
+}
+
+func codebaseSearchTool(store *Store) *tool.Definition {
+	return &tool.Definition{
+		Name:        "codebase_search",
+		Description: "Search indexed symbols by exact name and full-text relevance.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "Symbol name or full-text search query"},
+				"top_k": map[string]any{"type": "integer", "description": "Maximum FTS results (default 10, max 100)"},
+			},
+			"required": []string{"query"},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			query, _ := args["query"].(string)
+			query = strings.TrimSpace(query)
+			if query == "" {
+				return nil, fmt.Errorf("codebase_search: query is required")
+			}
+
+			exact, err := store.FindSymbols(ctx, query, "")
+			if err != nil {
+				return nil, err
+			}
+			results, err := store.Search(ctx, query, intArg(args["top_k"], 10))
+			if err != nil {
+				return nil, err
+			}
+
+			syms := make([]Symbol, 0, len(exact)+len(results))
+			seen := make(map[int64]struct{}, len(exact)+len(results))
+			for _, sym := range exact {
+				seen[sym.ID] = struct{}{}
+				syms = append(syms, sym)
+			}
+			for _, result := range results {
+				if _, ok := seen[result.ID]; ok {
+					continue
+				}
+				seen[result.ID] = struct{}{}
+				syms = append(syms, result.Symbol)
+			}
+			return map[string]any{"found": len(syms) > 0, "symbols": symbolSummaries(syms)}, nil
+		},
 	}
 }
 
