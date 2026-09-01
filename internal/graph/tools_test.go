@@ -30,7 +30,7 @@ func TestToolsAgainstOwnRepo(t *testing.T) {
 	for _, d := range defs {
 		byName[d.Name] = d
 	}
-	for _, want := range []string{"graph_query", "find_callers", "find_implementations", "multi_resolution_view", "resolve_symbol"} {
+	for _, want := range []string{"graph_query", "find_callers", "find_implementations", "multi_resolution_view", "resolve_symbol", "codebase_search"} {
 		if _, ok := byName[want]; !ok {
 			t.Fatalf("missing tool %q", want)
 		}
@@ -67,4 +67,48 @@ func TestToolsAgainstOwnRepo(t *testing.T) {
 		t.Fatalf("resolve_symbol: %v", err)
 	}
 	t.Logf("resolve_symbol(OpenStore) = %+v", out)
+}
+
+func TestCodebaseSearchTool(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	for _, symbol := range []Symbol{
+		{Name: "Router", Kind: KindStruct, Package: "router", File: "router.go", Line: 1, EndLine: 2, Doc: "Routes coding tasks."},
+		{Name: "SearchHelper", Kind: KindFunc, Package: "router", File: "search.go", Line: 1, EndLine: 2, Doc: "Uses the Router."},
+	} {
+		if err := store.InsertSymbol(ctx, symbol); err != nil {
+			t.Fatalf("InsertSymbol(%s): %v", symbol.Name, err)
+		}
+	}
+
+	var search *tool.Definition
+	for _, def := range Tools(store, "") {
+		if def.Name == "codebase_search" {
+			search = def
+			break
+		}
+	}
+	if search == nil {
+		t.Fatal("codebase_search is not registered")
+	}
+
+	out, err := search.Handler(ctx, map[string]any{"query": "Router", "top_k": 10})
+	if err != nil {
+		t.Fatalf("codebase_search: %v", err)
+	}
+	result := out.(map[string]any)
+	symbols := result["symbols"].([]map[string]any)
+	if len(symbols) != 2 {
+		t.Fatalf("codebase_search symbols = %+v, want exact and FTS matches", symbols)
+	}
+	if symbols[0]["name"] != "Router" || symbols[1]["name"] != "SearchHelper" {
+		t.Fatalf("codebase_search order = %+v, want exact Router before FTS match", symbols)
+	}
+	if _, err := search.Handler(ctx, map[string]any{"query": ""}); err == nil {
+		t.Fatal("codebase_search accepted an empty query")
+	}
 }

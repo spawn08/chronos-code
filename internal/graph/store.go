@@ -112,11 +112,29 @@ func (s *Store) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(kind, from_name);
 		CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_name);
+		CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+			name, signature, doc, package, file,
+			content='symbols', content_rowid='id'
+		);
+		CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+			INSERT INTO symbols_fts(rowid, name, signature, doc, package, file)
+			VALUES (new.id, new.name, new.signature, new.doc, new.package, new.file);
+		END;
+		CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+			INSERT INTO symbols_fts(symbols_fts, rowid, name, signature, doc, package, file)
+			VALUES ('delete', old.id, old.name, old.signature, old.doc, old.package, old.file);
+		END;
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate graph store: %w", err)
 	}
-	return s.addContentHashColumn()
+	if err := s.addContentHashColumn(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')`); err != nil {
+		return fmt.Errorf("rebuild symbols fts: %w", err)
+	}
+	return nil
 }
 
 // addContentHashColumn adds files.content_hash for graph.db files created
@@ -328,6 +346,52 @@ func (s *Store) FindSymbols(ctx context.Context, name, kind string) ([]Symbol, e
 func (s *Store) FindSymbolsFuzzy(ctx context.Context, substr string) ([]Symbol, error) {
 	return s.querySymbols(ctx, `SELECT id, name, kind, package, file, line, end_line, signature, doc, receiver
 		FROM symbols WHERE name LIKE ? ORDER BY name LIMIT 25`, "%"+substr+"%")
+}
+
+// SearchResult is a symbol matched through the FTS index with its BM25 rank.
+type SearchResult struct {
+	Symbol
+	Rank float64
+}
+
+// Search returns the top ranked symbols matching query. Invalid limits use the
+// default rather than allowing an unbounded SQLite query.
+func (s *Store) Search(ctx context.Context, query string, topK int) ([]SearchResult, error) {
+	if topK < 1 {
+		topK = 10
+	}
+	if topK > 100 {
+		topK = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.name, s.kind, s.package, s.file, s.line, s.end_line,
+			s.signature, s.doc, s.receiver, bm25(symbols_fts)
+		FROM symbols_fts
+		JOIN symbols s ON s.id = symbols_fts.rowid
+		WHERE symbols_fts MATCH ?
+		ORDER BY bm25(symbols_fts)
+		LIMIT ?
+	`, query, topK)
+	if err != nil {
+		return nil, fmt.Errorf("search symbols: %w", err)
+	}
+	defer rows.Close()
+
+	var out []SearchResult
+	for rows.Next() {
+		var result SearchResult
+		var kind string
+		if err := rows.Scan(&result.ID, &result.Name, &kind, &result.Package, &result.File,
+			&result.Line, &result.EndLine, &result.Signature, &result.Doc, &result.Receiver, &result.Rank); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		result.Kind = SymbolKind(kind)
+		out = append(out, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("search symbols: %w", err)
+	}
+	return out, nil
 }
 
 // SymbolsInPackage returns all symbols declared in pkg.
