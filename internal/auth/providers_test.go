@@ -27,6 +27,17 @@ func TestLookupProvider_Anthropic(t *testing.T) {
 	}
 }
 
+func TestLookupProvider_OpenAI(t *testing.T) {
+	cfg, ok := LookupProvider("openai")
+	if !ok {
+		t.Fatal("LookupProvider(\"openai\") returned false")
+	}
+	want := OpenAICodexSubscriptionConfig()
+	if cfg.Provider != want.Provider || cfg.ClientID != want.ClientID || cfg.AuthURL != want.AuthURL || cfg.TokenURL != want.TokenURL || cfg.RedirectPort != want.RedirectPort {
+		t.Errorf("LookupProvider(\"openai\") = %+v, want the OpenAICodexSubscriptionConfig() client: %+v", cfg, want)
+	}
+}
+
 func TestLookupProvider_CaseInsensitive(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC", "Anthropic", "AnThRoPiC"} {
 		if _, ok := LookupProvider(name); !ok {

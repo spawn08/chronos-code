@@ -6,7 +6,58 @@ import (
 	"testing"
 
 	"github.com/spawn08/chronos/sdk/agent"
+	"gopkg.in/yaml.v3"
 )
+
+// TestProvidersUnmarshal_BaseURL covers AC-2.2's config-parsing side: a
+// providers.<name>.base_url entry in config.yaml must land in
+// Config.Providers.
+func TestProvidersUnmarshal_BaseURL(t *testing.T) {
+	var cfg Config
+	body := []byte("providers:\n  anthropic:\n    base_url: \"https://internal-gateway.corp.com/claude\"\n")
+	if err := yaml.Unmarshal(body, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got, want := cfg.Providers["anthropic"].BaseURL, "https://internal-gateway.corp.com/claude"; got != want {
+		t.Errorf("Providers[\"anthropic\"].BaseURL = %q, want %q", got, want)
+	}
+}
+
+// TestProvidersUnmarshal_MissingSection covers the contract invariant that
+// a config.yaml without a providers: section parses without error and
+// leaves Providers nil (zero value), not an error.
+func TestProvidersUnmarshal_MissingSection(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte("router:\n  enabled: true\n"), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg.Providers != nil {
+		t.Errorf("Providers = %#v, want nil with no providers: section", cfg.Providers)
+	}
+}
+
+func TestMergeProviders(t *testing.T) {
+	base := map[string]ProviderOverride{"anthropic": {BaseURL: "https://old.example.com"}}
+	overlay := map[string]ProviderOverride{
+		"anthropic": {BaseURL: "https://new.example.com"},
+		"openai":    {BaseURL: "https://openai-gateway.example.com"},
+	}
+	merged := mergeProviders(base, overlay)
+	if got := merged["anthropic"].BaseURL; got != "https://new.example.com" {
+		t.Errorf("anthropic BaseURL = %q, want overlay to win", got)
+	}
+	if got := merged["openai"].BaseURL; got != "https://openai-gateway.example.com" {
+		t.Errorf("openai BaseURL = %q, want %q", got, "https://openai-gateway.example.com")
+	}
+}
+
+func TestMergeProviders_EmptyOverlayKeepsBase(t *testing.T) {
+	base := map[string]ProviderOverride{"anthropic": {BaseURL: "https://old.example.com"}}
+	merged := mergeProviders(base, nil)
+	if got := merged["anthropic"].BaseURL; got != "https://old.example.com" {
+		t.Errorf("anthropic BaseURL = %q, want base preserved when overlay is empty", got)
+	}
+}
 
 func TestLoadLearnedAgents(t *testing.T) {
 	dir := t.TempDir()

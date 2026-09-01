@@ -27,9 +27,12 @@ func NewIndexer(store *Store, root string) *Indexer {
 	return &Indexer{Store: store, Root: root}
 }
 
-// Stats reports the outcome of an indexing pass.
+// Stats reports the outcome of an indexing pass. Skipped counts files whose
+// content hash matched the stored hash from the previous pass — Files only
+// counts files that were actually re-parsed and re-inserted.
 type IndexStats struct {
 	Files    int
+	Skipped  int
 	Packages int
 	Symbols  int
 	Edges    int
@@ -39,24 +42,60 @@ type IndexStats struct {
 const loadMode = packages.NeedName | packages.NeedFiles | packages.NeedCompiledGoFiles |
 	packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports
 
-// IndexAll performs a full reindex of every Go package under Root.
+// IndexAll (re)indexes every Go package under Root, using each file's
+// content hash (internal/graph/merkle.go) to skip files that are unchanged
+// since the last pass rather than unconditionally wiping and rebuilding the
+// whole store (ROADMAP.md §7: <100ms single-file re-index, <30s full
+// re-index). Files and packages no longer present on disk are pruned so a
+// deleted file or removed directory doesn't leave stale rows behind
+// forever; edges are pruned separately (PruneStaleEdges) since they are
+// name-keyed rather than file-keyed.
 func (ix *Indexer) IndexAll(ctx context.Context) (*IndexStats, error) {
 	start := time.Now()
 	pkgs, err := packages.Load(&packages.Config{Context: ctx, Dir: ix.Root, Mode: loadMode}, "./...")
 	if err != nil {
 		return nil, fmt.Errorf("load packages: %w", err)
 	}
-	if err := ix.Store.Reset(ctx); err != nil {
-		return nil, err
+
+	oldHashes, err := ix.Store.AllFileHashes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load stored file hashes: %w", err)
 	}
+
 	stats := &IndexStats{}
 	named := collectNamedTypes(pkgs)
+	seenFiles := make(map[string]bool, len(oldHashes))
+	seenPkgs := make(map[string]bool, len(pkgs))
 	for _, pkg := range pkgs {
-		if err := ix.indexPackage(ctx, pkg, named, stats); err != nil {
+		if err := ix.indexPackage(ctx, pkg, named, stats, oldHashes, seenFiles); err != nil {
 			return nil, fmt.Errorf("index package %s: %w", pkg.PkgPath, err)
 		}
+		seenPkgs[pkg.PkgPath] = true
 		stats.Packages++
 	}
+
+	for path := range oldHashes {
+		if !seenFiles[path] {
+			if err := ix.Store.RemoveFile(ctx, path); err != nil {
+				return nil, fmt.Errorf("remove stale file %s: %w", path, err)
+			}
+		}
+	}
+	existingPkgs, err := ix.Store.Packages(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list stored packages: %w", err)
+	}
+	for _, name := range existingPkgs {
+		if !seenPkgs[name] {
+			if err := ix.Store.RemovePackage(ctx, name); err != nil {
+				return nil, fmt.Errorf("remove stale package %s: %w", name, err)
+			}
+		}
+	}
+	if err := ix.Store.PruneStaleEdges(ctx); err != nil {
+		return nil, err
+	}
+
 	if err := ix.indexNonGoFiles(ctx, stats); err != nil {
 		return nil, fmt.Errorf("index non-go files: %w", err)
 	}
@@ -109,27 +148,39 @@ func (ix *Indexer) indexNonGoFiles(ctx context.Context, stats *IndexStats) error
 	})
 }
 
-// IndexFile incrementally reindexes the package containing path: it clears
-// previously recorded symbols for every file in that package and re-derives
-// them from a fresh, scoped packages.Load. Call edges and implements edges
+// IndexFile incrementally reindexes the package containing path. It first
+// checks path's content hash against the stored one and returns
+// immediately (without ever calling packages.Load) if unchanged — the
+// short-circuit that keeps fsnotify save-without-content-change events
+// (common with editors that touch mtime on every save) cheap. Otherwise it
+// re-derives the package from a fresh, scoped packages.Load, skipping any
+// of the package's other files whose hash is still unchanged. Call edges
 // are name-keyed, so stale entries from other files self-heal on the next
-// full IndexAll rather than needing per-edge invalidation here.
+// full IndexAll's PruneStaleEdges rather than needing per-edge invalidation
+// here.
 func (ix *Indexer) IndexFile(ctx context.Context, path string) (*IndexStats, error) {
 	start := time.Now()
+
+	if hash, err := FileHash(path); err == nil {
+		if stored, storeErr := ix.Store.FileHash(ctx, path); storeErr == nil && stored != "" && stored == hash {
+			return &IndexStats{Elapsed: time.Since(start)}, nil
+		}
+	}
+
 	dir := filepath.Dir(path)
 	pkgs, err := packages.Load(&packages.Config{Context: ctx, Dir: dir, Mode: loadMode}, ".")
 	if err != nil {
 		return nil, fmt.Errorf("load package for %s: %w", path, err)
 	}
+	oldHashes, err := ix.Store.AllFileHashes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load stored file hashes: %w", err)
+	}
 	stats := &IndexStats{}
 	named := collectNamedTypes(pkgs)
+	seenFiles := make(map[string]bool)
 	for _, pkg := range pkgs {
-		for _, f := range pkg.CompiledGoFiles {
-			if err := ix.Store.ClearFile(ctx, f); err != nil {
-				return nil, err
-			}
-		}
-		if err := ix.indexPackage(ctx, pkg, named, stats); err != nil {
+		if err := ix.indexPackage(ctx, pkg, named, stats, oldHashes, seenFiles); err != nil {
 			return nil, fmt.Errorf("index package %s: %w", pkg.PkgPath, err)
 		}
 		stats.Packages++
@@ -138,7 +189,12 @@ func (ix *Indexer) IndexFile(ctx context.Context, path string) (*IndexStats, err
 	return stats, nil
 }
 
-func (ix *Indexer) indexPackage(ctx context.Context, pkg *packages.Package, named namedTypes, stats *IndexStats) error {
+// indexPackage (re)indexes pkg, skipping any file whose content hash
+// matches oldHashes — that file's existing symbol/edge rows are left as-is.
+// seenFiles is marked for every file in pkg regardless of whether it was
+// skipped, so callers can diff it against oldHashes to find files deleted
+// since the last pass.
+func (ix *Indexer) indexPackage(ctx context.Context, pkg *packages.Package, named namedTypes, stats *IndexStats, oldHashes map[string]string, seenFiles map[string]bool) error {
 	if pkg.Types == nil || pkg.TypesInfo == nil {
 		return nil
 	}
@@ -151,28 +207,60 @@ func (ix *Indexer) indexPackage(ctx context.Context, pkg *packages.Package, name
 		return err
 	}
 
+	packageChanged := false
 	for i, file := range pkg.Syntax {
 		if i >= len(pkg.CompiledGoFiles) {
 			break
 		}
 		path := pkg.CompiledGoFiles[i]
-		info, err := os.Stat(path)
+		seenFiles[path] = true
+
+		hash, hashErr := FileHash(path)
+		if hashErr == nil && oldHashes[path] == hash {
+			stats.Skipped++
+			continue
+		}
+		packageChanged = true
+
+		info, statErr := os.Stat(path)
 		mtime := time.Now().Unix()
-		if err == nil {
+		if statErr == nil {
 			mtime = info.ModTime().Unix()
 		}
 		if err := ix.Store.UpsertFile(ctx, path, pkg.PkgPath, mtime); err != nil {
 			return err
 		}
-		stats.Files++
-		if err := ix.indexFile(ctx, pkg, file, path, named, stats); err != nil {
+		if hashErr == nil {
+			if err := ix.Store.UpsertFileHash(ctx, path, hash); err != nil {
+				return err
+			}
+		}
+		if err := ix.Store.ClearFile(ctx, path); err != nil {
 			return err
+		}
+		stats.Files++
+		if err := ix.indexFile(ctx, pkg, file, path, stats); err != nil {
+			return err
+		}
+	}
+
+	// implements edges are derived once per package from the named-type
+	// table, not per file; only recompute them when something in the
+	// package actually changed, so an untouched package's edges aren't
+	// needlessly rewritten.
+	if packageChanged {
+		edges := implementsEdges(named, pkg.PkgPath)
+		for _, e := range edges {
+			if err := ix.Store.InsertEdge(ctx, e); err != nil {
+				return err
+			}
+			stats.Edges++
 		}
 	}
 	return nil
 }
 
-func (ix *Indexer) indexFile(ctx context.Context, pkg *packages.Package, file *ast.File, path string, named namedTypes, stats *IndexStats) error {
+func (ix *Indexer) indexFile(ctx context.Context, pkg *packages.Package, file *ast.File, path string, stats *IndexStats) error {
 	fset := pkg.Fset
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
@@ -196,19 +284,6 @@ func (ix *Indexer) indexFile(ctx context.Context, pkg *packages.Package, file *a
 					return err
 				}
 				stats.Symbols++
-			}
-		}
-	}
-	// implements edges are derived once per package from the named-type table,
-	// not per file, so only run it on the first file to avoid duplicate work.
-	if len(file.Decls) > 0 {
-		if pos := fset.Position(file.Decls[0].Pos()); pos.Filename == path {
-			edges := implementsEdges(named, pkg.PkgPath)
-			for _, e := range edges {
-				if err := ix.Store.InsertEdge(ctx, e); err != nil {
-					return err
-				}
-				stats.Edges++
 			}
 		}
 	}

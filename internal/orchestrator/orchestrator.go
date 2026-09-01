@@ -235,11 +235,18 @@ func applyStoredCredentials(ctx context.Context, cfg *config.Config) {
 	}
 
 	apply := func(mc *agent.ModelConfig) {
-		if mc.APIKey != "" || mc.Provider == "" {
+		if mc.Provider == "" {
 			return
 		}
-		if key := resolve(mc.Provider); key != "" {
-			mc.APIKey = key
+		if mc.APIKey == "" {
+			if key := resolve(mc.Provider); key != "" {
+				mc.APIKey = key
+			}
+		}
+		if mc.BaseURL == "" {
+			if override, ok := cfg.Providers[mc.Provider]; ok && override.BaseURL != "" {
+				mc.BaseURL = override.BaseURL
+			}
 		}
 	}
 
@@ -871,6 +878,11 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 	mc := agent.ModelConfig{Provider: provider, Model: modelID}
 	if key := auth.Resolve(ctx, auth.NewStore(), provider).Token; key != "" {
 		mc.APIKey = key
+	}
+	if o.cfg != nil {
+		if override, ok := o.cfg.Providers[provider]; ok && override.BaseURL != "" {
+			mc.BaseURL = override.BaseURL
+		}
 	}
 	p, err := agent.BuildProvider(mc)
 	if err != nil {

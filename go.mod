@@ -5,6 +5,7 @@ go 1.26.0
 replace github.com/spawn08/chronos => ../chronos
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0

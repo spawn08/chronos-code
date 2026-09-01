@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestFrameTiming_Stats_Empty(t *testing.T) {
@@ -111,6 +114,39 @@ func TestInvalidateRenderCache(t *testing.T) {
 	m.invalidateRenderCache()
 	if m.renderedBlocks != nil {
 		t.Errorf("renderedBlocks = %v after invalidate, want nil", m.renderedBlocks)
+	}
+}
+
+// TestHandleKey_AltEnterQueuesWhileSending covers AC-2: Alt+Enter while a
+// turn is streaming captures the input into queuedMessage instead of
+// inserting a newline.
+func TestHandleKey_AltEnterQueuesWhileSending(t *testing.T) {
+	ta := textarea.New()
+	ta.SetValue("follow-up message")
+	m := &appModel{input: ta, sending: true}
+
+	_, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+
+	if m.queuedMessage != "follow-up message" {
+		t.Errorf("queuedMessage = %q, want %q", m.queuedMessage, "follow-up message")
+	}
+	if m.input.Value() != "" {
+		t.Errorf("input.Value() = %q after queuing, want empty", m.input.Value())
+	}
+}
+
+// TestHandleKey_AltEnterDoesNotQueueWhenIdle covers the negative case: with
+// no turn streaming, Alt+Enter must not touch queuedMessage (it falls
+// through to the textarea's own insert-newline binding instead).
+func TestHandleKey_AltEnterDoesNotQueueWhenIdle(t *testing.T) {
+	ta := textarea.New()
+	ta.SetValue("still typing")
+	m := &appModel{input: ta, sending: false}
+
+	_, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+
+	if m.queuedMessage != "" {
+		t.Errorf("queuedMessage = %q, want empty when not sending", m.queuedMessage)
 	}
 }
 
