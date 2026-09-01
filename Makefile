@@ -11,13 +11,34 @@ LDFLAGS  := -s -w \
 	-X '$(MODULE)/internal/cli.Commit=$(COMMIT)' \
 	-X '$(MODULE)/internal/cli.BuildDate=$(BUILD_DATE)'
 
-CGO_ENABLED := 1
+CGO_ENABLED ?= 1
 
-.PHONY: build test fmt vet tidy clean install eval
+SIZE_LIMIT  := 36700160
+
+.PHONY: build build-release test lint size-check fmt vet tidy clean install eval
 
 build:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) go build -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
+
+build-release:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+		-ldflags="-s -w -X '$(MODULE)/internal/cli.Version=$(VERSION)' -X '$(MODULE)/internal/cli.Commit=$(COMMIT)' -X '$(MODULE)/internal/cli.BuildDate=$(BUILD_DATE)'" \
+		-o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
+
+lint:
+	golangci-lint run ./...
+
+size-check: build-release
+	@SIZE=$$(stat -f%z $(BIN_DIR)/$(BINARY) 2>/dev/null || stat -c%s $(BIN_DIR)/$(BINARY)); \
+	echo "Binary size: $$SIZE bytes ($$(( SIZE / 1048576 )) MB)"; \
+	if [ "$$SIZE" -gt "$(SIZE_LIMIT)" ]; then \
+		echo "FAIL: binary exceeds $(SIZE_LIMIT) bytes"; exit 1; \
+	fi; \
+	if [ "$$SIZE" -gt 20971520 ]; then \
+		echo "WARN: binary exceeds 20 MB target ($(SIZE_LIMIT) byte gate active)"; \
+	fi
 
 test:
 	go test ./... -race -count=1

@@ -25,6 +25,23 @@ var keys = keyMap{
 const helpText = `Commands:
   /agents            List all agents
   /agent <id>        Switch to agent
+  /model                       Show active model + known models with context windows
+  /model <provider> <model>    Switch the active agent's model
+  /model <model>                Switch by model ID alone (only if unambiguous)
+  /login                        Interactive login picker (arrow keys)
+  /login openai subscription   Sign in with a ChatGPT Plus/Pro subscription
+                                (browser login, no API key needed)
+  /login <provider> <api-key>  Store an API key directly
+  /login <provider> oauth <client-id> <auth-url> <token-url>
+                                Bring-your-own-IdP OAuth login (enterprise)
+
+  Note: there is no "sign in with Claude subscription" flow for Anthropic —
+  Anthropic disabled third-party subscription OAuth in April 2026. Use an
+  API key, or /login's "Use existing login" if Claude Code is already
+  installed and logged in on this machine.
+  /logout <provider>           Remove a stored credential
+  /whoami [provider]           Show which credential source is active
+  /context           Show active model, context window, and token usage
   /stream            Toggle streaming on/off
   /session           Show current session and recent history
   /memory            List remembered project/user/feedback notes

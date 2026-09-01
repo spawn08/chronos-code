@@ -1,0 +1,44 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - unused
+    - ineffassign
+  settings:
+    errcheck:
+      exclude-functions:
+        - "fmt.Fprint"
+        - "fmt.Fprintf"
+        - "fmt.Fprintln"
+        - "fmt.Scanln"
+        - "fmt.Sscanf"
+        - "(*net/http.Server).Shutdown"
+        - "os.RemoveAll"
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck]
+      - source: "defer "
+        linters: [errcheck]
+      - source: "\\.(Close|Shutdown)\\("
+        linters: [errcheck]
+      # Pre-existing issues — tracked for cleanup in later plans
+      - path: internal/cli/root\.go
+        text: "debugMode"
+        linters: [unused]
+      - path: internal/server/handlers\.go
+        text: "resolveCtx"
+        linters: [unused]
+      - path: internal/tui/styles\.go
+        text: "colorAccent|styleKeyHint"
+        linters: [unused]
+      - path: internal/incctx/incctx\.go
+        text: "S1033"
+        linters: [staticcheck]

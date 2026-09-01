@@ -32,12 +32,32 @@ type ProviderOAuthConfig struct {
 	// RedirectPort is the local loopback callback port used by LoginPKCE,
 	// e.g. 8765.
 	RedirectPort int
+	// RedirectPath is the loopback callback path, e.g. "/callback". Empty
+	// defaults to "/callback" — most providers accept any path on a
+	// registered localhost redirect_uri, but some (e.g. OpenAI's Codex
+	// OAuth client) have it fixed to a specific value as part of the
+	// client's own registration.
+	RedirectPath string
+	// ExtraAuthParams are appended verbatim to the PKCE authorization
+	// URL's query string, for providers whose OAuth app requires
+	// non-standard flags beyond the OAuth2 core spec (e.g. OpenAI's Codex
+	// client requires id_token_add_organizations, codex_cli_simplified_flow,
+	// and originator — see subscriptions.go).
+	ExtraAuthParams map[string]string
+}
+
+// redirectPath returns cfg.RedirectPath, defaulting to "/callback".
+func (cfg ProviderOAuthConfig) redirectPath() string {
+	if cfg.RedirectPath == "" {
+		return "/callback"
+	}
+	return cfg.RedirectPath
 }
 
 // redirectURI is the loopback callback URL LoginPKCE listens on and
 // advertises to the authorization server.
 func (cfg ProviderOAuthConfig) redirectURI() string {
-	return fmt.Sprintf("http://127.0.0.1:%d/callback", cfg.RedirectPort)
+	return fmt.Sprintf("http://127.0.0.1:%d%s", cfg.RedirectPort, cfg.redirectPath())
 }
 
 // oauth2Config adapts cfg to golang.org/x/oauth2's Config, which this
@@ -98,6 +118,9 @@ func buildAuthURL(cfg ProviderOAuthConfig, state, codeChallenge string) string {
 		"code_challenge":        {codeChallenge},
 		"code_challenge_method": {"S256"},
 	}
+	for k, val := range cfg.ExtraAuthParams {
+		v.Set(k, val)
+	}
 	return cfg.AuthURL + "?" + v.Encode()
 }
 
@@ -126,10 +149,10 @@ type pkceCallbackResult struct {
 
 // startPKCECallbackServer starts (but does not block on) a localhost HTTP
 // server on 127.0.0.1:port that accepts exactly one OAuth redirect
-// callback on "/" or "/callback", validates the returned state, and
-// reports the outcome on the returned channel. The server shuts itself
-// down immediately after handling that one callback.
-func startPKCECallbackServer(port int, state string) (<-chan pkceCallbackResult, *http.Server) {
+// callback on "/" or path, validates the returned state, and reports the
+// outcome on the returned channel. The server shuts itself down
+// immediately after handling that one callback.
+func startPKCECallbackServer(port int, path, state string) (<-chan pkceCallbackResult, *http.Server) {
 	resultCh := make(chan pkceCallbackResult, 1)
 	mux := http.NewServeMux()
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), Handler: mux}
@@ -152,7 +175,9 @@ func startPKCECallbackServer(port int, state string) (<-chan pkceCallbackResult,
 		go srv.Shutdown(context.Background())
 	}
 	mux.HandleFunc("/", handler)
-	mux.HandleFunc("/callback", handler)
+	if path != "/" {
+		mux.HandleFunc(path, handler)
+	}
 	return resultCh, srv
 }
 
@@ -203,7 +228,7 @@ func LoginPKCE(ctx context.Context, store *Store, cfg ProviderOAuthConfig, onPro
 		return err
 	}
 
-	resultCh, srv := startPKCECallbackServer(cfg.RedirectPort, state)
+	resultCh, srv := startPKCECallbackServer(cfg.RedirectPort, cfg.redirectPath(), state)
 	serveErrCh := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

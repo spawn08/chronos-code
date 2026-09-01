@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -18,7 +19,9 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 
+	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
@@ -70,6 +73,23 @@ type chatDoneMsg struct {
 
 type shellDoneMsg struct{ err error }
 
+// oauthEvent carries one step of an in-flight /login <provider> oauth flow:
+// either the authorization URL (as soon as it's known, so the TUI can show
+// it even if the automatic browser-open fails, e.g. over SSH) or the final
+// outcome. oauthEventMsg re-arms listenOAuth after a non-final event, the
+// same self-reissuing pattern streamDeltaMsg/listenStream use for chat
+// streaming.
+type oauthEvent struct {
+	url  string
+	done bool
+	err  error
+}
+
+type oauthEventMsg struct {
+	ev oauthEvent
+	ch <-chan oauthEvent
+}
+
 // appModel is the interactive REPL's tea.Model. Pointer receivers throughout
 // (rather than the copy-and-return style some bubbletea examples use) since
 // several fields (viewport.Model, textarea.Model) carry meaningful internal
@@ -94,11 +114,18 @@ type appModel struct {
 	activeToolLines []string
 	lastChunk       string
 	lastUsage       model.Usage
-	sending         bool
+	// lastKnownUsage persists the most recent non-zero lastUsage across
+	// turns (finalizeTurn zeroes lastUsage itself once each turn's status
+	// line is computed), so /context and the status bar's context-usage
+	// segment have something to show between turns, not just immediately
+	// after one completes.
+	lastKnownUsage model.Usage
+	sending        bool
 
 	statusMsg string
 
 	approval *pendingApproval
+	wizard   *loginWizard
 
 	searching     bool
 	searchQuery   string
@@ -232,6 +259,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendError(msg.err)
 		}
 		return m, nil
+
+	case oauthEventMsg:
+		return m.handleOAuthEvent(msg)
 	}
 
 	return m, nil
@@ -245,6 +275,9 @@ func (m *appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.approval != nil {
 		return m.handleApprovalKey(msg)
+	}
+	if m.wizard != nil {
+		return m.handleWizardKey(msg)
 	}
 	if m.searching {
 		return m.handleSearchKey(msg)
@@ -476,6 +509,31 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.appendSystem(fmt.Sprintf("switched to %s", arg))
 			m.refreshPrompt()
 		}
+	case "/model":
+		m.handleModelCommand(arg)
+	case "/login":
+		if arg == "" {
+			m.wizard = newLoginWizard(m)
+			m.viewport.SetContent(m.renderTranscript())
+			return m, nil
+		}
+		if cmd := m.handleLoginCommand(arg); cmd != nil {
+			return m, cmd
+		}
+	case "/logout":
+		if arg == "" {
+			m.appendError(fmt.Errorf("usage: /logout <provider>"))
+			break
+		}
+		if err := m.orch.Logout(arg); err != nil {
+			m.appendError(err)
+		} else {
+			m.appendSystem(fmt.Sprintf("logged out of %q", arg))
+		}
+	case "/whoami":
+		m.handleWhoamiCommand(arg)
+	case "/context":
+		m.handleContextCommand()
 	case "/stream":
 		m.stream = !m.stream
 		m.appendSystem(fmt.Sprintf("streaming: %v", m.stream))
@@ -524,6 +582,280 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 	return m, nil
+}
+
+// handleModelCommand implements /model. With no argument it shows the
+// active agent's current provider/model (with its context window, if
+// known), then a model list — fetched live from the active provider's own
+// API when that provider supports it and a credential is resolvable
+// (Orchestrator.ListActiveProviderModels), clearly labeled as such.
+// Otherwise it falls back to modelinfo's static registry, but restricted
+// to providers Orchestrator.AuthorizedProviders confirms are actually
+// usable right now — never the full catalog regardless of what's
+// configured, since a wall of models you can't use is noise, not help. If
+// nothing is authorized at all, it says so instead of listing anything.
+// Context window size is never available from either vendor's API, so
+// that one field always comes from the static table regardless of which
+// list is shown. With an argument it switches the active agent's model
+// via Orchestrator.SwitchModel, which resolves credentials through the
+// full auth precedence chain automatically.
+func (m *appModel) handleModelCommand(arg string) {
+	if arg == "" {
+		provider, modelID := m.orch.ActiveModelInfo()
+		var b strings.Builder
+		fmt.Fprintf(&b, "active: %s / %s", provider, modelID)
+		if info, ok := modelinfo.Lookup(provider, modelID); ok {
+			fmt.Fprintf(&b, "  (context window: %s tokens)", formatTokenCount(info.ContextWindow))
+		}
+		b.WriteString("\n\n")
+
+		fetchCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+		list, live := m.orch.ListActiveProviderModels(fetchCtx)
+		cancel()
+		switch {
+		case live:
+			fmt.Fprintf(&b, "models (live from %s API):\n", provider)
+		default:
+			authorized := m.orch.AuthorizedProviders(m.ctx, distinctProviders(modelinfo.All()))
+			list = filterByProviders(modelinfo.All(), authorized)
+			if len(list) == 0 {
+				b.WriteString("no provider is authorized yet — run /login to add one.")
+				m.appendSystem(strings.TrimRight(b.String(), "\n"))
+				return
+			}
+			b.WriteString("models (static registry, authorized providers only):\n")
+		}
+		for _, i := range list {
+			fmt.Fprintf(&b, "  %-11s %-30s %s tokens\n", i.Provider, i.Model, formatTokenCount(i.ContextWindow))
+		}
+		b.WriteString("\nswitch with: /model <provider> <model>  (or /model <model> if it's unambiguous)")
+		m.appendSystem(strings.TrimRight(b.String(), "\n"))
+		return
+	}
+
+	parts := strings.Fields(arg)
+	var provider, modelID string
+	switch len(parts) {
+	case 1:
+		info, ok := modelinfo.LookupByModel(parts[0])
+		if !ok {
+			m.appendError(fmt.Errorf("model %q is unknown or ambiguous; specify a provider: /model <provider> %s", parts[0], parts[0]))
+			return
+		}
+		provider, modelID = info.Provider, parts[0]
+	case 2:
+		provider, modelID = parts[0], parts[1]
+	default:
+		m.appendError(fmt.Errorf("usage: /model <provider> <model>"))
+		return
+	}
+
+	if err := m.orch.SwitchModel(m.ctx, provider, modelID); err != nil {
+		m.appendError(err)
+		return
+	}
+	m.appendSystem(fmt.Sprintf("switched to %s / %s", provider, modelID))
+}
+
+// distinctProviders returns the unique provider names present in list, in
+// first-seen order.
+func distinctProviders(list []modelinfo.Info) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, i := range list {
+		if !seen[i.Provider] {
+			seen[i.Provider] = true
+			out = append(out, i.Provider)
+		}
+	}
+	return out
+}
+
+// filterByProviders returns the subset of list whose Provider is in
+// providers.
+func filterByProviders(list []modelinfo.Info, providers []string) []modelinfo.Info {
+	allow := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		allow[p] = true
+	}
+	var out []modelinfo.Info
+	for _, i := range list {
+		if allow[i.Provider] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// handleLoginCommand implements /login <provider> <api-key> (the always-
+// available BYO-key path), /login openai subscription (the ChatGPT
+// browser-login flow — see auth.OpenAICodexSubscriptionConfig for why
+// this is OpenAI-only), and /login <provider> oauth <client-id> <auth-url>
+// <token-url> (bring-your-own-IdP OAuth). It returns a non-nil tea.Cmd
+// only for the two OAuth paths, which run asynchronously so the browser
+// round-trip doesn't block the UI.
+func (m *appModel) handleLoginCommand(arg string) tea.Cmd {
+	parts := strings.Fields(arg)
+	if len(parts) < 2 {
+		m.appendError(fmt.Errorf("usage: /login <provider> <api-key>  or  /login openai subscription  or  /login <provider> oauth <client-id> <auth-url> <token-url>"))
+		return nil
+	}
+	provider := parts[0]
+	if parts[1] == "subscription" {
+		if provider != "openai" {
+			m.appendError(fmt.Errorf("subscription login is only available for openai — Anthropic disabled third-party subscription OAuth in April 2026; use an API key or reuse an existing Claude Code login instead"))
+			return nil
+		}
+		return m.startSubscriptionLogin()
+	}
+	if parts[1] == "oauth" {
+		if len(parts) < 5 {
+			m.appendError(fmt.Errorf("usage: /login <provider> oauth <client-id> <auth-url> <token-url>"))
+			return nil
+		}
+		cfg := auth.ProviderOAuthConfig{
+			Provider:     provider,
+			ClientID:     parts[2],
+			AuthURL:      parts[3],
+			TokenURL:     parts[4],
+			RedirectPort: 8765,
+		}
+		m.appendSystem(fmt.Sprintf("starting OAuth login for %q — opening your browser...", provider))
+		return m.startOAuthLogin(provider, cfg)
+	}
+
+	apiKey := parts[1]
+	if err := m.orch.Login(m.ctx, provider, apiKey); err != nil {
+		m.appendError(err)
+		return nil
+	}
+	m.appendSystem(fmt.Sprintf("stored API key for %q", provider))
+	return nil
+}
+
+// startSubscriptionLogin kicks off the OpenAI/ChatGPT subscription browser
+// login. See auth.OpenAICodexSubscriptionConfig's doc comment for why this
+// exists only for OpenAI and not Anthropic.
+func (m *appModel) startSubscriptionLogin() tea.Cmd {
+	m.appendSystem("starting ChatGPT subscription login — opening your browser...")
+	return m.startOAuthLogin("openai", auth.OpenAICodexSubscriptionConfig())
+}
+
+// startOAuthLogin runs Orchestrator.LoginOAuth on a background goroutine,
+// relaying its onPromptURL callback and final result back to Update via
+// oauthEventMsg — the same self-reissuing channel pattern listenStream
+// uses for chat streaming, since a tea.Cmd can only return one message per
+// invocation.
+func (m *appModel) startOAuthLogin(provider string, cfg auth.ProviderOAuthConfig) tea.Cmd {
+	ch := make(chan oauthEvent, 2)
+	go func() {
+		err := m.orch.LoginOAuth(m.ctx, cfg, func(url string) { ch <- oauthEvent{url: url} })
+		ch <- oauthEvent{done: true, err: err}
+	}()
+	return listenOAuth(ch)
+}
+
+func listenOAuth(ch <-chan oauthEvent) tea.Cmd {
+	return func() tea.Msg {
+		return oauthEventMsg{ev: <-ch, ch: ch}
+	}
+}
+
+func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
+	if msg.ev.url != "" {
+		m.appendSystem("open this URL to sign in:\n  " + msg.ev.url)
+		m.viewport.SetContent(m.renderTranscript())
+		m.viewport.GotoBottom()
+		return m, listenOAuth(msg.ch)
+	}
+	if msg.ev.err != nil {
+		m.appendError(msg.ev.err)
+	} else {
+		m.appendSystem("OAuth login complete")
+	}
+	m.viewport.SetContent(m.renderTranscript())
+	m.viewport.GotoBottom()
+	return m, nil
+}
+
+// handleWhoamiCommand implements /whoami [provider]: with no argument it
+// reports the active agent's own provider (the credential that actually
+// matters for what you're doing right now), falling back to anthropic and
+// openai if no agent/model is active yet.
+func (m *appModel) handleWhoamiCommand(arg string) {
+	var providers []string
+	switch {
+	case arg != "":
+		providers = []string{arg}
+	default:
+		if p, _ := m.orch.ActiveModelInfo(); p != "" {
+			providers = []string{p}
+		} else {
+			providers = []string{"anthropic", "openai"}
+		}
+	}
+	var b strings.Builder
+	for _, p := range providers {
+		fmt.Fprintln(&b, m.orch.AuthStatusLine(m.ctx, p))
+	}
+	m.appendSystem(strings.TrimRight(b.String(), "\n"))
+}
+
+// handleContextCommand implements /context: active model, its known
+// context window (if any), the most recent turn's token usage, and the
+// session-wide budget line.
+func (m *appModel) handleContextCommand() {
+	provider, modelID := m.orch.ActiveModelInfo()
+	var b strings.Builder
+	fmt.Fprintf(&b, "model: %s / %s\n", provider, modelID)
+	if info, ok := modelinfo.Lookup(provider, modelID); ok {
+		fmt.Fprintf(&b, "context window: %s tokens\n", formatTokenCount(info.ContextWindow))
+	} else {
+		b.WriteString("context window: unknown (model not in registry)\n")
+	}
+	if m.lastKnownUsage.PromptTokens > 0 || m.lastKnownUsage.CompletionTokens > 0 {
+		fmt.Fprintf(&b, "last turn: %d prompt + %d completion = %d total\n",
+			m.lastKnownUsage.PromptTokens, m.lastKnownUsage.CompletionTokens,
+			m.lastKnownUsage.PromptTokens+m.lastKnownUsage.CompletionTokens)
+	}
+	if status := m.orch.BudgetStatusLine(); status != "" {
+		fmt.Fprintln(&b, status)
+	}
+	m.appendSystem(strings.TrimRight(b.String(), "\n"))
+}
+
+// formatTokenCount renders a token count compactly (e.g. "12.3k", "1.0M")
+// for status bar / picker display; non-positive counts (the modelinfo
+// "unknown" sentinel) render as "unknown" rather than "0".
+func formatTokenCount(n int) string {
+	switch {
+	case n <= 0:
+		return "unknown"
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// contextUsageSegment renders a compact "ctx used/window (pct%)" status bar
+// fragment from the most recent turn's usage, or "" if no turn has
+// completed yet. The window comes from modelinfo; an unregistered model
+// still shows the used-token count, just without a window/percentage.
+func (m *appModel) contextUsageSegment() string {
+	used := m.lastKnownUsage.PromptTokens + m.lastKnownUsage.CompletionTokens
+	if used == 0 {
+		return ""
+	}
+	provider, modelID := m.orch.ActiveModelInfo()
+	info, ok := modelinfo.Lookup(provider, modelID)
+	if !ok || info.ContextWindow <= 0 {
+		return "ctx " + formatTokenCount(used)
+	}
+	pct := int(float64(used) / float64(info.ContextWindow) * 100)
+	return fmt.Sprintf("ctx %s/%s (%d%%)", formatTokenCount(used), formatTokenCount(info.ContextWindow), pct)
 }
 
 // refreshPrompt updates the input box's prompt to show the currently active
@@ -578,6 +910,7 @@ func (m *appModel) finalizeTurn(err error) {
 		m.blocks = append(m.blocks, b.String())
 	}
 	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 {
+		m.lastKnownUsage = m.lastUsage
 		m.statusMsg = fmt.Sprintf("tokens: %d prompt + %d completion = %d total",
 			m.lastUsage.PromptTokens, m.lastUsage.CompletionTokens,
 			m.lastUsage.PromptTokens+m.lastUsage.CompletionTokens)
@@ -617,6 +950,8 @@ func (m *appModel) View() string {
 	switch {
 	case m.approval != nil:
 		bottom = m.renderApprovalModal()
+	case m.wizard != nil:
+		bottom = m.renderWizardModal()
 	case m.searching:
 		bottom = m.renderSearchOverlay()
 	default:
@@ -634,6 +969,9 @@ func (m *appModel) View() string {
 // overflow by its padding width and wrap onto a second line).
 func (m *appModel) renderHeaderBar() string {
 	left := " ◆ chronos-code "
+	if provider, modelID := m.orch.ActiveModelInfo(); modelID != "" {
+		left = " ◆ chronos-code · " + provider + "/" + modelID + " "
+	}
 	right := ""
 	if m.workDir != "" {
 		dir := m.workDir
@@ -696,7 +1034,11 @@ func (m *appModel) renderStatusBar() string {
 	if m.stream {
 		streamLabel = "stream"
 	}
-	leftText := " ● " + m.orch.ActiveID() + " │ " + streamLabel + " "
+	leftText := " ● " + m.orch.ActiveID() + " │ " + streamLabel
+	if ctxSeg := m.contextUsageSegment(); ctxSeg != "" {
+		leftText += " │ " + ctxSeg
+	}
+	leftText += " "
 	leftSeg := styleStatusLeft.Render(leftText)
 
 	var rightParts []string

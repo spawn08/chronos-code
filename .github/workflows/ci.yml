@@ -9,6 +9,31 @@ permissions:
   contents: read
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout chronos-code
+        uses: actions/checkout@v4
+        with:
+          path: chronos-code
+
+      - name: Checkout chronos (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: spawn08/chronos
+          path: chronos
+          token: ${{ secrets.CHRONOS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: chronos-code/go.sum
+
+      - name: Build release binary
+        working-directory: chronos-code
+        run: make build-release
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -30,9 +55,12 @@ jobs:
           go-version: '1.24'
           cache-dependency-path: chronos-code/go.sum
 
-      - name: Vet
-        working-directory: chronos-code
-        run: go vet ./...
+      - name: Install golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.13.2
+          working-directory: chronos-code
+          args: ./...
 
       - name: Check formatting
         working-directory: chronos-code
@@ -64,6 +92,32 @@ jobs:
       - name: Test
         working-directory: chronos-code
         run: make test
+
+  size-gate:
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Checkout chronos-code
+        uses: actions/checkout@v4
+        with:
+          path: chronos-code
+
+      - name: Checkout chronos (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: spawn08/chronos
+          path: chronos
+          token: ${{ secrets.CHRONOS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: chronos-code/go.sum
+
+      - name: Check binary size
+        working-directory: chronos-code
+        run: make size-check
 
   eval:
     runs-on: ubuntu-latest

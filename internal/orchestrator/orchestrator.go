@@ -30,6 +30,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/incctx"
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/projectdocs"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
@@ -841,6 +842,153 @@ func (o *Orchestrator) SwitchAgent(id string) error {
 
 func (o *Orchestrator) ActiveAgent() *agent.Agent {
 	return o.agents[o.active]
+}
+
+// ActiveModelInfo returns the active agent's current provider name and
+// model ID (model.Provider.Name()/Model()), for TUI display (e.g. the
+// header bar and /model command) — it reflects whatever SwitchModel last
+// set, not just the YAML the agent was originally built from.
+func (o *Orchestrator) ActiveModelInfo() (provider, modelID string) {
+	a := o.ActiveAgent()
+	if a == nil || a.Model == nil {
+		return "", ""
+	}
+	return a.Model.Name(), a.Model.Model()
+}
+
+// SwitchModel rebuilds the active agent's model provider against
+// (provider, modelID), resolving credentials through auth.Resolve's full
+// precedence chain (ROADMAP.md §5.3) exactly as applyStoredCredentials does
+// at startup — so switching models in a running TUI session picks up
+// env vars, chronos-code's own login, or a reused Claude Code/Codex
+// credential the same way the initial build did. It takes effect
+// immediately; there is no need to restart or rebuild the Orchestrator.
+func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string) error {
+	a := o.ActiveAgent()
+	if a == nil {
+		return fmt.Errorf("no active agent")
+	}
+	mc := agent.ModelConfig{Provider: provider, Model: modelID}
+	if key := auth.Resolve(ctx, auth.NewStore(), provider).Token; key != "" {
+		mc.APIKey = key
+	}
+	p, err := agent.BuildProvider(mc)
+	if err != nil {
+		return fmt.Errorf("build provider for %s/%s: %w", provider, modelID, err)
+	}
+	a.Model = p
+	return nil
+}
+
+// Login stores an API-key credential for provider (ROADMAP.md §5.3's
+// simplest, always-available auth path) and, if provider matches the
+// active agent's current provider, immediately rebuilds its model provider
+// so the new credential takes effect without restarting the session.
+func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error {
+	if err := auth.LoginAPIKey(auth.NewStore(), provider, apiKey); err != nil {
+		return err
+	}
+	if activeProvider, modelID := o.ActiveModelInfo(); activeProvider == provider && modelID != "" {
+		return o.SwitchModel(ctx, provider, modelID)
+	}
+	return nil
+}
+
+// LoginOAuth runs a bring-your-own-IdP OAuth Authorization Code + PKCE flow
+// (internal/auth.LoginPKCE). chronos-code has no built-in "Sign in with
+// Anthropic/OpenAI" client of its own — every endpoint and client_id must
+// be supplied by the caller, so this only works for an enterprise's own IdP
+// app registration or one the user has already set up. onPromptURL is
+// called with the authorization URL to show the user (e.g. print it in the
+// TUI); LoginOAuth also always attempts to open it in the system browser.
+func (o *Orchestrator) LoginOAuth(ctx context.Context, cfg auth.ProviderOAuthConfig, onPromptURL func(string)) error {
+	return auth.LoginPKCE(ctx, auth.NewStore(), cfg, onPromptURL)
+}
+
+// Logout removes provider's stored chronos-code credential. It has no
+// effect on a credential reused from ~/.claude or ~/.codex (those belong to
+// the other CLI, not chronos-code) or on env-var-based auth.
+func (o *Orchestrator) Logout(provider string) error {
+	return auth.Logout(auth.NewStore(), provider)
+}
+
+// ExternalLogin identifies a provider whose credential chronos-code is
+// reusing from an already-installed Claude Code / Codex CLI login, rather
+// than one it obtained itself.
+type ExternalLogin struct {
+	Provider string
+	Label    string
+}
+
+// DetectedExternalLogins reports which providers have a reusable existing
+// Claude Code / Codex CLI login on this machine (the "~/.claude" /
+// "~/.codex" reuse link of the ROADMAP.md §5.3 precedence chain) — e.g. so
+// /login's interactive picker only offers "use my existing login" when
+// there's actually one to use, and never a brand-new sign-in flow this
+// tool has no OAuth client of its own to perform.
+func (o *Orchestrator) DetectedExternalLogins() []ExternalLogin {
+	var found []ExternalLogin
+	if _, err := auth.LoadClaudeCodeCredential(); err == nil {
+		found = append(found, ExternalLogin{Provider: "anthropic", Label: "anthropic — via existing Claude Code login"})
+	}
+	if _, err := auth.LoadCodexCredential(); err == nil {
+		found = append(found, ExternalLogin{Provider: "openai", Label: "openai — via existing Codex CLI login"})
+	}
+	return found
+}
+
+// AuthorizedProviders returns the subset of candidates that currently
+// resolve to a non-empty credential (env var, chronos-code's own login, or
+// an external CLI reuse) via auth.Resolve. It makes no network calls —
+// just local env/keychain/file checks — so it's cheap to call on every
+// /model invocation, e.g. to decide which of modelinfo's static entries
+// are actually worth showing rather than dumping the whole catalog
+// regardless of whether any of it is usable.
+func (o *Orchestrator) AuthorizedProviders(ctx context.Context, candidates []string) []string {
+	store := auth.NewStore()
+	var out []string
+	for _, p := range candidates {
+		if auth.Resolve(ctx, store, p).Token != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ListActiveProviderModels attempts to fetch a live model list for the
+// active agent's provider using its resolved credential
+// (modelinfo.FetchLive) — real model IDs from the vendor's own API, not a
+// hardcoded list. It reports ok=false (never an error the caller must
+// handle) when the provider has no supported live-listing endpoint, no
+// credential is currently resolvable, or the request fails for any reason
+// (network, timeout, auth); callers should fall back to modelinfo.All() in
+// that case, which is the pre-existing, always-available static registry.
+func (o *Orchestrator) ListActiveProviderModels(ctx context.Context) (models []modelinfo.Info, ok bool) {
+	provider, _ := o.ActiveModelInfo()
+	if provider == "" {
+		return nil, false
+	}
+	key := auth.Resolve(ctx, auth.NewStore(), provider).Token
+	if key == "" {
+		return nil, false
+	}
+	list, err := modelinfo.FetchLive(ctx, provider, key)
+	if err != nil {
+		return nil, false
+	}
+	return list, true
+}
+
+// AuthStatusLine reports which link of provider's authentication
+// precedence chain (auth.Resolve, ROADMAP.md §5.3) is currently effective,
+// for TUI display (e.g. /whoami and the header bar) — never the token
+// itself.
+func (o *Orchestrator) AuthStatusLine(ctx context.Context, provider string) string {
+	rc := auth.Resolve(ctx, auth.NewStore(), provider)
+	if rc.Source == auth.SourceNone {
+		return fmt.Sprintf("%s: not authenticated", provider)
+	}
+	return fmt.Sprintf("%s: %s (%s)", provider, rc.Source, rc.Method)
 }
 
 func (o *Orchestrator) ActiveID() string {
