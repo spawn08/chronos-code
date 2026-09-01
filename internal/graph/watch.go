@@ -100,6 +100,11 @@ func (w *Watcher) loop(ctx context.Context) {
 	}
 }
 
+// reindex calls IndexFile once per changed directory. IndexFile itself
+// checks each file's content hash before doing any real work, so a save
+// event where an editor rewrote a file without changing its bytes (a
+// common touch-on-save pattern) is cheap here rather than needing its own
+// hash check in this loop.
 func (w *Watcher) reindex(ctx context.Context, paths []string) {
 	seenDirs := make(map[string]struct{})
 	for _, p := range paths {

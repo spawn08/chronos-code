@@ -184,6 +184,13 @@ type appModel struct {
 
 	approval *pendingApproval
 	wizard   *loginWizard
+	picker   *picker
+
+	// queuedMessage holds a message typed with Alt+Enter while a turn was
+	// still streaming (m.sending); finalizeTurn dispatches it once that
+	// turn completes, so the user doesn't have to wait to start typing the
+	// next message.
+	queuedMessage string
 
 	searching     bool
 	searchQuery   string
@@ -222,6 +229,11 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		workDir: wd,
 	}
 
+	// NOTE: plan_07 (Kitty keyboard protocol) called for tea.WithKittyKeyboard()
+	// here. That option does not exist in charmbracelet/bubbletea v1.3.10 (the
+	// version pinned in go.mod) — the library has no Kitty keyboard protocol
+	// support at all as of this release. AC-1 is blocked on an upstream
+	// bubbletea release; see .ppd/chronos-code-v1/plans/plan_07.md.
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	installApprovalHandlers(orch, NewApprovalHandler(p))
 
@@ -299,8 +311,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleStreamDelta(msg)
 
 	case streamDoneMsg:
-		m.finalizeTurn(nil)
-		return m, nil
+		return m, m.finalizeTurn(nil)
 
 	case chatDoneMsg:
 		if msg.resp != nil {
@@ -310,8 +321,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeAgentText.WriteString(msg.resp.Content)
 			m.lastUsage = msg.resp.Usage
 		}
-		m.finalizeTurn(msg.err)
-		return m, nil
+		return m, m.finalizeTurn(msg.err)
 
 	case shellDoneMsg:
 		if msg.err != nil {
@@ -338,6 +348,9 @@ func (m *appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.wizard != nil {
 		return m.handleWizardKey(msg)
 	}
+	if m.picker != nil {
+		return m.handlePickerKey(msg)
+	}
 	if m.searching {
 		return m.handleSearchKey(msg)
 	}
@@ -350,6 +363,20 @@ func (m *appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input.Reset()
 		return m.handleSubmit(line)
+	case msg.String() == "alt+enter" && m.sending:
+		m.queuedMessage = m.input.Value()
+		m.input.Reset()
+		m.statusMsg = "queued — will send after the current turn finishes"
+		return m, nil
+	case key.Matches(msg, keys.AgentPicker):
+		m.picker = newAgentPicker(m)
+		return m, nil
+	case key.Matches(msg, keys.ModelPicker):
+		m.picker = newModelPicker(m)
+		return m, nil
+	case key.Matches(msg, keys.CommandPalette):
+		m.picker = newCommandPalette()
+		return m, nil
 	case key.Matches(msg, keys.HistoryPrev):
 		if !strings.Contains(m.input.Value(), "\n") {
 			if v, ok := m.history.Prev(m.input.Value()); ok {
@@ -498,8 +525,7 @@ func listenStream(ch <-chan *model.ChatResponse) tea.Cmd {
 func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	resp := msg.resp
 	if resp.Err != nil {
-		m.finalizeTurn(resp.Err)
-		return m, nil
+		return m, m.finalizeTurn(resp.Err)
 	}
 	if resp.Usage.PromptTokens > 0 {
 		m.lastUsage = resp.Usage
@@ -955,8 +981,10 @@ func (m *appModel) appendError(err error) {
 // finalizeTurn closes out the in-progress agent turn (streamed or not),
 // folding activeAgentText/activeToolLines into a permanent transcript block
 // and resetting the in-progress state. err, if non-nil, replaces the turn
-// with an error block instead.
-func (m *appModel) finalizeTurn(err error) {
+// with an error block instead. If the user queued a follow-up message with
+// Alt+Enter while this turn was still streaming, it is dispatched now via
+// the returned tea.Cmd — the same path a typed Enter would use.
+func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.sending = false
 	if err != nil {
 		m.blocks = append(m.blocks, styleError.Render("error: "+err.Error()))
@@ -986,6 +1014,14 @@ func (m *appModel) finalizeTurn(err error) {
 	m.lastUsage = model.Usage{}
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
+
+	if m.queuedMessage == "" {
+		return nil
+	}
+	queued := m.queuedMessage
+	m.queuedMessage = ""
+	_, cmd := m.handleSubmit(queued)
+	return cmd
 }
 
 func (m *appModel) renderTranscript() string {
@@ -1042,6 +1078,8 @@ func (m *appModel) View() string {
 		bottom = m.renderApprovalModal()
 	case m.wizard != nil:
 		bottom = m.renderWizardModal()
+	case m.picker != nil:
+		bottom = m.renderPickerModal()
 	case m.searching:
 		bottom = m.renderSearchOverlay()
 	default:
@@ -1135,7 +1173,7 @@ func (m *appModel) renderStatusBar() string {
 	if m.statusMsg != "" {
 		rightParts = append(rightParts, m.statusMsg)
 	}
-	rightParts = append(rightParts, "ctrl+c quit")
+	rightParts = append(rightParts, "ctrl+a agents │ ctrl+/ palette │ ctrl+c quit")
 	rightText := " " + strings.Join(rightParts, " │ ") + " "
 	rightSeg := styleStatusRight.Render(rightText)
 

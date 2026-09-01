@@ -60,6 +60,8 @@ func Execute() error {
 		return runLogout()
 	case "whoami":
 		return runWhoami()
+	case "providers":
+		return runProviders()
 	case "auth":
 		return runAuth()
 	case "session":
@@ -166,6 +168,7 @@ Usage:
   chronos-code login <provider> --api-key <key>  Store a BYO API key
   chronos-code logout <provider>   Remove a stored credential
   chronos-code whoami [provider]   Show the effective credential source
+  chronos-code providers          List built-in and resolvable providers
   chronos-code config show        Print resolved configuration
   chronos-code config validate    Validate all config files
   chronos-code auth login <provider> --api-key <key>   Store a BYO API key
@@ -419,6 +422,33 @@ func runWhoami() error {
 	return nil
 }
 
+// runProviders lists every built-in OAuth provider plus its currently
+// resolvable credential and any configured base_url override. It backs both
+// the top-level `chronos-code providers` command and `chronos-code auth
+// providers` so the two stay identical by construction.
+func runProviders() error {
+	store := auth.NewStore()
+	ctx := context.Background()
+
+	var overrides map[string]config.ProviderOverride
+	if cfg, err := config.Load(configPath); err == nil {
+		overrides = cfg.Providers
+	}
+
+	fmt.Println("built-in OAuth providers:")
+	for _, name := range auth.ListProviders() {
+		fmt.Printf("  %s\n", name)
+	}
+	fmt.Println("\nresolvable credentials:")
+	for _, p := range []string{"anthropic", "openai"} {
+		printResolvedCredential(auth.Resolve(ctx, store, p))
+		if override, ok := overrides[p]; ok && override.BaseURL != "" {
+			fmt.Printf("%-15s base_url: %s\n", "", override.BaseURL)
+		}
+	}
+	return nil
+}
+
 func runAuth() error {
 	if len(os.Args) < 3 {
 		return fmt.Errorf("usage: chronos-code auth [login|logout|status|refresh|whoami|providers]")
@@ -533,15 +563,7 @@ func runAuth() error {
 		return nil
 
 	case "providers":
-		fmt.Println("built-in OAuth providers:")
-		for _, name := range auth.ListProviders() {
-			fmt.Printf("  %s\n", name)
-		}
-		fmt.Println("\nresolvable credentials:")
-		for _, p := range []string{"anthropic", "openai"} {
-			printResolvedCredential(auth.Resolve(ctx, store, p))
-		}
-		return nil
+		return runProviders()
 
 	default:
 		return fmt.Errorf("unknown auth command: %s", os.Args[2])

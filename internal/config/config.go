@@ -24,6 +24,14 @@ type Config struct {
 	Tools     ToolsConfig     `yaml:"tools,omitempty"`
 	Learning  LearningConfig  `yaml:"learning,omitempty"`
 	Server    ServerConfig    `yaml:"server,omitempty"`
+	Providers map[string]ProviderOverride `yaml:"providers,omitempty"`
+}
+
+// ProviderOverride holds per-provider settings that apply regardless of
+// which agent or model is in use, such as routing model calls to an
+// enterprise gateway/proxy instead of the provider's default endpoint.
+type ProviderOverride struct {
+	BaseURL string `yaml:"base_url,omitempty"`
 }
 
 // ServerConfig controls the HTTP server mode (PRD P3-004).
@@ -112,12 +120,14 @@ func Load(configPath string) (*Config, error) {
 	if userDir != "" {
 		if overlay, err := loadFromDir(userDir); err == nil {
 			mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+			base.Providers = mergeProviders(base.Providers, overlay.Providers)
 		}
 	}
 
 	if projectDir != "" {
 		if overlay, err := loadFromDir(projectDir); err == nil {
 			mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+			base.Providers = mergeProviders(base.Providers, overlay.Providers)
 		}
 		if learned, err := loadLearnedAgents(filepath.Join(projectDir, "learned", "agents")); err == nil {
 			base.Agents = mergeLearnedAgents(base.Agents, learned)
@@ -130,6 +140,7 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("load config %s: %w", configPath, err)
 		}
 		mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+		base.Providers = mergeProviders(base.Providers, overlay.Providers)
 	}
 
 	injectSystemPrompts(base)
@@ -265,4 +276,25 @@ func mergeFileConfig(base, overlay *agent.FileConfig) {
 	if overlay.SkillsDir != "" {
 		base.SkillsDir = overlay.SkillsDir
 	}
+}
+
+// mergeProviders overlays provider-level overrides (currently just
+// base_url) onto base, entry by entry, so a project config.yaml can
+// override a single provider's base_url without needing to repeat every
+// other provider the user config or embedded defaults already set.
+func mergeProviders(base, overlay map[string]ProviderOverride) map[string]ProviderOverride {
+	if len(overlay) == 0 {
+		return base
+	}
+	if base == nil {
+		base = make(map[string]ProviderOverride, len(overlay))
+	}
+	for name, ov := range overlay {
+		if ov.BaseURL != "" {
+			existing := base[name]
+			existing.BaseURL = ov.BaseURL
+			base[name] = existing
+		}
+	}
+	return base
 }

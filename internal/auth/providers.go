@@ -14,6 +14,7 @@ var builtinProviders = map[string]ProviderOAuthConfig{
 		Scopes:       []string{"user:inference"},
 		RedirectPort: 8765,
 	},
+	"openai": OpenAICodexSubscriptionConfig(),
 }
 
 // LookupProvider returns the built-in OAuth configuration for a known

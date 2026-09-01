@@ -80,9 +80,10 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS files (
-			path    TEXT PRIMARY KEY,
-			package TEXT NOT NULL,
-			mtime   INTEGER NOT NULL
+			path         TEXT PRIMARY KEY,
+			package      TEXT NOT NULL,
+			mtime        INTEGER NOT NULL,
+			content_hash TEXT NOT NULL DEFAULT ''
 		);
 		CREATE TABLE IF NOT EXISTS packages (
 			name    TEXT PRIMARY KEY,
@@ -114,6 +115,37 @@ func (s *Store) migrate() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate graph store: %w", err)
+	}
+	return s.addContentHashColumn()
+}
+
+// addContentHashColumn adds files.content_hash for graph.db files created
+// before this column existed — CREATE TABLE IF NOT EXISTS above is a no-op
+// against an already-existing files table, so pre-existing databases need
+// this explicit ALTER. SQLite errors on a duplicate column, so check
+// PRAGMA table_info first rather than attempting the ALTER unconditionally.
+func (s *Store) addContentHashColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(files)`)
+	if err != nil {
+		return fmt.Errorf("inspect files schema: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan files schema: %w", err)
+		}
+		if name == "content_hash" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect files schema: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add content_hash column: %w", err)
 	}
 	return nil
 }
@@ -155,6 +187,93 @@ func (s *Store) UpsertFile(ctx context.Context, path, pkg string, mtime int64) e
 		return fmt.Errorf("upsert file %s: %w", path, err)
 	}
 	return nil
+}
+
+// RemoveFile deletes all rows recorded for path — its file-level metadata
+// and its symbols — used to prune files that were removed from disk since
+// the last IndexAll pass now that IndexAll no longer wipes the store first.
+func (s *Store) RemoveFile(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM symbols WHERE file = ?`, path); err != nil {
+		return fmt.Errorf("remove file %s symbols: %w", path, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("remove file %s: %w", path, err)
+	}
+	return nil
+}
+
+// RemovePackage deletes a package's row, used to prune packages whose
+// directory no longer exists on disk since the last IndexAll pass.
+func (s *Store) RemovePackage(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM packages WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("remove package %s: %w", name, err)
+	}
+	return nil
+}
+
+// PruneStaleEdges removes edges whose from_name or to_name no longer
+// matches any indexed symbol. Previously IndexAll's full Reset provided
+// this cleanup for free every pass; incremental IndexAll no longer wipes
+// the edges table, so this replaces that guarantee explicitly.
+func (s *Store) PruneStaleEdges(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM edges
+		WHERE from_name NOT IN (SELECT name FROM symbols)
+		   OR to_name NOT IN (SELECT name FROM symbols)
+	`)
+	if err != nil {
+		return fmt.Errorf("prune stale edges: %w", err)
+	}
+	return nil
+}
+
+// UpsertFileHash records path's current content hash, called after
+// (re)indexing it so the next pass can compare against it via
+// AllFileHashes/FileHash to decide whether the file changed.
+func (s *Store) UpsertFileHash(ctx context.Context, path, hash string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO files (path, package, mtime, content_hash) VALUES (?, '', 0, ?)
+		ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash
+	`, path, hash)
+	if err != nil {
+		return fmt.Errorf("upsert file hash %s: %w", path, err)
+	}
+	return nil
+}
+
+// FileHash returns the stored content hash for path, or "" if path has no
+// recorded hash (never indexed, or indexed before this column existed).
+func (s *Store) FileHash(ctx context.Context, path string) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT content_hash FROM files WHERE path = ?`, path).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query file hash %s: %w", path, err)
+	}
+	return hash, nil
+}
+
+// AllFileHashes bulk-loads every stored path -> content_hash pair with a
+// non-empty hash, for DiffTree-style comparison against a freshly built
+// MerkleTree without one query per file.
+func (s *Store) AllFileHashes(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path, content_hash FROM files WHERE content_hash != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("query file hashes: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var path, hash string
+		if err := rows.Scan(&path, &hash); err != nil {
+			return nil, fmt.Errorf("scan file hash: %w", err)
+		}
+		out[path] = hash
+	}
+	return out, rows.Err()
 }
 
 // UpsertPackage records a package's import list (comma-joined import paths).
