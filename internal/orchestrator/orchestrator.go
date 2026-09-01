@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"github.com/spawn08/chronos/engine/hooks"
@@ -29,9 +30,11 @@ import (
 	"github.com/spawn08/chronos-code/internal/incctx"
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/projectdocs"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/session"
+	"github.com/spawn08/chronos-code/internal/skills"
 	"github.com/spawn08/chronos-code/internal/teambuilder"
 	"github.com/spawn08/chronos-code/internal/toolcompress"
 	"github.com/spawn08/chronos-code/internal/workspace"
@@ -51,13 +54,14 @@ type Orchestrator struct {
 	sessionMgr *session.Manager
 	sessions   map[string]string // agentID -> current sessionID
 
-	router     *router.Router
-	budget     *budget.Tracker
-	memory     *memory.Store
-	workspace  *workspace.Info
-	actBuf     *activation.Buffer
-	attBudget  *attention.Budgeter
-	teams      map[string]*team.Team
+	router             *router.Router
+	budget             *budget.Tracker
+	memory             *memory.Store
+	workspace          *workspace.Info
+	actBuf             *activation.Buffer
+	attBudget          *attention.Budgeter
+	teams              map[string]*team.Team
+	projectDocsWatcher *projectdocs.Watcher
 }
 
 // OpenStorageForCLI opens the same storage.Storage backend New would (per
@@ -82,7 +86,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
 
-	applyStoredCredentials(cfg)
+	applyStoredCredentials(ctx, cfg)
 
 	agents, err := agent.BuildAll(ctx, &cfg.FileConfig)
 	if err != nil {
@@ -121,6 +125,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	wsInfo := setupWorkspace(root, agents)
 
 	memStore := setupMemory(cfg, agents)
+
+	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
+
+	setupSkills(cfg, root, agents)
 
 	rt := setupRouter(cfg, projectDir)
 
@@ -173,47 +181,54 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	}
 
 	return &Orchestrator{
-		agents:     agents,
-		order:      order,
-		active:     active,
-		store:      store,
-		cfg:        cfg,
-		graphStore: graphStore,
-		watcher:    watcher,
-		sessionMgr: sessionMgr,
-		sessions:   sessions,
-		router:     rt,
-		budget:     tracker,
-		memory:     memStore,
-		workspace:  wsInfo,
-		actBuf:     actBuf,
-		attBudget:  attBudget,
-		teams:      teams,
+		agents:             agents,
+		order:              order,
+		active:             active,
+		store:              store,
+		cfg:                cfg,
+		graphStore:         graphStore,
+		watcher:            watcher,
+		sessionMgr:         sessionMgr,
+		sessions:           sessions,
+		router:             rt,
+		budget:             tracker,
+		memory:             memStore,
+		workspace:          wsInfo,
+		actBuf:             actBuf,
+		attBudget:          attBudget,
+		teams:              teams,
+		projectDocsWatcher: pdWatcher,
 	}, nil
 }
 
-// applyStoredCredentials fills in ModelConfig.APIKey from a stored
-// internal/auth credential (PRD P2-010) for any agent (or the shared
-// Defaults block) whose provider has no api_key set in YAML and no
-// corresponding env var override at the point buildProvider resolves it —
-// without this, `chronos-code auth login <provider> --api-key ...` stores a
-// credential that nothing ever reads back, silently having no effect on
-// actual model calls. Only API-key credentials are applied here; OAuth
-// credentials (access tokens) aren't a drop-in replacement for the api_key
-// field chronos's provider constructors expect, so they're left for a
-// future provider-level integration.
-func applyStoredCredentials(cfg *config.Config) {
+// applyStoredCredentials fills in ModelConfig.APIKey from each provider's
+// full authentication precedence chain (ROADMAP.md §5.3: gateway/API-key env
+// vars > chronos-code's own OAuth login > reuse of an existing Claude Code /
+// Codex CLI login > chronos-code's own stored API key) for any agent (or the
+// shared Defaults block) whose provider has no api_key already set in YAML —
+// without this, `chronos-code auth login <provider> ...` stores a credential
+// that nothing ever reads back, silently having no effect on actual model
+// calls.
+//
+// CAVEAT: chronos's provider constructors send ModelConfig.APIKey as
+// whatever bearer/key format that provider's SDK expects for a plain API
+// key (e.g. Anthropic's x-api-key header). An OAuth access token resolved
+// here (chronos-code's own OAuth login, or a reused Claude Code/Codex
+// token) is passed through the same field; whether the provider's HTTP
+// layer accepts it as-is depends on that provider's API — this is the same
+// simplification called out in the prior version of this function, now
+// widened to cover the full chain rather than just the keychain API-key
+// case.
+func applyStoredCredentials(ctx context.Context, cfg *config.Config) {
 	store := auth.NewStore()
-	resolved := make(map[string]string) // provider -> API key (may be "")
+	resolved := make(map[string]string) // provider -> effective token (may be "")
 
 	resolve := func(provider string) string {
 		key, cached := resolved[provider]
 		if cached {
 			return key
 		}
-		if cred, err := store.Load(provider); err == nil && cred != nil && cred.Method == auth.MethodAPIKey {
-			key = cred.APIKey
-		}
+		key = auth.Resolve(ctx, store, provider).Token
 		resolved[provider] = key
 		return key
 	}
@@ -381,6 +396,173 @@ func formatScoredMemories(scored []memory.ScoredRecord) string {
 		fmt.Fprintf(&b, "\n- [%s] %s", sr.Record.Category, content)
 	}
 	return b.String()
+}
+
+// setupProjectDocs discovers AGENTS.md/CLAUDE.md/AGENT.md/.cursorrules/
+// .github/copilot-instructions.md from root down to the current directory
+// (ROADMAP.md §5.4), renders them (summarizing or truncating if they exceed
+// projectdocs.TokenBudget), and injects the result into every agent via
+// ContextPinsFn — chained after any pin function setupMemory already
+// installed, so neither clobbers the other. A background watcher
+// re-renders on any candidate file change without requiring an agent
+// rebuild, since the injected pins read a mutex-guarded pointer rather than
+// a value baked in at startup. Returns nil if there are no instructions
+// files to watch, or if the workspace root can't be established.
+func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent) *projectdocs.Watcher {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = root
+	}
+	bundle, err := projectdocs.Load(root, cwd)
+	if err != nil {
+		fmt.Printf("warning: load project instructions: %v\n", err)
+		return nil
+	}
+	if bundle.Empty() {
+		return nil
+	}
+
+	modelID := ""
+	if cfg.Defaults != nil {
+		modelID = cfg.Defaults.Model.Model
+	}
+	cachePath := filepath.Join(root, config.ConfigDirName, "projectdocs-cache.json")
+	summarize := projectDocsSummarizer(cfg)
+
+	var mu sync.RWMutex
+	render := func(b *projectdocs.Bundle) string {
+		out, err := projectdocs.Render(ctx, b, modelID, cachePath, summarize)
+		if err != nil {
+			fmt.Printf("warning: render project instructions: %v\n", err)
+			return ""
+		}
+		return out
+	}
+
+	rendered := render(bundle)
+	get := func() string {
+		mu.RLock()
+		defer mu.RUnlock()
+		return rendered
+	}
+	for _, a := range agents {
+		prev := a.ContextPinsFn
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var msgs []model.Message
+			if prev != nil {
+				msgs = append(msgs, prev(ctx)...)
+			}
+			if text := get(); text != "" {
+				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: text})
+			}
+			return msgs
+		}
+	}
+
+	dirs, err := projectdocs.WatchDirs(root, cwd)
+	if err != nil {
+		return nil
+	}
+	watcher, err := projectdocs.Watch(ctx, dirs, func() {
+		b, err := projectdocs.Load(root, cwd)
+		if err != nil {
+			return
+		}
+		out := render(b)
+		mu.Lock()
+		rendered = out
+		mu.Unlock()
+	})
+	if err != nil {
+		fmt.Printf("warning: watch project instructions: %v\n", err)
+		return nil
+	}
+	return watcher
+}
+
+// projectDocsSummarizer builds a projectdocs.Summarizer from cfg.Router's
+// model (the same cheap/fast model config setupRouter uses for T1
+// classification) so an over-budget instructions bundle gets condensed
+// instead of hard-truncated. Returns nil (meaning "hard-truncate instead")
+// if no router model is configured or it fails to build.
+func projectDocsSummarizer(cfg *config.Config) projectdocs.Summarizer {
+	if cfg.Router.Model.Provider == "" {
+		return nil
+	}
+	provider, err := agent.BuildProvider(cfg.Router.Model)
+	if err != nil {
+		return nil
+	}
+	modelID := cfg.Router.Model.Model
+	return func(ctx context.Context, text string) (string, error) {
+		resp, err := provider.Chat(ctx, &model.ChatRequest{
+			Model:     modelID,
+			MaxTokens: 4000,
+			Messages: []model.Message{
+				{Role: model.RoleSystem, Content: "Condense the following project instructions to fit a much smaller token budget, preserving every concrete rule, convention, and constraint. Drop prose and examples, not obligations."},
+				{Role: model.RoleUser, Content: text},
+			},
+		})
+		if err != nil {
+			return "", fmt.Errorf("summarize project instructions: %w", err)
+		}
+		return resp.Content, nil
+	}
+}
+
+// setupSkills discovers chronos-code's own skill catalog (repo-local >
+// user-global > bundled, ROADMAP.md §5.1) and, for every agent, chains in a
+// ContextPinsFn that BM25-selects the top-K most relevant skills for the
+// current user message and injects only those — never the whole catalog,
+// which is the "load everything into context" anti-pattern §5.1 explicitly
+// rejects. It reads the same messageKey{} context value setupMemory's
+// message-aware branch already relies on, so it must run after (or in any
+// order relative to) setupMemory — both only read that key at call time,
+// never at setup time. A missing/unreadable bundled catalog is logged and
+// skipped, not fatal: an agent with no skills selected behaves exactly as
+// it did before this feature existed.
+func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent) {
+	bundledData, err := defaults.ReadFile("skills/default-skills.yaml")
+	if err != nil {
+		fmt.Printf("warning: read bundled skill catalog: %v\n", err)
+		return
+	}
+	bundled, err := skills.LoadBundledYAML(bundledData)
+	if err != nil {
+		fmt.Printf("warning: parse bundled skill catalog: %v\n", err)
+		return
+	}
+	catalog, err := skills.Discover(root, bundled)
+	if err != nil {
+		fmt.Printf("warning: discover skills: %v\n", err)
+		return
+	}
+	if len(catalog) == 0 {
+		return
+	}
+
+	modelID := ""
+	if cfg.Defaults != nil {
+		modelID = cfg.Defaults.Model.Model
+	}
+
+	for _, a := range agents {
+		prev := a.ContextPinsFn
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var msgs []model.Message
+			if prev != nil {
+				msgs = append(msgs, prev(ctx)...)
+			}
+			msg, _ := ctx.Value(messageKey{}).(string)
+			if msg == "" {
+				return msgs
+			}
+			if rendered := skills.Render(skills.Select(msg, catalog, skills.DefaultTopK, modelID)); rendered != "" {
+				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: rendered})
+			}
+			return msgs
+		}
+	}
 }
 
 // setupRouter loads routing.yaml (project override at
@@ -809,6 +991,9 @@ func (o *Orchestrator) Close() error {
 	}
 	if o.watcher != nil {
 		o.watcher.Close()
+	}
+	if o.projectDocsWatcher != nil {
+		o.projectDocsWatcher.Close()
 	}
 	if o.graphStore != nil {
 		o.graphStore.Close()

@@ -19,6 +19,17 @@ type Credential struct {
 	AccessToken  string    `json:"access_token,omitempty"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at,omitempty"` // zero value = never expires (e.g. API keys)
+
+	// ClientID, AuthURL, TokenURL, and Scopes mirror the ProviderOAuthConfig
+	// that produced an OAuth credential (Method == MethodOAuthPKCE or
+	// MethodDeviceCode). Persisting them lets AutoRefreshStored reconstruct
+	// a ProviderOAuthConfig from the stored credential alone, so a caller
+	// doing an automatic pre-expiry refresh doesn't need the user to
+	// re-supply --client-id/--auth-url/--token-url every time.
+	ClientID string   `json:"client_id,omitempty"`
+	AuthURL  string   `json:"auth_url,omitempty"`
+	TokenURL string   `json:"token_url,omitempty"`
+	Scopes   []string `json:"scopes,omitempty"`
 }
 
 // LoginAPIKey stores a bring-your-own API key credential for provider. API

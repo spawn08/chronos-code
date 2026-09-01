@@ -164,6 +164,8 @@ Usage:
   chronos-code auth logout <provider>                   Remove a stored credential
   chronos-code auth status [provider]                   Show authentication state
   chronos-code auth refresh <provider> ...              Refresh an OAuth credential
+  chronos-code auth whoami [provider]                   Show the effective credential source (anthropic/openai default)
+  chronos-code auth providers                            List providers with a resolvable credential right now
   chronos-code session list [agent]                     List sessions
   chronos-code session delete <id>                      Delete a session and its history
   chronos-code session export <id> <path>                Export a session to JSON
@@ -348,7 +350,7 @@ func oauthConfigFromFlags(provider string, args []string) auth.ProviderOAuthConf
 
 func runAuth() error {
 	if len(os.Args) < 3 {
-		return fmt.Errorf("usage: chronos-code auth [login|logout|status|refresh]")
+		return fmt.Errorf("usage: chronos-code auth [login|logout|status|refresh|whoami|providers]")
 	}
 	store := auth.NewStore()
 	ctx := context.Background()
@@ -441,9 +443,45 @@ func runAuth() error {
 		fmt.Printf("refreshed credential for %q\n", provider)
 		return nil
 
+	case "whoami":
+		providers := []string{"anthropic", "openai"}
+		if len(os.Args) >= 4 {
+			providers = []string{os.Args[3]}
+		}
+		for _, p := range providers {
+			printResolvedCredential(auth.Resolve(ctx, store, p))
+		}
+		return nil
+
+	case "providers":
+		for _, p := range []string{"anthropic", "openai"} {
+			printResolvedCredential(auth.Resolve(ctx, store, p))
+		}
+		return nil
+
 	default:
 		return fmt.Errorf("unknown auth command: %s", os.Args[2])
 	}
+}
+
+// printResolvedCredential reports which link of the provider's precedence
+// chain (ROADMAP.md §5.3) is currently effective, without ever printing the
+// token itself.
+func printResolvedCredential(rc auth.ResolvedCredential) {
+	if rc.Source == auth.SourceNone {
+		fmt.Printf("%-15s no credential resolved (env vars, chronos-code login, and external CLI reuse all empty)\n", rc.Provider)
+		return
+	}
+	expiry := "never"
+	switch {
+	case rc.ExpiresAt.IsZero():
+		// leave as "never"
+	case time.Until(rc.ExpiresAt) <= 0:
+		expiry = "expired"
+	default:
+		expiry = time.Until(rc.ExpiresAt).String()
+	}
+	fmt.Printf("%-15s source: %-22s method: %-12s expires: %s\n", rc.Provider, rc.Source, rc.Method, expiry)
 }
 
 func printAuthStatus(st auth.Status) {

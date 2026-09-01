@@ -58,15 +58,20 @@ func (cfg ProviderOAuthConfig) oauth2Config() *oauth2.Config {
 	}
 }
 
-// credentialFromToken maps a golang.org/x/oauth2 Token into the
-// Credential shape this package persists.
-func credentialFromToken(provider string, method Method, tok *oauth2.Token) Credential {
+// credentialFromToken maps a golang.org/x/oauth2 Token into the Credential
+// shape this package persists, carrying cfg's OAuth app details along so a
+// later automatic refresh (AutoRefreshStored) doesn't need them re-supplied.
+func credentialFromToken(cfg ProviderOAuthConfig, method Method, tok *oauth2.Token) Credential {
 	return Credential{
-		Provider:     provider,
+		Provider:     cfg.Provider,
 		Method:       method,
 		AccessToken:  tok.AccessToken,
 		RefreshToken: tok.RefreshToken,
 		ExpiresAt:    tok.Expiry,
+		ClientID:     cfg.ClientID,
+		AuthURL:      cfg.AuthURL,
+		TokenURL:     cfg.TokenURL,
+		Scopes:       cfg.Scopes,
 	}
 }
 
@@ -235,7 +240,7 @@ func LoginPKCE(ctx context.Context, store *Store, cfg ProviderOAuthConfig, onPro
 		return fmt.Errorf("auth: exchange authorization code: %w", err)
 	}
 
-	return store.Save(cfg.Provider, credentialFromToken(cfg.Provider, MethodOAuthPKCE, tok))
+	return store.Save(cfg.Provider, credentialFromToken(cfg, MethodOAuthPKCE, tok))
 }
 
 // LoginDeviceCode runs an RFC 8628 Device Authorization Grant flow against
@@ -266,7 +271,7 @@ func LoginDeviceCode(ctx context.Context, store *Store, cfg ProviderOAuthConfig,
 		return fmt.Errorf("auth: poll for device access token: %w", err)
 	}
 
-	return store.Save(cfg.Provider, credentialFromToken(cfg.Provider, MethodDeviceCode, tok))
+	return store.Save(cfg.Provider, credentialFromToken(cfg, MethodDeviceCode, tok))
 }
 
 // Refresh renews the stored credential for cfg.Provider using its refresh
@@ -290,7 +295,7 @@ func Refresh(ctx context.Context, store *Store, cfg ProviderOAuthConfig) error {
 		return fmt.Errorf("auth: refresh token for provider %q: %w", cfg.Provider, err)
 	}
 
-	updated := credentialFromToken(cfg.Provider, cred.Method, tok)
+	updated := credentialFromToken(cfg, cred.Method, tok)
 	if updated.RefreshToken == "" {
 		// Some servers don't rotate refresh tokens on every refresh; keep the
 		// previous one rather than dropping it.
@@ -315,4 +320,38 @@ func AutoRefreshIfNeeded(ctx context.Context, store *Store, cfg ProviderOAuthCon
 		return Refresh(ctx, store, cfg)
 	}
 	return nil
+}
+
+// DefaultRefreshWindow is the pre-expiry window chronos-code's own OAuth
+// credentials are refreshed within (ROADMAP.md §5.3: "Refresh only in the
+// 60-second pre-expiry window (matches Claude Code behavior; avoids
+// double-rotation invalidating the other CLI's refresh token)").
+const DefaultRefreshWindow = 60 * time.Second
+
+// AutoRefreshStored behaves like AutoRefreshIfNeeded, but reconstructs the
+// ProviderOAuthConfig from the stored credential's own ClientID/AuthURL/
+// TokenURL/Scopes (persisted by credentialFromToken at login time) instead
+// of requiring the caller to supply them. It is a no-op if no credential is
+// stored, the stored credential is an API key, or the credential predates
+// this field set (ClientID/TokenURL empty) — in the latter case the caller
+// must re-run login or auth refresh with explicit flags once.
+func AutoRefreshStored(ctx context.Context, store *Store, provider string, window time.Duration) error {
+	cred, err := store.Load(provider)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if cred.Method == MethodAPIKey || cred.TokenURL == "" {
+		return nil
+	}
+	cfg := ProviderOAuthConfig{
+		Provider: provider,
+		ClientID: cred.ClientID,
+		AuthURL:  cred.AuthURL,
+		TokenURL: cred.TokenURL,
+		Scopes:   cred.Scopes,
+	}
+	return AutoRefreshIfNeeded(ctx, store, cfg, window)
 }

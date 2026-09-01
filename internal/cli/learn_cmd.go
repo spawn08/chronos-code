@@ -140,7 +140,7 @@ func learnSuggest(cfg *config.Config, store *learning.Store, agentID string) err
 		return fmt.Errorf("load learning.yaml: %w", err)
 	}
 	mc := distCfg.ModelConfig()
-	resolveStoredAPIKey(&mc)
+	resolveStoredAPIKey(ctx, &mc)
 	provider, err := agent.BuildProvider(mc)
 	if err != nil {
 		return fmt.Errorf("build distillation model provider: %w", err)
@@ -185,20 +185,19 @@ func loadLearningConfig() (*learning.Config, error) {
 	return learning.Parse(data)
 }
 
-// resolveStoredAPIKey fills mc.APIKey from a stored internal/auth credential
-// (PRD P2-010) when the caller didn't already set one — mirroring
+// resolveStoredAPIKey fills mc.APIKey from the provider's full
+// authentication precedence chain (PRD P2-010; ROADMAP.md §5.3) when the
+// caller didn't already set one — mirroring
 // orchestrator.applyStoredCredentials, but scoped to the single ModelConfig
 // the distillation model uses, since `learn suggest` doesn't build a full
 // Orchestrator.
-func resolveStoredAPIKey(mc *agent.ModelConfig) {
+func resolveStoredAPIKey(ctx context.Context, mc *agent.ModelConfig) {
 	if mc.APIKey != "" || mc.Provider == "" {
 		return
 	}
-	cred, err := auth.NewStore().Load(mc.Provider)
-	if err != nil || cred == nil || cred.Method != auth.MethodAPIKey {
-		return
+	if token := auth.Resolve(ctx, auth.NewStore(), mc.Provider).Token; token != "" {
+		mc.APIKey = token
 	}
-	mc.APIKey = cred.APIKey
 }
 
 func printSuggestions(suggestions []*learning.Suggestion) {
