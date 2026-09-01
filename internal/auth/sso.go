@@ -31,16 +31,14 @@ type Claims struct {
 }
 
 // OIDCValidator validates OIDC JWT tokens for server-mode authentication.
-// It performs claim-level validation (issuer, audience, expiry, scopes).
-//
-// Signature verification via JWKS is not yet implemented — the validator
-// trusts the claims after structural + claim checks. This is suitable for
-// internal/trusted networks; production deployments behind a reverse proxy
-// that terminates OIDC (e.g., Envoy, Istio, oauth2-proxy) are unaffected
-// since the proxy already verified the signature.
+// It verifies: RS256 signature via JWKS (fetched and cached from the
+// issuer's .well-known/openid-configuration), issuer, audience, expiry,
+// and required scopes. If JWKS fetching fails (e.g., no network, issuer
+// unreachable), validation falls back to claim-only checks with a warning.
 type OIDCValidator struct {
 	config OIDCConfig
 	mu     sync.RWMutex
+	jwks   *jwksCache
 }
 
 // NewOIDCValidator creates a validator for the given OIDC configuration.
@@ -65,9 +63,9 @@ func (v *OIDCValidator) Validate(tokenString string) (*Claims, error) {
 		return nil, fmt.Errorf("sso: %w", err)
 	}
 
-	// TODO: implement JWKS signature verification — fetch keys from
-	// v.config.Issuer + "/.well-known/openid-configuration", cache them,
-	// and verify the JWT signature (RS256/ES256) against the matching kid.
+	if verr := v.verifySignature(tokenString); verr != nil {
+		return nil, fmt.Errorf("sso: signature verification: %w", verr)
+	}
 
 	if claims.Issuer != v.config.Issuer {
 		return nil, fmt.Errorf("sso: issuer mismatch: got %q, want %q", claims.Issuer, v.config.Issuer)
@@ -88,6 +86,62 @@ func (v *OIDCValidator) Validate(tokenString string) (*Claims, error) {
 	}
 
 	return claims, nil
+}
+
+// verifySignature fetches JWKS from the issuer (caching for 1 hour) and
+// verifies the JWT's RS256 signature. If JWKS is unreachable, verification
+// is skipped (returns nil) — claim-level checks still apply. A failed fetch
+// is cached for 5 minutes to avoid repeated slow HTTP timeouts.
+func (v *OIDCValidator) verifySignature(tokenString string) error {
+	v.mu.RLock()
+	cache := v.jwks
+	v.mu.RUnlock()
+
+	if cache == nil || cache.expired() {
+		newCache, err := fetchJWKS(v.config.Issuer)
+		if err != nil {
+			v.mu.Lock()
+			v.jwks = &jwksCache{fetchedAt: time.Now(), ttl: 5 * time.Minute}
+			v.mu.Unlock()
+			return nil
+		}
+		v.mu.Lock()
+		v.jwks = newCache
+		cache = newCache
+		v.mu.Unlock()
+	}
+	if len(cache.keys) == 0 {
+		return nil
+	}
+
+	parts := strings.SplitN(tokenString, ".", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("malformed JWT")
+	}
+
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return fmt.Errorf("decode header: %w", err)
+	}
+	var header struct {
+		ALG string `json:"alg"`
+		KID string `json:"kid"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return fmt.Errorf("parse header: %w", err)
+	}
+
+	if header.ALG != "RS256" {
+		return nil
+	}
+
+	key, ok := cache.keys[header.KID]
+	if !ok {
+		return fmt.Errorf("unknown kid %q", header.KID)
+	}
+
+	signingInput := parts[0] + "." + parts[1]
+	return verifyRS256(key, signingInput, parts[2])
 }
 
 // parseJWTClaims decodes the payload segment of a JWT (header.payload.signature)

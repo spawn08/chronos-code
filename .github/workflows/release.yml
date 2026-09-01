@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.24'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout chronos-code
+        uses: actions/checkout@v4
+        with:
+          path: chronos-code
+
+      - name: Checkout chronos (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: spawn08/chronos
+          path: chronos
+          token: ${{ secrets.CHRONOS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: chronos-code/go.sum
+
+      - name: Test
+        working-directory: chronos-code
+        run: make test
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout chronos-code
+        uses: actions/checkout@v4
+        with:
+          path: chronos-code
+          fetch-depth: 0
+
+      - name: Checkout chronos (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: spawn08/chronos
+          path: chronos
+          token: ${{ secrets.CHRONOS_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: chronos-code/go.sum
+
+      - name: Build binary
+        working-directory: chronos-code
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          MODULE="github.com/spawn08/chronos-code"
+
+          LDFLAGS="-s -w"
+          LDFLAGS="${LDFLAGS} -X '${MODULE}/internal/cli.Version=${VERSION}'"
+          LDFLAGS="${LDFLAGS} -X '${MODULE}/internal/cli.Commit=${COMMIT}'"
+          LDFLAGS="${LDFLAGS} -X '${MODULE}/internal/cli.BuildDate=${BUILD_DATE}'"
+
+          BINARY="chronos-code"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY="${BINARY}.exe"
+          fi
+
+          go build -ldflags "${LDFLAGS}" -trimpath -o "${BINARY}" ./cmd/chronos-code
+
+      - name: Package
+        working-directory: chronos-code
+        run: |
+          ARCHIVE_NAME="chronos-code-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip "${ARCHIVE_NAME}.zip" chronos-code.exe README.md
+            echo "ASSET=${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "${ARCHIVE_NAME}.tar.gz" chronos-code README.md
+            echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronos-code-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: chronos-code/${{ env.ASSET }}
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > checksums-sha256.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*
