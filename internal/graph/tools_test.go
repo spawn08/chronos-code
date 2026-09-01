@@ -3,7 +3,9 @@ package graph
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/tool"
 )
@@ -30,9 +32,17 @@ func TestToolsAgainstOwnRepo(t *testing.T) {
 	for _, d := range defs {
 		byName[d.Name] = d
 	}
-	for _, want := range []string{"graph_query", "find_callers", "find_implementations", "multi_resolution_view", "resolve_symbol", "codebase_search"} {
-		if _, ok := byName[want]; !ok {
+	wantTools := []string{"graph_query", "find_callers", "find_implementations", "multi_resolution_view", "resolve_symbol", "codebase_search", "codebase_map"}
+	if len(defs) != len(wantTools) {
+		t.Fatalf("Tools returned %d definitions, want %d", len(defs), len(wantTools))
+	}
+	for _, want := range wantTools {
+		def, ok := byName[want]
+		if !ok {
 			t.Fatalf("missing tool %q", want)
+		}
+		if def.Permission != tool.PermAllow {
+			t.Fatalf("tool %q permission = %q, want %q", want, def.Permission, tool.PermAllow)
 		}
 	}
 
@@ -110,5 +120,148 @@ func TestCodebaseSearchTool(t *testing.T) {
 	}
 	if _, err := search.Handler(ctx, map[string]any{"query": ""}); err == nil {
 		t.Fatal("codebase_search accepted an empty query")
+	}
+}
+
+func TestCodebaseMapTool(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := newCodeMapStore(t)
+	defer store.Close()
+
+	packages := []struct {
+		name   string
+		file   string
+		symbol Symbol
+	}{
+		{
+			name: "example/auth",
+			file: filepath.Join(root, "auth", "auth.go"),
+			symbol: Symbol{Name: "Authenticator", Kind: KindStruct, Package: "example/auth", Line: 3,
+				Signature: "type Authenticator struct{}", Doc: "Authenticates requests."},
+		},
+		{
+			name: "example/other",
+			file: filepath.Join(root, "other", "other.go"),
+			symbol: Symbol{Name: "Other", Kind: KindStruct, Package: "example/other", Line: 4,
+				Signature: "type Other struct{}", Doc: "Unrelated functionality."},
+		},
+	}
+	for _, pkg := range packages {
+		if err := store.UpsertPackage(ctx, pkg.name, ""); err != nil {
+			t.Fatalf("UpsertPackage(%s): %v", pkg.name, err)
+		}
+		if err := store.UpsertFile(ctx, pkg.file, pkg.name, 1); err != nil {
+			t.Fatalf("UpsertFile(%s): %v", pkg.file, err)
+		}
+		pkg.symbol.File = pkg.file
+		if err := store.InsertSymbol(ctx, pkg.symbol); err != nil {
+			t.Fatalf("InsertSymbol(%s): %v", pkg.symbol.Name, err)
+		}
+	}
+	if err := store.InsertSymbol(ctx, Symbol{
+		Name: "Authorizer", Kind: KindStruct, Package: packages[0].name, File: packages[0].file, Line: 8,
+		Signature: "type Authorizer struct{}", Doc: "Authorizes requests.",
+	}); err != nil {
+		t.Fatalf("InsertSymbol(Authorizer): %v", err)
+	}
+	if err := store.UpsertPackage(ctx, "example/authfallback", ""); err != nil {
+		t.Fatalf("UpsertPackage fallback: %v", err)
+	}
+
+	var codeMap *tool.Definition
+	for _, def := range Tools(store, root) {
+		if def.Name == "codebase_map" {
+			codeMap = def
+			break
+		}
+	}
+	if codeMap == nil {
+		t.Fatal("codebase_map is not registered")
+	}
+	if codeMap.Permission != tool.PermAllow {
+		t.Fatalf("codebase_map permission = %q, want %q", codeMap.Permission, tool.PermAllow)
+	}
+	if _, required := codeMap.Parameters["required"]; required {
+		t.Fatal("codebase_map query should be optional")
+	}
+
+	out, err := codeMap.Handler(ctx, map[string]any{"query": "requests"})
+	if err != nil {
+		t.Fatalf("codebase_map FTS query: %v", err)
+	}
+	got := out.(string)
+	if strings.Count(got, "# Package `example/auth`") != 1 {
+		t.Fatalf("codebase_map should deduplicate the ranked FTS package:\n%s", got)
+	}
+	if strings.Contains(got, "# Package `example/authfallback`") || strings.Contains(got, "# Package `example/other`") {
+		t.Fatalf("codebase_map FTS query rendered an unrelated package:\n%s", got)
+	}
+
+	out, err = codeMap.Handler(ctx, map[string]any{"query": "auth"})
+	if err != nil {
+		t.Fatalf("codebase_map package fallback query: %v", err)
+	}
+	got = out.(string)
+	if strings.Count(got, "# Package `example/auth`") != 1 {
+		t.Fatalf("codebase_map should render each matched package once:\n%s", got)
+	}
+	if !strings.Contains(got, "# Package `example/authfallback`") {
+		t.Fatalf("codebase_map should append package-name fallback matches:\n%s", got)
+	}
+	if strings.Contains(got, "# Package `example/other`") || strings.Contains(got, "# Code Map") {
+		t.Fatalf("codebase_map query returned the full package index or an unrelated package:\n%s", got)
+	}
+
+	out, err = codeMap.Handler(ctx, nil)
+	if err != nil {
+		t.Fatalf("codebase_map index: %v", err)
+	}
+	index := out.(string)
+	if !strings.Contains(index, "# Code Map") || !strings.Contains(index, "- `example/auth`") || !strings.Contains(index, "- `example/other`") {
+		t.Fatalf("codebase_map empty query did not return the package index:\n%s", index)
+	}
+}
+
+func TestCodebaseMapToolOutputByteLimit(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := newCodeMapStore(t)
+	defer store.Close()
+
+	pkg, file := "large", filepath.Join(root, "large.go")
+	if err := store.UpsertPackage(ctx, pkg, ""); err != nil {
+		t.Fatalf("UpsertPackage: %v", err)
+	}
+	if err := store.UpsertFile(ctx, file, pkg, 1); err != nil {
+		t.Fatalf("UpsertFile: %v", err)
+	}
+	if err := store.InsertSymbol(ctx, Symbol{
+		Name: "Large", Kind: KindFunc, Package: pkg, File: file, Line: 1,
+		Signature: "func Large() " + strings.Repeat("界", codebaseMapMaxOutputBytes),
+	}); err != nil {
+		t.Fatalf("InsertSymbol: %v", err)
+	}
+
+	var codeMap *tool.Definition
+	for _, def := range Tools(store, root) {
+		if def.Name == "codebase_map" {
+			codeMap = def
+			break
+		}
+	}
+	out, err := codeMap.Handler(ctx, map[string]any{"query": "Large"})
+	if err != nil {
+		t.Fatalf("codebase_map: %v", err)
+	}
+	got := out.(string)
+	if len(got) > codebaseMapMaxOutputBytes {
+		t.Fatalf("codebase_map output is %d bytes, limit is %d", len(got), codebaseMapMaxOutputBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("codebase_map byte limit split a UTF-8 encoding")
+	}
+	if !strings.HasSuffix(got, codebaseMapTruncationNotice) {
+		t.Fatalf("codebase_map truncated output lacks notice: %q", got[len(got)-100:])
 	}
 }

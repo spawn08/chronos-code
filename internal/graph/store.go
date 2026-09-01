@@ -46,6 +46,12 @@ type Symbol struct {
 	Receiver  string
 }
 
+// FileRecord is file-level metadata recorded in the graph.
+type FileRecord struct {
+	Path    string
+	Package string
+}
+
 // Edge is a directed relationship between two symbols, referenced by name
 // (not ID) so lookups don't require resolving the source side first.
 type Edge struct {
@@ -398,6 +404,31 @@ func (s *Store) Search(ctx context.Context, query string, topK int) ([]SearchRes
 func (s *Store) SymbolsInPackage(ctx context.Context, pkg string) ([]Symbol, error) {
 	return s.querySymbols(ctx, `SELECT id, name, kind, package, file, line, end_line, signature, doc, receiver
 		FROM symbols WHERE package = ? ORDER BY file, line`, pkg)
+}
+
+// FilesInPackage returns all files recorded for pkg, ordered by path.
+func (s *Store) FilesInPackage(ctx context.Context, pkg string) ([]FileRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT path, package
+		FROM files WHERE package = ? ORDER BY path
+	`, pkg)
+	if err != nil {
+		return nil, fmt.Errorf("query files in package %s: %w", pkg, err)
+	}
+	defer rows.Close()
+
+	var out []FileRecord
+	for rows.Next() {
+		var file FileRecord
+		if err := rows.Scan(&file.Path, &file.Package); err != nil {
+			return nil, fmt.Errorf("scan file in package %s: %w", pkg, err)
+		}
+		out = append(out, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query files in package %s: %w", pkg, err)
+	}
+	return out, nil
 }
 
 // SymbolsInFile returns all symbols declared in a file.

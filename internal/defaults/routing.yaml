@@ -28,6 +28,32 @@ router:
     - "architecture" = user asks about design, structure, patterns
     - "code" = everything else (implement, fix, refactor, add, change, write)
 
+# Task complexity and kind to model mapping. Undeclared cells fall back to
+# medium/edit so model selection is deterministic for every classification.
+model_routing:
+  models:
+    low:
+      edit:
+        provider: "anthropic"
+        model: "claude-haiku-4-5"
+      explain:
+        provider: "anthropic"
+        model: "claude-haiku-4-5"
+    medium:
+      edit:
+        provider: "anthropic"
+        model: "claude-sonnet-4-6"
+    high:
+      refactor:
+        provider: "anthropic"
+        model: "claude-sonnet-4-6"
+      debug:
+        provider: "anthropic"
+        model: "claude-opus-4-8"
+      architect:
+        provider: "anthropic"
+        model: "claude-opus-4-8"
+
 # Intent → Agent mapping
 intent_routing:
 

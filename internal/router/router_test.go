@@ -1,9 +1,14 @@
 package router
 
-import "testing"
+import (
+	"testing"
 
-// routingYAML is a verbatim copy of internal/defaults/routing.yaml, used as
-// a test fixture so this package stays decoupled from internal/defaults.
+	"github.com/spawn08/chronos-code/internal/defaults"
+	"github.com/spawn08/chronos-code/internal/modelinfo"
+)
+
+// routingYAML is the legacy routing config from before model_routing was
+// added, retained to verify compatibility with existing user overrides.
 const routingYAML = `
 # Chronos Code — Agent Routing Configuration
 # Routes user messages to the right agent based on intent classification.
@@ -254,6 +259,9 @@ func TestParseAndClassify(t *testing.T) {
 	if len(cfg.IntentRouting) != 7 {
 		t.Fatalf("len(IntentRouting) = %d, want 7", len(cfg.IntentRouting))
 	}
+	if _, ok := cfg.ResolveModel(ComplexityLow, TaskKindEdit); ok {
+		t.Fatal("ResolveModel() ok = true for legacy YAML without model_routing")
+	}
 
 	r, err := New(cfg, "coder")
 	if err != nil {
@@ -313,6 +321,50 @@ func TestParseAndClassify(t *testing.T) {
 			t.Errorf("Classify() agent = %q, want %q", agent, "coder")
 		}
 	})
+}
+
+func TestBundledModelRouting(t *testing.T) {
+	data, err := defaults.ReadFile("routing.yaml")
+	if err != nil {
+		t.Fatalf("defaults.ReadFile(routing.yaml) error = %v", err)
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	want := map[Classification]ModelSpec{
+		{Complexity: ComplexityLow, Kind: TaskKindEdit}:       {Provider: "anthropic", Model: "claude-haiku-4-5"},
+		{Complexity: ComplexityLow, Kind: TaskKindExplain}:    {Provider: "anthropic", Model: "claude-haiku-4-5"},
+		{Complexity: ComplexityMedium, Kind: TaskKindEdit}:    {Provider: "anthropic", Model: "claude-sonnet-4-6"},
+		{Complexity: ComplexityHigh, Kind: TaskKindRefactor}:  {Provider: "anthropic", Model: "claude-sonnet-4-6"},
+		{Complexity: ComplexityHigh, Kind: TaskKindDebug}:     {Provider: "anthropic", Model: "claude-opus-4-8"},
+		{Complexity: ComplexityHigh, Kind: TaskKindArchitect}: {Provider: "anthropic", Model: "claude-opus-4-8"},
+	}
+	declared := 0
+	for _, byKind := range cfg.ModelRouting.Models {
+		declared += len(byKind)
+	}
+	if declared != len(want) {
+		t.Fatalf("bundled model routing declares %d cells, want %d", declared, len(want))
+	}
+	for classification, wantSpec := range want {
+		got, ok := cfg.ResolveModel(classification.Complexity, classification.Kind)
+		if !ok || got != wantSpec {
+			t.Errorf("ResolveModel(%q, %q) = (%+v, %v), want (%+v, true)", classification.Complexity, classification.Kind, got, ok, wantSpec)
+		}
+		if _, ok := modelinfo.Lookup(got.Provider, got.Model); !ok {
+			t.Errorf("bundled model %+v is not registered in modelinfo", got)
+		}
+	}
+
+	fallback := want[Classification{Complexity: ComplexityMedium, Kind: TaskKindEdit}]
+	for i := 0; i < 2; i++ {
+		got, ok := cfg.ResolveModel(ComplexityHigh, TaskKindExplain)
+		if !ok || got != fallback {
+			t.Errorf("fallback attempt %d = (%+v, %v), want (%+v, true)", i+1, got, ok, fallback)
+		}
+	}
 }
 
 func TestNew_InvalidRegexError(t *testing.T) {

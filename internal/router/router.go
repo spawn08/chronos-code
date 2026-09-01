@@ -42,12 +42,25 @@ type IntentRoute struct {
 	Reason   string   `yaml:"reason"`
 }
 
+// ModelSpec identifies a model and the provider used to construct it.
+type ModelSpec struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+}
+
+// ModelRouting maps task complexity and kind to the model that should handle
+// the task. Missing cells resolve to the medium/edit model.
+type ModelRouting struct {
+	Models map[Complexity]map[TaskKind]ModelSpec `yaml:"models"`
+}
+
 // Config is the subset of routing.yaml this package understands. The
 // explicit_switch, escalation, pipelines, and cost_optimization sections are
 // intentionally not modeled — yaml.Unmarshal drops unknown keys.
 type Config struct {
 	Router        routerSection `yaml:"router"`
 	IntentRouting []IntentRoute `yaml:"intent_routing"`
+	ModelRouting  ModelRouting  `yaml:"model_routing"`
 }
 
 // Parse decodes raw YAML bytes (e.g. loaded via internal/defaults.ReadFile)
@@ -59,6 +72,19 @@ func Parse(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("router: parse routing config: %w", err)
 	}
 	return &cfg, nil
+}
+
+// ResolveModel returns the exact complexity/kind model when declared, falling
+// back to medium/edit otherwise. It returns ok=false when neither cell exists,
+// including for legacy routing YAML without a model_routing section.
+func (c *Config) ResolveModel(complexity Complexity, kind TaskKind) (ModelSpec, bool) {
+	if byKind, ok := c.ModelRouting.Models[complexity]; ok {
+		if model, ok := byKind[kind]; ok {
+			return model, true
+		}
+	}
+	model, ok := c.ModelRouting.Models[ComplexityMedium][TaskKindEdit]
+	return model, ok
 }
 
 // compiledRoute is an intent route with its patterns pre-compiled as
