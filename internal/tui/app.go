@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,6 +74,59 @@ type chatDoneMsg struct {
 
 type shellDoneMsg struct{ err error }
 
+const frameTimingSamples = 100
+
+type frameTiming struct {
+	updateStart time.Time
+	samples     [frameTimingSamples]time.Duration
+	sampleIdx   int
+	sampleCount int
+}
+
+func (ft *frameTiming) recordUpdateStart() { ft.updateStart = time.Now() }
+
+func (ft *frameTiming) recordViewEnd() {
+	if ft.updateStart.IsZero() {
+		return
+	}
+	ft.samples[ft.sampleIdx] = time.Since(ft.updateStart)
+	ft.sampleIdx = (ft.sampleIdx + 1) % frameTimingSamples
+	if ft.sampleCount < frameTimingSamples {
+		ft.sampleCount++
+	}
+	ft.updateStart = time.Time{}
+}
+
+func (ft *frameTiming) sorted() []time.Duration {
+	if ft.sampleCount == 0 {
+		return nil
+	}
+	s := make([]time.Duration, ft.sampleCount)
+	copy(s, ft.samples[:ft.sampleCount])
+	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	return s
+}
+
+func (ft *frameTiming) percentile(sorted []time.Duration, p float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(float64(len(sorted)-1) * p)
+	return sorted[idx]
+}
+
+func (ft *frameTiming) stats() string {
+	s := ft.sorted()
+	if len(s) == 0 {
+		return "no frame timing data (send a message first)"
+	}
+	p50 := ft.percentile(s, 0.50)
+	p95 := ft.percentile(s, 0.95)
+	p99 := ft.percentile(s, 0.99)
+	return fmt.Sprintf("frame timing (%d samples): p50=%s  p95=%s  p99=%s",
+		len(s), p50, p95, p99)
+}
+
 // oauthEvent carries one step of an in-flight /login <provider> oauth flow:
 // either the authorization URL (as soon as it's known, so the TUI can show
 // it even if the automatic browser-open fails, e.g. over SSH) or the final
@@ -110,6 +164,9 @@ type appModel struct {
 	ready         bool
 
 	blocks          []string // finalized, already-rendered transcript entries
+	renderedBlocks  []string // cached rendered versions of m.blocks
+	renderWidth     int      // width at which renderedBlocks were rendered
+	transcriptBuf   strings.Builder
 	activeAgentText strings.Builder
 	activeToolLines []string
 	lastChunk       string
@@ -123,6 +180,7 @@ type appModel struct {
 	sending        bool
 
 	statusMsg string
+	perf      frameTiming
 
 	approval *pendingApproval
 	wizard   *loginWizard
@@ -199,6 +257,7 @@ func (m *appModel) Init() tea.Cmd {
 }
 
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.perf.recordUpdateStart()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -539,6 +598,9 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.appendSystem(fmt.Sprintf("streaming: %v", m.stream))
 	case "/clear":
 		m.blocks = nil
+		m.invalidateRenderCache()
+	case "/perf":
+		m.appendSystem(m.perf.stats())
 	case "/session":
 		var b strings.Builder
 		fmt.Fprintf(&b, "current session: %s\n", m.orch.CurrentSessionID())
@@ -927,21 +989,49 @@ func (m *appModel) finalizeTurn(err error) {
 }
 
 func (m *appModel) renderTranscript() string {
-	parts := append([]string{}, m.blocks...)
-	if m.sending {
-		var cur []string
-		cur = append(cur, m.activeToolLines...)
-		if txt := m.activeAgentText.String(); txt != "" {
-			cur = append(cur, RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width)+"\n"+RenderMarkdownLite(txt, m.viewport.Width))
-		} else {
-			cur = append(cur, styleDim.Render(m.spin.View()+" thinking..."))
-		}
-		parts = append(parts, strings.Join(cur, "\n"))
+	if m.renderWidth != m.viewport.Width {
+		m.renderedBlocks = nil
+		m.renderWidth = m.viewport.Width
 	}
-	return strings.Join(parts, "\n\n")
+
+	for i := len(m.renderedBlocks); i < len(m.blocks); i++ {
+		m.renderedBlocks = append(m.renderedBlocks, m.blocks[i])
+	}
+
+	m.transcriptBuf.Reset()
+	for i, rb := range m.renderedBlocks {
+		if i > 0 {
+			m.transcriptBuf.WriteString("\n\n")
+		}
+		m.transcriptBuf.WriteString(rb)
+	}
+
+	if m.sending {
+		if m.transcriptBuf.Len() > 0 {
+			m.transcriptBuf.WriteString("\n\n")
+		}
+		for _, tl := range m.activeToolLines {
+			m.transcriptBuf.WriteString(tl)
+			m.transcriptBuf.WriteByte('\n')
+		}
+		if txt := m.activeAgentText.String(); txt != "" {
+			m.transcriptBuf.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width))
+			m.transcriptBuf.WriteByte('\n')
+			m.transcriptBuf.WriteString(RenderMarkdownLite(txt, m.viewport.Width))
+		} else {
+			m.transcriptBuf.WriteString(styleDim.Render(m.spin.View() + " thinking..."))
+		}
+	}
+
+	return m.transcriptBuf.String()
+}
+
+func (m *appModel) invalidateRenderCache() {
+	m.renderedBlocks = nil
 }
 
 func (m *appModel) View() string {
+	defer m.perf.recordViewEnd()
 	if !m.ready {
 		return ""
 	}

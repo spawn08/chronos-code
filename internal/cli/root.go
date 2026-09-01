@@ -54,6 +54,12 @@ func Execute() error {
 		return runInit()
 	case "config":
 		return runConfig()
+	case "login":
+		return runLogin()
+	case "logout":
+		return runLogout()
+	case "whoami":
+		return runWhoami()
 	case "auth":
 		return runAuth()
 	case "session":
@@ -156,6 +162,10 @@ Usage:
   chronos-code                    Start interactive REPL (default)
   chronos-code run <message>      Execute a single task and exit
   chronos-code init               Initialize .chronos-code/ in current project
+  chronos-code login <provider>    Sign in with a built-in provider (e.g. anthropic)
+  chronos-code login <provider> --api-key <key>  Store a BYO API key
+  chronos-code logout <provider>   Remove a stored credential
+  chronos-code whoami [provider]   Show the effective credential source
   chronos-code config show        Print resolved configuration
   chronos-code config validate    Validate all config files
   chronos-code auth login <provider> --api-key <key>   Store a BYO API key
@@ -164,8 +174,8 @@ Usage:
   chronos-code auth logout <provider>                   Remove a stored credential
   chronos-code auth status [provider]                   Show authentication state
   chronos-code auth refresh <provider> ...              Refresh an OAuth credential
-  chronos-code auth whoami [provider]                   Show the effective credential source (anthropic/openai default)
-  chronos-code auth providers                            List providers with a resolvable credential right now
+  chronos-code auth whoami [provider]                   Show the effective credential source
+  chronos-code auth providers                           List built-in and resolvable providers
   chronos-code session list [agent]                     List sessions
   chronos-code session delete <id>                      Delete a session and its history
   chronos-code session export <id> <path>                Export a session to JSON
@@ -348,6 +358,67 @@ func oauthConfigFromFlags(provider string, args []string) auth.ProviderOAuthConf
 	}
 }
 
+func runLogin() error {
+	if len(os.Args) < 3 {
+		return fmt.Errorf("usage: chronos-code login <provider> [--api-key <key>]")
+	}
+	provider := os.Args[2]
+	rest := os.Args[3:]
+
+	if hasFlag(rest, "api-key") {
+		key := flagValue(rest, "api-key", "")
+		if key == "" {
+			return fmt.Errorf("--api-key requires a value")
+		}
+		store := auth.NewStore()
+		if err := auth.LoginAPIKey(store, provider, key); err != nil {
+			return err
+		}
+		fmt.Printf("stored API key for %q\n", provider)
+		return nil
+	}
+
+	cfg, ok := auth.LookupProvider(provider)
+	if !ok {
+		return fmt.Errorf("no built-in OAuth config for %q; use: chronos-code auth login %s --oauth-pkce --client-id <id> --auth-url <url> --token-url <url>", provider, provider)
+	}
+	store := auth.NewStore()
+	ctx := context.Background()
+	fmt.Printf("signing in to %s via OAuth PKCE...\n", provider)
+	if err := auth.LoginPKCE(ctx, store, cfg, func(url string) {
+		fmt.Printf("open this URL to sign in:\n  %s\n", url)
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("logged in to %q via OAuth PKCE\n", provider)
+	return nil
+}
+
+func runLogout() error {
+	if len(os.Args) < 3 {
+		return fmt.Errorf("usage: chronos-code logout <provider>")
+	}
+	store := auth.NewStore()
+	if err := auth.Logout(store, os.Args[2]); err != nil {
+		return err
+	}
+	fmt.Printf("logged out of %q\n", os.Args[2])
+	return nil
+}
+
+func runWhoami() error {
+	store := auth.NewStore()
+	ctx := context.Background()
+	providers := []string{"anthropic", "openai"}
+	if len(os.Args) >= 3 {
+		providers = []string{os.Args[2]}
+	}
+	for _, p := range providers {
+		printResolvedCredential(auth.Resolve(ctx, store, p))
+	}
+	return nil
+}
+
 func runAuth() error {
 	if len(os.Args) < 3 {
 		return fmt.Errorf("usage: chronos-code auth [login|logout|status|refresh|whoami|providers]")
@@ -396,7 +467,15 @@ func runAuth() error {
 			fmt.Printf("logged in to %q via device code\n", provider)
 			return nil
 		default:
-			return fmt.Errorf("auth login: specify --api-key, --oauth-pkce, or --device-code")
+			if cfg, ok := auth.LookupProvider(provider); ok {
+				fmt.Printf("signing in to %s via OAuth PKCE...\n", provider)
+				if err := auth.LoginPKCE(ctx, store, cfg, func(url string) { fmt.Printf("open this URL to sign in:\n  %s\n", url) }); err != nil {
+					return err
+				}
+				fmt.Printf("logged in to %q via OAuth PKCE\n", provider)
+				return nil
+			}
+			return fmt.Errorf("auth login: specify --api-key, --oauth-pkce, or --device-code (or use: chronos-code login %s for built-in providers)", provider)
 		}
 
 	case "logout":
@@ -454,6 +533,11 @@ func runAuth() error {
 		return nil
 
 	case "providers":
+		fmt.Println("built-in OAuth providers:")
+		for _, name := range auth.ListProviders() {
+			fmt.Printf("  %s\n", name)
+		}
+		fmt.Println("\nresolvable credentials:")
 		for _, p := range []string{"anthropic", "openai"} {
 			printResolvedCredential(auth.Resolve(ctx, store, p))
 		}
