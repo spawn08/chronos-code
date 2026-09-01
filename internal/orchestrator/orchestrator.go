@@ -56,6 +56,11 @@ type Orchestrator struct {
 	sessions   map[string]string // agentID -> current sessionID
 
 	router             *router.Router
+	routingConfig      *router.Config
+	routingMu          sync.Mutex
+	routingState       map[string]router.Classification
+	modelOverrides     map[string]bool
+	buildProvider      func(agent.ModelConfig) (model.Provider, error)
 	budget             *budget.Tracker
 	memory             *memory.Store
 	workspace          *workspace.Info
@@ -131,7 +136,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 
 	setupSkills(cfg, root, agents)
 
-	rt := setupRouter(cfg, projectDir)
+	rt, routingConfig := setupRouter(cfg, projectDir)
 
 	grCfg := setupGuardrails(cfg, projectDir, agents)
 
@@ -181,7 +186,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		active = order[0]
 	}
 
-	return &Orchestrator{
+	orch := &Orchestrator{
 		agents:             agents,
 		order:              order,
 		active:             active,
@@ -192,6 +197,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		sessionMgr:         sessionMgr,
 		sessions:           sessions,
 		router:             rt,
+		routingConfig:      routingConfig,
+		routingState:       make(map[string]router.Classification),
+		modelOverrides:     make(map[string]bool),
 		budget:             tracker,
 		memory:             memStore,
 		workspace:          wsInfo,
@@ -199,7 +207,11 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		attBudget:          attBudget,
 		teams:              teams,
 		projectDocsWatcher: pdWatcher,
-	}, nil
+	}
+	for _, a := range agents {
+		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
+	}
+	return orch, nil
 }
 
 // applyStoredCredentials fills in ModelConfig.APIKey from each provider's
@@ -584,24 +596,24 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 // T0 pattern are classified by that cheap model instead of always defaulting
 // to the "code" intent. Failure to build the T1 provider (e.g. missing API
 // key) is non-fatal — the router still works with T0-only matching.
-func setupRouter(cfg *config.Config, projectDir string) *router.Router {
+func setupRouter(cfg *config.Config, projectDir string) (*router.Router, *router.Config) {
 	if !cfg.Router.Enabled {
-		return nil
+		return nil, nil
 	}
 	data, err := readOverridableFile(projectDir, "routing.yaml", "routing.yaml")
 	if err != nil {
 		fmt.Printf("warning: load routing.yaml: %v\n", err)
-		return nil
+		return nil, nil
 	}
 	rcfg, err := router.Parse(data)
 	if err != nil {
 		fmt.Printf("warning: parse routing.yaml: %v\n", err)
-		return nil
+		return nil, nil
 	}
 	rt, err := router.New(rcfg, "coder")
 	if err != nil {
 		fmt.Printf("warning: build router: %v\n", err)
-		return nil
+		return nil, nil
 	}
 	if rcfg.Router.Model.Provider != "" && rcfg.Router.Model.Model != "" {
 		provider, err := agent.BuildProvider(agent.ModelConfig{
@@ -614,7 +626,7 @@ func setupRouter(cfg *config.Config, projectDir string) *router.Router {
 			rt.SetT1(t1)
 		}
 	}
-	return rt
+	return rt, rcfg
 }
 
 // setupGuardrails loads the guardrail YAML config (project override at
@@ -807,7 +819,9 @@ func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *
 // id it should be sent to. If routing is disabled or the message doesn't
 // match any T0 pattern or T1 classification, it returns the currently active
 // agent id and matched=false, so callers can always safely call Route
-// without special-casing "router present or not."
+// without special-casing "router present or not." When model routing is
+// configured, the resolved provider is applied to the returned agent without
+// changing which agent is active.
 func (o *Orchestrator) Route(ctx context.Context, message string) (agentID string, matched bool) {
 	if o.router == nil {
 		return o.active, false
@@ -816,7 +830,65 @@ func (o *Orchestrator) Route(ctx context.Context, message string) (agentID strin
 	if _, ok := o.agents[agentID]; !ok {
 		return o.active, false
 	}
+	if !matched {
+		agentID = o.active
+	}
+
+	classification := router.ClassifyTask(message)
+	o.routingMu.Lock()
+	defer o.routingMu.Unlock()
+	if o.routingConfig == nil || o.modelOverrides[agentID] {
+		return agentID, matched
+	}
+	delete(o.routingState, agentID)
+	spec, ok := o.routingConfig.ResolveModel(classification.Complexity, classification.Kind)
+	if !ok {
+		return agentID, matched
+	}
+	if err := o.switchModel(ctx, agentID, spec.Provider, spec.Model); err == nil {
+		o.routingState[agentID] = classification
+	}
 	return agentID, matched
+}
+
+type modelEscalationHook struct {
+	orchestrator *Orchestrator
+	agentID      string
+}
+
+func (h modelEscalationHook) Before(context.Context, *hooks.Event) error { return nil }
+
+func (h modelEscalationHook) After(ctx context.Context, evt *hooks.Event) error {
+	if evt.Type == hooks.EventToolCallAfter && evt.Error != nil {
+		_ = h.orchestrator.escalateModel(ctx, h.agentID)
+	}
+	return nil
+}
+
+func (o *Orchestrator) escalateModel(ctx context.Context, agentID string) error {
+	o.routingMu.Lock()
+	defer o.routingMu.Unlock()
+	if o.routingConfig == nil || o.modelOverrides[agentID] {
+		return nil
+	}
+	classification, ok := o.routingState[agentID]
+	if !ok || classification.Complexity == router.ComplexityHigh {
+		return nil
+	}
+	next := router.ComplexityMedium
+	if classification.Complexity == router.ComplexityMedium {
+		next = router.ComplexityHigh
+	}
+	spec, ok := o.routingConfig.ResolveModel(next, classification.Kind)
+	if !ok {
+		return nil
+	}
+	if err := o.switchModel(ctx, agentID, spec.Provider, spec.Model); err != nil {
+		return err
+	}
+	classification.Complexity = next
+	o.routingState[agentID] = classification
+	return nil
 }
 
 // SetPermissionMode applies mode (one of "prompt", "auto_approve", "deny" —
@@ -869,9 +941,23 @@ func (o *Orchestrator) ActiveModelInfo() (provider, modelID string) {
 // at startup — so switching models in a running TUI session picks up
 // env vars, chronos-code's own login, or a reused Claude Code/Codex
 // credential the same way the initial build did. It takes effect
-// immediately; there is no need to restart or rebuild the Orchestrator.
+// immediately and is treated as an explicit per-agent override of automatic
+// model routing; there is no need to restart or rebuild the Orchestrator.
 func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string) error {
-	a := o.ActiveAgent()
+	o.routingMu.Lock()
+	defer o.routingMu.Unlock()
+	if err := o.switchModel(ctx, o.active, provider, modelID); err != nil {
+		return err
+	}
+	if o.modelOverrides == nil {
+		o.modelOverrides = make(map[string]bool)
+	}
+	o.modelOverrides[o.active] = true
+	return nil
+}
+
+func (o *Orchestrator) switchModel(ctx context.Context, agentID, provider, modelID string) error {
+	a := o.agents[agentID]
 	if a == nil {
 		return fmt.Errorf("no active agent")
 	}
@@ -884,7 +970,11 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 			mc.BaseURL = override.BaseURL
 		}
 	}
-	p, err := agent.BuildProvider(mc)
+	buildProvider := o.buildProvider
+	if buildProvider == nil {
+		buildProvider = agent.BuildProvider
+	}
+	p, err := buildProvider(mc)
 	if err != nil {
 		return fmt.Errorf("build provider for %s/%s: %w", provider, modelID, err)
 	}
@@ -901,7 +991,9 @@ func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error
 		return err
 	}
 	if activeProvider, modelID := o.ActiveModelInfo(); activeProvider == provider && modelID != "" {
-		return o.SwitchModel(ctx, provider, modelID)
+		o.routingMu.Lock()
+		defer o.routingMu.Unlock()
+		return o.switchModel(ctx, o.active, provider, modelID)
 	}
 	return nil
 }

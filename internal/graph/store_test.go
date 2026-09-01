@@ -4,8 +4,40 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func TestFilesInPackage(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	for i, file := range []FileRecord{
+		{Path: "pkg/z.go", Package: "example/pkg"},
+		{Path: "other.go", Package: "example/other"},
+		{Path: "pkg/a.go", Package: "example/pkg"},
+	} {
+		if err := store.UpsertFile(ctx, file.Path, file.Package, int64(i+1)); err != nil {
+			t.Fatalf("UpsertFile(%s): %v", file.Path, err)
+		}
+	}
+
+	got, err := store.FilesInPackage(ctx, "example/pkg")
+	if err != nil {
+		t.Fatalf("FilesInPackage: %v", err)
+	}
+	want := []FileRecord{
+		{Path: "pkg/a.go", Package: "example/pkg"},
+		{Path: "pkg/z.go", Package: "example/pkg"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FilesInPackage = %#v, want %#v", got, want)
+	}
+}
 
 func TestStoreFTSSynchronizesSymbols(t *testing.T) {
 	ctx := context.Background()

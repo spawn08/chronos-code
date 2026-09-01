@@ -6,23 +6,109 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/tool"
 )
 
-// Tools returns the T0 (zero-LLM-cost) graph navigation tools defined by
-// PRD P1-007: graph_query, find_callers, find_implementations,
-// multi_resolution_view, and resolve_symbol. root is the workspace root,
-// used to resolve relative file paths for L3 source snippets.
+const (
+	codebaseMapMaxOutputBytes   = 64 * 1024
+	codebaseMapTruncationNotice = "\n\n_Output truncated at 65536 bytes._\n"
+)
+
+// Tools returns the T0 (zero-LLM-cost) graph navigation tools. root is the
+// workspace root, used to resolve paths for source snippets and code maps.
 func Tools(store *Store, root string) []*tool.Definition {
 	return []*tool.Definition{
 		graphQueryTool(store),
 		codebaseSearchTool(store),
+		codebaseMapTool(store, root),
 		findCallersTool(store),
 		findImplementationsTool(store),
 		multiResolutionViewTool(store, root),
 		resolveSymbolTool(store),
 	}
+}
+
+func codebaseMapTool(store *Store, root string) *tool.Definition {
+	return &tool.Definition{
+		Name:        "codebase_map",
+		Description: "Render deterministic package maps, selecting packages by indexed symbol relevance and package name.",
+		Permission:  tool.PermAllow,
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "Optional symbol or package query; omit for the package index"},
+			},
+		},
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			query, _ := args["query"].(string)
+			query = strings.TrimSpace(query)
+			if query == "" {
+				index, err := RenderCodeMapIndex(ctx, store)
+				if err != nil {
+					return nil, err
+				}
+				return limitCodebaseMapOutputBytes(index), nil
+			}
+
+			results, err := store.Search(ctx, query, 100)
+			if err != nil {
+				return nil, err
+			}
+			packages := make([]string, 0, len(results))
+			seen := make(map[string]struct{}, len(results))
+			for _, result := range results {
+				if _, ok := seen[result.Package]; ok {
+					continue
+				}
+				seen[result.Package] = struct{}{}
+				packages = append(packages, result.Package)
+			}
+
+			allPackages, err := store.Packages(ctx)
+			if err != nil {
+				return nil, err
+			}
+			foldedQuery := strings.ToLower(query)
+			for _, pkg := range allPackages {
+				if !strings.Contains(strings.ToLower(pkg), foldedQuery) {
+					continue
+				}
+				if _, ok := seen[pkg]; ok {
+					continue
+				}
+				seen[pkg] = struct{}{}
+				packages = append(packages, pkg)
+			}
+
+			var output strings.Builder
+			for i, pkg := range packages {
+				codeMap, err := RenderCodeMap(ctx, store, root, pkg)
+				if err != nil {
+					return nil, err
+				}
+				if i > 0 {
+					output.WriteByte('\n')
+				}
+				output.WriteString(codeMap)
+			}
+			return limitCodebaseMapOutputBytes(output.String()), nil
+		},
+	}
+}
+
+// limitCodebaseMapOutputBytes caps tool output in bytes without splitting a
+// UTF-8 encoding. The truncation notice is included within the byte limit.
+func limitCodebaseMapOutputBytes(output string) string {
+	if len(output) <= codebaseMapMaxOutputBytes {
+		return output
+	}
+	end := codebaseMapMaxOutputBytes - len(codebaseMapTruncationNotice)
+	for end > 0 && !utf8.ValidString(output[:end]) {
+		end--
+	}
+	return output[:end] + codebaseMapTruncationNotice
 }
 
 func codebaseSearchTool(store *Store) *tool.Definition {
