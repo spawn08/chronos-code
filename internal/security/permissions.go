@@ -39,12 +39,15 @@ func (c *PermissionChecker) Check(toolName string, args map[string]any, yolo boo
 			return Deny
 		}
 	case "shell", "shell_auto":
-		if c.guard.checkShellArgs(args) != nil {
+		if c.guard.checkShellArgs(args, toolName == "shell_auto") != nil {
 			return Deny
 		}
 		command, _ := args["command"].(string)
 		if matchesAnyRegex(c.policy.neverAllow, command) {
 			return Deny
+		}
+		if !c.guard.shellCommandAllowed(command) {
+			return Confirm
 		}
 		if matchesAnyRegex(c.policy.confirm, command) {
 			return Confirm
