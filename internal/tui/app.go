@@ -196,6 +196,7 @@ type appModel struct {
 	searchQuery   string
 	searchResults []string
 	searchIdx     int
+	completionIdx int
 
 	quitting bool
 }
@@ -268,7 +269,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		vh := msg.Height - headerHeight - (inputRows + inputBoxBorderWidth) - statusHeight
+		vh := m.viewportHeight()
 		if vh < 1 {
 			vh = 1
 		}
@@ -351,6 +352,25 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.searching {
 		return m.handleSearchKey(msg)
 	}
+	if completions := commandCompletions(m.input.Value()); len(completions) > 0 {
+		if m.completionIdx >= len(completions) {
+			m.completionIdx = 0
+		}
+		switch msg.Code {
+		case tea.KeyTab:
+			m.input.SetValue(completions[m.completionIdx])
+			m.input.CursorEnd()
+			m.completionIdx = 0
+			m.resizeViewport()
+			return m, nil
+		case tea.KeyUp:
+			m.completionIdx = (m.completionIdx - 1 + len(completions)) % len(completions)
+			return m, nil
+		case tea.KeyDown:
+			m.completionIdx = (m.completionIdx + 1) % len(completions)
+			return m, nil
+		}
+	}
 
 	switch {
 	case key.Matches(msg, keys.Submit):
@@ -359,6 +379,8 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.Reset()
+		m.completionIdx = 0
+		m.resizeViewport()
 		return m.handleSubmit(line)
 	case msg.String() == "alt+enter" && m.sending:
 		m.queuedMessage = m.input.Value()
@@ -399,7 +421,29 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	completions := commandCompletions(m.input.Value())
+	if m.completionIdx >= len(completions) {
+		m.completionIdx = 0
+	}
+	m.resizeViewport()
 	return m, cmd
+}
+
+func (m *appModel) viewportHeight() int {
+	height := m.height - headerHeight - (inputRows + inputBoxBorderWidth) - statusHeight
+	if len(commandCompletions(m.input.Value())) > 0 {
+		height--
+	}
+	if height < 1 {
+		return 1
+	}
+	return height
+}
+
+func (m *appModel) resizeViewport() {
+	if m.ready {
+		m.viewport.SetHeight(m.viewportHeight())
+	}
 }
 
 func (m *appModel) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1088,13 +1132,34 @@ func (m *appModel) View() tea.View {
 	case m.searching:
 		bottom = m.renderSearchOverlay()
 	default:
-		bottom = styleInputBox.Width(m.width - inputBoxBorderWidth).Render(m.input.View())
+		input := styleInputBox.Width(m.width - inputBoxBorderWidth).Render(m.input.View())
+		if completions := commandCompletions(m.input.Value()); len(completions) > 0 {
+			bottom = lipgloss.JoinVertical(lipgloss.Left, m.renderCommandCompletions(completions), input)
+		} else {
+			bottom = input
+		}
 	}
 
 	return tea.View{
 		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar()),
 		AltScreen: true,
 	}
+}
+
+func (m *appModel) renderCommandCompletions(completions []string) string {
+	var b strings.Builder
+	b.WriteString(styleKeyHint.Render(" tab complete "))
+	for i, command := range completions {
+		if i > 0 {
+			b.WriteString("  ")
+		}
+		if i == m.completionIdx {
+			b.WriteString(styleAgentName.Render(command))
+		} else {
+			b.WriteString(styleDim.Render(command))
+		}
+	}
+	return truncateToWidth(b.String(), m.width)
 }
 
 // renderHeaderBar and renderStatusBar build their output by concatenating

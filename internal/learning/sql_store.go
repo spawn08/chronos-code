@@ -96,12 +96,15 @@ func OpenSQLStore(ctx context.Context, path string) (*SQLStore, error) {
 	return &SQLStore{db: db}, nil
 }
 
-// CreateSession records a new session.
+// CreateSession records a session if it does not already exist. Session IDs
+// survive process restarts, so resuming a conversation must preserve its
+// existing telemetry row rather than fail the first hook in the new process.
 func (s *SQLStore) CreateSession(ctx context.Context, session Session) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions
 			(id, repo_path, started_at, ended_at, model, turns, input_tokens, output_tokens, cost_usd)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO NOTHING`,
 		session.ID, session.RepoPath, timestamp(session.StartedAt), nullableTimestamp(session.EndedAt),
 		session.Model, session.Turns, session.InputTokens, session.OutputTokens, session.CostUSD)
 	if err != nil {

@@ -46,8 +46,9 @@ const helpText = `Commands:
 Keys:
   enter              Send message
   alt+enter, ctrl+j  Insert newline (queues as a follow-up if a turn is streaming)
-  up / down          Recall previous/next message (single-line input only)
+  up / down          Select completion, otherwise recall message history
   ctrl+r             Search message history
+  tab                Complete the selected slash command
   ctrl+a             Agent picker
   ctrl+/             Command palette (includes /model to switch models)
   ctrl+m             Model picker (use /model or ctrl+/ if terminal key enhancements are unavailable)
