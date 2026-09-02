@@ -19,6 +19,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	projectSkillDirs = []string{
+		filepath.Join(".claude", "skills"),
+		filepath.Join(".codex", "skills"),
+		filepath.Join(".agents", "skills"),
+		filepath.Join(".gemini", "skills"),
+		filepath.Join(".opencode", "skills"),
+		filepath.Join(".opencode", "skill"),
+		filepath.Join(".cursor", "skills"),
+		filepath.Join(".windsurf", "skills"),
+		filepath.Join(".github", "skills"),
+	}
+	userSkillDirs = []string{
+		filepath.Join(".claude", "skills"),
+		filepath.Join(".codex", "skills"),
+		filepath.Join(".agents", "skills"),
+		filepath.Join(".gemini", "skills"),
+		filepath.Join(".opencode", "skills"),
+		filepath.Join(".opencode", "skill"),
+		filepath.Join(".config", "opencode", "skills"),
+		filepath.Join(".config", "opencode", "skill"),
+		filepath.Join(".cursor", "skills"),
+		filepath.Join(".windsurf", "skills"),
+		filepath.Join(".github", "skills"),
+	}
+)
+
 // Skill is chronos-code's own skill representation: a named capability
 // bundle with trigger keywords for selection matching (ROADMAP.md §5.1's
 // SKILL.md frontmatter schema) and a markdown body injected verbatim when
@@ -163,31 +190,32 @@ func LoadDir(dir string) ([]*Skill, error) {
 	return out, nil
 }
 
-// Discover merges every tier of ROADMAP.md §5.1's resolution order,
-// highest-priority first: repo-local ("<root>/.chronos-code/skills"), user
-// global ("~/.chronos-code/skills"), plugin-installed
-// ("~/.chronos-code/plugins/*/skills"), then bundled (embedded
-// default-skills.yaml, passed in as bundled since internal/defaults isn't
-// importable from here without an import cycle risk — callers already have
-// defaults.ReadFile). A name present in a higher tier shadows the same name
-// in a lower one.
+// Discover merges native and provider skill directories in highest-priority
+// order: project chronos-code, project provider directories, user
+// chronos-code, user provider directories, plugins, then bundled defaults.
+// Names are matched case-insensitively so a skill is injected only once even
+// when several providers expose the same installation.
 func Discover(root string, bundled []*Skill) ([]*Skill, error) {
 	var tiers [][]*Skill
 
 	if root != "" {
-		repoSkills, err := LoadDir(filepath.Join(root, ".chronos-code", "skills"))
-		if err != nil {
-			return nil, err
+		for _, dir := range append([]string{filepath.Join(".chronos-code", "skills")}, projectSkillDirs...) {
+			projectSkills, err := LoadDir(filepath.Join(root, dir))
+			if err != nil {
+				return nil, err
+			}
+			tiers = append(tiers, projectSkills)
 		}
-		tiers = append(tiers, repoSkills)
 	}
 
 	if home, err := os.UserHomeDir(); err == nil {
-		userSkills, err := LoadDir(filepath.Join(home, ".chronos-code", "skills"))
-		if err != nil {
-			return nil, err
+		for _, dir := range append([]string{filepath.Join(".chronos-code", "skills")}, userSkillDirs...) {
+			userSkills, err := LoadDir(filepath.Join(home, dir))
+			if err != nil {
+				return nil, err
+			}
+			tiers = append(tiers, userSkills)
 		}
-		tiers = append(tiers, userSkills)
 
 		pluginsDir := filepath.Join(home, ".chronos-code", "plugins")
 		entries, err := os.ReadDir(pluginsDir)
@@ -216,10 +244,11 @@ func Discover(root string, bundled []*Skill) ([]*Skill, error) {
 	var merged []*Skill
 	for _, tier := range tiers {
 		for _, s := range tier {
-			if seen[s.Name] {
+			name := strings.ToLower(strings.TrimSpace(s.Name))
+			if seen[name] {
 				continue
 			}
-			seen[s.Name] = true
+			seen[name] = true
 			merged = append(merged, s)
 		}
 	}

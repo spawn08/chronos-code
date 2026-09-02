@@ -59,6 +59,7 @@ type Orchestrator struct {
 
 	sessionMgr *session.Manager
 	sessions   map[string]string // agentID -> current sessionID
+	sessionMu  sync.RWMutex
 
 	router             *router.Router
 	routingConfig      *router.Config
@@ -75,6 +76,7 @@ type Orchestrator struct {
 	attBudget          *attention.Budgeter
 	teams              map[string]*team.Team
 	projectDocsWatcher *projectdocs.Watcher
+	skillCatalog       []*skills.Skill
 	permissionChecker  *security.PermissionChecker
 	permissionYolo     atomic.Bool
 	hookRunner         *security.HookRunner
@@ -82,6 +84,12 @@ type Orchestrator struct {
 	lspManager         interface{ Close() error }
 	closeOnce          sync.Once
 	closeErr           error
+}
+
+type SkillInfo struct {
+	Name        string
+	Description string
+	Source      string
 }
 
 const userHookPromptContextTokens = 1000
@@ -176,7 +184,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
 
-	setupSkills(cfg, root, agents)
+	skillCatalog := setupSkills(cfg, root, agents)
 	languageServerManager = setupLSP(root, wsInfo, agents)
 
 	rt, routingConfig := setupRouter(cfg, projectDir)
@@ -252,6 +260,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		attBudget:          attBudget,
 		teams:              teams,
 		projectDocsWatcher: pdWatcher,
+		skillCatalog:       skillCatalog,
 		permissionChecker:  security.NewPermissionChecker(policy, root),
 		hookRunner:         hookRunner,
 		learningStore:      learningStore,
@@ -866,8 +875,8 @@ func projectDocsSummarizer(cfg *config.Config) projectdocs.Summarizer {
 	}
 }
 
-// setupSkills discovers chronos-code's own skill catalog (repo-local >
-// user-global > bundled, ROADMAP.md §5.1) and, for every agent, chains in a
+// setupSkills discovers the merged native/provider skill catalog and, for
+// every agent, chains in a
 // ContextPinsFn that BM25-selects the top-K most relevant skills for the
 // current user message and injects only those — never the whole catalog,
 // which is the "load everything into context" anti-pattern §5.1 explicitly
@@ -877,24 +886,24 @@ func projectDocsSummarizer(cfg *config.Config) projectdocs.Summarizer {
 // never at setup time. A missing/unreadable bundled catalog is logged and
 // skipped, not fatal: an agent with no skills selected behaves exactly as
 // it did before this feature existed.
-func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent) {
+func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent) []*skills.Skill {
 	bundledData, err := defaults.ReadFile("skills/default-skills.yaml")
 	if err != nil {
 		fmt.Printf("warning: read bundled skill catalog: %v\n", err)
-		return
+		return nil
 	}
 	bundled, err := skills.LoadBundledYAML(bundledData)
 	if err != nil {
 		fmt.Printf("warning: parse bundled skill catalog: %v\n", err)
-		return
+		return nil
 	}
 	catalog, err := skills.Discover(root, bundled)
 	if err != nil {
 		fmt.Printf("warning: discover skills: %v\n", err)
-		return
+		return nil
 	}
 	if len(catalog) == 0 {
-		return
+		return nil
 	}
 
 	modelID := ""
@@ -922,6 +931,7 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 			return msgs
 		}
 	}
+	return catalog
 }
 
 // setupRouter loads routing.yaml (project override at
@@ -1129,7 +1139,7 @@ func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatRes
 			message = message + "\n\n" + preloaded
 		}
 	}
-	sid := o.sessions[o.active]
+	sid := o.CurrentSessionID()
 	if sid == "" || a.Storage == nil {
 		return a.Chat(ctx, message)
 	}
@@ -1189,7 +1199,7 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message string) (conte
 // context pins and session-scoped runtime features.
 func (o *Orchestrator) turnContext(ctx context.Context, message string) context.Context {
 	ctx = context.WithValue(ctx, messageKey{}, message)
-	if sid := o.sessions[o.active]; sid != "" {
+	if sid := o.CurrentSessionID(); sid != "" {
 		ctx = storage.WithSession(ctx, sid)
 	}
 	return ctx
@@ -1543,6 +1553,17 @@ func (o *Orchestrator) ListAgents() []string {
 	return o.order
 }
 
+func (o *Orchestrator) ListSkills() []SkillInfo {
+	result := make([]SkillInfo, len(o.skillCatalog))
+	for i, skill := range o.skillCatalog {
+		result[i] = SkillInfo{Name: skill.Name, Description: skill.Description, Source: skill.Source}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+	return result
+}
+
 func (o *Orchestrator) GetAgent(id string) (*agent.Agent, bool) {
 	a, ok := o.agents[id]
 	return a, ok
@@ -1567,7 +1588,26 @@ func (o *Orchestrator) SessionManager() *session.Manager {
 // CurrentSessionID returns the session id currently bound to the active
 // agent.
 func (o *Orchestrator) CurrentSessionID() string {
+	o.sessionMu.RLock()
+	defer o.sessionMu.RUnlock()
 	return o.sessions[o.active]
+}
+
+// ResetSession starts a fresh conversation context for the active agent. The
+// previous session remains persisted and available through session history.
+func (o *Orchestrator) ResetSession(ctx context.Context) (string, error) {
+	agentID := o.active
+	if _, ok := o.agents[agentID]; !ok {
+		return "", fmt.Errorf("no active agent")
+	}
+	sessionID := session.NewSessionID()
+	if err := o.sessionMgr.Ensure(ctx, sessionID, agentID); err != nil {
+		return "", fmt.Errorf("create replacement session: %w", err)
+	}
+	o.sessionMu.Lock()
+	o.sessions[agentID] = sessionID
+	o.sessionMu.Unlock()
+	return sessionID, nil
 }
 
 // MemoryStore returns the YAML-backed memory store (PRD P2-002), or nil if

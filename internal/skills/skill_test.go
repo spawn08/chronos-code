@@ -1,8 +1,10 @@
 package skills
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -201,6 +203,57 @@ func TestDiscoverMergesAllTiersWithPrecedence(t *testing.T) {
 		if got[name] != description {
 			t.Errorf("skill %q description = %q, want %q", name, got[name], description)
 		}
+	}
+}
+
+func TestDiscoverProviderDirectoriesAndRemovesDuplicates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+
+	writeSkill(t, filepath.Join(root, ".chronos-code", "skills"), "shared", "chronos project")
+	writeSkill(t, filepath.Join(root, ".claude", "skills"), "Shared", "claude duplicate")
+	writeSkill(t, filepath.Join(root, ".codex", "skills"), "codex-only", "codex project")
+	writeSkill(t, filepath.Join(root, ".agents", "skills"), "agents-only", "agents project")
+	writeSkill(t, filepath.Join(root, ".gemini", "skills"), "gemini-only", "gemini project")
+	writeSkill(t, filepath.Join(root, ".opencode", "skills"), "opencode-only", "opencode project")
+	writeSkill(t, filepath.Join(root, ".cursor", "skills"), "cursor-only", "cursor project")
+	writeSkill(t, filepath.Join(root, ".windsurf", "skills"), "windsurf-only", "windsurf project")
+	writeSkill(t, filepath.Join(root, ".github", "skills"), "copilot-only", "github project")
+	userDirs := []string{
+		filepath.Join(".claude", "skills"), filepath.Join(".codex", "skills"),
+		filepath.Join(".agents", "skills"), filepath.Join(".gemini", "skills"),
+		filepath.Join(".opencode", "skills"), filepath.Join(".config", "opencode", "skills"),
+		filepath.Join(".cursor", "skills"), filepath.Join(".windsurf", "skills"),
+		filepath.Join(".github", "skills"),
+	}
+	for i, dir := range userDirs {
+		writeSkill(t, filepath.Join(home, dir), fmt.Sprintf("user-%d", i), "user provider")
+	}
+
+	merged, err := Discover(root, []*Skill{{Name: "CODEX-ONLY", Description: "bundled duplicate"}})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	got := make(map[string]string, len(merged))
+	for _, skill := range merged {
+		key := strings.ToLower(skill.Name)
+		if _, exists := got[key]; exists {
+			t.Fatalf("duplicate skill %q in merged catalog", key)
+		}
+		got[key] = skill.Description
+	}
+	want := map[string]string{
+		"shared": "chronos project", "codex-only": "codex project", "agents-only": "agents project",
+		"gemini-only": "gemini project", "opencode-only": "opencode project", "cursor-only": "cursor project",
+		"windsurf-only": "windsurf project", "copilot-only": "github project",
+	}
+	for i := range userDirs {
+		want[fmt.Sprintf("user-%d", i)] = "user provider"
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("discovered skills = %v, want %v", got, want)
 	}
 }
 

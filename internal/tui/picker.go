@@ -70,7 +70,7 @@ func newModelPicker(m *appModel) *picker {
 var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/login", "/logout", "/whoami",
 	"/context", "/stream", "/session", "/memory", "/budget", "/workspace",
-	"/clear", "/perf", "/help", "/quit",
+	"/skills", "/clear", "/perf", "/help", "/quit",
 }
 
 func newCommandPalette() *picker {

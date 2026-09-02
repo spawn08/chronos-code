@@ -6,3 +6,5 @@ dist/
 .chronos-code/sessions.db
 vendor/
 .ppd/*
+*.db-shm
+*.db-wal

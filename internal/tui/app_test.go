@@ -9,6 +9,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 
@@ -239,7 +240,9 @@ func TestHandleKey_V2PickerShortcuts(t *testing.T) {
 
 func TestHandleKey_EnterSubmitsWithoutOpeningModelPicker(t *testing.T) {
 	m := newTestAppModel(t)
+	oldSessionID := m.orch.CurrentSessionID()
 	m.blocks = []string{"clear me"}
+	m.lastKnownUsage.PromptTokens = 10
 	m.input.SetValue("/clear")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -252,6 +255,62 @@ func TestHandleKey_EnterSubmitsWithoutOpeningModelPicker(t *testing.T) {
 	}
 	if len(m.blocks) != 0 {
 		t.Errorf("Enter did not submit /clear; blocks = %v", m.blocks)
+	}
+	if got := m.orch.CurrentSessionID(); got == oldSessionID || got == "" {
+		t.Errorf("/clear session ID = %q, want a new non-empty ID", got)
+	}
+	if m.lastKnownUsage.PromptTokens != 0 {
+		t.Errorf("/clear retained last usage: %+v", m.lastKnownUsage)
+	}
+}
+
+func TestHandleModelCommand_InfersActiveProviderForUnknownLiveModel(t *testing.T) {
+	m := newTestAppModel(t)
+
+	m.handleModelCommand("new-live-model")
+
+	provider, modelID := m.orch.ActiveModelInfo()
+	if provider != "openai" || modelID != "new-live-model" {
+		t.Errorf("active model = %s/%s, want openai/new-live-model", provider, modelID)
+	}
+}
+
+func TestStreamingDoesNotForceViewportToBottomAfterPageUp(t *testing.T) {
+	m := newTestAppModel(t)
+	m.followOutput = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{strings.Repeat("line\n", 40)}
+	m.viewport.SetContent(m.renderTranscript())
+	m.viewport.GotoBottom()
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.followOutput || m.viewport.AtBottom() {
+		t.Fatal("PageUp did not detach viewport from live output")
+	}
+
+	m.sending = true
+	before := m.viewport.YOffset()
+	_, _ = m.handleStreamDelta(streamDeltaMsg{
+		resp: &model.ChatResponse{Content: "more output\n"},
+		ch:   make(chan *model.ChatResponse),
+	})
+	if got := m.viewport.YOffset(); got != before {
+		t.Errorf("stream moved viewport offset from %d to %d while detached", before, got)
+	}
+}
+
+func TestHandleSlashSkillsListsDiscoveredCatalog(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("/skills")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd != nil {
+		t.Fatal("/skills returned a command")
+	}
+	output := strings.Join(m.blocks, "\n")
+	if !strings.Contains(output, "skills (") || !strings.Contains(output, "code-review") {
+		t.Errorf("/skills output = %q, want discovered bundled skills", output)
 	}
 }
 
