@@ -255,6 +255,47 @@ func TestHandleKey_EnterSubmitsWithoutOpeningModelPicker(t *testing.T) {
 	}
 }
 
+func TestHandleKey_TabCompletesSlashCommand(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("/ag")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if cmd != nil {
+		t.Fatal("Tab completion returned a command")
+	}
+	if got := m.input.Value(); got != "/agent" {
+		t.Errorf("input after Tab = %q, want /agent", got)
+	}
+}
+
+func TestHandleKey_DownSelectsNextSlashCompletion(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("/ag")
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	if got := m.input.Value(); got != "/agents" {
+		t.Errorf("input after Down+Tab = %q, want /agents", got)
+	}
+}
+
+func TestView_ShowsSlashCommandCompletions(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.input.SetValue("/mod")
+	m.resizeViewport()
+
+	view := m.View()
+	if !strings.Contains(view.Content, "tab complete") || !strings.Contains(view.Content, "/model") {
+		t.Errorf("View() does not show slash completions: %q", view.Content)
+	}
+	if got, want := m.viewport.Height(), 23; got != want {
+		t.Errorf("viewport height with completions = %d, want %d", got, want)
+	}
+}
+
 func TestUpdate_KeyReleasesDoNotTriggerPressActions(t *testing.T) {
 	tests := []struct {
 		name string

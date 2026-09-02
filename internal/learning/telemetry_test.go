@@ -136,6 +136,35 @@ func TestTelemetryUsesContextSessionWithAgentFallback(t *testing.T) {
 	}
 }
 
+func TestTelemetryResumesExistingSession(t *testing.T) {
+	store := openTestSQLStore(t)
+	ctx := storage.WithSession(context.Background(), "resumed-session")
+	evt := &hooks.Event{Type: hooks.EventModelCallBefore, Name: "model-a"}
+
+	first := NewTelemetryRecorder(store, "/repo", "coder")
+	if err := first.Before(ctx, evt); err != nil {
+		t.Fatalf("first recorder Before() error = %v", err)
+	}
+
+	// A new recorder simulates restarting chronos-code and resuming the same
+	// persisted conversation session.
+	resumed := NewTelemetryRecorder(store, "/repo", "coder")
+	if err := resumed.Before(ctx, evt); err != nil {
+		t.Fatalf("resumed recorder Before() error = %v", err)
+	}
+
+	var sessions, turns int
+	if err := store.db.QueryRow(`SELECT count(*) FROM sessions WHERE id = 'resumed-session'`).Scan(&sessions); err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if err := store.db.QueryRow(`SELECT count(*) FROM turns WHERE session_id = 'resumed-session'`).Scan(&turns); err != nil {
+		t.Fatalf("count turns: %v", err)
+	}
+	if sessions != 1 || turns != 2 {
+		t.Errorf("resumed telemetry counts = sessions %d, turns %d; want 1, 2", sessions, turns)
+	}
+}
+
 func TestTelemetryConcurrentIDsAreUnique(t *testing.T) {
 	store := openTestSQLStore(t)
 	recorder := NewTelemetryRecorder(store, "/repo", "coder")
