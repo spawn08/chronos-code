@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -125,6 +126,27 @@ func SummarizeArgs(args string) string {
 // RenderToolCall renders a single tool-call line (name + summarized args).
 func RenderToolCall(name, argSummary string) string {
 	return fmt.Sprintf("  %s %s %s", styleTool.Render("⎿"), styleBold.Render(name), styleDim.Render(argSummary))
+}
+
+func RenderToolActivity(agent, name string, args any, done bool, eventErr any) string {
+	state := "running"
+	marker := "⎿"
+	if done {
+		state = "done"
+		marker = "✓"
+	}
+	if eventErr != nil {
+		state = "failed"
+		marker = "✗"
+	}
+	details := ""
+	if args != nil {
+		if encoded, err := json.Marshal(args); err == nil {
+			details = " " + SummarizeArgs(string(encoded))
+		}
+	}
+	return fmt.Sprintf("  %s %s%s %s%s", styleTool.Render(marker), agent,
+		styleBold.Render(name), styleDim.Render(state), styleDim.Render(details))
 }
 
 // RenderTurnHeader renders a turn header line: icon + styled name + trailing separator.

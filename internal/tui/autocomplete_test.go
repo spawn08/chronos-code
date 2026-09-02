@@ -14,7 +14,7 @@ func TestCommandCompletions(t *testing.T) {
 		{name: "empty", input: "", want: nil},
 		{name: "plain text", input: "help", want: nil},
 		{name: "arguments", input: "/agent coder", want: nil},
-		{name: "prefix orders shortest first", input: "/ag", want: []string{"/agent", "/agents"}},
+		{name: "prefix orders shortest first", input: "/ag", want: []string{"/agent", "/agents", "/usage"}},
 		{name: "exact first", input: "/agent", want: []string{"/agent", "/agents"}},
 		{name: "fuzzy subsequence", input: "/mdl", want: []string{"/model"}},
 	}

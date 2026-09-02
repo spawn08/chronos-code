@@ -16,6 +16,7 @@ import (
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/mcp"
 	"github.com/spawn08/chronos/engine/model"
+	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/engine/tool"
 	chronostrace "github.com/spawn08/chronos/os/trace"
 	"github.com/spawn08/chronos/sdk/agent"
@@ -83,6 +84,7 @@ type Orchestrator struct {
 	hookRunner         *security.HookRunner
 	learningStore      *learning.SQLStore
 	lspManager         interface{ Close() error }
+	broker             *chronosstream.Broker
 	closeOnce          sync.Once
 	closeErr           error
 }
@@ -202,6 +204,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 
 	actBuf := activation.NewBuffer(50)
+	broker := chronosstream.NewBroker(chronosstream.WithBufferSize(256))
+	for _, a := range agents {
+		a.Broker = broker
+	}
 	if err := setupSubAgents(agents); err != nil {
 		return nil, fmt.Errorf("configure subagent delegation: %w", err)
 	}
@@ -270,6 +276,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		hookRunner:         hookRunner,
 		learningStore:      learningStore,
 		lspManager:         languageServerManager,
+		broker:             broker,
 	}
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
@@ -1652,6 +1659,19 @@ func (o *Orchestrator) SessionCost() budget.SessionCost {
 	return o.currentUSDBudget().Cost(sessionID)
 }
 
+// SubscribeActivity returns execution events for the active session and a
+// cleanup function. Delegated agents share this broker and session.
+func (o *Orchestrator) SubscribeActivity() (<-chan chronosstream.Event, func(), error) {
+	if o.broker == nil {
+		return nil, func() {}, fmt.Errorf("execution activity is unavailable")
+	}
+	sub, err := o.broker.SubscribeTopic(o.CurrentSessionID())
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return sub.C, func() { o.broker.Unsubscribe(sub.ID) }, nil
+}
+
 func (o *Orchestrator) currentUSDBudget() *budget.Tracker {
 	o.budgetMu.RLock()
 	tracker := o.usdBudget
@@ -1788,6 +1808,11 @@ func (o *Orchestrator) Close() error {
 		if o.lspManager != nil {
 			if err := o.lspManager.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close LSP manager: %w", err))
+			}
+		}
+		if o.broker != nil {
+			if err := o.broker.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close activity broker: %w", err))
 			}
 		}
 		if o.store != nil {

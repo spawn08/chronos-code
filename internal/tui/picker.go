@@ -69,7 +69,7 @@ func newModelPicker(m *appModel) *picker {
 // same order, for Ctrl+/'s fuzzy-filtered palette.
 var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/login", "/logout", "/whoami",
-	"/context", "/stream", "/session", "/memory", "/budget", "/workspace",
+	"/context", "/usage", "/stream", "/session", "/memory", "/budget", "/workspace",
 	"/skills", "/copy", "/clear", "/perf", "/help", "/quit",
 }
 
