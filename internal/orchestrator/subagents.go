@@ -3,10 +3,13 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/sdk/harness"
 )
+
+const configuredSubagentTimeout = 10 * time.Minute
 
 type configuredAgentRunner struct {
 	agents   map[string]*agent.Agent
@@ -15,7 +18,9 @@ type configuredAgentRunner struct {
 
 func (r configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSpec, task string) (string, error) {
 	if configured := r.agents[spec.Name]; configured != nil {
-		result, err := configured.Execute(ctx, task)
+		runCtx, cancel := context.WithTimeout(ctx, configuredSubagentTimeout)
+		defer cancel()
+		result, err := configured.Execute(runCtx, task)
 		if err != nil {
 			return "", fmt.Errorf("configured subagent %q: %w", spec.Name, err)
 		}

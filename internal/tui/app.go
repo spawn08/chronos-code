@@ -169,6 +169,8 @@ type appModel struct {
 	transcriptBuf     strings.Builder
 	activeAgentText   strings.Builder
 	activeToolLines   []string
+	pendingToolCalls  int
+	pendingSubagents  int
 	lastChunk         string
 	lastAssistantText string
 	lastUsage         model.Usage
@@ -299,6 +301,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		m.viewport.SetContent(m.renderTranscript())
 		return m, cmd
 
 	case approvalRequestMsg:
@@ -599,8 +602,18 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	}
 	for _, tc := range resp.ToolCalls {
 		m.activeToolLines = append(m.activeToolLines, RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
+		m.pendingToolCalls++
+		if tc.Name == "spawn_subagent" {
+			m.pendingSubagents++
+		}
 	}
 	if resp.Content != "" && resp.Content != m.lastChunk {
+		if m.pendingToolCalls > 0 && len(resp.ToolCalls) == 0 {
+			label := progressLabel(m.pendingToolCalls, m.pendingSubagents, "completed")
+			m.activeToolLines = append(m.activeToolLines, styleAgentName.Render("  ✓ "+label))
+			m.pendingToolCalls = 0
+			m.pendingSubagents = 0
+		}
 		m.activeAgentText.WriteString(resp.Content)
 		m.lastChunk = resp.Content
 	}
@@ -1127,6 +1140,8 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	}
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
+	m.pendingToolCalls = 0
+	m.pendingSubagents = 0
 	m.lastChunk = ""
 	m.lastUsage = model.Usage{}
 	m.viewport.SetContent(m.renderTranscript())
@@ -1176,9 +1191,27 @@ func (m *appModel) renderTranscript() string {
 		} else {
 			m.transcriptBuf.WriteString(styleDim.Render(m.spin.View() + " thinking..."))
 		}
+		if m.pendingToolCalls > 0 {
+			label := progressLabel(m.pendingToolCalls, m.pendingSubagents, "running...")
+			m.transcriptBuf.WriteByte('\n')
+			m.transcriptBuf.WriteString(styleTool.Render(m.spin.View() + " " + label))
+		}
 	}
 
 	return m.transcriptBuf.String()
+}
+
+func progressLabel(toolCalls, subagents int, state string) string {
+	count, noun := toolCalls, "tool calls"
+	if subagents > 0 {
+		count, noun = subagents, "subagents"
+		if subagents == 1 {
+			noun = "subagent"
+		}
+	} else if toolCalls == 1 {
+		noun = "tool call"
+	}
+	return fmt.Sprintf("%d %s %s", count, noun, state)
 }
 
 func (m *appModel) invalidateRenderCache() {

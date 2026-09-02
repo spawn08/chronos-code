@@ -64,9 +64,18 @@ func (c *approvalCache) remember(sessionID, toolName string, decision approvalDe
 // presses y/n/a.
 func NewApprovalHandler(p *tea.Program) tool.ApprovalFunc {
 	cache := newApprovalCache()
+	var promptMu sync.Mutex
 
 	return func(ctx context.Context, toolName string, args map[string]any) (bool, error) {
 		sessionID := storage.SessionFromContext(ctx)
+		if cache.allowed(sessionID, toolName) {
+			return true, nil
+		}
+		// Concurrent subagents may request tools simultaneously. Serialize human
+		// prompts so one modal cannot overwrite another, then re-check the cache
+		// because an earlier "all session" decision may have approved this call.
+		promptMu.Lock()
+		defer promptMu.Unlock()
 		if cache.allowed(sessionID, toolName) {
 			return true, nil
 		}
