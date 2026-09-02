@@ -179,8 +179,9 @@ type appModel struct {
 	lastKnownUsage model.Usage
 	sending        bool
 
-	statusMsg string
-	perf      frameTiming
+	statusMsg    string
+	perf         frameTiming
+	followOutput bool
 
 	approval *pendingApproval
 	wizard   *loginWizard
@@ -220,14 +221,15 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	wd, _ := os.Getwd()
 
 	m := &appModel{
-		orch:    orch,
-		stream:  stream,
-		ctx:     ctx,
-		cancel:  cancel,
-		input:   ta,
-		spin:    spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		history: NewHistory(),
-		workDir: wd,
+		orch:         orch,
+		stream:       stream,
+		ctx:          ctx,
+		cancel:       cancel,
+		input:        ta,
+		spin:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		history:      NewHistory(),
+		workDir:      wd,
+		followOutput: true,
 	}
 
 	p := tea.NewProgram(m)
@@ -290,6 +292,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
+	case tea.MouseWheelMsg:
+		if !m.ready {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		m.followOutput = m.viewport.AtBottom()
+		return m, cmd
+
 	case spinner.TickMsg:
 		if !m.sending {
 			return m, nil
@@ -351,6 +362,12 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.searching {
 		return m.handleSearchKey(msg)
+	}
+	if m.ready && (msg.Code == tea.KeyPgUp || msg.Code == tea.KeyPgDown) {
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		m.followOutput = m.viewport.AtBottom()
+		return m, cmd
 	}
 	if completions := commandCompletions(m.input.Value()); len(completions) > 0 {
 		if m.completionIdx >= len(completions) {
@@ -590,7 +607,9 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		m.lastChunk = resp.Content
 	}
 	m.viewport.SetContent(m.renderTranscript())
-	m.viewport.GotoBottom()
+	if m.followOutput {
+		m.viewport.GotoBottom()
+	}
 	return m, listenStream(msg.ch)
 }
 
@@ -672,8 +691,19 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.stream = !m.stream
 		m.appendSystem(fmt.Sprintf("streaming: %v", m.stream))
 	case "/clear":
+		if m.sending {
+			m.appendError(fmt.Errorf("cannot clear context while a response is in progress"))
+			break
+		}
+		if _, err := m.orch.ResetSession(m.ctx); err != nil {
+			m.appendError(err)
+			break
+		}
 		m.blocks = nil
 		m.invalidateRenderCache()
+		m.lastKnownUsage = model.Usage{}
+		m.statusMsg = "new session started"
+		m.followOutput = true
 	case "/perf":
 		m.appendSystem(m.perf.stats())
 	case "/session":
@@ -703,6 +733,22 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		var b strings.Builder
 		for _, rec := range records {
 			fmt.Fprintf(&b, "  %s  [%-8s] %s\n", rec.ID, rec.Category, rec.Content)
+		}
+		m.appendSystem(strings.TrimRight(b.String(), "\n"))
+	case "/skills":
+		catalog := m.orch.ListSkills()
+		if len(catalog) == 0 {
+			m.appendSystem("no skills discovered")
+			break
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "skills (%d):\n", len(catalog))
+		for _, skill := range catalog {
+			fmt.Fprintf(&b, "  %-24s %s", skill.Name, skill.Description)
+			if skill.Source != "" {
+				fmt.Fprintf(&b, "  [%s]", skill.Source)
+			}
+			b.WriteByte('\n')
 		}
 		m.appendSystem(strings.TrimRight(b.String(), "\n"))
 	case "/budget":
@@ -735,7 +781,9 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 // that one field always comes from the static table regardless of which
 // list is shown. With an argument it switches the active agent's model
 // via Orchestrator.SwitchModel, which resolves credentials through the
-// full auth precedence chain automatically.
+// full auth precedence chain automatically. A model-only argument uses the
+// static registry when possible and otherwise keeps the active provider, which
+// allows newly released live-listed models to be selected without repeating it.
 func (m *appModel) handleModelCommand(arg string) {
 	if arg == "" {
 		provider, modelID := m.orch.ActiveModelInfo()
@@ -775,11 +823,16 @@ func (m *appModel) handleModelCommand(arg string) {
 	switch len(parts) {
 	case 1:
 		info, ok := modelinfo.LookupByModel(parts[0])
-		if !ok {
-			m.appendError(fmt.Errorf("model %q is unknown or ambiguous; specify a provider: /model <provider> %s", parts[0], parts[0]))
-			return
+		if ok {
+			provider, modelID = info.Provider, parts[0]
+		} else {
+			provider, _ = m.orch.ActiveModelInfo()
+			if provider == "" {
+				m.appendError(fmt.Errorf("cannot infer a provider for model %q; use /model <provider> <model>", parts[0]))
+				return
+			}
+			modelID = parts[0]
 		}
-		provider, modelID = info.Provider, parts[0]
 	case 2:
 		provider, modelID = parts[0], parts[1]
 	default:
@@ -911,7 +964,9 @@ func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
 		m.appendSystem("OAuth login complete")
 	}
 	m.viewport.SetContent(m.renderTranscript())
-	m.viewport.GotoBottom()
+	if m.followOutput {
+		m.viewport.GotoBottom()
+	}
 	return m, nil
 }
 
@@ -1062,7 +1117,9 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.lastChunk = ""
 	m.lastUsage = model.Usage{}
 	m.viewport.SetContent(m.renderTranscript())
-	m.viewport.GotoBottom()
+	if m.followOutput {
+		m.viewport.GotoBottom()
+	}
 
 	if m.queuedMessage == "" {
 		return nil
@@ -1143,6 +1200,7 @@ func (m *appModel) View() tea.View {
 	return tea.View{
 		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar()),
 		AltScreen: true,
+		MouseMode: tea.MouseModeCellMotion,
 	}
 }
 
