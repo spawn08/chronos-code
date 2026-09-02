@@ -243,3 +243,97 @@ func TestMergeLearnedAgents_HandAuthoredWins(t *testing.T) {
 		t.Errorf("search-first.Name = %q, want the learned agent to be appended", byID["search-first"].Name)
 	}
 }
+
+func TestLoadAgentDirSupportsYAMLAndYML(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "beta.yml"), []byte("id: beta\nname: Beta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpha.yaml"), []byte("id: alpha\nname: Alpha\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("ignored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadAgentDir(dir)
+	if err != nil {
+		t.Fatalf("loadAgentDir() error = %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "alpha" || got[1].ID != "beta" {
+		t.Fatalf("loadAgentDir() = %+v, want alpha then beta", got)
+	}
+}
+
+func TestLoadAgentDirRejectsDefinitionWithoutID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invalid.yaml")
+	if err := os.WriteFile(path, []byte("name: Missing ID\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadAgentDir(dir)
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "missing id") {
+		t.Fatalf("loadAgentDir() error = %v, want path and missing id", err)
+	}
+}
+
+func TestMergeAgentsUsesCaseInsensitiveIDPrecedence(t *testing.T) {
+	base := []agent.AgentConfig{{ID: "coder", Name: "Built in"}, {ID: "reviewer", Name: "Reviewer"}}
+	overlay := []agent.AgentConfig{{ID: "CODER", Name: "User Coder"}, {ID: "custom", Name: "Custom"}}
+
+	got := mergeAgents(base, overlay)
+
+	if len(got) != 3 {
+		t.Fatalf("mergeAgents() = %+v, want three unique agents", got)
+	}
+	if got[0].ID != "coder" || got[0].Name != "User Coder" {
+		t.Errorf("merged coder = %+v, want user definition in original position", got[0])
+	}
+	if got[1].ID != "reviewer" || got[2].ID != "custom" {
+		t.Errorf("merged order = %+v, want reviewer then custom", got)
+	}
+}
+
+func TestLoadDiscoversUserAndProjectAgentDirectories(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(repo)
+
+	userAgents := filepath.Join(home, ConfigDirName, "agents")
+	projectAgents := filepath.Join(repo, ConfigDirName, "agents")
+	for _, dir := range []string{userAgents, projectAgents} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixtures := map[string]string{
+		filepath.Join(userAgents, "user-worker.yaml"):       "id: user-worker\nname: User Worker\n",
+		filepath.Join(userAgents, "shared.yml"):             "id: shared\nname: User Shared\n",
+		filepath.Join(projectAgents, "project-worker.yaml"): "id: project-worker\nname: Project Worker\n",
+		filepath.Join(projectAgents, "shared.yaml"):         "id: shared\nname: Project Shared\n",
+	}
+	for path, body := range fixtures {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	byID := make(map[string]agent.AgentConfig, len(cfg.Agents))
+	for _, configured := range cfg.Agents {
+		byID[strings.ToLower(configured.ID)] = configured
+	}
+	for _, id := range []string{"coder", "user-worker", "project-worker", "shared"} {
+		if _, ok := byID[id]; !ok {
+			t.Errorf("resolved agents missing %q: %v", id, byID)
+		}
+	}
+	if got := byID["shared"].Name; got != "Project Shared" {
+		t.Errorf("shared agent name = %q, want project override", got)
+	}
+}

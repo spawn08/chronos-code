@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,15 +18,15 @@ import (
 type Config struct {
 	agent.FileConfig `yaml:",inline"`
 
-	Router    RouterConfig    `yaml:"router,omitempty"`
-	Security  SecurityConfig  `yaml:"security,omitempty"`
-	Memory    MemoryConfig    `yaml:"memory,omitempty"`
-	Session   SessionConfig   `yaml:"session,omitempty"`
-	Workspace WorkspaceConfig `yaml:"workspace,omitempty"`
-	Tools     ToolsConfig     `yaml:"tools,omitempty"`
-	Learning  LearningConfig  `yaml:"learning,omitempty"`
-	Server    ServerConfig    `yaml:"server,omitempty"`
-	Hooks     HooksConfig     `yaml:"hooks,omitempty"`
+	Router    RouterConfig                `yaml:"router,omitempty"`
+	Security  SecurityConfig              `yaml:"security,omitempty"`
+	Memory    MemoryConfig                `yaml:"memory,omitempty"`
+	Session   SessionConfig               `yaml:"session,omitempty"`
+	Workspace WorkspaceConfig             `yaml:"workspace,omitempty"`
+	Tools     ToolsConfig                 `yaml:"tools,omitempty"`
+	Learning  LearningConfig              `yaml:"learning,omitempty"`
+	Server    ServerConfig                `yaml:"server,omitempty"`
+	Hooks     HooksConfig                 `yaml:"hooks,omitempty"`
 	Providers map[string]ProviderOverride `yaml:"providers,omitempty"`
 }
 
@@ -140,9 +141,9 @@ type ToolsConfig struct {
 }
 
 type RouterConfig struct {
-	Enabled     bool              `yaml:"enabled,omitempty"`
-	Model       agent.ModelConfig `yaml:"model,omitempty"`
-	BudgetTokens int             `yaml:"budget_tokens,omitempty"`
+	Enabled      bool              `yaml:"enabled,omitempty"`
+	Model        agent.ModelConfig `yaml:"model,omitempty"`
+	BudgetTokens int               `yaml:"budget_tokens,omitempty"`
 }
 
 type SecurityConfig struct {
@@ -203,6 +204,11 @@ func Load(configPath string) (*Config, error) {
 			mergeHooks(&base.Hooks, overlay.Hooks)
 			base.Providers = mergeProviders(base.Providers, overlay.Providers)
 		}
+		userAgents, err := loadAgentDir(filepath.Join(userDir, "agents"))
+		if err != nil {
+			return nil, fmt.Errorf("load user agents: %w", err)
+		}
+		base.Agents = mergeAgents(base.Agents, userAgents)
 	}
 
 	if projectDir != "" {
@@ -211,6 +217,11 @@ func Load(configPath string) (*Config, error) {
 			mergeHooks(&base.Hooks, overlay.Hooks)
 			base.Providers = mergeProviders(base.Providers, overlay.Providers)
 		}
+		projectAgents, err := loadAgentDir(filepath.Join(projectDir, "agents"))
+		if err != nil {
+			return nil, fmt.Errorf("load project agents: %w", err)
+		}
+		base.Agents = mergeAgents(base.Agents, projectAgents)
 		if learned, err := loadLearnedAgents(filepath.Join(projectDir, "learned", "agents")); err == nil {
 			base.Agents = mergeLearnedAgents(base.Agents, learned)
 		}
@@ -230,6 +241,61 @@ func Load(configPath string) (*Config, error) {
 	agent.NormalizeFileConfig(&base.FileConfig)
 
 	return base, nil
+}
+
+// loadAgentDir reads immediate YAML children as complete agent definitions.
+// Directory entries are sorted to make newly added agent ordering stable.
+func loadAgentDir(dir string) ([]agent.AgentConfig, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var out []agent.AgentConfig
+	for _, entry := range entries {
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if entry.IsDir() || (ext != ".yaml" && ext != ".yml") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read agent %s: %w", path, err)
+		}
+		var cfg agent.AgentConfig
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("parse agent %s: %w", path, err)
+		}
+		if strings.TrimSpace(cfg.ID) == "" {
+			return nil, fmt.Errorf("parse agent %s: missing id", path)
+		}
+		out = append(out, cfg)
+	}
+	return out, nil
+}
+
+// mergeAgents overlays complete agent definitions by case-insensitive ID.
+// Replacements retain their original position; new agents append in source
+// order so CLI and picker output remains deterministic.
+func mergeAgents(base, overlay []agent.AgentConfig) []agent.AgentConfig {
+	index := make(map[string]int, len(base))
+	for i := range base {
+		index[strings.ToLower(base[i].ID)] = i
+	}
+	for _, cfg := range overlay {
+		key := strings.ToLower(cfg.ID)
+		if i, ok := index[key]; ok {
+			cfg.ID = base[i].ID
+			base[i] = cfg
+			continue
+		}
+		index[key] = len(base)
+		base = append(base, cfg)
+	}
+	return base
 }
 
 func loadEmbeddedDefaults() (*Config, error) {
@@ -335,12 +401,13 @@ func loadLearnedAgents(dir string) ([]agent.AgentConfig, error) {
 func mergeLearnedAgents(existing, learned []agent.AgentConfig) []agent.AgentConfig {
 	seen := make(map[string]bool, len(existing))
 	for _, a := range existing {
-		seen[a.ID] = true
+		seen[strings.ToLower(a.ID)] = true
 	}
 	for _, a := range learned {
-		if !seen[a.ID] {
+		key := strings.ToLower(a.ID)
+		if !seen[key] {
 			existing = append(existing, a)
-			seen[a.ID] = true
+			seen[key] = true
 		}
 	}
 	return existing
@@ -348,7 +415,7 @@ func mergeLearnedAgents(existing, learned []agent.AgentConfig) []agent.AgentConf
 
 func mergeFileConfig(base, overlay *agent.FileConfig) {
 	if len(overlay.Agents) > 0 {
-		base.Agents = overlay.Agents
+		base.Agents = mergeAgents(base.Agents, overlay.Agents)
 	}
 	if len(overlay.Teams) > 0 {
 		base.Teams = overlay.Teams

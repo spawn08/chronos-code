@@ -163,14 +163,15 @@ type appModel struct {
 	workDir       string
 	ready         bool
 
-	blocks          []string // finalized, already-rendered transcript entries
-	renderedBlocks  []string // cached rendered versions of m.blocks
-	renderWidth     int      // width at which renderedBlocks were rendered
-	transcriptBuf   strings.Builder
-	activeAgentText strings.Builder
-	activeToolLines []string
-	lastChunk       string
-	lastUsage       model.Usage
+	blocks            []string // finalized, already-rendered transcript entries
+	renderedBlocks    []string // cached rendered versions of m.blocks
+	renderWidth       int      // width at which renderedBlocks were rendered
+	transcriptBuf     strings.Builder
+	activeAgentText   strings.Builder
+	activeToolLines   []string
+	lastChunk         string
+	lastAssistantText string
+	lastUsage         model.Usage
 	// lastKnownUsage persists the most recent non-zero lastUsage across
 	// turns (finalizeTurn zeroes lastUsage itself once each turn's status
 	// line is computed), so /context and the status bar's context-usage
@@ -291,15 +292,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
-
-	case tea.MouseWheelMsg:
-		if !m.ready {
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		m.followOutput = m.viewport.AtBottom()
-		return m, cmd
 
 	case spinner.TickMsg:
 		if !m.sending {
@@ -543,10 +535,6 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 			}
 			line = parts[1]
 		}
-	default:
-		if agentID, matched := m.orch.Route(m.ctx, line); matched {
-			_ = m.orch.SwitchAgent(agentID)
-		}
 	}
 
 	m.history.Add(line)
@@ -702,8 +690,18 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.blocks = nil
 		m.invalidateRenderCache()
 		m.lastKnownUsage = model.Usage{}
+		m.lastAssistantText = ""
 		m.statusMsg = "new session started"
 		m.followOutput = true
+	case "/copy":
+		if m.lastAssistantText == "" {
+			m.appendError(fmt.Errorf("no assistant response to copy"))
+			break
+		}
+		m.statusMsg = "copy requested"
+		m.viewport.SetContent(m.renderTranscript())
+		m.viewport.GotoBottom()
+		return m, tea.SetClipboard(m.lastAssistantText)
 	case "/perf":
 		m.appendSystem(m.perf.stats())
 	case "/session":
@@ -1055,7 +1053,11 @@ func (m *appModel) contextUsageSegment() string {
 // textarea's documented requirement to re-call SetWidth after changing
 // Prompt so its internal wrap-width cache stays correct.
 func (m *appModel) refreshPrompt() {
-	m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " ❯ "
+	if m.orch.ActiveID() == m.orch.PrimaryID() {
+		m.input.Prompt = "❯ "
+	} else {
+		m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " ❯ "
+	}
 	if m.width > 0 {
 		m.input.SetWidth(m.width - inputBoxBorderWidth - inputBoxPaddingWidth)
 	}
@@ -1094,7 +1096,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.blocks = append(m.blocks, styleError.Render("error: "+err.Error()))
 	} else {
 		var b strings.Builder
-		b.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width()))
+		b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
 		b.WriteString("\n")
 		for _, l := range m.activeToolLines {
 			b.WriteString(l)
@@ -1102,6 +1104,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		}
 		b.WriteString(RenderMarkdownLite(m.activeAgentText.String(), m.viewport.Width()))
 		m.blocks = append(m.blocks, b.String())
+		m.lastAssistantText = m.activeAgentText.String()
 	}
 	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 {
 		m.lastKnownUsage = m.lastUsage
@@ -1157,7 +1160,7 @@ func (m *appModel) renderTranscript() string {
 			m.transcriptBuf.WriteByte('\n')
 		}
 		if txt := m.activeAgentText.String(); txt != "" {
-			m.transcriptBuf.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width()))
+			m.transcriptBuf.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
 			m.transcriptBuf.WriteByte('\n')
 			m.transcriptBuf.WriteString(RenderMarkdownLite(txt, m.viewport.Width()))
 		} else {
@@ -1200,7 +1203,6 @@ func (m *appModel) View() tea.View {
 	return tea.View{
 		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar()),
 		AltScreen: true,
-		MouseMode: tea.MouseModeCellMotion,
 	}
 }
 
@@ -1228,8 +1230,8 @@ func (m *appModel) renderCommandCompletions(completions []string) string {
 // overflow by its padding width and wrap onto a second line).
 func (m *appModel) renderHeaderBar() string {
 	left := " ◆ chronos-code "
-	if provider, modelID := m.orch.ActiveModelInfo(); modelID != "" {
-		left = " ◆ chronos-code · " + provider + "/" + modelID + " "
+	if m.orch.ActiveID() != m.orch.PrimaryID() {
+		left = " ◆ chronos-code · @" + m.orch.ActiveID() + " "
 	}
 	right := ""
 	if m.workDir != "" {
@@ -1246,6 +1248,13 @@ func (m *appModel) renderHeaderBar() string {
 		gap = 0
 	}
 	return styleHeaderBar.Render(left + strings.Repeat(" ", gap) + right)
+}
+
+func (m *appModel) displayAgentName() string {
+	if m.orch.ActiveID() == m.orch.PrimaryID() {
+		return "chronos-code"
+	}
+	return m.orch.ActiveID()
 }
 
 func (m *appModel) renderApprovalModal() string {
@@ -1293,7 +1302,10 @@ func (m *appModel) renderStatusBar() string {
 	if m.stream {
 		streamLabel = "stream"
 	}
-	leftText := " ● " + m.orch.ActiveID() + " │ " + streamLabel
+	leftText := " ● " + streamLabel
+	if m.orch.ActiveID() != m.orch.PrimaryID() {
+		leftText = " ● @" + m.orch.ActiveID() + " │ " + streamLabel
+	}
 	if ctxSeg := m.contextUsageSegment(); ctxSeg != "" {
 		leftText += " │ " + ctxSeg
 	}
