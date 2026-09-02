@@ -407,8 +407,15 @@ func TestStreamDeltaShowsSubagentToolCall(t *testing.T) {
 		ch: make(chan *model.ChatResponse),
 	})
 
-	if got := m.renderTranscript(); !strings.Contains(got, "spawn_subagent") || !strings.Contains(got, "researcher") {
+	if got := m.renderTranscript(); !strings.Contains(got, "spawn_subagent") || !strings.Contains(got, "researcher") || !strings.Contains(got, "1 subagent running") {
 		t.Errorf("stream transcript does not show subagent call: %q", got)
+	}
+	_, _ = m.handleStreamDelta(streamDeltaMsg{
+		resp: &model.ChatResponse{Content: "synthesized result"},
+		ch:   make(chan *model.ChatResponse),
+	})
+	if got := m.renderTranscript(); !strings.Contains(got, "1 subagent completed") || strings.Contains(got, "subagent running") {
+		t.Errorf("stream transcript does not complete subagent progress: %q", got)
 	}
 }
 
