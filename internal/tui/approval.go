@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/storage"
 )
 
 // approvalRequestMsg asks the running Program to show a permission modal for
@@ -21,6 +22,35 @@ type approvalRequestMsg struct {
 type approvalDecision struct {
 	allow  bool
 	always bool
+	all    bool
+}
+
+type approvalCache struct {
+	mu       sync.Mutex
+	tools    map[string]bool
+	sessions map[string]bool
+}
+
+func newApprovalCache() *approvalCache {
+	return &approvalCache{tools: make(map[string]bool), sessions: make(map[string]bool)}
+}
+
+func approvalKey(sessionID, toolName string) string { return sessionID + "\x00" + toolName }
+
+func (c *approvalCache) allowed(sessionID, toolName string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessions[sessionID] || c.tools[approvalKey(sessionID, toolName)]
+}
+
+func (c *approvalCache) remember(sessionID, toolName string, decision approvalDecision) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if decision.all {
+		c.sessions[sessionID] = true
+	} else if decision.always {
+		c.tools[approvalKey(sessionID, toolName)] = true
+	}
 }
 
 // NewApprovalHandler returns a tool.ApprovalFunc (engine/tool/registry.go)
@@ -33,14 +63,11 @@ type approvalDecision struct {
 // while Update (on the main event-loop goroutine) resolves resp once the user
 // presses y/n/a.
 func NewApprovalHandler(p *tea.Program) tool.ApprovalFunc {
-	var mu sync.Mutex
-	autoApproved := make(map[string]bool)
+	cache := newApprovalCache()
 
 	return func(ctx context.Context, toolName string, args map[string]any) (bool, error) {
-		mu.Lock()
-		approved := autoApproved[toolName]
-		mu.Unlock()
-		if approved {
+		sessionID := storage.SessionFromContext(ctx)
+		if cache.allowed(sessionID, toolName) {
 			return true, nil
 		}
 
@@ -49,10 +76,8 @@ func NewApprovalHandler(p *tea.Program) tool.ApprovalFunc {
 
 		select {
 		case dec := <-resp:
-			if dec.always {
-				mu.Lock()
-				autoApproved[toolName] = true
-				mu.Unlock()
+			if dec.allow {
+				cache.remember(sessionID, toolName, dec)
 			}
 			return dec.allow, nil
 		case <-ctx.Done():
