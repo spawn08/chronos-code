@@ -2,13 +2,18 @@ package tui
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/sdk/agent"
+
+	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 type approvalInstallerStub struct {
@@ -19,6 +24,48 @@ type approvalInstallerStub struct {
 func (s *approvalInstallerStub) SetApprovalHandler(handler tool.ApprovalFunc) {
 	s.handler = handler
 	s.calls++
+}
+
+func newTestAppModel(t *testing.T) *appModel {
+	t.Helper()
+	root := t.TempDir()
+	indexOnStart := false
+	cfg := &config.Config{
+		FileConfig: agent.FileConfig{
+			Defaults: &agent.AgentConfig{Storage: agent.StorageConfig{
+				Backend: "sqlite",
+				DSN:     filepath.Join(root, "sessions.db"),
+			}},
+			Agents: []agent.AgentConfig{{
+				ID:   "coder",
+				Name: "Coder",
+				Model: agent.ModelConfig{
+					Provider: "openai",
+					Model:    "gpt-4o-mini",
+					APIKey:   "test-key",
+				},
+			}},
+		},
+		Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart},
+	}
+	orch, err := orchestrator.New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("orchestrator.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := orch.Close(); err != nil {
+			t.Errorf("orchestrator.Close() error = %v", err)
+		}
+	})
+
+	ta := textarea.New()
+	return &appModel{
+		orch:    orch,
+		ctx:     context.Background(),
+		cancel:  func() {},
+		input:   ta,
+		history: NewHistory(),
+	}
 }
 
 func TestFrameTiming_Stats_Empty(t *testing.T) {
@@ -137,7 +184,7 @@ func TestHandleKey_AltEnterQueuesWhileSending(t *testing.T) {
 	ta.SetValue("follow-up message")
 	m := &appModel{input: ta, sending: true}
 
-	_, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	_, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 
 	if m.queuedMessage != "follow-up message" {
 		t.Errorf("queuedMessage = %q, want %q", m.queuedMessage, "follow-up message")
@@ -155,10 +202,128 @@ func TestHandleKey_AltEnterDoesNotQueueWhenIdle(t *testing.T) {
 	ta.SetValue("still typing")
 	m := &appModel{input: ta, sending: false}
 
-	_, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	_, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 
 	if m.queuedMessage != "" {
 		t.Errorf("queuedMessage = %q, want empty when not sending", m.queuedMessage)
+	}
+}
+
+func TestHandleKey_V2PickerShortcuts(t *testing.T) {
+	tests := []struct {
+		name        string
+		msg         tea.KeyPressMsg
+		wantHeading string
+	}{
+		{name: "Ctrl+A", msg: tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl}, wantHeading: "Switch agent:"},
+		{name: "Ctrl+M", msg: tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl}, wantHeading: "Switch model"},
+		{name: "Ctrl+/", msg: tea.KeyPressMsg{Code: '/', Mod: tea.ModCtrl}, wantHeading: "Commands:"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestAppModel(t)
+			_, cmd := m.Update(tt.msg)
+			if cmd != nil {
+				t.Fatal("picker shortcut returned a command")
+			}
+			if m.picker == nil {
+				t.Fatal("picker shortcut did not open a picker")
+			}
+			if !strings.Contains(m.picker.heading, tt.wantHeading) {
+				t.Errorf("picker heading = %q, want it to contain %q", m.picker.heading, tt.wantHeading)
+			}
+		})
+	}
+}
+
+func TestHandleKey_EnterSubmitsWithoutOpeningModelPicker(t *testing.T) {
+	m := newTestAppModel(t)
+	m.blocks = []string{"clear me"}
+	m.input.SetValue("/clear")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd != nil {
+		t.Fatal("/clear submission returned a command")
+	}
+	if m.picker != nil {
+		t.Fatal("Enter opened a picker")
+	}
+	if len(m.blocks) != 0 {
+		t.Errorf("Enter did not submit /clear; blocks = %v", m.blocks)
+	}
+}
+
+func TestUpdate_KeyReleasesDoNotTriggerPressActions(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  tea.KeyReleaseMsg
+	}{
+		{name: "Enter", msg: tea.KeyReleaseMsg{Code: tea.KeyEnter}},
+		{name: "Alt+Enter", msg: tea.KeyReleaseMsg{Code: tea.KeyEnter, Mod: tea.ModAlt}},
+		{name: "Ctrl+A", msg: tea.KeyReleaseMsg{Code: 'a', Mod: tea.ModCtrl}},
+		{name: "Ctrl+M", msg: tea.KeyReleaseMsg{Code: 'm', Mod: tea.ModCtrl}},
+		{name: "Ctrl+/", msg: tea.KeyReleaseMsg{Code: '/', Mod: tea.ModCtrl}},
+		{name: "Ctrl+C", msg: tea.KeyReleaseMsg{Code: 'c', Mod: tea.ModCtrl}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &appModel{cancel: func() {}, queuedMessage: "existing"}
+			_, cmd := m.Update(tt.msg)
+			if cmd != nil {
+				t.Fatal("key release returned a command")
+			}
+			if m.quitting || m.picker != nil || m.queuedMessage != "existing" {
+				t.Fatalf("key release changed action state: quitting=%v picker=%v queuedMessage=%q", m.quitting, m.picker != nil, m.queuedMessage)
+			}
+		})
+	}
+}
+
+func TestFinalizeTurn_DispatchesQueuedFollowUp(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.queuedMessage = "follow-up message"
+	m.activeAgentText.WriteString("first response")
+
+	cmd := m.finalizeTurn(nil)
+
+	if cmd == nil {
+		t.Fatal("finalizeTurn() did not return the queued message command")
+	}
+	if m.queuedMessage != "" {
+		t.Errorf("queuedMessage = %q after finalizeTurn, want empty", m.queuedMessage)
+	}
+	if !m.sending {
+		t.Fatal("queued follow-up was not dispatched")
+	}
+	if got, ok := m.history.Prev(""); !ok || got != "follow-up message" {
+		t.Errorf("history.Prev() = %q, %v; want queued follow-up", got, ok)
+	}
+}
+
+func TestUnsupportedKeyboardEnhancements_HasSlashModelFallback(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("/model definitely-not-a-model")
+
+	_, cmd := m.Update(tea.KeyboardEnhancementsMsg{})
+	if cmd != nil {
+		t.Fatal("unsupported keyboard enhancement state returned a command")
+	}
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("slash fallback returned a command")
+	}
+	if m.picker != nil {
+		t.Fatal("slash fallback unexpectedly opened a picker")
+	}
+	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "definitely-not-a-model") {
+		t.Errorf("slash fallback was not handled; transcript = %q", got)
+	}
+	if !strings.Contains(helpText, "use /model or ctrl+/ if terminal key enhancements are unavailable") {
+		t.Fatal("/help does not document the unsupported-terminal fallback")
 	}
 }
 

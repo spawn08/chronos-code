@@ -48,6 +48,12 @@ chronos-code
 
 Without `init`, embedded defaults are used automatically.
 
+### Language server tools
+
+Build with `go build -tags lsp ./...` to include the `lsp_diagnostics`, `lsp_hover`, `lsp_references`, and `lsp_rename_preview` tools. Supported servers are `gopls` for Go, `typescript-language-server --stdio` for JavaScript/TypeScript, `pyright-langserver --stdio` for Python, and `rust-analyzer` for Rust.
+
+Language servers are discovered and started lazily on the first tool or referenced-file diagnostics request. A missing server is non-fatal: the corresponding request is skipped or reports that no server is available, and Chronos Code continues without LSP diagnostics. Builds without the `lsp` tag retain the same fallback behavior and register no LSP tools.
+
 ## Architecture
 
 ```

@@ -2,13 +2,118 @@ package budget
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/storage"
 )
+
+func TestBundledModelPricing(t *testing.T) {
+	tests := []struct {
+		model  string
+		input  Microdollars
+		output Microdollars
+	}{
+		{model: "claude-haiku-4-5", input: 1, output: 5},
+		{model: "claude-sonnet-4-6", input: 3, output: 15},
+		{model: "claude-opus-4-8", input: 5, output: 25},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			got, err := PriceForModel(tt.model)
+			if err != nil {
+				t.Fatalf("PriceForModel() error = %v", err)
+			}
+			if got.InputMicrodollarsPerToken != tt.input || got.OutputMicrodollarsPerToken != tt.output {
+				t.Errorf("PriceForModel() = %+v, want input=%d output=%d", got, tt.input, tt.output)
+			}
+		})
+	}
+
+	if _, err := PriceForModel("unpriced-model"); !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("PriceForModel(unknown) error = %v, want ErrUnknownModel", err)
+	}
+}
+
+func TestReservationCapAndReconciliation(t *testing.T) {
+	tr := NewTrackerWithUSDCap(0, 500, 100)
+
+	id, err := tr.Reserve("s1", "claude-sonnet-4-6", 10, 4) // 30 + 60 = 90
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	if got := tr.Cost("s1"); got != (SessionCost{ReservedMicrodollars: 90}) {
+		t.Fatalf("Cost() after reservation = %+v, want 90 reserved", got)
+	}
+	if _, err := tr.Reserve("s1", "claude-haiku-4-5", 11, 0); !errors.Is(err, ErrUSDBudgetExceeded) {
+		t.Fatalf("over-cap Reserve() error = %v, want ErrUSDBudgetExceeded", err)
+	}
+
+	if err := tr.Reconcile(id, 5, 1); err != nil { // 15 + 15 = 30
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	want := SessionCost{InputTokens: 5, OutputTokens: 1, SpentMicrodollars: 30}
+	if got := tr.Cost("s1"); got != want {
+		t.Fatalf("Cost() after reconciliation = %+v, want %+v", got, want)
+	}
+	if _, err := tr.Reserve("s1", "claude-haiku-4-5", 70, 0); err != nil {
+		t.Fatalf("Reserve() after unused reservation released error = %v", err)
+	}
+}
+
+func TestCostSessionIsolationAndUnknowns(t *testing.T) {
+	tr := NewTrackerWithUSDCap(0, 500, 50)
+	id, err := tr.Reserve("s1", "claude-haiku-4-5", 10, 2)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	if got := tr.Cost("s2"); got != (SessionCost{}) {
+		t.Fatalf("Cost(s2) = %+v, want zero", got)
+	}
+	if _, err := tr.Reserve("s2", "unknown", 1, 1); !errors.Is(err, ErrUnknownModel) {
+		t.Fatalf("Reserve(unknown) error = %v, want ErrUnknownModel", err)
+	}
+	if err := tr.Reconcile(id, 10, 2); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if err := tr.Reconcile(id, 10, 2); !errors.Is(err, ErrUnknownReservation) {
+		t.Fatalf("second Reconcile() error = %v, want ErrUnknownReservation", err)
+	}
+}
+
+func TestConcurrentCostAccounting(t *testing.T) {
+	const calls = 100
+	tr := NewTrackerWithUSDCap(0, 500, 100_000)
+	var wg sync.WaitGroup
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := tr.Reserve("s1", "claude-haiku-4-5", 10, 10)
+			if err != nil {
+				t.Errorf("Reserve() error = %v", err)
+				return
+			}
+			if err := tr.Reconcile(id, 4, 2); err != nil {
+				t.Errorf("Reconcile() error = %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	want := SessionCost{
+		InputTokens:       calls * 4,
+		OutputTokens:      calls * 2,
+		SpentMicrodollars: calls * (4 + 2*5),
+	}
+	if got := tr.Cost("s1"); got != want {
+		t.Fatalf("Cost() = %+v, want %+v", got, want)
+	}
+}
 
 // seedUsage feeds tokens into tr for the session carried by ctx via After, as
 // if a model call had just completed.

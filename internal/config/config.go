@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -24,7 +25,86 @@ type Config struct {
 	Tools     ToolsConfig     `yaml:"tools,omitempty"`
 	Learning  LearningConfig  `yaml:"learning,omitempty"`
 	Server    ServerConfig    `yaml:"server,omitempty"`
+	Hooks     HooksConfig     `yaml:"hooks,omitempty"`
 	Providers map[string]ProviderOverride `yaml:"providers,omitempty"`
+}
+
+const maxHookTimeoutMs = 300_000
+
+var hookNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+type HookDef struct {
+	Name      string `yaml:"name"`
+	Command   string `yaml:"command"`
+	TimeoutMs int    `yaml:"timeout_ms"`
+}
+
+type HooksConfig struct {
+	PreToolCall      []HookDef `yaml:"pre_tool_call,omitempty"`
+	PostToolCall     []HookDef `yaml:"post_tool_call,omitempty"`
+	UserPromptSubmit []HookDef `yaml:"user_prompt_submit,omitempty"`
+
+	preToolCallSet      bool
+	postToolCallSet     bool
+	userPromptSubmitSet bool
+}
+
+func (c *HooksConfig) UnmarshalYAML(node *yaml.Node) error {
+	type hooksConfig HooksConfig
+	var decoded hooksConfig
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			switch node.Content[i].Value {
+			case "pre_tool_call":
+				decoded.preToolCallSet = true
+			case "post_tool_call":
+				decoded.postToolCallSet = true
+			case "user_prompt_submit":
+				decoded.userPromptSubmitSet = true
+			default:
+				return fmt.Errorf("hooks.%s: unsupported hook point", node.Content[i].Value)
+			}
+		}
+	}
+
+	*c = HooksConfig(decoded)
+	return c.validate()
+}
+
+func (c HooksConfig) validate() error {
+	points := []struct {
+		name  string
+		hooks []HookDef
+	}{
+		{name: "pre_tool_call", hooks: c.PreToolCall},
+		{name: "post_tool_call", hooks: c.PostToolCall},
+		{name: "user_prompt_submit", hooks: c.UserPromptSubmit},
+	}
+
+	for _, point := range points {
+		seen := make(map[string]struct{}, len(point.hooks))
+		for i, hook := range point.hooks {
+			field := fmt.Sprintf("hooks.%s[%d]", point.name, i)
+			if !hookNamePattern.MatchString(hook.Name) {
+				return fmt.Errorf("%s.name: must start with an alphanumeric character and contain only alphanumeric characters, '.', '_', or '-'", field)
+			}
+			if _, ok := seen[hook.Name]; ok {
+				return fmt.Errorf("%s.name: duplicate name %q", field, hook.Name)
+			}
+			seen[hook.Name] = struct{}{}
+			if strings.TrimSpace(hook.Command) == "" {
+				return fmt.Errorf("%s.command: must not be empty", field)
+			}
+			if hook.TimeoutMs <= 0 || hook.TimeoutMs > maxHookTimeoutMs {
+				return fmt.Errorf("%s.timeout_ms: must be between 1 and %d", field, maxHookTimeoutMs)
+			}
+		}
+	}
+	return nil
 }
 
 // ProviderOverride holds per-provider settings that apply regardless of
@@ -120,6 +200,7 @@ func Load(configPath string) (*Config, error) {
 	if userDir != "" {
 		if overlay, err := loadFromDir(userDir); err == nil {
 			mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+			mergeHooks(&base.Hooks, overlay.Hooks)
 			base.Providers = mergeProviders(base.Providers, overlay.Providers)
 		}
 	}
@@ -127,6 +208,7 @@ func Load(configPath string) (*Config, error) {
 	if projectDir != "" {
 		if overlay, err := loadFromDir(projectDir); err == nil {
 			mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+			mergeHooks(&base.Hooks, overlay.Hooks)
 			base.Providers = mergeProviders(base.Providers, overlay.Providers)
 		}
 		if learned, err := loadLearnedAgents(filepath.Join(projectDir, "learned", "agents")); err == nil {
@@ -140,6 +222,7 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("load config %s: %w", configPath, err)
 		}
 		mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+		mergeHooks(&base.Hooks, overlay.Hooks)
 		base.Providers = mergeProviders(base.Providers, overlay.Providers)
 	}
 
@@ -275,6 +358,21 @@ func mergeFileConfig(base, overlay *agent.FileConfig) {
 	}
 	if overlay.SkillsDir != "" {
 		base.SkillsDir = overlay.SkillsDir
+	}
+}
+
+func mergeHooks(base *HooksConfig, overlay HooksConfig) {
+	if overlay.preToolCallSet {
+		base.PreToolCall = overlay.PreToolCall
+		base.preToolCallSet = true
+	}
+	if overlay.postToolCallSet {
+		base.PostToolCall = overlay.PostToolCall
+		base.postToolCallSet = true
+	}
+	if overlay.userPromptSubmitSet {
+		base.UserPromptSubmit = overlay.UserPromptSubmit
+		base.userPromptSubmitSet = true
 	}
 }
 

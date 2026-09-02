@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
@@ -229,12 +229,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		workDir: wd,
 	}
 
-	// NOTE: plan_07 (Kitty keyboard protocol) called for tea.WithKittyKeyboard()
-	// here. That option does not exist in charmbracelet/bubbletea v1.3.10 (the
-	// version pinned in go.mod) — the library has no Kitty keyboard protocol
-	// support at all as of this release. AC-1 is blocked on an upstream
-	// bubbletea release; see .ppd/chronos-code-v1/plans/plan_07.md.
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	installApprovalHandlers(orch, NewApprovalHandler(p))
 
 	_, err := p.Run()
@@ -278,18 +273,20 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			vh = 1
 		}
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width, vh)
+			m.viewport = viewport.New()
+			m.viewport.SetWidth(msg.Width)
+			m.viewport.SetHeight(vh)
 			m.ready = true
 		} else {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = vh
+			m.viewport.SetWidth(msg.Width)
+			m.viewport.SetHeight(vh)
 		}
 		m.input.SetWidth(msg.Width - inputBoxBorderWidth - inputBoxPaddingWidth)
 		m.refreshPrompt()
 		m.viewport.SetContent(m.renderTranscript())
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case spinner.TickMsg:
@@ -336,7 +333,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, keys.Quit) {
 		m.cancel()
 		m.quitting = true
@@ -405,7 +402,7 @@ func (m *appModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *appModel) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	a := m.approval
 	switch msg.String() {
 	case "y", "enter":
@@ -421,8 +418,8 @@ func (m *appModel) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *appModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
+func (m *appModel) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.Code {
 	case tea.KeyEsc:
 		m.searching = false
 		return m, nil
@@ -433,7 +430,7 @@ func (m *appModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.searching = false
 		return m, nil
-	case tea.KeyUp, tea.KeyCtrlR:
+	case tea.KeyUp:
 		if len(m.searchResults) > 0 {
 			m.searchIdx = (m.searchIdx + 1) % len(m.searchResults)
 		}
@@ -449,12 +446,20 @@ func (m *appModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.updateSearchResults()
 		}
 		return m, nil
-	case tea.KeyRunes, tea.KeySpace:
+	default:
+		if key.Matches(msg, keys.ReverseSearch) {
+			if len(m.searchResults) > 0 {
+				m.searchIdx = (m.searchIdx + 1) % len(m.searchResults)
+			}
+			return m, nil
+		}
+		if msg.Text == "" {
+			return m, nil
+		}
 		m.searchQuery += msg.String()
 		m.updateSearchResults()
 		return m, nil
 	}
-	return m, nil
 }
 
 func (m *appModel) updateSearchResults() {
@@ -957,25 +962,25 @@ func (m *appModel) refreshPrompt() {
 	}
 }
 
-// appendUserTurn, appendSystem and appendError all wrap to m.viewport.Width:
+// appendUserTurn, appendSystem and appendError all wrap to m.viewport.Width():
 // the viewport itself never wraps long lines, so an unwrapped line can
 // overflow into and visually corrupt the fixed-height chrome below it — the
 // same class of bug that made the status bar wrap onto a second line (see
 // styleHeaderBar's comment in styles.go).
 func (m *appModel) appendUserTurn(line string) {
-	header := RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width)
-	body := wrapText(line, m.viewport.Width)
+	header := RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width())
+	body := wrapText(line, m.viewport.Width())
 	m.blocks = append(m.blocks, header+"\n"+body)
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 }
 
 func (m *appModel) appendSystem(s string) {
-	m.blocks = append(m.blocks, wrapText(styleDim.Render(s), m.viewport.Width))
+	m.blocks = append(m.blocks, wrapText(styleDim.Render(s), m.viewport.Width()))
 }
 
 func (m *appModel) appendError(err error) {
-	m.blocks = append(m.blocks, wrapText(styleError.Render("error: ")+err.Error(), m.viewport.Width))
+	m.blocks = append(m.blocks, wrapText(styleError.Render("error: ")+err.Error(), m.viewport.Width()))
 }
 
 // finalizeTurn closes out the in-progress agent turn (streamed or not),
@@ -990,13 +995,13 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.blocks = append(m.blocks, styleError.Render("error: "+err.Error()))
 	} else {
 		var b strings.Builder
-		b.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width))
+		b.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width()))
 		b.WriteString("\n")
 		for _, l := range m.activeToolLines {
 			b.WriteString(l)
 			b.WriteString("\n")
 		}
-		b.WriteString(RenderMarkdownLite(m.activeAgentText.String(), m.viewport.Width))
+		b.WriteString(RenderMarkdownLite(m.activeAgentText.String(), m.viewport.Width()))
 		m.blocks = append(m.blocks, b.String())
 	}
 	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 {
@@ -1025,9 +1030,9 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 }
 
 func (m *appModel) renderTranscript() string {
-	if m.renderWidth != m.viewport.Width {
+	if m.renderWidth != m.viewport.Width() {
 		m.renderedBlocks = nil
-		m.renderWidth = m.viewport.Width
+		m.renderWidth = m.viewport.Width()
 	}
 
 	for i := len(m.renderedBlocks); i < len(m.blocks); i++ {
@@ -1051,9 +1056,9 @@ func (m *appModel) renderTranscript() string {
 			m.transcriptBuf.WriteByte('\n')
 		}
 		if txt := m.activeAgentText.String(); txt != "" {
-			m.transcriptBuf.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width))
+			m.transcriptBuf.WriteString(RenderTurnHeader("✦", m.orch.ActiveID(), styleAgentName, m.viewport.Width()))
 			m.transcriptBuf.WriteByte('\n')
-			m.transcriptBuf.WriteString(RenderMarkdownLite(txt, m.viewport.Width))
+			m.transcriptBuf.WriteString(RenderMarkdownLite(txt, m.viewport.Width()))
 		} else {
 			m.transcriptBuf.WriteString(styleDim.Render(m.spin.View() + " thinking..."))
 		}
@@ -1066,10 +1071,10 @@ func (m *appModel) invalidateRenderCache() {
 	m.renderedBlocks = nil
 }
 
-func (m *appModel) View() string {
+func (m *appModel) View() tea.View {
 	defer m.perf.recordViewEnd()
 	if !m.ready {
-		return ""
+		return tea.View{AltScreen: true}
 	}
 
 	var bottom string
@@ -1086,7 +1091,10 @@ func (m *appModel) View() string {
 		bottom = styleInputBox.Width(m.width - inputBoxBorderWidth).Render(m.input.View())
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar())
+	return tea.View{
+		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar()),
+		AltScreen: true,
+	}
 }
 
 // renderHeaderBar and renderStatusBar build their output by concatenating

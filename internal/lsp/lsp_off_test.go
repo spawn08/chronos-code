@@ -33,3 +33,16 @@ func TestTools_StubReturnsNil(t *testing.T) {
 		t.Errorf("stub Tools should return nil, got %d tools", len(tools))
 	}
 }
+
+func TestManager_StubIsInert(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	if manager == nil {
+		t.Fatal("expected inert manager")
+	}
+	if err := manager.Close(); err != nil {
+		t.Errorf("stub manager Close should not error, got: %v", err)
+	}
+	if tools := Tools(manager, t.TempDir()); tools != nil {
+		t.Errorf("stub Tools should return nil, got %d tools", len(tools))
+	}
+}

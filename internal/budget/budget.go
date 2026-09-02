@@ -8,7 +8,9 @@ package budget
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/spawn08/chronos/engine/hooks"
@@ -28,6 +30,59 @@ const (
 	LevelStop       Level = "stop"
 )
 
+// Microdollars is one millionth of a US dollar. Using integer units keeps
+// model pricing deterministic and avoids floating-point rounding.
+type Microdollars int64
+
+// ModelPrice is a model's input and output price per token.
+type ModelPrice struct {
+	InputMicrodollarsPerToken  Microdollars
+	OutputMicrodollarsPerToken Microdollars
+}
+
+// SessionCost is an atomic snapshot of one session's reconciled usage and
+// outstanding pre-call reservations.
+type SessionCost struct {
+	InputTokens          int64
+	OutputTokens         int64
+	SpentMicrodollars    Microdollars
+	ReservedMicrodollars Microdollars
+}
+
+// ReservationID identifies an outstanding pre-call cost reservation.
+type ReservationID uint64
+
+var (
+	// ErrUnknownModel indicates that deterministic pricing is unavailable.
+	ErrUnknownModel = errors.New("unknown model price")
+	// ErrUSDBudgetExceeded indicates that a reservation would exceed the cap.
+	ErrUSDBudgetExceeded = errors.New("USD budget exceeded")
+	// ErrUnknownReservation indicates that a reservation was already reconciled
+	// or was not created by this tracker.
+	ErrUnknownReservation = errors.New("unknown cost reservation")
+)
+
+var bundledModelPrices = map[string]ModelPrice{
+	"claude-haiku-4-5":  {InputMicrodollarsPerToken: 1, OutputMicrodollarsPerToken: 5},
+	"claude-sonnet-4-6": {InputMicrodollarsPerToken: 3, OutputMicrodollarsPerToken: 15},
+	"claude-opus-4-8":   {InputMicrodollarsPerToken: 5, OutputMicrodollarsPerToken: 25},
+}
+
+// PriceForModel returns deterministic pricing for a bundled routing model.
+func PriceForModel(modelID string) (ModelPrice, error) {
+	price, ok := bundledModelPrices[modelID]
+	if !ok {
+		return ModelPrice{}, fmt.Errorf("%w: %q", ErrUnknownModel, modelID)
+	}
+	return price, nil
+}
+
+type reservation struct {
+	sessionID string
+	price     ModelPrice
+	cost      Microdollars
+}
+
 // Tracker tracks per-session token usage against a budget and implements
 // hooks.Hook so it can be attached to an agent's hook chain to run
 // automatically around every model call.
@@ -36,6 +91,10 @@ type Tracker struct {
 	maxTokens     int
 	used          map[string]int
 	baseThreshold int
+	usdCap        Microdollars
+	costs         map[string]SessionCost
+	reservations  map[ReservationID]reservation
+	nextReserveID ReservationID
 }
 
 // NewTracker creates a Tracker with the given token budget and base tool-result
@@ -43,11 +102,104 @@ type Tracker struct {
 // context on the latter). maxTokens <= 0 means "unlimited": Before never
 // blocks, Ratio is always 0, and Level is always LevelNormal.
 func NewTracker(maxTokens int, baseCompressionThreshold int) *Tracker {
+	return NewTrackerWithUSDCap(maxTokens, baseCompressionThreshold, 0)
+}
+
+// NewTrackerWithUSDCap creates a Tracker with token and USD budgets. A usdCap
+// <= 0 means unlimited USD spend; known-model pricing and accounting remain
+// active so callers can still report session cost.
+func NewTrackerWithUSDCap(maxTokens int, baseCompressionThreshold int, usdCap Microdollars) *Tracker {
 	return &Tracker{
 		maxTokens:     maxTokens,
 		used:          make(map[string]int),
 		baseThreshold: baseCompressionThreshold,
+		usdCap:        usdCap,
+		costs:         make(map[string]SessionCost),
+		reservations:  make(map[ReservationID]reservation),
 	}
+}
+
+// Reserve conservatively reserves the cost of estimated input and maximum
+// output tokens before a model call. The cap check and reservation are atomic.
+func (t *Tracker) Reserve(sessionID, modelID string, estimatedInputTokens, maxOutputTokens int) (ReservationID, error) {
+	price, err := PriceForModel(modelID)
+	if err != nil {
+		return 0, err
+	}
+	cost, err := price.cost(estimatedInputTokens, maxOutputTokens)
+	if err != nil {
+		return 0, err
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	current := t.costs[sessionID]
+	if t.usdCap > 0 && exceedsCap(current.SpentMicrodollars, current.ReservedMicrodollars, cost, t.usdCap) {
+		return 0, fmt.Errorf("%w for session %q: spent %d, reserved %d, requested %d, cap %d microdollars",
+			ErrUSDBudgetExceeded, sessionID, current.SpentMicrodollars, current.ReservedMicrodollars, cost, t.usdCap)
+	}
+	t.nextReserveID++
+	id := t.nextReserveID
+	current.ReservedMicrodollars += cost
+	t.costs[sessionID] = current
+	t.reservations[id] = reservation{sessionID: sessionID, price: price, cost: cost}
+	return id, nil
+}
+
+// Reconcile replaces an outstanding reservation with the call's actual input
+// and output usage. Passing zero usage releases a reservation for a failed
+// call. Actual spend is recorded even when it exceeds the original estimate.
+func (t *Tracker) Reconcile(id ReservationID, inputTokens, outputTokens int) error {
+	if inputTokens < 0 || outputTokens < 0 {
+		return fmt.Errorf("token counts must be non-negative: input %d, output %d", inputTokens, outputTokens)
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	reserved, ok := t.reservations[id]
+	if !ok {
+		return fmt.Errorf("%w: %d", ErrUnknownReservation, id)
+	}
+	actual, err := reserved.price.cost(inputTokens, outputTokens)
+	if err != nil {
+		return err
+	}
+	current := t.costs[reserved.sessionID]
+	current.ReservedMicrodollars -= reserved.cost
+	current.SpentMicrodollars += actual
+	current.InputTokens += int64(inputTokens)
+	current.OutputTokens += int64(outputTokens)
+	t.costs[reserved.sessionID] = current
+	delete(t.reservations, id)
+	return nil
+}
+
+// Cost returns an atomic cost and usage snapshot for sessionID.
+func (t *Tracker) Cost(sessionID string) SessionCost {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.costs[sessionID]
+}
+
+func (p ModelPrice) cost(inputTokens, outputTokens int) (Microdollars, error) {
+	if inputTokens < 0 || outputTokens < 0 {
+		return 0, fmt.Errorf("token counts must be non-negative: input %d, output %d", inputTokens, outputTokens)
+	}
+	input := int64(inputTokens)
+	output := int64(outputTokens)
+	if input > math.MaxInt64/int64(p.InputMicrodollarsPerToken) || output > math.MaxInt64/int64(p.OutputMicrodollarsPerToken) {
+		return 0, errors.New("model cost overflows microdollars")
+	}
+	inputCost := input * int64(p.InputMicrodollarsPerToken)
+	outputCost := output * int64(p.OutputMicrodollarsPerToken)
+	if inputCost > math.MaxInt64-outputCost {
+		return 0, errors.New("model cost overflows microdollars")
+	}
+	return Microdollars(inputCost + outputCost), nil
+}
+
+func exceedsCap(spent, reserved, requested, cap Microdollars) bool {
+	return spent > cap-reserved || requested > cap-spent-reserved
 }
 
 // sessionKey resolves the bucket key for evt: the active session id from ctx,

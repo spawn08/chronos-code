@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
@@ -31,6 +33,8 @@ var (
 	streamMode      = true
 	permissionMode  string
 	yoloMode        bool
+	usdBudgetCap    budget.Microdollars
+	usdBudgetSet    bool
 	resumeSessionID string
 )
 
@@ -136,6 +140,27 @@ func stripGlobalFlags() error {
 			yoloMode = true
 			i++
 			continue
+		case arg == "--budget":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--budget requires a value")
+			}
+			cap, err := parseUSDBudget(args[i+1])
+			if err != nil {
+				return fmt.Errorf("--budget: %w", err)
+			}
+			usdBudgetCap = cap
+			usdBudgetSet = true
+			i += 2
+			continue
+		case strings.HasPrefix(arg, "--budget="):
+			cap, err := parseUSDBudget(strings.TrimPrefix(arg, "--budget="))
+			if err != nil {
+				return fmt.Errorf("--budget: %w", err)
+			}
+			usdBudgetCap = cap
+			usdBudgetSet = true
+			i++
+			continue
 		case arg == "--resume":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--resume requires a session id")
@@ -156,6 +181,40 @@ func stripGlobalFlags() error {
 		return fmt.Errorf("--yolo conflicts with --permission-mode deny")
 	}
 	return nil
+}
+
+func parseUSDBudget(value string) (budget.Microdollars, error) {
+	parts := strings.Split(value, ".")
+	if len(parts) > 2 || parts[0] == "" || (len(parts) == 2 && (parts[1] == "" || len(parts[1]) > 6)) {
+		return 0, fmt.Errorf("must be a non-negative decimal USD amount with at most 6 decimal places")
+	}
+	for _, part := range parts {
+		for i := 0; i < len(part); i++ {
+			if part[i] < '0' || part[i] > '9' {
+				return 0, fmt.Errorf("must be a non-negative decimal USD amount with at most 6 decimal places")
+			}
+		}
+	}
+
+	whole, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("amount overflows microdollars")
+	}
+	fraction := uint64(0)
+	if len(parts) == 2 {
+		padded := parts[1] + strings.Repeat("0", 6-len(parts[1]))
+		fraction, _ = strconv.ParseUint(padded, 10, 64)
+	}
+
+	const maxMicrodollars = uint64(1<<63 - 1)
+	if whole > maxMicrodollars/1_000_000 {
+		return 0, fmt.Errorf("amount overflows microdollars")
+	}
+	microdollars := whole*1_000_000 + fraction
+	if microdollars > maxMicrodollars {
+		return 0, fmt.Errorf("amount overflows microdollars")
+	}
+	return budget.Microdollars(microdollars), nil
 }
 
 func printVersion() error {
@@ -212,6 +271,7 @@ Global flags:
   --no-stream                     Disable streaming output
   --permission-mode <mode>        Tool permission mode (prompt, auto_approve, deny)
   --yolo                          Auto-approve policy-allowed tools; never overrides deny or destructive confirm
+  --budget <usd>                  Per-session USD cap (up to 6 decimal places; omitted means unlimited)
   --resume <session-id>           Resume a specific session instead of the latest one
 `)
 	return nil
@@ -226,6 +286,9 @@ func loadAndBuild() (*orchestrator.Orchestrator, error) {
 	orch, err := orchestrator.New(ctx, cfg, resumeSessionID)
 	if err != nil {
 		return nil, fmt.Errorf("build orchestrator: %w", err)
+	}
+	if usdBudgetSet {
+		orch.SetUSDCap(usdBudgetCap)
 	}
 	if err := orch.SetPermissionMode(effectivePermissionMode()); err != nil {
 		return nil, fmt.Errorf("apply --permission-mode: %w", err)

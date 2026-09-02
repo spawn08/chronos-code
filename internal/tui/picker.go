@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 )
@@ -140,9 +140,9 @@ func (m *appModel) renderPickerModal() string {
 
 // handlePickerKey routes a key event while a picker is active, mirroring
 // handleWizardKey/handleSearchKey's modal-takes-all-input pattern.
-func (m *appModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	p := m.picker
-	switch msg.Type {
+	switch msg.Code {
 	case tea.KeyEsc:
 		m.picker = nil
 		return m, nil
@@ -165,14 +165,17 @@ func (m *appModel) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSubmit(value)
 	}
 	if p.filterable {
-		switch msg.Type {
+		switch msg.Code {
 		case tea.KeyBackspace:
 			if len(p.filter) > 0 {
 				p.filter = p.filter[:len(p.filter)-1]
 				p.applyFilter()
 			}
 			return m, nil
-		case tea.KeyRunes, tea.KeySpace:
+		default:
+			if msg.Text == "" {
+				return m, nil
+			}
 			p.filter += msg.String()
 			p.applyFilter()
 			return m, nil

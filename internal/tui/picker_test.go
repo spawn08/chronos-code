@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestNewCommandPalette(t *testing.T) {
@@ -56,21 +56,21 @@ func TestHandlePickerKey_Navigation(t *testing.T) {
 	p := &picker{items: []wizardItem{{label: "a", value: "/a"}, {label: "b", value: "/b"}, {label: "c", value: "/c"}}}
 	m := &appModel{picker: p}
 
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	if p.idx != 1 {
 		t.Fatalf("idx after KeyDown = %d, want 1", p.idx)
 	}
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyDown}) // at bottom, should not overflow
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyDown}) // at bottom, should not overflow
 	if p.idx != 2 {
 		t.Fatalf("idx after 3x KeyDown on a 3-item list = %d, want 2 (clamped)", p.idx)
 	}
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyUp})
 	if p.idx != 1 {
 		t.Fatalf("idx after KeyUp = %d, want 1", p.idx)
 	}
 
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if m.picker != nil {
 		t.Error("picker should be nil after Esc")
 	}
@@ -80,7 +80,7 @@ func TestHandlePickerKey_FilterTyping(t *testing.T) {
 	p := newCommandPalette()
 	m := &appModel{picker: p}
 
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("mo")})
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: 'm', Text: "mo"})
 	if p.filter != "mo" {
 		t.Fatalf("filter = %q, want %q", p.filter, "mo")
 	}
@@ -88,7 +88,7 @@ func TestHandlePickerKey_FilterTyping(t *testing.T) {
 		t.Fatal("expected filtered items for \"mo\"")
 	}
 
-	_, _ = m.handlePickerKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	_, _ = m.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if p.filter != "m" {
 		t.Fatalf("filter after backspace = %q, want %q", p.filter, "m")
 	}
