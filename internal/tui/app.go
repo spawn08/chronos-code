@@ -186,6 +186,10 @@ type appModel struct {
 	activeToolLines   []string
 	pendingToolCalls  int
 	pendingSubagents  int
+	turnModelCalls    int
+	turnSubagents     int
+	lastModelCalls    int
+	lastSubagents     int
 	lastChunk         string
 	lastAssistantText string
 	lastUsage         model.Usage
@@ -609,6 +613,8 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	m.turnCostStart = m.orch.SessionCost()
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
+	m.turnModelCalls = 0
+	m.turnSubagents = 0
 	m.lastChunk = ""
 	var activityCmd tea.Cmd
 	if ch, stop, err := m.orch.SubscribeActivity(); err == nil {
@@ -708,6 +714,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	changed := true
 	switch msg.event.Type {
 	case chronosstream.EventModelCall:
+		m.turnModelCalls++
 		modelName, _ := data["model"].(string)
 		m.activeToolLines = append(m.activeToolLines, styleDim.Render("  "+label+"model "+modelName))
 	case chronosstream.EventToolCall:
@@ -715,6 +722,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		m.pendingToolCalls++
 		if toolName == "spawn_subagent" {
 			m.pendingSubagents++
+			m.turnSubagents++
 		}
 	case chronosstream.EventToolResult:
 		m.activeToolLines = append(m.activeToolLines, RenderToolActivity(label, toolName, nil, true, data["error"]))
@@ -834,6 +842,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.invalidateRenderCache()
 		m.lastKnownUsage = model.Usage{}
 		m.lastTurnCost = budget.SessionCost{}
+		m.lastModelCalls = 0
+		m.lastSubagents = 0
 		m.lastAssistantText = ""
 		m.statusMsg = "new session started"
 		m.followOutput = true
@@ -1165,8 +1175,8 @@ func (m *appModel) usageSummary() string {
 		output = int64(m.lastKnownUsage.CompletionTokens)
 	}
 	session := m.orch.SessionCost()
-	return fmt.Sprintf("last turn: input %d │ output %d │ cache n/a │ cost %s\nsession: input %d │ output %d │ cost %s",
-		input, output, m.formatCost(m.lastTurnCost.SpentMicrodollars), session.InputTokens, session.OutputTokens,
+	return fmt.Sprintf("last turn: input %d │ output %d │ cache n/a │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ output %d │ cost %s",
+		input, output, m.formatCost(m.lastTurnCost.SpentMicrodollars), m.lastModelCalls, m.lastSubagents, session.InputTokens, session.OutputTokens,
 		m.formatCost(session.SpentMicrodollars))
 }
 
@@ -1176,8 +1186,8 @@ func (m *appModel) usageStatus() string {
 		input = int64(m.lastKnownUsage.PromptTokens)
 		output = int64(m.lastKnownUsage.CompletionTokens)
 	}
-	return fmt.Sprintf("in %d │ out %d │ cache n/a │ cost %s", input, output,
-		m.formatCost(m.lastTurnCost.SpentMicrodollars))
+	return fmt.Sprintf("last in %d │ out %d │ calls %d │ agents %d │ cost %s", input, output,
+		m.lastModelCalls, m.lastSubagents, m.formatCost(m.lastTurnCost.SpentMicrodollars))
 }
 
 func (m *appModel) formatCost(cost budget.Microdollars) string {
@@ -1326,12 +1336,21 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 			m.lastUsage.PromptTokens+m.lastUsage.CompletionTokens)
 	}
 	cost := m.orch.SessionCost()
-	m.lastTurnCost = budget.SessionCost{
+	turnCost := budget.SessionCost{
 		InputTokens:       cost.InputTokens - m.turnCostStart.InputTokens,
 		OutputTokens:      cost.OutputTokens - m.turnCostStart.OutputTokens,
 		SpentMicrodollars: cost.SpentMicrodollars - m.turnCostStart.SpentMicrodollars,
 	}
-	m.statusMsg = m.usageStatus()
+	if turnCost.InputTokens > 0 || turnCost.OutputTokens > 0 {
+		m.lastTurnCost = turnCost
+		m.lastModelCalls = m.turnModelCalls
+		m.lastSubagents = m.turnSubagents
+	}
+	if err != nil {
+		m.statusMsg = "request failed │ previous " + strings.TrimPrefix(m.usageStatus(), "last ")
+	} else {
+		m.statusMsg = m.usageStatus()
+	}
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
 	m.pendingToolCalls = 0

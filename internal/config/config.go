@@ -159,8 +159,9 @@ type MemoryConfig struct {
 }
 
 type SessionConfig struct {
-	AutoResume      bool `yaml:"auto_resume,omitempty"`
-	MaxHistoryTurns int  `yaml:"max_history_turns,omitempty"`
+	AutoResume           bool `yaml:"auto_resume,omitempty"`
+	MaxHistoryTurns      int  `yaml:"max_history_turns,omitempty"`
+	MaxModelCallsPerTurn int  `yaml:"max_model_calls_per_turn,omitempty"`
 }
 
 // LearningConfig controls the self-learning distillation loop (PRD G-009,

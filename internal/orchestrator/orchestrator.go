@@ -418,6 +418,11 @@ func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
 
 func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 	ctx = h.withFallbackSession(ctx)
+	if evt.Type == hooks.EventModelCallBefore {
+		if err := claimTurnModelCall(ctx); err != nil {
+			return err
+		}
+	}
 	if err := h.tracker.Before(ctx, evt); err != nil {
 		return err
 	}
@@ -1211,6 +1216,11 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message string) (conte
 // context pins and session-scoped runtime features.
 func (o *Orchestrator) turnContext(ctx context.Context, message string) context.Context {
 	ctx = context.WithValue(ctx, messageKey{}, message)
+	maxModelCalls := 0
+	if o.cfg != nil {
+		maxModelCalls = o.cfg.Session.MaxModelCallsPerTurn
+	}
+	ctx = withSubagentTurnState(ctx, maxModelCalls, o.active)
 	if sid := o.CurrentSessionID(); sid != "" {
 		ctx = storage.WithSession(ctx, sid)
 	}

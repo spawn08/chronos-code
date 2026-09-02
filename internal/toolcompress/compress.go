@@ -25,6 +25,11 @@ const DefaultThresholdTokens = 500
 // a previously evicted result.
 const ReadStoredResultTool = "read_stored_result"
 
+const (
+	defaultStoredResultChunkBytes = 8 << 10
+	maxStoredResultChunkBytes     = 16 << 10
+)
+
 // Wrap wraps every handler currently registered on a so results exceeding
 // thresholdTokens (0 uses DefaultThresholdTokens) are evicted to a.Storage
 // and replaced with a compact preview, and registers ReadStoredResultTool so
@@ -86,12 +91,14 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 
 	a.Tools.Register(&tool.Definition{
 		Name:        ReadStoredResultTool,
-		Description: "Retrieve the full content of a tool result that was compressed because it was too large.",
+		Description: "Retrieve a bounded chunk of a compressed tool result. Continue with next_offset only when more content is necessary.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"key": map[string]any{"type": "string", "description": "The storage_key returned alongside a compressed tool result"},
+				"key":       map[string]any{"type": "string", "description": "The storage_key returned alongside a compressed tool result"},
+				"offset":    map[string]any{"type": "integer", "description": "Byte offset to start reading from (default 0)"},
+				"max_bytes": map[string]any{"type": "integer", "description": "Maximum bytes to return (default 8192, capped at 16384)"},
 			},
 			"required": []string{"key"},
 		},
@@ -100,9 +107,47 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 			if key == "" {
 				return nil, fmt.Errorf("read_stored_result: key is required")
 			}
-			return agent.ReadStoredResult(ctx, store, sessionOrAgent(ctx, agentID), key)
+			content, err := agent.ReadStoredResult(ctx, store, sessionOrAgent(ctx, agentID), key)
+			if err != nil {
+				return nil, err
+			}
+			offset := intArg(args["offset"])
+			if offset < 0 || offset > len(content) {
+				return nil, fmt.Errorf("read_stored_result: offset %d outside result of %d bytes", offset, len(content))
+			}
+			maxBytes := intArg(args["max_bytes"])
+			if maxBytes <= 0 {
+				maxBytes = defaultStoredResultChunkBytes
+			}
+			if maxBytes > maxStoredResultChunkBytes {
+				maxBytes = maxStoredResultChunkBytes
+			}
+			end := offset + maxBytes
+			if end > len(content) {
+				end = len(content)
+			}
+			return map[string]any{
+				"content":     content[offset:end],
+				"offset":      offset,
+				"next_offset": end,
+				"total_bytes": len(content),
+				"truncated":   end < len(content),
+			}, nil
 		},
 	})
+}
+
+func intArg(value any) int {
+	switch value := value.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
 }
 
 func sessionOrAgent(ctx context.Context, agentID string) string {

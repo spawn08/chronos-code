@@ -14,6 +14,7 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/sdk/harness"
 	"github.com/spawn08/chronos/storage"
 	storagememory "github.com/spawn08/chronos/storage/adapters/memory"
 
@@ -209,6 +210,44 @@ func TestSetupSubAgentsExecutesConfiguredWorker(t *testing.T) {
 	}
 	if got := reviewResult.(map[string]any)["result"]; got != "review findings" {
 		t.Errorf("reviewer result = %#v, want review findings", got)
+	}
+}
+
+func TestConfiguredAgentRunnerRejectsDelegationCycle(t *testing.T) {
+	runner := configuredAgentRunner{}
+	ctx := context.WithValue(context.Background(), subagentPathKey{}, []string{"coder", "researcher"})
+	_, err := runner.Run(ctx, harness.SubAgentSpec{Name: "researcher"}, "recurse")
+	if err == nil || !strings.Contains(err.Error(), "delegation cycle") {
+		t.Fatalf("cyclic Run() error = %v", err)
+	}
+}
+
+func TestConfiguredAgentRunnerDoesNotCapIndependentDelegations(t *testing.T) {
+	provider := &subagentTestProvider{name: "worker-provider", modelID: "worker", response: "done"}
+	worker, err := agent.New("researcher", "Researcher").WithModel(provider).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := configuredAgentRunner{agents: map[string]*agent.Agent{"researcher": worker}}
+	ctx := withSubagentTurnState(context.Background(), 0, "coder")
+	spec := harness.SubAgentSpec{Name: "researcher"}
+	for i := 0; i < 6; i++ {
+		if _, err := runner.Run(ctx, spec, "bounded task"); err != nil {
+			t.Fatalf("Run() %d error = %v", i+1, err)
+		}
+	}
+}
+
+func TestTurnModelCallLimit(t *testing.T) {
+	ctx := withSubagentTurnState(context.Background(), 2, "coder")
+	if err := claimTurnModelCall(ctx); err != nil {
+		t.Fatalf("first model call rejected: %v", err)
+	}
+	if err := claimTurnModelCall(ctx); err != nil {
+		t.Fatalf("second model call rejected: %v", err)
+	}
+	if err := claimTurnModelCall(ctx); err == nil || !strings.Contains(err.Error(), "model call limit exceeded") {
+		t.Fatalf("third model call error = %v", err)
 	}
 }
 
