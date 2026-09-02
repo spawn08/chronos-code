@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"github.com/spawn08/chronos/engine/hooks"
@@ -68,6 +70,8 @@ type Orchestrator struct {
 	attBudget          *attention.Budgeter
 	teams              map[string]*team.Team
 	projectDocsWatcher *projectdocs.Watcher
+	permissionChecker  *security.PermissionChecker
+	permissionYolo     atomic.Bool
 }
 
 // OpenStorageForCLI opens the same storage.Storage backend New would (per
@@ -140,7 +144,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 
 	grCfg := setupGuardrails(cfg, projectDir, agents)
 
-	setupSecurity(cfg, projectDir, root, store, agents)
+	policy := setupSecurity(cfg, projectDir, root, store, agents)
 
 	maxTokens, _ := grCfg.TokenBudget()
 	tracker := budget.NewTracker(maxTokens, cfg.Tools.CompressionThresholdTokens)
@@ -180,6 +184,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	teams := setupTeams(cfg, agents)
 
 	discoverMCPServers(ctx, root, agents)
+	normalizeToolPermissions(agents)
 
 	active := "coder"
 	if _, ok := agents[active]; !ok && len(order) > 0 {
@@ -207,7 +212,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		attBudget:          attBudget,
 		teams:              teams,
 		projectDocsWatcher: pdWatcher,
+		permissionChecker:  security.NewPermissionChecker(policy, root),
 	}
+	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
 		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
 	}
@@ -373,6 +380,45 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 // messageKey is a context key for the current user message, set by Chat so
 // ContextPinsFn can use it for relevance-ranked memory recall (P3-009).
 type messageKey struct{}
+
+const maxRecentSkillTools = 5
+
+type skillToolHistory struct {
+	mu      sync.Mutex
+	agentID string
+	tools   map[string][]string
+}
+
+func newSkillToolHistory(agentID string) *skillToolHistory {
+	return &skillToolHistory{agentID: agentID, tools: make(map[string][]string)}
+}
+
+func (h *skillToolHistory) Before(context.Context, *hooks.Event) error { return nil }
+
+func (h *skillToolHistory) After(ctx context.Context, evt *hooks.Event) error {
+	if evt.Type != hooks.EventToolCallAfter || evt.Name == "" {
+		return nil
+	}
+	key := sessionOrAgentKey(ctx, h.agentID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	tools := append(h.tools[key], evt.Name)
+	if len(tools) > maxRecentSkillTools {
+		tools = tools[len(tools)-maxRecentSkillTools:]
+	}
+	h.tools[key] = tools
+	return nil
+}
+
+func (h *skillToolHistory) query(ctx context.Context, message string) string {
+	key := sessionOrAgentKey(ctx, h.agentID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.tools[key]) == 0 {
+		return message
+	}
+	return message + "\n" + strings.Join(h.tools[key], " ")
+}
 
 // setupMemory wires chronos-code's YAML-backed memory store (PRD P2-002)
 // into every agent via ContextPinsFn, which chronos's sdk/agent evaluates
@@ -568,6 +614,8 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 
 	for _, a := range agents {
 		prev := a.ContextPinsFn
+		history := newSkillToolHistory(a.ID)
+		a.Hooks = append(a.Hooks, history)
 		a.ContextPinsFn = func(ctx context.Context) []model.Message {
 			var msgs []model.Message
 			if prev != nil {
@@ -577,7 +625,8 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 			if msg == "" {
 				return msgs
 			}
-			if rendered := skills.Render(skills.Select(msg, catalog, skills.DefaultTopK, modelID)); rendered != "" {
+			query := history.query(ctx, msg)
+			if rendered := skills.Render(skills.Select(query, catalog, skills.DefaultTopK, modelID)); rendered != "" {
 				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: rendered})
 			}
 			return msgs
@@ -776,9 +825,7 @@ func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatRes
 	if a == nil {
 		return nil, fmt.Errorf("no active agent")
 	}
-	// Inject user message into context so ContextPinsFn can use it for
-	// relevance-ranked memory recall (PRD P3-009).
-	ctx = context.WithValue(ctx, messageKey{}, message)
+	ctx = o.turnContext(ctx, message)
 	// Predictive context loading (PRD P3-007): resolve symbol names from the
 	// user message in the code graph and pre-load L2 summaries so the model's
 	// first turn starts with relevant code context instead of spending extra
@@ -808,10 +855,18 @@ func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *
 	if a == nil {
 		return nil, fmt.Errorf("no active agent")
 	}
+	ctx = o.turnContext(ctx, message)
+	return a.ChatStream(ctx, message)
+}
+
+// turnContext gives every execution path the same per-turn inputs for dynamic
+// context pins and session-scoped runtime features.
+func (o *Orchestrator) turnContext(ctx context.Context, message string) context.Context {
+	ctx = context.WithValue(ctx, messageKey{}, message)
 	if sid := o.sessions[o.active]; sid != "" {
 		ctx = storage.WithSession(ctx, sid)
 	}
-	return a.ChatStream(ctx, message)
+	return ctx
 }
 
 // Route classifies message via the T0 intent router, falling back to the T1
@@ -891,10 +946,62 @@ func (o *Orchestrator) escalateModel(ctx context.Context, agentID string) error 
 	return nil
 }
 
-// SetPermissionMode applies mode (one of "prompt", "auto_approve", "deny" —
-// see tool.ParsePermissionMode for accepted aliases) to every agent's tool
-// registry. This is how the CLI's `--permission-mode` flag takes effect;
-// without a call to this, the flag was parsed but silently had no effect.
+// SetApprovalHandler installs handler behind the policy checker on every agent
+// registry. Replacing the human handler never replaces policy enforcement.
+func (o *Orchestrator) SetApprovalHandler(handler tool.ApprovalFunc) {
+	for _, a := range o.agents {
+		a.Tools.SetApprovalHandler(func(ctx context.Context, toolName string, args map[string]any) (bool, error) {
+			switch o.permissionChecker.Check(toolName, args, o.permissionYolo.Load()) {
+			case security.Auto:
+				return true, nil
+			case security.Deny:
+				o.auditPermissionDenial(ctx, toolName, args)
+				return false, nil
+			case security.Confirm:
+				if handler == nil {
+					return false, nil
+				}
+				return handler(ctx, toolName, args)
+			default:
+				return false, nil
+			}
+		})
+	}
+}
+
+// normalizeToolPermissions ensures every executable tool call reaches the
+// policy-aware approval handler. It runs once at startup after registration.
+func normalizeToolPermissions(agents map[string]*agent.Agent) {
+	for _, a := range agents {
+		for _, def := range a.Tools.List() {
+			if def.Permission == tool.PermDeny {
+				continue
+			}
+			normalized := *def
+			normalized.Permission = tool.PermRequireApproval
+			a.Tools.Register(&normalized)
+		}
+	}
+}
+
+func (o *Orchestrator) auditPermissionDenial(ctx context.Context, toolName string, args map[string]any) {
+	if o.store == nil {
+		return
+	}
+	_ = o.store.AppendAuditLog(ctx, &storage.AuditLog{
+		ID:        session.NewSessionID(),
+		SessionID: storage.SessionFromContext(ctx),
+		Actor:     "permission-policy",
+		Action:    "block",
+		Resource:  toolName,
+		Detail:    map[string]any{"args": args},
+		CreatedAt: time.Now(),
+	})
+}
+
+// SetPermissionMode applies mode to every agent registry. Auto-approve is
+// implemented by the policy checker while registries remain in prompt mode,
+// so hard denials and explicit confirmations cannot bypass the checker.
 func (o *Orchestrator) SetPermissionMode(mode string) error {
 	if mode == "" {
 		return nil
@@ -903,8 +1010,15 @@ func (o *Orchestrator) SetPermissionMode(mode string) error {
 	if err != nil {
 		return err
 	}
+	registryMode := parsed
+	yolo := false
+	if parsed == tool.PermissionModeAutoApprove {
+		registryMode = tool.PermissionModePrompt
+		yolo = true
+	}
+	o.permissionYolo.Store(yolo)
 	for _, a := range o.agents {
-		if err := a.Tools.SetPermissionMode(parsed); err != nil {
+		if err := a.Tools.SetPermissionMode(registryMode); err != nil {
 			return fmt.Errorf("set permission mode for agent %q: %w", a.ID, err)
 		}
 	}

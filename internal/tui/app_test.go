@@ -1,13 +1,25 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spawn08/chronos/engine/tool"
 )
+
+type approvalInstallerStub struct {
+	handler tool.ApprovalFunc
+	calls   int
+}
+
+func (s *approvalInstallerStub) SetApprovalHandler(handler tool.ApprovalFunc) {
+	s.handler = handler
+	s.calls++
+}
 
 func TestFrameTiming_Stats_Empty(t *testing.T) {
 	var ft frameTiming
@@ -155,5 +167,24 @@ func TestRenderTranscript_EmptyBlocks(t *testing.T) {
 	got := m.renderTranscript()
 	if got != "" {
 		t.Errorf("renderTranscript() with no blocks = %q, want empty", got)
+	}
+}
+
+func TestInstallApprovalHandlersDelegatesToCompositionOwner(t *testing.T) {
+	stub := &approvalInstallerStub{}
+	wantCalled := false
+	handler := func(context.Context, string, map[string]any) (bool, error) {
+		wantCalled = true
+		return true, nil
+	}
+	installApprovalHandlers(stub, handler)
+	if stub.calls != 1 || stub.handler == nil {
+		t.Fatalf("SetApprovalHandler calls = %d, handler nil = %v; want 1, false", stub.calls, stub.handler == nil)
+	}
+	if _, err := stub.handler(context.Background(), "shell", nil); err != nil {
+		t.Fatalf("installed handler error = %v", err)
+	}
+	if !wantCalled {
+		t.Fatal("installApprovalHandlers did not pass through the TUI handler")
 	}
 }

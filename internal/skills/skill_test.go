@@ -153,3 +153,106 @@ func TestDiscoverFallsBackToBundledWhenNoOverride(t *testing.T) {
 		t.Fatalf("merged = %+v, want bundled fallback", merged)
 	}
 }
+
+func TestDiscoverMergesAllTiersWithPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+
+	writeSkill(t, filepath.Join(root, ".chronos-code", "skills"), "shared", "repo")
+	writeSkill(t, filepath.Join(root, ".chronos-code", "skills"), "repo-only", "repo")
+	writeSkill(t, filepath.Join(home, ".chronos-code", "skills"), "shared", "user")
+	writeSkill(t, filepath.Join(home, ".chronos-code", "skills"), "user-wins", "user")
+	writeSkill(t, filepath.Join(home, ".chronos-code", "skills"), "user-only", "user")
+	pluginSkills := filepath.Join(home, ".chronos-code", "plugins", "plugin-a", "skills")
+	writeSkill(t, pluginSkills, "shared", "plugin")
+	writeSkill(t, pluginSkills, "user-wins", "plugin")
+	writeSkill(t, pluginSkills, "plugin-wins", "plugin")
+	writeSkill(t, pluginSkills, "plugin-only", "plugin")
+
+	bundled := []*Skill{
+		{Name: "shared", Description: "bundled"},
+		{Name: "user-wins", Description: "bundled"},
+		{Name: "plugin-wins", Description: "bundled"},
+		{Name: "bundled-only", Description: "bundled"},
+	}
+	merged, err := Discover(root, bundled)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	got := make(map[string]string, len(merged))
+	for _, skill := range merged {
+		got[skill.Name] = skill.Description
+	}
+	want := map[string]string{
+		"shared":       "repo",
+		"repo-only":    "repo",
+		"user-wins":    "user",
+		"user-only":    "user",
+		"plugin-wins":  "plugin",
+		"plugin-only":  "plugin",
+		"bundled-only": "bundled",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("skills = %v, want %v", got, want)
+	}
+	for name, description := range want {
+		if got[name] != description {
+			t.Errorf("skill %q description = %q, want %q", name, got[name], description)
+		}
+	}
+}
+
+func TestDiscoverTraversesPluginsDeterministically(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	pluginsDir := filepath.Join(home, ".chronos-code", "plugins")
+
+	writeSkill(t, filepath.Join(pluginsDir, "zeta", "skills"), "collision", "zeta")
+	writeSkill(t, filepath.Join(pluginsDir, "zeta", "skills"), "zeta-only", "zeta")
+	writeSkill(t, filepath.Join(pluginsDir, "alpha", "skills"), "collision", "alpha")
+	writeSkill(t, filepath.Join(pluginsDir, "alpha", "skills"), "alpha-only", "alpha")
+
+	merged, err := Discover(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	wantNames := []string{"alpha-only", "collision", "zeta-only"}
+	if len(merged) != len(wantNames) {
+		t.Fatalf("len(merged) = %d, want %d", len(merged), len(wantNames))
+	}
+	for i, name := range wantNames {
+		if merged[i].Name != name {
+			t.Errorf("merged[%d].Name = %q, want %q", i, merged[i].Name, name)
+		}
+	}
+	if merged[1].Description != "alpha" {
+		t.Errorf("collision description = %q, want first lexical plugin alpha", merged[1].Description)
+	}
+}
+
+func TestDiscoverMissingPluginDirectoryIsNotError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bundled := []*Skill{{Name: "bundled", Description: "fallback"}}
+
+	merged, err := Discover(t.TempDir(), bundled)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(merged) != 1 || merged[0] != bundled[0] {
+		t.Fatalf("merged = %+v, want bundled fallback", merged)
+	}
+}
+
+func writeSkill(t *testing.T, dir, name, description string) {
+	t.Helper()
+	skillDir := filepath.Join(dir, name)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: " + description + "\n---\nbody"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

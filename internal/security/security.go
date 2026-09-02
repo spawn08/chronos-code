@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,6 +35,9 @@ type Policy struct {
 	DeniedPatterns  []string
 	MaxExecSeconds  int
 	SecretPatterns  []string // carried through for reuse by another package
+	autoAllow       []*regexp.Regexp
+	confirm         []*regexp.Regexp
+	neverAllow      []*regexp.Regexp
 }
 
 // policyYAML mirrors the on-disk YAML shape.
@@ -47,6 +51,9 @@ type policyYAML struct {
 	Shell struct {
 		AllowedCommands  []string `yaml:"allowed_commands"`
 		DeniedPatterns   []string `yaml:"denied_patterns"`
+		AutoAllow        []string `yaml:"auto_allow"`
+		Confirm          []string `yaml:"confirm"`
+		NeverAllow       []string `yaml:"never_allow"`
 		MaxExecutionSecs int      `yaml:"max_execution_time_sec"`
 	} `yaml:"shell"`
 	Secrets struct {
@@ -75,7 +82,30 @@ func LoadPolicy(data []byte) (*Policy, error) {
 	if p.MaxExecSeconds <= 0 {
 		p.MaxExecSeconds = defaultMaxExecSeconds
 	}
+
+	var err error
+	if p.autoAllow, err = compilePatterns("shell.auto_allow", raw.Shell.AutoAllow); err != nil {
+		return nil, err
+	}
+	if p.confirm, err = compilePatterns("shell.confirm", raw.Shell.Confirm); err != nil {
+		return nil, err
+	}
+	if p.neverAllow, err = compilePatterns("shell.never_allow", raw.Shell.NeverAllow); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+func compilePatterns(field string, patterns []string) ([]*regexp.Regexp, error) {
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for i, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("security: invalid %s[%d] regex %q: %w", field, i, pattern, err)
+		}
+		compiled = append(compiled, re)
+	}
+	return compiled, nil
 }
 
 // Guard is a hooks.Hook that enforces Policy at tool-call time.

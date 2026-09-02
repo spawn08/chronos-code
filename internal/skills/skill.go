@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -164,12 +165,12 @@ func LoadDir(dir string) ([]*Skill, error) {
 
 // Discover merges every tier of ROADMAP.md §5.1's resolution order,
 // highest-priority first: repo-local ("<root>/.chronos-code/skills"), user
-// global ("~/.chronos-code/skills"), then bundled (embedded
+// global ("~/.chronos-code/skills"), plugin-installed
+// ("~/.chronos-code/plugins/*/skills"), then bundled (embedded
 // default-skills.yaml, passed in as bundled since internal/defaults isn't
 // importable from here without an import cycle risk — callers already have
 // defaults.ReadFile). A name present in a higher tier shadows the same name
-// in a lower one. (Plugin-installed skills, §5.1's third tier, are omitted:
-// chronos-code has no plugin system yet.)
+// in a lower one.
 func Discover(root string, bundled []*Skill) ([]*Skill, error) {
 	var tiers [][]*Skill
 
@@ -187,6 +188,26 @@ func Discover(root string, bundled []*Skill) ([]*Skill, error) {
 			return nil, err
 		}
 		tiers = append(tiers, userSkills)
+
+		pluginsDir := filepath.Join(home, ".chronos-code", "plugins")
+		entries, err := os.ReadDir(pluginsDir)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("skills: read plugins dir %q: %w", pluginsDir, err)
+		}
+		var pluginNames []string
+		for _, entry := range entries {
+			if entry.IsDir() {
+				pluginNames = append(pluginNames, entry.Name())
+			}
+		}
+		sort.Strings(pluginNames)
+		for _, name := range pluginNames {
+			pluginSkills, err := LoadDir(filepath.Join(pluginsDir, name, "skills"))
+			if err != nil {
+				return nil, err
+			}
+			tiers = append(tiers, pluginSkills)
+		}
 	}
 
 	tiers = append(tiers, bundled)
