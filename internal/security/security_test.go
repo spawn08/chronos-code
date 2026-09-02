@@ -203,6 +203,8 @@ shell:
 		{"git push origin main", true, Confirm},
 		{"sudo rm -rf /", false, Deny},
 		{"sudo rm -rf /", true, Deny},
+		{"sed -n 1,20p README.md", false, Confirm},
+		{"sed -n 1,20p README.md", true, Confirm},
 	}
 	for _, tc := range cases {
 		if got := checker.Check("shell", map[string]any{"command": tc.command}, tc.yolo); got != tc.want {
@@ -220,7 +222,7 @@ func TestPermissionChecker_HardRestrictionsOverrideYolo(t *testing.T) {
 		{"file_read", map[string]any{"path": ".env"}},
 		{"file_write", map[string]any{"path": "/etc/passwd"}},
 		{"shell", map[string]any{"command": "sudo rm -rf /"}},
-		{"shell", map[string]any{"command": "unknown-command"}},
+		{"shell_auto", map[string]any{"command": "unknown-command"}},
 	}
 	for _, tc := range cases {
 		if got := checker.Check(tc.name, tc.args, true); got != Deny {
@@ -336,6 +338,30 @@ func TestGuard_Shell_AllowedCommand(t *testing.T) {
 	}
 	if err := g.Before(context.Background(), evt); err != nil {
 		t.Fatalf("expected 'go build ./...' to be allowed, got: %v", err)
+	}
+}
+
+func TestGuard_Shell_UnlistedCommandDefersToApproval(t *testing.T) {
+	g := NewGuard(defaultTestPolicy(), "/workspace", nil)
+	evt := &hooks.Event{
+		Type:  hooks.EventToolCallBefore,
+		Name:  "shell",
+		Input: map[string]any{"command": "sed -n 1,20p README.md"},
+	}
+	if err := g.Before(context.Background(), evt); err != nil {
+		t.Fatalf("expected unlisted interactive shell command to defer to approval, got: %v", err)
+	}
+}
+
+func TestGuard_ShellAuto_UnlistedCommandDenied(t *testing.T) {
+	g := NewGuard(defaultTestPolicy(), "/workspace", nil)
+	evt := &hooks.Event{
+		Type:  hooks.EventToolCallBefore,
+		Name:  "shell_auto",
+		Input: map[string]any{"command": "sed -n 1,20p README.md"},
+	}
+	if err := g.Before(context.Background(), evt); err == nil {
+		t.Fatal("expected unlisted automatic shell command to be denied")
 	}
 }
 

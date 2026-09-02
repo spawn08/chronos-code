@@ -135,8 +135,10 @@ func (g *Guard) Before(ctx context.Context, evt *hooks.Event) error {
 	switch evt.Name {
 	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
 		blockErr = g.checkFileArgs(evt.Name, args)
-	case "shell", "shell_auto":
-		blockErr = g.checkShellArgs(args)
+	case "shell":
+		blockErr = g.checkShellArgs(args, false)
+	case "shell_auto":
+		blockErr = g.checkShellArgs(args, true)
 	default:
 		return nil
 	}
@@ -216,7 +218,7 @@ func isUnderAnyRoot(root string, writablePaths []string, resolved string) bool {
 
 // checkShellArgs enforces the denied-pattern and allowed-command rules
 // against a "command" string argument, when present.
-func (g *Guard) checkShellArgs(args map[string]any) error {
+func (g *Guard) checkShellArgs(args map[string]any, requireAllowlisted bool) error {
 	command, ok := args["command"].(string)
 	if !ok || command == "" {
 		return nil
@@ -229,25 +231,32 @@ func (g *Guard) checkShellArgs(args map[string]any) error {
 		}
 	}
 
-	if len(g.policy.AllowedCommands) > 0 {
-		fields := strings.Fields(command)
-		if len(fields) == 0 {
-			return nil
-		}
-		first := fields[0]
-		allowed := false
-		for _, ac := range g.policy.AllowedCommands {
-			if first == ac {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return fmt.Errorf("security: shell command %q is not in the allowed_commands list", first)
-		}
+	if requireAllowlisted && !g.shellCommandAllowed(command) {
+		return fmt.Errorf("security: shell command %q is not in the allowed_commands list", firstShellCommand(command))
 	}
 
 	return nil
+}
+
+func (g *Guard) shellCommandAllowed(command string) bool {
+	if len(g.policy.AllowedCommands) == 0 {
+		return true
+	}
+	first := firstShellCommand(command)
+	for _, allowed := range g.policy.AllowedCommands {
+		if first == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func firstShellCommand(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // audit best-effort records a blocked tool call to storage. Any error from
