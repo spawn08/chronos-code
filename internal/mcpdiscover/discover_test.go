@@ -3,6 +3,7 @@ package mcpdiscover
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/mcp"
@@ -182,6 +183,7 @@ func TestDiscoverFromFile_PackageJSON(t *testing.T) {
 }
 
 func TestDiscover_Deduplication(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	cursorDir := filepath.Join(root, ".cursor")
 	os.MkdirAll(cursorDir, 0o755)
@@ -223,10 +225,77 @@ func TestDiscover_Deduplication(t *testing.T) {
 }
 
 func TestDiscover_EmptyRoot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	servers := Discover(root)
 	if len(servers) != 0 {
 		t.Fatalf("got %d servers, want 0 for empty root", len(servers))
+	}
+}
+
+func TestLoad_ProjectAndUserPrecedenceIsDeterministic(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".chronos-code"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".cursor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(home, ".chronos-code", "mcp.json"), `{
+		"mcpServers": {
+			"shared": {"command": "user"},
+			"user-only": {"command": "user-only"}
+		}
+	}`)
+	writeFile(t, filepath.Join(root, ".cursor", "mcp.json"), `{
+		"mcpServers": {
+			"shared": {"command": "cursor"},
+			"cursor-only": {"command": "cursor-only"}
+		}
+	}`)
+	writeFile(t, filepath.Join(root, ".mcp.json"), `{
+		"mcpServers": {
+			"shared": {"command": "project"},
+			"project-only": {"command": "project-only"}
+		}
+	}`)
+
+	snapshot := Load(root)
+	if snapshot.Err != nil {
+		t.Fatal(snapshot.Err)
+	}
+	wantNames := []string{"cursor-only", "project-only", "shared", "user-only"}
+	if len(snapshot.Servers) != len(wantNames) {
+		t.Fatalf("got %d servers, want %d", len(snapshot.Servers), len(wantNames))
+	}
+	for i, want := range wantNames {
+		if snapshot.Servers[i].Name != want {
+			t.Errorf("servers[%d].Name=%q, want %q", i, snapshot.Servers[i].Name, want)
+		}
+	}
+	if snapshot.Servers[2].Command != "project" {
+		t.Errorf("shared command=%q, want project", snapshot.Servers[2].Command)
+	}
+}
+
+func TestLoad_MalformedFileHasPathContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	path := filepath.Join(root, ".mcp.json")
+	writeFile(t, path, `{bad`)
+
+	snapshot := Load(root)
+	if snapshot.Err == nil {
+		t.Fatal("expected malformed config error")
+	}
+	if !strings.Contains(snapshot.Err.Error(), path) || !strings.Contains(snapshot.Err.Error(), "parse MCP config") {
+		t.Fatalf("error %q does not identify malformed source %s", snapshot.Err, path)
+	}
+	if snapshot.Servers != nil {
+		t.Fatalf("malformed load returned servers: %v", snapshot.Servers)
 	}
 }
 
