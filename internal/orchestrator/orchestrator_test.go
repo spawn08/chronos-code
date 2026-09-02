@@ -17,14 +17,55 @@ import (
 	"github.com/spawn08/chronos/storage"
 	storagememory "github.com/spawn08/chronos/storage/adapters/memory"
 
+	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/learning"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
+	"github.com/spawn08/chronos-code/internal/toolcompress"
 )
 
 type routingTestProvider struct {
 	provider string
 	model    string
+}
+
+type closeTrackingStorage struct {
+	storage.Storage
+	mu     sync.Mutex
+	closes int
+	err    error
+}
+
+type closeTrackingLSP struct {
+	mu     sync.Mutex
+	closes int
+}
+
+func (m *closeTrackingLSP) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closes++
+	return nil
+}
+
+func (m *closeTrackingLSP) closeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closes
+}
+
+func (s *closeTrackingStorage) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closes++
+	return s.err
+}
+
+func (s *closeTrackingStorage) closeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closes
 }
 
 func (p *routingTestProvider) Chat(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
@@ -41,6 +82,246 @@ func (p *routingTestProvider) Model() string { return p.model }
 type skillContextTestProvider struct {
 	mu       sync.Mutex
 	requests []*model.ChatRequest
+}
+
+type budgetTestProvider struct {
+	mu       sync.Mutex
+	calls    int
+	modelID  string
+	response *model.ChatResponse
+	err      error
+}
+
+func (p *budgetTestProvider) Chat(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return p.response, p.err
+}
+
+func (p *budgetTestProvider) StreamChat(context.Context, *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	return nil, errors.New("unexpected streaming call")
+}
+
+func (p *budgetTestProvider) Name() string  { return "test" }
+func (p *budgetTestProvider) Model() string { return p.modelID }
+
+func (p *budgetTestProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func newBudgetTestOrchestrator(provider model.Provider) *Orchestrator {
+	a := &agent.Agent{
+		ID:         "coder",
+		Model:      provider,
+		Tools:      tool.NewRegistry(),
+		Guardrails: guardrails.NewEngine(),
+	}
+	orch := &Orchestrator{
+		agents:   map[string]*agent.Agent{"coder": a},
+		active:   "coder",
+		sessions: map[string]string{"coder": "session-1"},
+		budget:   budget.NewTracker(0, 500),
+	}
+	a.Hooks = append(a.Hooks, budgetHook{tracker: orch.budget, orchestrator: orch, agentID: a.ID})
+	return orch
+}
+
+func TestBudgetRejectsBeforeProviderInvocation(t *testing.T) {
+	provider := &budgetTestProvider{modelID: "claude-haiku-4-5"}
+	orch := newBudgetTestOrchestrator(provider)
+	orch.SetUSDCap(1)
+
+	_, err := orch.Chat(context.Background(), "hello")
+	if !errors.Is(err, budget.ErrUSDBudgetExceeded) {
+		t.Fatalf("Chat() error = %v, want ErrUSDBudgetExceeded", err)
+	}
+	if got := provider.callCount(); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+	if got := orch.SessionCost(); got != (budget.SessionCost{}) {
+		t.Fatalf("SessionCost() = %+v, want no spend or reservation", got)
+	}
+}
+
+func TestLearningTelemetryEnabledCreatesStoreAndIsolatesAgents(t *testing.T) {
+	root := t.TempDir()
+	agents := map[string]*agent.Agent{
+		"coder":    {ID: "coder"},
+		"reviewer": {ID: "reviewer"},
+	}
+	store, err := setupLearningTelemetry(context.Background(), &config.Config{
+		Learning: config.LearningConfig{Enabled: true},
+	}, root, agents)
+	if err != nil {
+		t.Fatalf("setupLearningTelemetry() error = %v", err)
+	}
+	if store == nil {
+		t.Fatal("setupLearningTelemetry() store = nil, want SQL store")
+	}
+	t.Cleanup(func() { _ = store.Close(context.Background()) })
+
+	dbPath := filepath.Join(root, config.ConfigDirName, "memory.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("Stat(%q) error = %v", dbPath, err)
+	}
+	if len(agents["coder"].Hooks) != 1 || len(agents["reviewer"].Hooks) != 1 {
+		t.Fatalf("agent hooks = (%#v, %#v), want one telemetry recorder each", agents["coder"].Hooks, agents["reviewer"].Hooks)
+	}
+	coderRecorder, coderOK := agents["coder"].Hooks[0].(*learning.TelemetryRecorder)
+	reviewerRecorder, reviewerOK := agents["reviewer"].Hooks[0].(*learning.TelemetryRecorder)
+	if !coderOK || !reviewerOK {
+		t.Fatalf("agent hooks = (%#v, %#v), want telemetry recorders", agents["coder"].Hooks, agents["reviewer"].Hooks)
+	}
+	if coderRecorder == reviewerRecorder {
+		t.Fatal("agents share one telemetry recorder, want isolated recorders")
+	}
+	evt := &hooks.Event{Type: hooks.EventModelCallBefore, Name: "test-model"}
+	if err := coderRecorder.Before(context.Background(), evt); err != nil {
+		t.Fatalf("coder recorder Before() error = %v", err)
+	}
+	if err := reviewerRecorder.Before(context.Background(), evt); err != nil {
+		t.Fatalf("reviewer recorder Before() error = %v", err)
+	}
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.Sessions != 2 || stats.Turns != 2 {
+		t.Fatalf("Stats() = %+v, want two isolated agent sessions and turns", stats)
+	}
+}
+
+func TestLearningTelemetryDisabledCreatesNothing(t *testing.T) {
+	root := t.TempDir()
+	a := &agent.Agent{ID: "coder"}
+	store, err := setupLearningTelemetry(context.Background(), &config.Config{}, root, map[string]*agent.Agent{"coder": a})
+	if err != nil {
+		t.Fatalf("setupLearningTelemetry() error = %v", err)
+	}
+	if store != nil {
+		t.Fatal("setupLearningTelemetry() store is non-nil when learning is disabled")
+	}
+	if len(a.Hooks) != 0 {
+		t.Fatalf("agent hooks = %#v, want no telemetry recorder", a.Hooks)
+	}
+	if _, err := os.Stat(filepath.Join(root, config.ConfigDirName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disabled learning created config directory: %v", err)
+	}
+}
+
+func TestLearningTelemetryInitializationFailureDoesNotAttachRecorders(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	a := &agent.Agent{ID: "coder"}
+	store, err := setupLearningTelemetry(context.Background(), &config.Config{
+		Learning: config.LearningConfig{Enabled: true},
+	}, root, map[string]*agent.Agent{"coder": a})
+	if err == nil || !strings.Contains(err.Error(), "create learning telemetry directory") {
+		t.Fatalf("setupLearningTelemetry() error = %v, want contextual directory error", err)
+	}
+	if store != nil || len(a.Hooks) != 0 {
+		t.Fatalf("failed setup returned store %v and hooks %#v, want neither", store, a.Hooks)
+	}
+}
+
+func TestLearningTelemetryCloseIsOnceAndComposesErrors(t *testing.T) {
+	root := t.TempDir()
+	learningStore, err := setupLearningTelemetry(context.Background(), &config.Config{
+		Learning: config.LearningConfig{Enabled: true},
+	}, root, nil)
+	if err != nil {
+		t.Fatalf("setupLearningTelemetry() error = %v", err)
+	}
+	storageErr := errors.New("primary storage close failed")
+	primary := &closeTrackingStorage{err: storageErr}
+	orch := &Orchestrator{learningStore: learningStore, store: primary}
+
+	const callers = 8
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- orch.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if !errors.Is(err, storageErr) {
+			t.Fatalf("Close() error = %v, want joined primary storage error", err)
+		}
+	}
+	if got := primary.closeCount(); got != 1 {
+		t.Fatalf("primary storage Close() calls = %d, want 1", got)
+	}
+	if _, err := learningStore.Stats(context.Background()); err == nil {
+		t.Fatal("learning store remains usable after Orchestrator.Close()")
+	}
+}
+
+func TestLSPCloseIsExactlyOnce(t *testing.T) {
+	manager := &closeTrackingLSP{}
+	orch := &Orchestrator{lspManager: manager}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = orch.Close()
+		}()
+	}
+	wg.Wait()
+	if got := manager.closeCount(); got != 1 {
+		t.Fatalf("LSP manager Close() calls = %d, want 1", got)
+	}
+}
+
+func TestBudgetReconcilesSuccessfulCallOnce(t *testing.T) {
+	provider := &budgetTestProvider{
+		modelID: "claude-haiku-4-5",
+		response: &model.ChatResponse{
+			Role:  model.RoleAssistant,
+			Usage: model.Usage{PromptTokens: 4, CompletionTokens: 2},
+		},
+	}
+	orch := newBudgetTestOrchestrator(provider)
+	orch.SetUSDCap(1_000)
+
+	if _, err := orch.Chat(context.Background(), "hello"); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	want := budget.SessionCost{InputTokens: 4, OutputTokens: 2, SpentMicrodollars: 14}
+	if got := orch.SessionCost(); got != want {
+		t.Fatalf("SessionCost() = %+v, want %+v", got, want)
+	}
+	if got := provider.callCount(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+}
+
+func TestBudgetFailedCallReleasesReservation(t *testing.T) {
+	provider := &budgetTestProvider{modelID: "claude-haiku-4-5", err: errors.New("provider failed")}
+	orch := newBudgetTestOrchestrator(provider)
+	orch.SetUSDCap(1_000)
+
+	if _, err := orch.Chat(context.Background(), "hello"); err == nil {
+		t.Fatal("Chat() error = nil, want provider failure")
+	}
+	if got := orch.SessionCost(); got != (budget.SessionCost{}) {
+		t.Fatalf("SessionCost() = %+v, want released reservation and no spend", got)
+	}
+	if got := provider.callCount(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
 }
 
 func (p *skillContextTestProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
@@ -250,6 +531,114 @@ func TestSkillContextParityPreservesExistingPins(t *testing.T) {
 	}
 }
 
+func TestLSPToolsAndDiagnosticPinsPreserveParityAndBounds(t *testing.T) {
+	root := t.TempDir()
+	files := []string{"internal/a.go", "internal/b.go", "other/a.go"}
+	agents := map[string]*agent.Agent{
+		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
+		"reviewer": {ID: "reviewer", Tools: tool.NewRegistry()},
+	}
+	for _, a := range agents {
+		a.ContextPinsFn = func(context.Context) []model.Message {
+			return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+		}
+	}
+	called := make(map[string]int)
+	diagnostics := &tool.Definition{
+		Name: "lsp_diagnostics",
+		Handler: func(_ context.Context, args map[string]any) (any, error) {
+			file := args["file"].(string)
+			called[file]++
+			items := make([]map[string]any, 0, 6)
+			for i := 1; i <= 6; i++ {
+				severity := "warning"
+				if i <= 2 {
+					severity = "error"
+				}
+				items = append(items, map[string]any{"severity": severity, "message": "diagnostic", "line": i, "col": 1})
+			}
+			return map[string]any{"diagnostics": items, "count": len(items)}, nil
+		},
+	}
+	definitions := []*tool.Definition{
+		diagnostics,
+		{Name: "lsp_hover"},
+		{Name: "lsp_references"},
+		{Name: "lsp_rename_preview"},
+	}
+	installLSPTools(root, files, agents, definitions)
+
+	for id, a := range agents {
+		for _, name := range []string{"lsp_diagnostics", "lsp_hover", "lsp_references", "lsp_rename_preview"} {
+			if _, ok := a.Tools.Get(name); !ok {
+				t.Fatalf("agent %s lacks tool %s", id, name)
+			}
+		}
+		ctx := context.WithValue(context.Background(), messageKey{}, "fix `internal/b.go`; a.go is ambiguous")
+		joined := strings.Join(messageContents(a.ContextPinsFn(ctx)), "\n")
+		if !strings.Contains(joined, "existing pin") || !strings.Contains(joined, "errors: 2, warnings: 4; showing 5 of 6") {
+			t.Fatalf("agent %s pins = %q", id, joined)
+		}
+		if strings.Count(joined, "\n- internal/b.go:") != maxPinnedLSPDiagnostics {
+			t.Fatalf("agent %s diagnostics were not bounded to %d: %q", id, maxPinnedLSPDiagnostics, joined)
+		}
+	}
+	if called["internal/b.go"] != len(agents) || called["internal/a.go"] != 0 || called["other/a.go"] != 0 {
+		t.Fatalf("diagnostic calls = %#v, want only unambiguous internal/b.go", called)
+	}
+}
+
+func TestLSPDiagnosticPinsIgnoreUnavailableServer(t *testing.T) {
+	a := &agent.Agent{ID: "coder", Tools: tool.NewRegistry()}
+	a.ContextPinsFn = func(context.Context) []model.Message {
+		return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+	}
+	installLSPTools("/workspace", []string{"main.go"}, map[string]*agent.Agent{"coder": a}, []*tool.Definition{{
+		Name: "lsp_diagnostics",
+		Handler: func(context.Context, map[string]any) (any, error) {
+			return nil, errors.New("lsp: no language server available")
+		},
+	}})
+	pins := a.ContextPinsFn(context.WithValue(context.Background(), messageKey{}, "check main.go"))
+	if got := strings.Join(messageContents(pins), "\n"); got != "existing pin" {
+		t.Fatalf("pins = %q, want missing server to preserve existing pins only", got)
+	}
+}
+
+func TestLSPDiagnosticContextBlockingStreamingParity(t *testing.T) {
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{
+		ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine(),
+	}
+	installLSPTools("/workspace", []string{"main.go"}, map[string]*agent.Agent{"coder": a}, []*tool.Definition{{
+		Name: "lsp_diagnostics",
+		Handler: func(context.Context, map[string]any) (any, error) {
+			return map[string]any{"diagnostics": []map[string]any{{
+				"severity": "error", "message": "broken", "line": 2, "col": 3,
+			}}}, nil
+		},
+	}})
+	orch := &Orchestrator{
+		agents: map[string]*agent.Agent{"coder": a}, active: "coder",
+		sessions: map[string]string{"coder": "session-1"},
+	}
+
+	if _, err := orch.Chat(context.Background(), "fix main.go"); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	stream, err := orch.ChatStream(context.Background(), "fix main.go")
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	for range stream {
+	}
+	blocking := strings.Join(systemContents(provider.request(0)), "\n")
+	streaming := strings.Join(systemContents(provider.request(1)), "\n")
+	if blocking != streaming || !strings.Contains(blocking, "main.go:2:3 [error] broken") {
+		t.Fatalf("blocking pins %q, streaming pins %q; want equivalent diagnostics", blocking, streaming)
+	}
+}
+
 func TestSkillToolHistoryIsBoundedAndSessionScoped(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
@@ -305,6 +694,168 @@ func messageContents(messages []model.Message) []string {
 		contents = append(contents, msg.Content)
 	}
 	return contents
+}
+
+func TestUserHookPolicyDenialPrecedesMiddleware(t *testing.T) {
+	root := t.TempDir()
+	runner, err := security.NewHookRunner(root)
+	if err != nil {
+		t.Fatalf("NewHookRunner() error = %v", err)
+	}
+	orch := newPermissionTestOrchestrator(t, nil)
+	a := orch.agents["coder"]
+	executions := 0
+	registerApprovalTool(a.Tools, "shell", &executions)
+	wrapUserToolHooks(a, config.HooksConfig{PreToolCall: []config.HookDef{{
+		Name: "pre", Command: "touch hook-ran", TimeoutMs: 1000,
+	}}}, runner)
+
+	if _, err := a.Tools.Execute(context.Background(), "shell", map[string]any{"command": "rm dangerous"}); err == nil {
+		t.Fatal("policy-denied tool call succeeded")
+	}
+	if executions != 0 {
+		t.Fatalf("handler executions = %d, want 0", executions)
+	}
+	if _, err := os.Stat(filepath.Join(root, "hook-ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pre-hook ran before policy denial: %v", err)
+	}
+}
+
+func TestUserHookPreFailureBlocksHandlerInOrder(t *testing.T) {
+	root := t.TempDir()
+	runner, err := security.NewHookRunner(root)
+	if err != nil {
+		t.Fatalf("NewHookRunner() error = %v", err)
+	}
+	a := &agent.Agent{ID: "coder", Tools: tool.NewRegistry()}
+	executions := 0
+	registerPermissionTool(a.Tools, "test", tool.PermAllow, &executions)
+	wrapUserToolHooks(a, config.HooksConfig{PreToolCall: []config.HookDef{
+		{Name: "first", Command: "printf first >> order", TimeoutMs: 1000},
+		{Name: "block", Command: "printf second >> order; exit 7", TimeoutMs: 1000},
+		{Name: "third", Command: "printf third >> order", TimeoutMs: 1000},
+	}}, runner)
+
+	if _, err := a.Tools.Execute(context.Background(), "test", nil); !errors.Is(err, security.ErrHookExit) {
+		t.Fatalf("Execute() error = %v, want hook exit error", err)
+	}
+	if executions != 0 {
+		t.Fatalf("handler executions = %d, want 0", executions)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "order"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got := string(data); got != "firstsecond" {
+		t.Fatalf("hook order = %q, want firstsecond", got)
+	}
+}
+
+func TestUserHookPostSeesRawOutputBeforeCompressionAndCannotMaskResult(t *testing.T) {
+	root := t.TempDir()
+	runner, err := security.NewHookRunner(root)
+	if err != nil {
+		t.Fatalf("NewHookRunner() error = %v", err)
+	}
+	raw := strings.Repeat("raw-output-", 100)
+	a := &agent.Agent{
+		ID:      "coder",
+		Model:   &routingTestProvider{provider: "test", model: "test"},
+		Tools:   tool.NewRegistry(),
+		Storage: storagememory.New(),
+	}
+	a.Tools.Register(&tool.Definition{
+		Name: "test", Permission: tool.PermAllow,
+		Handler: func(context.Context, map[string]any) (any, error) { return raw, nil },
+	})
+	wrapUserToolHooks(a, config.HooksConfig{PostToolCall: []config.HookDef{
+		{Name: "inspect", Command: "printf '%s' {{tool_output}} > raw.json", TimeoutMs: 1000},
+		{Name: "fail", Command: "exit 9", TimeoutMs: 1000},
+	}}, runner)
+	toolcompress.Wrap(a, 1)
+
+	result, err := a.Tools.Execute(storage.WithSession(context.Background(), "session-1"), "test", nil)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	compressed, ok := result.(map[string]any)
+	if !ok || compressed["compressed"] != true {
+		t.Fatalf("result = %#v, want compressed result despite failing post-hook", result)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "raw.json"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got, want := string(data), `"`+raw+`"`; got != want {
+		t.Fatalf("post-hook output = %q, want raw JSON output", got)
+	}
+}
+
+func TestHookPromptBlockingStreamingParityIsBoundedAndInjectedOnce(t *testing.T) {
+	root := t.TempDir()
+	runner, err := security.NewHookRunner(root)
+	if err != nil {
+		t.Fatalf("NewHookRunner() error = %v", err)
+	}
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{
+		ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine(),
+	}
+	cfg := &config.Config{Hooks: config.HooksConfig{UserPromptSubmit: []config.HookDef{{
+		Name:      "context",
+		Command:   "printf x >> prompt-runs; i=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done; printf '\\n%s|%s|%s' {{session_id}} {{agent_id}} {{user_message}}",
+		TimeoutMs: 2000,
+	}}}}
+	orch := &Orchestrator{
+		agents: map[string]*agent.Agent{"coder": a}, active: "coder",
+		sessions: map[string]string{"coder": "session-1"}, cfg: cfg, hookRunner: runner,
+	}
+
+	if _, err := orch.Chat(context.Background(), "hello"); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	stream, err := orch.ChatStream(context.Background(), "hello")
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	for range stream {
+	}
+
+	blocking := userContent(provider.request(0))
+	streaming := userContent(provider.request(1))
+	if blocking != streaming {
+		t.Fatalf("blocking prompt differs from streaming prompt")
+	}
+	if strings.Count(blocking, "<user_hook_context>") != 1 || strings.Count(blocking, "</user_hook_context>") != 1 {
+		t.Fatalf("prompt context was not injected exactly once: %q", blocking)
+	}
+	start := strings.Index(blocking, "<user_hook_context>\n") + len("<user_hook_context>\n")
+	end := strings.Index(blocking, "\n</user_hook_context>")
+	if start < len("<user_hook_context>\n") || end < start {
+		t.Fatalf("prompt context delimiters missing: %q", blocking)
+	}
+	if got := len(blocking[start:end]); got > userHookPromptContextTokens*security.CaptureBytesPerToken {
+		t.Fatalf("hook context bytes = %d, want at most %d", got, userHookPromptContextTokens*security.CaptureBytesPerToken)
+	}
+	if !strings.Contains(blocking[start:end], "session-1|coder|hello") {
+		t.Fatalf("hook context lacks session/agent/message variables: %q", blocking[start:end])
+	}
+	runs, err := os.ReadFile(filepath.Join(root, "prompt-runs"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got := string(runs); got != "xx" {
+		t.Fatalf("prompt hook runs = %q, want once per chat path", got)
+	}
+}
+
+func userContent(req *model.ChatRequest) string {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == model.RoleUser {
+			return req.Messages[i].Content
+		}
+	}
+	return ""
 }
 
 func newPermissionTestOrchestrator(t *testing.T, store storage.Storage) *Orchestrator {

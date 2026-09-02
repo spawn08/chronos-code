@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,8 @@ import (
 	"github.com/spawn08/chronos-code/internal/graph"
 	"github.com/spawn08/chronos-code/internal/guardrail"
 	"github.com/spawn08/chronos-code/internal/incctx"
+	"github.com/spawn08/chronos-code/internal/learning"
+	"github.com/spawn08/chronos-code/internal/lsp"
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
@@ -64,6 +67,8 @@ type Orchestrator struct {
 	modelOverrides     map[string]bool
 	buildProvider      func(agent.ModelConfig) (model.Provider, error)
 	budget             *budget.Tracker
+	budgetMu           sync.RWMutex
+	usdBudget          *budget.Tracker
 	memory             *memory.Store
 	workspace          *workspace.Info
 	actBuf             *activation.Buffer
@@ -72,7 +77,14 @@ type Orchestrator struct {
 	projectDocsWatcher *projectdocs.Watcher
 	permissionChecker  *security.PermissionChecker
 	permissionYolo     atomic.Bool
+	hookRunner         *security.HookRunner
+	learningStore      *learning.SQLStore
+	lspManager         interface{ Close() error }
+	closeOnce          sync.Once
+	closeErr           error
 }
+
+const userHookPromptContextTokens = 1000
 
 // OpenStorageForCLI opens the same storage.Storage backend New would (per
 // cfg.Defaults.Storage), without building any agents. It lets lightweight CLI
@@ -90,11 +102,33 @@ func OpenStorageForCLI(cfg *config.Config) (storage.Storage, string, error) {
 // every agent (bypassing cfg.Session.AutoResume's "reuse the most recent
 // session" heuristic) — this is how the CLI's `--resume <id>` flag resumes a
 // specific prior session rather than just "the latest one."
-func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orchestrator, error) {
+func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Orchestrator, err error) {
 	store, dsn, err := openStorage(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
+	var learningStore *learning.SQLStore
+	var languageServerManager *lsp.Manager
+	defer func() {
+		if err == nil {
+			return
+		}
+		var cleanupErrs []error
+		if learningStore != nil {
+			if closeErr := learningStore.Close(context.Background()); closeErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("close learning telemetry after startup failure: %w", closeErr))
+			}
+		}
+		if languageServerManager != nil {
+			if closeErr := languageServerManager.Close(); closeErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("close LSP manager after startup failure: %w", closeErr))
+			}
+		}
+		if closeErr := store.Close(); closeErr != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("close storage after startup failure: %w", closeErr))
+		}
+		err = errors.Join(append([]error{err}, cleanupErrs...)...)
+	}()
 
 	applyStoredCredentials(ctx, cfg)
 
@@ -132,6 +166,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	if root == "" {
 		root = config.WorkspaceRoot()
 	}
+	learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents)
+	if err != nil {
+		return nil, fmt.Errorf("configure learning telemetry: %w", err)
+	}
 	wsInfo := setupWorkspace(root, agents)
 
 	memStore := setupMemory(cfg, agents)
@@ -139,6 +177,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
 
 	setupSkills(cfg, root, agents)
+	languageServerManager = setupLSP(root, wsInfo, agents)
 
 	rt, routingConfig := setupRouter(cfg, projectDir)
 
@@ -150,25 +189,25 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 	tracker := budget.NewTracker(maxTokens, cfg.Tools.CompressionThresholdTokens)
 	attBudget := attention.NewBudgeter(100)
 	for _, a := range agents {
-		agentID := a.ID
-		// budgetHook forces a session id onto ctx before delegating to the
-		// shared tracker, so its "no session in context" fallback resolves to
-		// this agent's id — consistent with sessionOrAgentKey below, which
-		// toolcompress and incctx also use as their fallback. (budget.Tracker
-		// itself has no way to know which agent a hooks.Event came from; it
-		// only sees a *hooks.Event and a shared ctx.)
-		a.Hooks = append(a.Hooks, budgetHook{tracker: tracker, agentID: agentID})
 		a.Hooks = append(a.Hooks, attBudget)
 	}
 
 	actBuf := activation.NewBuffer(50)
+	var hookRunner *security.HookRunner
+	if len(cfg.Hooks.PreToolCall)+len(cfg.Hooks.PostToolCall)+len(cfg.Hooks.UserPromptSubmit) > 0 {
+		hookRunner, err = security.NewHookRunner(root)
+		if err != nil {
+			return nil, fmt.Errorf("configure user hooks: %w", err)
+		}
+	}
 	for _, a := range agents {
 		if err := a.ConnectMCP(ctx); err != nil {
 			fmt.Printf("warning: MCP connect for %s: %v\n", a.ID, err)
 		}
-		// Wrap tool handlers (compression + incremental context) only after
+		// Wrap tool handlers only after
 		// ConnectMCP so MCP-server tools are covered too, not just the
 		// built-in/YAML-declared ones registered before this point.
+		wrapUserToolHooks(a, cfg.Hooks, hookRunner)
 		agentID := a.ID
 		toolcompress.WrapDynamic(a, func(ctx context.Context) int {
 			base := tracker.CompressionThreshold(sessionOrAgentKey(ctx, agentID))
@@ -206,6 +245,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		routingState:       make(map[string]router.Classification),
 		modelOverrides:     make(map[string]bool),
 		budget:             tracker,
+		usdBudget:          budget.NewTrackerWithUSDCap(0, 0, 0),
 		memory:             memStore,
 		workspace:          wsInfo,
 		actBuf:             actBuf,
@@ -213,10 +253,16 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (*Orch
 		teams:              teams,
 		projectDocsWatcher: pdWatcher,
 		permissionChecker:  security.NewPermissionChecker(policy, root),
+		hookRunner:         hookRunner,
+		learningStore:      learningStore,
+		lspManager:         languageServerManager,
 	}
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
 		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
+		// Keep the budget hook last: if it reserves, no later Before hook can
+		// abort the call and strand the reservation.
+		a.Hooks = append(a.Hooks, budgetHook{tracker: tracker, orchestrator: orch, agentID: a.ID})
 	}
 	return orch, nil
 }
@@ -287,6 +333,41 @@ func sessionOrAgentKey(ctx context.Context, agentID string) string {
 	return agentID
 }
 
+func wrapUserToolHooks(a *agent.Agent, configured config.HooksConfig, runner *security.HookRunner) {
+	if runner == nil {
+		return
+	}
+	for _, def := range a.Tools.List() {
+		if def.Handler == nil {
+			continue
+		}
+		wrapped := *def
+		original := def.Handler
+		toolName := def.Name
+		wrapped.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+			vars := map[string]any{
+				"tool_name":  toolName,
+				"tool_args":  args,
+				"session_id": storage.SessionFromContext(ctx),
+				"agent_id":   a.ID,
+			}
+			for _, hook := range configured.PreToolCall {
+				if _, err := runner.Run(ctx, hook, vars); err != nil {
+					return nil, fmt.Errorf("pre-tool hook %q: %w", hook.Name, err)
+				}
+			}
+
+			result, handlerErr := original(ctx, args)
+			vars["tool_output"] = result
+			for _, hook := range configured.PostToolCall {
+				_, _ = runner.Run(ctx, hook, vars)
+			}
+			return result, handlerErr
+		}
+		a.Tools.Register(&wrapped)
+	}
+}
+
 // budgetHook adapts a single shared *budget.Tracker into a per-agent
 // hooks.Hook: it forces agentID onto ctx as the session id (via
 // storage.WithSession) whenever ctx doesn't already carry one, before
@@ -295,8 +376,16 @@ func sessionOrAgentKey(ctx context.Context, agentID string) string {
 // budget.Tracker would otherwise fall back to when it can't see which agent
 // a *hooks.Event came from).
 type budgetHook struct {
+	tracker      *budget.Tracker
+	orchestrator *Orchestrator
+	agentID      string
+}
+
+const budgetReservationMetadataKey = "chronos_code_budget_reservation"
+
+type budgetReservation struct {
 	tracker *budget.Tracker
-	agentID string
+	id      budget.ReservationID
 }
 
 func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
@@ -307,11 +396,57 @@ func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
 }
 
 func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
-	return h.tracker.Before(h.withFallbackSession(ctx), evt)
+	ctx = h.withFallbackSession(ctx)
+	if err := h.tracker.Before(ctx, evt); err != nil {
+		return err
+	}
+	if evt.Type != hooks.EventModelCallBefore || h.orchestrator == nil {
+		return nil
+	}
+	req, ok := evt.Input.(*model.ChatRequest)
+	if !ok || req == nil {
+		return fmt.Errorf("reserve model cost: missing chat request")
+	}
+	modelID := req.Model
+	if evt.Metadata != nil {
+		if provider, ok := evt.Metadata["provider"].(model.Provider); modelID == "" && ok {
+			modelID = provider.Model()
+		}
+	}
+	tracker := h.orchestrator.currentUSDBudget()
+	id, err := tracker.Reserve(storage.SessionFromContext(ctx), modelID,
+		model.NewTokenCounter(modelID).CountTokens(req.Messages), req.MaxTokens)
+	if err != nil {
+		return fmt.Errorf("reserve model cost: %w", err)
+	}
+	if evt.Metadata == nil {
+		evt.Metadata = make(map[string]any)
+	}
+	evt.Metadata[budgetReservationMetadataKey] = budgetReservation{tracker: tracker, id: id}
+	return nil
 }
 
 func (h budgetHook) After(ctx context.Context, evt *hooks.Event) error {
-	return h.tracker.After(h.withFallbackSession(ctx), evt)
+	ctx = h.withFallbackSession(ctx)
+	if err := h.tracker.After(ctx, evt); err != nil {
+		return err
+	}
+	if evt.Type != hooks.EventModelCallAfter {
+		return nil
+	}
+	reservation, ok := evt.Metadata[budgetReservationMetadataKey].(budgetReservation)
+	if !ok {
+		return nil
+	}
+	delete(evt.Metadata, budgetReservationMetadataKey)
+	var inputTokens, outputTokens int
+	if evt.Error == nil {
+		if resp, ok := evt.Output.(*model.ChatResponse); ok && resp != nil {
+			inputTokens = resp.Usage.PromptTokens
+			outputTokens = resp.Usage.CompletionTokens
+		}
+	}
+	return reservation.tracker.Reconcile(reservation.id, inputTokens, outputTokens)
 }
 
 // setupSessions establishes a persistent session id per agent (PRD P2-001).
@@ -340,6 +475,24 @@ func setupSessions(ctx context.Context, cfg *config.Config, mgr *session.Manager
 		sessions[id] = sid
 	}
 	return sessions
+}
+
+func setupLearningTelemetry(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent) (*learning.SQLStore, error) {
+	if !cfg.Learning.Enabled {
+		return nil, nil
+	}
+	dir := filepath.Join(root, config.ConfigDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create learning telemetry directory %s: %w", dir, err)
+	}
+	store, err := learning.OpenSQLStore(ctx, filepath.Join(dir, "memory.db"))
+	if err != nil {
+		return nil, fmt.Errorf("open learning telemetry: %w", err)
+	}
+	for _, a := range agents {
+		a.Hooks = append(a.Hooks, learning.NewTelemetryRecorder(store, root, a.ID))
+	}
+	return store, nil
 }
 
 // setupTracing wires chronos's span-based execution tracer into every agent
@@ -375,6 +528,143 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 		a.SystemPrompt = strings.TrimSpace(a.SystemPrompt + "\n\n" + banner)
 	}
 	return info
+}
+
+const maxPinnedLSPDiagnostics = 5
+
+// setupLSP registers the build-tag-dependent tools before runtime wrappers are
+// installed. The manager remains lazy, so missing server executables cannot
+// prevent startup.
+func setupLSP(root string, info *workspace.Info, agents map[string]*agent.Agent) *lsp.Manager {
+	manager := lsp.NewManager(root)
+	var files []string
+	if info != nil {
+		files = info.Files
+	}
+	installLSPTools(root, files, agents, lsp.Tools(manager, root))
+	return manager
+}
+
+func installLSPTools(root string, files []string, agents map[string]*agent.Agent, definitions []*tool.Definition) {
+	var diagnostics *tool.Definition
+	for _, definition := range definitions {
+		if definition.Name == "lsp_diagnostics" {
+			diagnostics = definition
+		}
+		for _, a := range agents {
+			a.Tools.Register(definition)
+		}
+	}
+	if diagnostics == nil {
+		return
+	}
+
+	for _, a := range agents {
+		prev := a.ContextPinsFn
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var messages []model.Message
+			if prev != nil {
+				messages = append(messages, prev(ctx)...)
+			}
+			message, _ := ctx.Value(messageKey{}).(string)
+			if pin := lspDiagnosticPin(ctx, root, files, message, diagnostics); pin != "" {
+				messages = append(messages, model.Message{Role: model.RoleSystem, Content: pin})
+			}
+			return messages
+		}
+	}
+}
+
+func lspDiagnosticPin(ctx context.Context, root string, files []string, message string, diagnostics *tool.Definition) string {
+	if message == "" || diagnostics == nil || diagnostics.Handler == nil {
+		return ""
+	}
+
+	type pinnedDiagnostic struct {
+		file, severity, message string
+		line, column            int
+	}
+	var pinned []pinnedDiagnostic
+	var errorsCount, warningsCount, total int
+	for _, file := range referencedWorkspaceFiles(root, files, message) {
+		result, err := diagnostics.Handler(ctx, map[string]any{"file": file})
+		if err != nil {
+			continue
+		}
+		output, ok := result.(map[string]any)
+		if !ok {
+			continue
+		}
+		items, ok := output["diagnostics"].([]map[string]any)
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			severity, _ := item["severity"].(string)
+			switch severity {
+			case "error":
+				errorsCount++
+			case "warning":
+				warningsCount++
+			}
+			total++
+			if len(pinned) == maxPinnedLSPDiagnostics {
+				continue
+			}
+			text, _ := item["message"].(string)
+			pinned = append(pinned, pinnedDiagnostic{
+				file: file, severity: severity, message: text,
+				line: numericValue(item["line"]), column: numericValue(item["col"]),
+			})
+		}
+	}
+	if total == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Fresh LSP diagnostics for referenced files (errors: %d, warnings: %d; showing %d of %d):", errorsCount, warningsCount, len(pinned), total)
+	for _, diagnostic := range pinned {
+		fmt.Fprintf(&b, "\n- %s:%d:%d [%s] %s", diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.severity, diagnostic.message)
+	}
+	return b.String()
+}
+
+func referencedWorkspaceFiles(root string, files []string, message string) []string {
+	mentioned := make(map[string]bool)
+	for _, field := range strings.Fields(message) {
+		field = strings.Trim(field, "`'\"()[]{}<>,:;!?")
+		field = filepath.ToSlash(filepath.Clean(field))
+		mentioned[field] = true
+	}
+
+	baseCounts := make(map[string]int, len(files))
+	for _, file := range files {
+		baseCounts[filepath.Base(file)]++
+	}
+	var referenced []string
+	for _, file := range files {
+		rel := filepath.ToSlash(filepath.Clean(file))
+		absolute := filepath.ToSlash(filepath.Join(root, file))
+		base := filepath.Base(file)
+		if mentioned[rel] || mentioned["./"+rel] || mentioned[absolute] || baseCounts[base] == 1 && mentioned[base] {
+			referenced = append(referenced, file)
+		}
+	}
+	return referenced
+}
+
+func numericValue(value any) int {
+	switch value := value.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
 }
 
 // messageKey is a context key for the current user message, set by Chat so
@@ -825,7 +1115,11 @@ func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatRes
 	if a == nil {
 		return nil, fmt.Errorf("no active agent")
 	}
-	ctx = o.turnContext(ctx, message)
+	var err error
+	ctx, message, err = o.preparePrompt(ctx, message)
+	if err != nil {
+		return nil, err
+	}
 	// Predictive context loading (PRD P3-007): resolve symbol names from the
 	// user message in the code graph and pre-load L2 summaries so the model's
 	// first turn starts with relevant code context instead of spending extra
@@ -855,8 +1149,40 @@ func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *
 	if a == nil {
 		return nil, fmt.Errorf("no active agent")
 	}
-	ctx = o.turnContext(ctx, message)
+	var err error
+	ctx, message, err = o.preparePrompt(ctx, message)
+	if err != nil {
+		return nil, err
+	}
 	return a.ChatStream(ctx, message)
+}
+
+func (o *Orchestrator) preparePrompt(ctx context.Context, message string) (context.Context, string, error) {
+	ctx = o.turnContext(ctx, message)
+	if o.hookRunner == nil || o.cfg == nil || len(o.cfg.Hooks.UserPromptSubmit) == 0 {
+		return ctx, message, nil
+	}
+
+	var output []string
+	vars := map[string]any{
+		"user_message": message,
+		"session_id":   storage.SessionFromContext(ctx),
+		"agent_id":     o.active,
+	}
+	for _, hook := range o.cfg.Hooks.UserPromptSubmit {
+		result, err := o.hookRunner.Run(ctx, hook, vars)
+		if err != nil {
+			return ctx, message, fmt.Errorf("user-prompt hook %q: %w", hook.Name, err)
+		}
+		if text := strings.Join(result.Stdout.Lines, "\n"); text != "" {
+			output = append(output, hook.Name+":\n"+text)
+		}
+	}
+	contextBlock := security.Summarize(security.CapturedOutput{Lines: output}, userHookPromptContextTokens)
+	if contextBlock != "" {
+		message += "\n\n<user_hook_context>\n" + contextBlock + "\n</user_hook_context>"
+	}
+	return ctx, message, nil
 }
 
 // turnContext gives every execution path the same per-turn inputs for dynamic
@@ -1260,6 +1586,39 @@ func (o *Orchestrator) BudgetStatusLine() string {
 	return o.budget.StatusLine(o.CurrentSessionID())
 }
 
+// SetUSDCap configures the per-session model cost cap in microdollars. A cap
+// less than or equal to zero is unlimited. Configure it before issuing calls.
+func (o *Orchestrator) SetUSDCap(cap budget.Microdollars) {
+	o.budgetMu.Lock()
+	o.usdBudget = budget.NewTrackerWithUSDCap(0, 0, cap)
+	o.budgetMu.Unlock()
+}
+
+// SessionCost returns model usage and USD cost for the active session.
+func (o *Orchestrator) SessionCost() budget.SessionCost {
+	sessionID := o.CurrentSessionID()
+	if sessionID == "" {
+		sessionID = o.active
+	}
+	return o.currentUSDBudget().Cost(sessionID)
+}
+
+func (o *Orchestrator) currentUSDBudget() *budget.Tracker {
+	o.budgetMu.RLock()
+	tracker := o.usdBudget
+	o.budgetMu.RUnlock()
+	if tracker != nil {
+		return tracker
+	}
+	// Supports narrowly constructed Orchestrators in tests and embedders.
+	o.budgetMu.Lock()
+	defer o.budgetMu.Unlock()
+	if o.usdBudget == nil {
+		o.usdBudget = budget.NewTrackerWithUSDCap(0, 0, 0)
+	}
+	return o.usdBudget
+}
+
 // Workspace returns the detected workspace info (PRD P2-005), or nil if
 // detection failed.
 func (o *Orchestrator) Workspace() *workspace.Info {
@@ -1352,22 +1711,44 @@ func discoverMCPServers(_ context.Context, root string, agents map[string]*agent
 }
 
 func (o *Orchestrator) Close() error {
-	for _, a := range o.agents {
-		a.CloseMCP()
-	}
-	if o.watcher != nil {
-		o.watcher.Close()
-	}
-	if o.projectDocsWatcher != nil {
-		o.projectDocsWatcher.Close()
-	}
-	if o.graphStore != nil {
-		o.graphStore.Close()
-	}
-	if o.store != nil {
-		return o.store.Close()
-	}
-	return nil
+	o.closeOnce.Do(func() {
+		for _, a := range o.agents {
+			a.CloseMCP()
+		}
+		var errs []error
+		if o.watcher != nil {
+			if err := o.watcher.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close graph watcher: %w", err))
+			}
+		}
+		if o.projectDocsWatcher != nil {
+			if err := o.projectDocsWatcher.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close project docs watcher: %w", err))
+			}
+		}
+		if o.graphStore != nil {
+			if err := o.graphStore.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close graph store: %w", err))
+			}
+		}
+		if o.learningStore != nil {
+			if err := o.learningStore.Close(context.Background()); err != nil {
+				errs = append(errs, fmt.Errorf("close learning telemetry: %w", err))
+			}
+		}
+		if o.lspManager != nil {
+			if err := o.lspManager.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close LSP manager: %w", err))
+			}
+		}
+		if o.store != nil {
+			if err := o.store.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close storage: %w", err))
+			}
+		}
+		o.closeErr = errors.Join(errs...)
+	})
+	return o.closeErr
 }
 
 func openStorage(cfg *config.Config) (storage.Storage, string, error) {

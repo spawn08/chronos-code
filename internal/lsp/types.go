@@ -2,12 +2,15 @@
 
 package lsp
 
+import "time"
+
 // Diagnostic represents a compiler error, warning, or informational message.
 type Diagnostic struct {
-	Range    Range  `json:"range"`
-	Severity int    `json:"severity"` // 1=Error, 2=Warning, 3=Info, 4=Hint
-	Message  string `json:"message"`
-	Source   string `json:"source"`
+	Range      Range     `json:"range"`
+	Severity   int       `json:"severity"` // 1=Error, 2=Warning, 3=Info, 4=Hint
+	Message    string    `json:"message"`
+	Source     string    `json:"source"`
+	ReceivedAt time.Time `json:"receivedAt,omitempty"`
 }
 
 // HoverResult holds the response from textDocument/hover.

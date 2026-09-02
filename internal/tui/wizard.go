@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 )
@@ -88,7 +88,7 @@ func newTextPrompt(placeholder string, password bool) textinput.Model {
 	ti.Placeholder = placeholder
 	ti.Focus()
 	ti.CharLimit = 512
-	ti.Width = 60
+	ti.SetWidth(60)
 	if password {
 		ti.EchoMode = textinput.EchoPassword
 	}
@@ -133,10 +133,10 @@ func (w *loginWizard) View() string {
 
 // handleWizardKey routes a key event while a wizard is active, mirroring
 // handleApprovalKey/handleSearchKey's modal-takes-all-input pattern.
-func (m *appModel) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *appModel) handleWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	w := m.wizard
 	if w.step == stepTextInput {
-		switch msg.Type {
+		switch msg.Code {
 		case tea.KeyEsc:
 			m.wizard = nil
 			return m, nil
@@ -148,7 +148,7 @@ func (m *appModel) handleWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	switch msg.Type {
+	switch msg.Code {
 	case tea.KeyEsc:
 		m.wizard = nil
 		return m, nil

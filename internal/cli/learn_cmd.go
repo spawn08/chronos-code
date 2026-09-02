@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spawn08/chronos/sdk/agent"
 
@@ -28,7 +29,7 @@ const defaultMinSessionsBeforeDistill = 3
 
 func runLearn() error {
 	if len(os.Args) < 3 {
-		return fmt.Errorf("usage: chronos-code learn [suggest|list|show|accept|reject]")
+		return fmt.Errorf("usage: chronos-code learn [suggest|list|show|accept|reject|candidates|promote]")
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -83,9 +84,96 @@ func runLearn() error {
 		}
 		fmt.Printf("rejected %q\n", os.Args[3])
 		return nil
+	case "candidates":
+		return learnCandidates(cfg)
+	case "promote":
+		if len(os.Args) < 4 {
+			return fmt.Errorf("usage: chronos-code learn promote <trigger-hash>")
+		}
+		return learnPromote(cfg, os.Args[3])
 	default:
 		return fmt.Errorf("unknown learn command: %s", os.Args[2])
 	}
+}
+
+func learnCandidates(cfg *config.Config) error {
+	ctx := context.Background()
+	store, root, err := openWorkspaceLearningStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close(ctx)
+
+	candidates, err := store.Candidates(ctx, root)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		fmt.Println("no learning candidates")
+		return nil
+	}
+	for _, candidate := range candidates {
+		fmt.Printf("%s  success %d  failure %d  tools %s\n",
+			candidate.TriggerHash, candidate.SuccessCount, candidate.FailCount, strings.Join(candidate.ToolSequence, ","))
+	}
+	return nil
+}
+
+func learnPromote(cfg *config.Config, triggerHash string) error {
+	ctx := context.Background()
+	store, root, err := openWorkspaceLearningStore(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close(ctx)
+
+	candidates, err := store.Candidates(ctx, root)
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if candidate.TriggerHash != triggerHash {
+			continue
+		}
+		skillsDir, err := userSkillsDir(cfg)
+		if err != nil {
+			return err
+		}
+		path, err := learning.PromoteCandidate(skillsDir, "learned-"+candidate.TriggerHash, candidate)
+		if err != nil {
+			return fmt.Errorf("promote candidate %q: %w", triggerHash, err)
+		}
+		fmt.Printf("promoted candidate %q to %s\n", triggerHash, path)
+		return nil
+	}
+	return fmt.Errorf("learning candidate %q not found", triggerHash)
+}
+
+func openWorkspaceLearningStore(ctx context.Context, cfg *config.Config) (*learning.SQLStore, string, error) {
+	root := cfg.Workspace.Root
+	if root == "" {
+		root = config.WorkspaceRoot()
+	}
+	dir := filepath.Join(root, config.ConfigDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, "", fmt.Errorf("create learning directory %q: %w", dir, err)
+	}
+	store, err := learning.OpenSQLStore(ctx, filepath.Join(dir, "memory.db"))
+	if err != nil {
+		return nil, "", fmt.Errorf("open workspace learning store: %w", err)
+	}
+	return store, root, nil
+}
+
+func userSkillsDir(cfg *config.Config) (string, error) {
+	if cfg.SkillsDir != "" {
+		return cfg.SkillsDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user skills directory: %w", err)
+	}
+	return filepath.Join(home, config.ConfigDirName, "skills"), nil
 }
 
 // learnSuggest implements `chronos-code learn suggest [agent]` (PRD P3-002):

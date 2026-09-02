@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 var (
@@ -128,7 +128,7 @@ func RenderToolCall(name, argSummary string) string {
 }
 
 // RenderTurnHeader renders a turn header line: icon + styled name + trailing separator.
-func RenderTurnHeader(icon, name string, nameStyle lipgloss.Style, width int) string {
+func RenderTurnHeader(icon, name string, nameStyle terminalStyle, width int) string {
 	prefix := icon + " " + nameStyle.Render(name) + " "
 	prefixWidth := lipgloss.Width(prefix)
 	remaining := width - prefixWidth

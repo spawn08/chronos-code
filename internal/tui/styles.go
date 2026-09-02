@@ -1,6 +1,25 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
+
+type terminalStyle struct {
+	lipgloss.Style
+}
+
+func newTerminalStyle(style lipgloss.Style) terminalStyle {
+	return terminalStyle{Style: style}
+}
+
+func (s terminalStyle) Render(strs ...string) string {
+	// Lip Gloss v2 emits true color from Style.Render; Sprint restores the
+	// output-profile filtering that v1 applied during rendering.
+	return lipgloss.Sprint(s.Style.Render(strs...))
+}
+
+func (s terminalStyle) Width(width int) terminalStyle {
+	s.Style = s.Style.Width(width)
+	return s
+}
 
 var (
 	colorPrimary  = lipgloss.Color("#7C8CFF")
@@ -20,47 +39,47 @@ var (
 )
 
 var (
-	styleUserPrefix = lipgloss.NewStyle().Bold(true).Foreground(colorUser)
-	styleAgentName  = lipgloss.NewStyle().Bold(true).Foreground(colorAgent)
-	styleTool       = lipgloss.NewStyle().Foreground(colorTool)
-	styleError      = lipgloss.NewStyle().Bold(true).Foreground(colorError)
-	styleDim        = lipgloss.NewStyle().Foreground(colorDim)
+	styleUserPrefix = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorUser))
+	styleAgentName  = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorAgent))
+	styleTool       = newTerminalStyle(lipgloss.NewStyle().Foreground(colorTool))
+	styleError      = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorError))
+	styleDim        = newTerminalStyle(lipgloss.NewStyle().Foreground(colorDim))
 
-	styleHeader     = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	styleBold       = lipgloss.NewStyle().Bold(true)
-	styleItalic     = lipgloss.NewStyle().Italic(true)
-	styleInlineCode = lipgloss.NewStyle().Foreground(colorCodeFg).Background(colorCodeBg)
-	styleCodeBlock  = lipgloss.NewStyle().Foreground(colorText).Background(colorCodeBg)
-	styleCodeLang   = lipgloss.NewStyle().Italic(true).Foreground(colorDim)
-	styleBlockquote = lipgloss.NewStyle().Italic(true).Foreground(colorDim)
-	styleBullet     = lipgloss.NewStyle().Foreground(colorPrimary)
+	styleHeader     = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorPrimary))
+	styleBold       = newTerminalStyle(lipgloss.NewStyle().Bold(true))
+	styleItalic     = newTerminalStyle(lipgloss.NewStyle().Italic(true))
+	styleInlineCode = newTerminalStyle(lipgloss.NewStyle().Foreground(colorCodeFg).Background(colorCodeBg))
+	styleCodeBlock  = newTerminalStyle(lipgloss.NewStyle().Foreground(colorText).Background(colorCodeBg))
+	styleCodeLang   = newTerminalStyle(lipgloss.NewStyle().Italic(true).Foreground(colorDim))
+	styleBlockquote = newTerminalStyle(lipgloss.NewStyle().Italic(true).Foreground(colorDim))
+	styleBullet     = newTerminalStyle(lipgloss.NewStyle().Foreground(colorPrimary))
 
-	styleDiffAdded   = lipgloss.NewStyle().Foreground(colorAdded)
-	styleDiffRemoved = lipgloss.NewStyle().Foreground(colorRemoved)
+	styleDiffAdded   = newTerminalStyle(lipgloss.NewStyle().Foreground(colorAdded))
+	styleDiffRemoved = newTerminalStyle(lipgloss.NewStyle().Foreground(colorRemoved))
 
-	styleInputBox = lipgloss.NewStyle().
+	styleInputBox = newTerminalStyle(lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorSubtle).
-			Padding(0, 1)
-	styleModal = lipgloss.NewStyle().
+			Padding(0, 1))
+	styleModal = newTerminalStyle(lipgloss.NewStyle().
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorPrimary).
-			Padding(1, 2)
+			Padding(1, 2))
 
-	styleHeaderBar = lipgloss.NewStyle().
+	styleHeaderBar = newTerminalStyle(lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colorText).
-			Background(colorChromeBg)
-	styleStatusLeft = lipgloss.NewStyle().
+			Background(colorChromeBg))
+	styleStatusLeft = newTerminalStyle(lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colorAgent).
-			Background(colorChromeBg)
-	styleStatusRight = lipgloss.NewStyle().
+			Background(colorChromeBg))
+	styleStatusRight = newTerminalStyle(lipgloss.NewStyle().
 				Foreground(colorDim).
-				Background(colorChromeBg)
-	styleStatusFill = lipgloss.NewStyle().
-			Background(colorChromeBg)
+				Background(colorChromeBg))
+	styleStatusFill = newTerminalStyle(lipgloss.NewStyle().
+			Background(colorChromeBg))
 
-	styleSeparator = lipgloss.NewStyle().Foreground(colorSubtle)
-	styleKeyHint   = lipgloss.NewStyle().Foreground(colorDim)
+	styleSeparator = newTerminalStyle(lipgloss.NewStyle().Foreground(colorSubtle))
+	styleKeyHint   = newTerminalStyle(lipgloss.NewStyle().Foreground(colorDim))
 )
