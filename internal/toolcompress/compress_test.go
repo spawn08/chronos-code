@@ -47,7 +47,7 @@ func newTestAgent(t *testing.T) *agent.Agent {
 func TestWrapCompressesLargeResult(t *testing.T) {
 	a := newTestAgent(t)
 
-	big := strings.Repeat("x", 5000) // well over the 500-token default threshold
+	big := strings.Repeat("x", 20_000) // well over the 500-token default threshold
 	a.Tools.Register(&tool.Definition{
 		Name:       "big_tool",
 		Permission: tool.PermAllow,
@@ -89,12 +89,47 @@ func TestWrapCompressesLargeResult(t *testing.T) {
 		t.Fatalf("expected small_tool result to pass through uncompressed, got %#v", out)
 	}
 
-	full, err := a.Tools.Execute(ctx, ReadStoredResultTool, map[string]any{"key": key})
+	chunk, err := a.Tools.Execute(ctx, ReadStoredResultTool, map[string]any{"key": key})
 	if err != nil {
 		t.Fatalf("execute %s: %v", ReadStoredResultTool, err)
 	}
-	fullStr, _ := full.(string)
-	if !strings.Contains(fullStr, big) {
-		t.Fatalf("read_stored_result did not return the full original data")
+	chunkMap, ok := chunk.(map[string]any)
+	if !ok {
+		t.Fatalf("read_stored_result result = %#v, want chunk metadata", chunk)
+	}
+	content, _ := chunkMap["content"].(string)
+	if len(content) != defaultStoredResultChunkBytes || chunkMap["truncated"] != true {
+		t.Fatalf("default chunk = %d bytes, truncated=%v", len(content), chunkMap["truncated"])
+	}
+	next, _ := chunkMap["next_offset"].(int)
+	chunk, err = a.Tools.Execute(ctx, ReadStoredResultTool, map[string]any{
+		"key": key, "offset": next, "max_bytes": 100_000,
+	})
+	if err != nil {
+		t.Fatalf("execute second %s chunk: %v", ReadStoredResultTool, err)
+	}
+	chunkMap = chunk.(map[string]any)
+	if got := len(chunkMap["content"].(string)); got > maxStoredResultChunkBytes {
+		t.Fatalf("requested oversized chunk returned %d bytes, cap is %d", got, maxStoredResultChunkBytes)
+	}
+
+	var reconstructed strings.Builder
+	offset := 0
+	for {
+		chunk, err = a.Tools.Execute(ctx, ReadStoredResultTool, map[string]any{
+			"key": key, "offset": offset, "max_bytes": 4096,
+		})
+		if err != nil {
+			t.Fatalf("paginate %s: %v", ReadStoredResultTool, err)
+		}
+		page := chunk.(map[string]any)
+		reconstructed.WriteString(page["content"].(string))
+		offset = page["next_offset"].(int)
+		if page["truncated"] != true {
+			break
+		}
+	}
+	if !strings.Contains(reconstructed.String(), big) {
+		t.Fatal("paginated read_stored_result did not preserve the full original data")
 	}
 }

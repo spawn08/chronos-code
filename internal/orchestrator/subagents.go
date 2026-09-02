@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/spawn08/chronos/sdk/agent"
@@ -11,12 +12,50 @@ import (
 
 const configuredSubagentTimeout = 10 * time.Minute
 
+type subagentTurnKey struct{}
+type subagentPathKey struct{}
+
+type subagentTurnState struct {
+	modelCalls atomic.Int32
+	maxCalls   int32
+}
+
+func withSubagentTurnState(ctx context.Context, maxModelCalls int, rootAgent string) context.Context {
+	if ctx.Value(subagentTurnKey{}) != nil {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, subagentTurnKey{}, &subagentTurnState{maxCalls: int32(maxModelCalls)})
+	if rootAgent != "" {
+		ctx = context.WithValue(ctx, subagentPathKey{}, []string{rootAgent})
+	}
+	return ctx
+}
+
+func claimTurnModelCall(ctx context.Context) error {
+	state, _ := ctx.Value(subagentTurnKey{}).(*subagentTurnState)
+	if state == nil || state.maxCalls <= 0 {
+		return nil
+	}
+	if calls := state.modelCalls.Add(1); calls > state.maxCalls {
+		return fmt.Errorf("model call limit exceeded: maximum %d per turn", state.maxCalls)
+	}
+	return nil
+}
+
 type configuredAgentRunner struct {
 	agents   map[string]*agent.Agent
 	fallback harness.Runner
 }
 
 func (r configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSpec, task string) (string, error) {
+	path, _ := ctx.Value(subagentPathKey{}).([]string)
+	for _, agentID := range path {
+		if agentID == spec.Name {
+			return "", fmt.Errorf("subagent delegation cycle detected: %v -> %s", path, spec.Name)
+		}
+	}
+	nextPath := append(append([]string(nil), path...), spec.Name)
+	ctx = context.WithValue(ctx, subagentPathKey{}, nextPath)
 	if configured := r.agents[spec.Name]; configured != nil {
 		runCtx, cancel := context.WithTimeout(ctx, configuredSubagentTimeout)
 		defer cancel()
