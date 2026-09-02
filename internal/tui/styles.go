@@ -28,7 +28,7 @@ var (
 	colorUser     = lipgloss.Color("#569CD6")
 	colorTool     = lipgloss.Color("#C586C0")
 	colorError    = lipgloss.Color("#F44747")
-	colorDim      = lipgloss.Color("#6A6A6A")
+	colorDim      = lipgloss.Color("#9A9A9A")
 	colorSubtle   = lipgloss.Color("#3C3C3C")
 	colorText     = lipgloss.Color("#D4D4D4")
 	colorAdded    = lipgloss.Color("#4EC9B0")
@@ -65,6 +65,10 @@ var (
 			Border(lipgloss.DoubleBorder()).
 			BorderForeground(colorPrimary).
 			Padding(1, 2))
+	styleApprovalModal = newTerminalStyle(lipgloss.NewStyle().
+				Border(lipgloss.DoubleBorder()).
+				BorderForeground(colorPrimary).
+				Padding(0, 1))
 
 	styleHeaderBar = newTerminalStyle(lipgloss.NewStyle().
 			Bold(true).

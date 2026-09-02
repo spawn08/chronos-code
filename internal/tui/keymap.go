@@ -53,6 +53,9 @@ Keys:
   tab                Complete the selected slash command
   pgup / pgdown      Scroll conversation history
   drag               Select visible terminal text for native copy
+  permission: y       Allow this call once
+  permission: a       Always allow this tool in the current session
+  permission: A       Allow all policy-approved tools in the current session
   ctrl+a             Agent picker
   ctrl+/             Command palette (includes /model to switch models)
   ctrl+m             Model picker (use /model or ctrl+/ if terminal key enhancements are unavailable)

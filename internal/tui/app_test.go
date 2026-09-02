@@ -9,6 +9,7 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
@@ -357,6 +358,57 @@ func TestPrimaryAssistantTurnUsesProductName(t *testing.T) {
 	transcript := strings.Join(m.blocks, "\n")
 	if strings.Contains(transcript, "coder") || !strings.Contains(transcript, "chronos-code") {
 		t.Errorf("primary assistant transcript label = %q", transcript)
+	}
+}
+
+func TestApprovalModalFitsSmallTerminalAndShowsAllChoices(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	responses := make(chan approvalDecision, 1)
+	_, _ = m.Update(approvalRequestMsg{
+		toolName: "spawn_subagent",
+		args: map[string]any{
+			"agent": "researcher",
+			"task":  "analyze the project",
+		},
+		resp: responses,
+	})
+
+	view := m.View()
+	for _, want := range []string{"Permission Required", "spawn_subagent", "once", "always tool", "all session"} {
+		if !strings.Contains(view.Content, want) {
+			t.Errorf("approval view missing %q: %q", want, view.Content)
+		}
+	}
+	if got := lipgloss.Height(view.Content); got > 12 {
+		t.Errorf("approval view height = %d, exceeds terminal height 12", got)
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'A', Text: "A"})
+	decision := <-responses
+	if !decision.allow || !decision.all {
+		t.Errorf("uppercase A decision = %+v, want allow all session", decision)
+	}
+	if got, want := m.viewport.Height(), 6; got != want {
+		t.Errorf("viewport height after approval = %d, want %d", got, want)
+	}
+}
+
+func TestStreamDeltaShowsSubagentToolCall(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+
+	_, _ = m.handleStreamDelta(streamDeltaMsg{
+		resp: &model.ChatResponse{ToolCalls: []model.ToolCall{{
+			Name:      "spawn_subagent",
+			Arguments: `{"agent":"researcher","task":"analyze"}`,
+		}}},
+		ch: make(chan *model.ChatResponse),
+	})
+
+	if got := m.renderTranscript(); !strings.Contains(got, "spawn_subagent") || !strings.Contains(got, "researcher") {
+		t.Errorf("stream transcript does not show subagent call: %q", got)
 	}
 }
 

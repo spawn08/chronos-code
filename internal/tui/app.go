@@ -273,7 +273,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		vh := m.viewportHeight()
-		if vh < 1 {
+		if vh < 1 && m.approval == nil {
 			vh = 1
 		}
 		if !m.ready {
@@ -303,6 +303,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case approvalRequestMsg:
 		m.approval = &pendingApproval{toolName: msg.toolName, args: msg.args, resp: msg.resp}
+		m.resizeViewport()
 		return m, nil
 
 	case streamStartedMsg:
@@ -439,11 +440,17 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) viewportHeight() int {
-	height := m.height - headerHeight - (inputRows + inputBoxBorderWidth) - statusHeight
-	if len(commandCompletions(m.input.Value())) > 0 {
-		height--
+	bottomHeight := inputRows + inputBoxBorderWidth
+	if m.approval != nil {
+		bottomHeight = lipgloss.Height(m.renderApprovalModal())
+	} else if len(commandCompletions(m.input.Value())) > 0 {
+		bottomHeight++
 	}
-	if height < 1 {
+	height := m.height - headerHeight - bottomHeight - statusHeight
+	if m.approval != nil && height < 0 {
+		return 0
+	}
+	if m.approval == nil && height < 1 {
 		return 1
 	}
 	return height
@@ -462,12 +469,15 @@ func (m *appModel) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.resp <- approvalDecision{allow: true}
 	case "a":
 		a.resp <- approvalDecision{allow: true, always: true}
+	case "A":
+		a.resp <- approvalDecision{allow: true, all: true}
 	case "n", "esc":
 		a.resp <- approvalDecision{allow: false}
 	default:
 		return m, nil
 	}
 	m.approval = nil
+	m.resizeViewport()
 	return m, nil
 }
 
@@ -1259,29 +1269,59 @@ func (m *appModel) displayAgentName() string {
 
 func (m *appModel) renderApprovalModal() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", styleHeader.Render("⚠ Permission Required"))
-	fmt.Fprintf(&b, "%s  %s\n\n", styleDim.Render("Tool:"), styleBold.Render(m.approval.toolName))
+	b.WriteString(styleHeader.Render("Permission Required"))
+	b.WriteByte('\n')
+	fmt.Fprintf(&b, "%s %s\n", styleDim.Render("Tool:"), styleBold.Render(m.approval.toolName))
+	var details string
 	switch m.approval.toolName {
 	case "file_write":
-		b.WriteString(RenderFileWriteDiff(m.approval.args))
-		b.WriteString("\n")
+		details = RenderFileWriteDiff(m.approval.args)
 	case "shell", "shell_auto":
-		b.WriteString(RenderShellPreview(m.approval.args))
-		b.WriteString("\n")
+		details = RenderShellPreview(m.approval.args)
 	default:
-		if s := FormatArgs(m.approval.args); s != "" {
-			fmt.Fprintf(&b, "%s  %s\n", styleDim.Render("Args:"), s)
+		if args := FormatArgs(m.approval.args); args != "" {
+			details = styleDim.Render("Args:") + " " + args
 		}
 	}
+	if details != "" {
+		b.WriteString(truncateApprovalDetails(details, m.approvalDetailBudget()))
+		b.WriteByte('\n')
+	}
 	b.WriteString("\n")
-	b.WriteString(styleAgentName.Render("y") + styleDim.Render(" allow") + "  ")
+	b.WriteString(styleAgentName.Render("y") + styleDim.Render(" once") + "  ")
 	b.WriteString(styleError.Render("n") + styleDim.Render(" deny") + "  ")
-	b.WriteString(styleUserPrefix.Render("a") + styleDim.Render(" always"))
+	b.WriteString(styleUserPrefix.Render("a") + styleDim.Render(" always tool") + "  ")
+	b.WriteString(styleUserPrefix.Render("A") + styleDim.Render(" all session"))
 	width := m.width - inputBoxBorderWidth
 	if width < 1 {
 		width = 1
 	}
-	return styleModal.Width(width).Render(b.String())
+	return styleApprovalModal.Width(width).Render(b.String())
+}
+
+func (m *appModel) approvalDetailBudget() int {
+	// Header, tool, blank, actions, border, and fixed TUI chrome consume eight rows.
+	budget := m.height - 8
+	if budget < 1 {
+		return 1
+	}
+	if budget > 20 {
+		return 20
+	}
+	return budget
+}
+
+func truncateApprovalDetails(details string, maxLines int) string {
+	lines := strings.Split(details, "\n")
+	if len(lines) <= maxLines {
+		return details
+	}
+	if maxLines == 1 {
+		return styleDim.Render(fmt.Sprintf("... %d detail lines hidden", len(lines)))
+	}
+	visible := append([]string(nil), lines[:maxLines-1]...)
+	visible = append(visible, styleDim.Render(fmt.Sprintf("... %d more lines", len(lines)-maxLines+1)))
+	return strings.Join(visible, "\n")
 }
 
 func (m *appModel) renderSearchOverlay() string {
