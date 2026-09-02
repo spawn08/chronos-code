@@ -31,6 +31,8 @@ var keys = keyMap{
 const helpText = `Commands:
   /agents            List all agents
   /agent <id>        Switch to agent
+  /context           Show model context and usage
+  /usage             Show token and USD usage
   /stream            Toggle streaming on/off
   /session           Show current session and recent history
   /memory            List remembered project/user/feedback notes
@@ -51,8 +53,9 @@ Keys:
   up / down          Select completion, otherwise recall message history
   ctrl+r             Search message history
   tab                Complete the selected slash command
-  pgup / pgdown      Scroll conversation history
-  drag               Select visible terminal text for native copy
+  wheel, pgup/pgdown Scroll conversation history
+  ctrl+up / ctrl+down Scroll half a page
+  shift+drag         Select visible terminal text for native copy
   permission: y       Allow this call once
   permission: a       Always allow this tool in the current session
   permission: A       Allow all policy-approved tools in the current session

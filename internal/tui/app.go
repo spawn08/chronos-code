@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -18,9 +19,11 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/spawn08/chronos/engine/model"
+	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/engine/tool"
 
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
@@ -40,6 +43,7 @@ const (
 	inputBoxBorderWidth  = 2 // rounded border, left + right
 	inputBoxPaddingWidth = 2 // styleInputBox.Padding(0, 1), left + right
 	statusHeight         = 1
+	maxTranscriptBytes   = 4 << 20
 )
 
 // pendingApproval mirrors an in-flight approvalRequestMsg while the modal is
@@ -65,6 +69,15 @@ type streamDeltaMsg struct {
 }
 
 type streamDoneMsg struct{}
+
+type streamRenderTickMsg struct{}
+
+type activityMsg struct {
+	event chronosstream.Event
+	ch    <-chan chronosstream.Event
+}
+
+type activityDoneMsg struct{}
 
 // chatDoneMsg carries the result of a non-streaming orch.Chat call.
 type chatDoneMsg struct {
@@ -164,6 +177,8 @@ type appModel struct {
 	ready         bool
 
 	blocks            []string // finalized, already-rendered transcript entries
+	blockBytes        int
+	trimmedBlocks     int
 	renderedBlocks    []string // cached rendered versions of m.blocks
 	renderWidth       int      // width at which renderedBlocks were rendered
 	transcriptBuf     strings.Builder
@@ -179,8 +194,13 @@ type appModel struct {
 	// line is computed), so /context and the status bar's context-usage
 	// segment have something to show between turns, not just immediately
 	// after one completes.
-	lastKnownUsage model.Usage
-	sending        bool
+	lastKnownUsage  model.Usage
+	turnCostStart   budget.SessionCost
+	lastTurnCost    budget.SessionCost
+	sending         bool
+	renderScheduled bool
+	activityCh      <-chan chronosstream.Event
+	stopActivity    func()
 
 	statusMsg    string
 	perf         frameTiming
@@ -295,13 +315,21 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
+	case tea.MouseWheelMsg:
+		if !m.ready {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		m.followOutput = m.viewport.AtBottom()
+		return m, cmd
+
 	case spinner.TickMsg:
 		if !m.sending {
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		m.viewport.SetContent(m.renderTranscript())
 		return m, cmd
 
 	case approvalRequestMsg:
@@ -315,13 +343,26 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamDeltaMsg:
 		return m.handleStreamDelta(msg)
 
+	case streamRenderTickMsg:
+		m.renderScheduled = false
+		m.refreshViewport()
+		return m, nil
+
+	case activityMsg:
+		return m.handleActivity(msg)
+
+	case activityDoneMsg:
+		return m, nil
+
 	case streamDoneMsg:
 		return m, m.finalizeTurn(nil)
 
 	case chatDoneMsg:
 		if msg.resp != nil {
-			for _, tc := range msg.resp.ToolCalls {
-				m.activeToolLines = append(m.activeToolLines, RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
+			if m.activityCh == nil {
+				for _, tc := range msg.resp.ToolCalls {
+					m.activeToolLines = append(m.activeToolLines, RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
+				}
 			}
 			m.activeAgentText.WriteString(msg.resp.Content)
 			m.lastUsage = msg.resp.Usage
@@ -364,6 +405,15 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.followOutput = m.viewport.AtBottom()
 		return m, cmd
+	}
+	if m.ready && msg.Mod.Contains(tea.ModCtrl) && (msg.Code == tea.KeyUp || msg.Code == tea.KeyDown) {
+		if msg.Code == tea.KeyUp {
+			m.viewport.HalfPageUp()
+		} else {
+			m.viewport.HalfPageDown()
+		}
+		m.followOutput = m.viewport.AtBottom()
+		return m, nil
 	}
 	if completions := commandCompletions(m.input.Value()); len(completions) > 0 {
 		if m.completionIdx >= len(completions) {
@@ -556,10 +606,18 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	m.refreshPrompt()
 
 	m.sending = true
+	m.turnCostStart = m.orch.SessionCost()
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
 	m.lastChunk = ""
-	return m, tea.Batch(m.sendCmd(line), m.spin.Tick)
+	var activityCmd tea.Cmd
+	if ch, stop, err := m.orch.SubscribeActivity(); err == nil {
+		m.activityCh = ch
+		m.stopActivity = stop
+		activityCmd = listenActivity(ch)
+	}
+	m.refreshViewport()
+	return m, tea.Batch(m.sendCmd(line), m.spin.Tick, activityCmd)
 }
 
 func (m *appModel) sendCmd(message string) tea.Cmd {
@@ -589,6 +647,18 @@ func listenStream(ch <-chan *model.ChatResponse) tea.Cmd {
 	}
 }
 
+func listenActivity(ch <-chan chronosstream.Event) tea.Cmd {
+	return func() tea.Msg {
+		for event := range ch {
+			switch event.Type {
+			case chronosstream.EventModelCall, chronosstream.EventToolCall, chronosstream.EventToolResult:
+				return activityMsg{event: event, ch: ch}
+			}
+		}
+		return activityDoneMsg{}
+	}
+}
+
 func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	resp := msg.resp
 	if resp.Err != nil {
@@ -600,15 +670,17 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	if resp.Usage.CompletionTokens > m.lastUsage.CompletionTokens {
 		m.lastUsage.CompletionTokens = resp.Usage.CompletionTokens
 	}
-	for _, tc := range resp.ToolCalls {
-		m.activeToolLines = append(m.activeToolLines, RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
-		m.pendingToolCalls++
-		if tc.Name == "spawn_subagent" {
-			m.pendingSubagents++
+	if m.activityCh == nil {
+		for _, tc := range resp.ToolCalls {
+			m.activeToolLines = append(m.activeToolLines, RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
+			m.pendingToolCalls++
+			if tc.Name == "spawn_subagent" {
+				m.pendingSubagents++
+			}
 		}
 	}
 	if resp.Content != "" && resp.Content != m.lastChunk {
-		if m.pendingToolCalls > 0 && len(resp.ToolCalls) == 0 {
+		if m.activityCh == nil && m.pendingToolCalls > 0 && len(resp.ToolCalls) == 0 {
 			label := progressLabel(m.pendingToolCalls, m.pendingSubagents, "completed")
 			m.activeToolLines = append(m.activeToolLines, styleAgentName.Render("  ✓ "+label))
 			m.pendingToolCalls = 0
@@ -617,11 +689,55 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		m.activeAgentText.WriteString(resp.Content)
 		m.lastChunk = resp.Content
 	}
+	cmds := []tea.Cmd{listenStream(msg.ch)}
+	if !m.renderScheduled {
+		m.renderScheduled = true
+		cmds = append(cmds, tea.Tick(time.Second/30, func(time.Time) tea.Msg { return streamRenderTickMsg{} }))
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
+	data, _ := msg.event.Data.(map[string]any)
+	agentID, _ := data["agent"].(string)
+	toolName, _ := data["tool"].(string)
+	label := ""
+	if agentID != "" {
+		label = "@" + agentID + " "
+	}
+	changed := true
+	switch msg.event.Type {
+	case chronosstream.EventModelCall:
+		modelName, _ := data["model"].(string)
+		m.activeToolLines = append(m.activeToolLines, styleDim.Render("  "+label+"model "+modelName))
+	case chronosstream.EventToolCall:
+		m.activeToolLines = append(m.activeToolLines, RenderToolActivity(label, toolName, data["args"], false, data["error"]))
+		m.pendingToolCalls++
+		if toolName == "spawn_subagent" {
+			m.pendingSubagents++
+		}
+	case chronosstream.EventToolResult:
+		m.activeToolLines = append(m.activeToolLines, RenderToolActivity(label, toolName, nil, true, data["error"]))
+		if m.pendingToolCalls > 0 {
+			m.pendingToolCalls--
+		}
+		if toolName == "spawn_subagent" && m.pendingSubagents > 0 {
+			m.pendingSubagents--
+		}
+	default:
+		changed = false
+	}
+	if changed {
+		m.refreshViewport()
+	}
+	return m, listenActivity(msg.ch)
+}
+
+func (m *appModel) refreshViewport() {
 	m.viewport.SetContent(m.renderTranscript())
 	if m.followOutput {
 		m.viewport.GotoBottom()
 	}
-	return m, listenStream(msg.ch)
 }
 
 func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
@@ -698,6 +814,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.handleWhoamiCommand(arg)
 	case "/context":
 		m.handleContextCommand()
+	case "/usage":
+		m.appendSystem(m.usageSummary())
 	case "/stream":
 		m.stream = !m.stream
 		m.appendSystem(fmt.Sprintf("streaming: %v", m.stream))
@@ -711,8 +829,11 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.blocks = nil
+		m.blockBytes = 0
+		m.trimmedBlocks = 0
 		m.invalidateRenderCache()
 		m.lastKnownUsage = model.Usage{}
+		m.lastTurnCost = budget.SessionCost{}
 		m.lastAssistantText = ""
 		m.statusMsg = "new session started"
 		m.followOutput = true
@@ -726,7 +847,11 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 		return m, tea.SetClipboard(m.lastAssistantText)
 	case "/perf":
-		m.appendSystem(m.perf.stats())
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		m.appendSystem(fmt.Sprintf("%s\nmemory: heap=%s allocated=%s sys=%s transcript=%s",
+			m.perf.stats(), formatBytes(stats.HeapAlloc), formatBytes(stats.TotalAlloc),
+			formatBytes(stats.Sys), formatBytes(uint64(m.transcriptBytes()))))
 	case "/session":
 		var b strings.Builder
 		fmt.Fprintf(&b, "current session: %s\n", m.orch.CurrentSessionID())
@@ -1026,15 +1151,60 @@ func (m *appModel) handleContextCommand() {
 	} else {
 		b.WriteString("context window: unknown (model not in registry)\n")
 	}
-	if m.lastKnownUsage.PromptTokens > 0 || m.lastKnownUsage.CompletionTokens > 0 {
-		fmt.Fprintf(&b, "last turn: %d prompt + %d completion = %d total\n",
-			m.lastKnownUsage.PromptTokens, m.lastKnownUsage.CompletionTokens,
-			m.lastKnownUsage.PromptTokens+m.lastKnownUsage.CompletionTokens)
-	}
+	fmt.Fprintln(&b, m.usageSummary())
 	if status := m.orch.BudgetStatusLine(); status != "" {
 		fmt.Fprintln(&b, status)
 	}
 	m.appendSystem(strings.TrimRight(b.String(), "\n"))
+}
+
+func (m *appModel) usageSummary() string {
+	input, output := m.lastTurnCost.InputTokens, m.lastTurnCost.OutputTokens
+	if input == 0 && output == 0 {
+		input = int64(m.lastKnownUsage.PromptTokens)
+		output = int64(m.lastKnownUsage.CompletionTokens)
+	}
+	session := m.orch.SessionCost()
+	return fmt.Sprintf("last turn: input %d │ output %d │ cache n/a │ cost %s\nsession: input %d │ output %d │ cost %s",
+		input, output, m.formatCost(m.lastTurnCost.SpentMicrodollars), session.InputTokens, session.OutputTokens,
+		m.formatCost(session.SpentMicrodollars))
+}
+
+func (m *appModel) usageStatus() string {
+	input, output := m.lastTurnCost.InputTokens, m.lastTurnCost.OutputTokens
+	if input == 0 && output == 0 {
+		input = int64(m.lastKnownUsage.PromptTokens)
+		output = int64(m.lastKnownUsage.CompletionTokens)
+	}
+	return fmt.Sprintf("in %d │ out %d │ cache n/a │ cost %s", input, output,
+		m.formatCost(m.lastTurnCost.SpentMicrodollars))
+}
+
+func (m *appModel) formatCost(cost budget.Microdollars) string {
+	_, modelID := m.orch.ActiveModelInfo()
+	if _, err := budget.PriceForModel(modelID); err != nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("$%.6f", float64(cost)/1_000_000)
+}
+
+func (m *appModel) transcriptBytes() int {
+	total := m.activeAgentText.Len()
+	for _, block := range m.blocks {
+		total += len(block)
+	}
+	for _, line := range m.activeToolLines {
+		total += len(line)
+	}
+	return total
+}
+
+func formatBytes(n uint64) string {
+	const mib = 1024 * 1024
+	if n >= mib {
+		return fmt.Sprintf("%.1f MiB", float64(n)/mib)
+	}
+	return fmt.Sprintf("%.1f KiB", float64(n)/1024)
 }
 
 // formatTokenCount renders a token count compactly (e.g. "12.3k", "1.0M")
@@ -1094,17 +1264,32 @@ func (m *appModel) refreshPrompt() {
 func (m *appModel) appendUserTurn(line string) {
 	header := RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width())
 	body := wrapText(line, m.viewport.Width())
-	m.blocks = append(m.blocks, header+"\n"+body)
+	m.appendBlock(header + "\n" + body)
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 }
 
 func (m *appModel) appendSystem(s string) {
-	m.blocks = append(m.blocks, wrapText(styleDim.Render(s), m.viewport.Width()))
+	m.appendBlock(wrapText(styleDim.Render(s), m.viewport.Width()))
 }
 
 func (m *appModel) appendError(err error) {
-	m.blocks = append(m.blocks, wrapText(styleError.Render("error: ")+err.Error(), m.viewport.Width()))
+	m.appendBlock(wrapText(styleError.Render("error: ")+err.Error(), m.viewport.Width()))
+}
+
+func (m *appModel) appendBlock(block string) {
+	m.blocks = append(m.blocks, block)
+	m.blockBytes += len(block)
+	trimmed := false
+	for m.blockBytes > maxTranscriptBytes && len(m.blocks) > 1 {
+		m.blockBytes -= len(m.blocks[0])
+		m.blocks = m.blocks[1:]
+		m.trimmedBlocks++
+		trimmed = true
+	}
+	if trimmed {
+		m.invalidateRenderCache()
+	}
 }
 
 // finalizeTurn closes out the in-progress agent turn (streamed or not),
@@ -1115,8 +1300,13 @@ func (m *appModel) appendError(err error) {
 // the returned tea.Cmd — the same path a typed Enter would use.
 func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.sending = false
+	if m.stopActivity != nil {
+		m.stopActivity()
+		m.stopActivity = nil
+		m.activityCh = nil
+	}
 	if err != nil {
-		m.blocks = append(m.blocks, styleError.Render("error: "+err.Error()))
+		m.appendBlock(styleError.Render("error: " + err.Error()))
 	} else {
 		var b strings.Builder
 		b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
@@ -1126,7 +1316,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 			b.WriteString("\n")
 		}
 		b.WriteString(RenderMarkdownLite(m.activeAgentText.String(), m.viewport.Width()))
-		m.blocks = append(m.blocks, b.String())
+		m.appendBlock(b.String())
 		m.lastAssistantText = m.activeAgentText.String()
 	}
 	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 {
@@ -1135,9 +1325,13 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 			m.lastUsage.PromptTokens, m.lastUsage.CompletionTokens,
 			m.lastUsage.PromptTokens+m.lastUsage.CompletionTokens)
 	}
-	if status := m.orch.BudgetStatusLine(); status != "" {
-		m.statusMsg = status
+	cost := m.orch.SessionCost()
+	m.lastTurnCost = budget.SessionCost{
+		InputTokens:       cost.InputTokens - m.turnCostStart.InputTokens,
+		OutputTokens:      cost.OutputTokens - m.turnCostStart.OutputTokens,
+		SpentMicrodollars: cost.SpentMicrodollars - m.turnCostStart.SpentMicrodollars,
 	}
+	m.statusMsg = m.usageStatus()
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
 	m.pendingToolCalls = 0
@@ -1169,6 +1363,9 @@ func (m *appModel) renderTranscript() string {
 	}
 
 	m.transcriptBuf.Reset()
+	if m.trimmedBlocks > 0 {
+		fmt.Fprintf(&m.transcriptBuf, "%s\n\n", styleDim.Render(fmt.Sprintf("[%d older transcript blocks omitted]", m.trimmedBlocks)))
+	}
 	for i, rb := range m.renderedBlocks {
 		if i > 0 {
 			m.transcriptBuf.WriteString("\n\n")
@@ -1246,6 +1443,7 @@ func (m *appModel) View() tea.View {
 	return tea.View{
 		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar()),
 		AltScreen: true,
+		MouseMode: tea.MouseModeCellMotion,
 	}
 }
 
@@ -1385,13 +1583,19 @@ func (m *appModel) renderStatusBar() string {
 	leftText += " "
 	leftSeg := styleStatusLeft.Render(leftText)
 
-	var rightParts []string
+	rightText := " ctrl+a agents │ ctrl+/ palette │ ctrl+c quit "
 	if m.statusMsg != "" {
-		rightParts = append(rightParts, m.statusMsg)
+		rightText = " " + m.statusMsg + " │" + rightText
 	}
-	rightParts = append(rightParts, "ctrl+a agents │ ctrl+/ palette │ ctrl+c quit")
-	rightText := " " + strings.Join(rightParts, " │ ") + " "
 	rightSeg := styleStatusRight.Render(rightText)
+	if lipgloss.Width(leftSeg)+lipgloss.Width(rightSeg) > m.width {
+		rightText = " " + m.statusMsg + " "
+		available := m.width - lipgloss.Width(leftSeg)
+		if available < 0 {
+			available = 0
+		}
+		rightSeg = styleStatusRight.Render(truncateToWidth(rightText, available))
+	}
 
 	gap := m.width - lipgloss.Width(leftSeg) - lipgloss.Width(rightSeg)
 	if gap < 0 {

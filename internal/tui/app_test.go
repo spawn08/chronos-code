@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/spawn08/chronos/engine/model"
+	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 
@@ -178,6 +179,22 @@ func TestInvalidateRenderCache(t *testing.T) {
 	}
 }
 
+func TestAppendBlockBoundsTranscriptMemory(t *testing.T) {
+	m := &appModel{}
+	m.appendBlock(strings.Repeat("x", maxTranscriptBytes))
+	m.appendBlock("latest")
+
+	if len(m.blocks) != 1 || m.blocks[0] != "latest" {
+		t.Fatalf("bounded blocks = %d, %q; want only latest", len(m.blocks), m.blocks[0])
+	}
+	if m.blockBytes != len("latest") || m.trimmedBlocks != 1 {
+		t.Fatalf("block accounting = %d bytes, %d trimmed", m.blockBytes, m.trimmedBlocks)
+	}
+	if got := m.renderTranscript(); !strings.Contains(got, "older transcript blocks omitted") {
+		t.Errorf("trimmed transcript has no omission marker: %q", got)
+	}
+}
+
 // TestHandleKey_AltEnterQueuesWhileSending covers AC-2: Alt+Enter while a
 // turn is streaming captures the input into queuedMessage instead of
 // inserting a newline.
@@ -300,12 +317,41 @@ func TestStreamingDoesNotForceViewportToBottomAfterPageUp(t *testing.T) {
 	}
 }
 
-func TestViewLeavesMouseCaptureDisabled(t *testing.T) {
+func TestMouseWheelDetachesViewportFromLiveOutput(t *testing.T) {
+	m := newTestAppModel(t)
+	m.followOutput = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{strings.Repeat("line\n", 40)}
+	m.viewport.SetContent(m.renderTranscript())
+	m.viewport.GotoBottom()
+
+	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if m.followOutput || m.viewport.AtBottom() {
+		t.Fatal("mouse wheel did not detach viewport from live output")
+	}
+}
+
+func TestStreamDeltaSchedulesBoundedRender(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	ch := make(chan *model.ChatResponse)
+
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{Content: "a"}, ch: ch})
+	if !m.renderScheduled {
+		t.Fatal("first delta did not schedule a render")
+	}
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{Content: "b"}, ch: ch})
+	if got := m.activeAgentText.String(); got != "ab" {
+		t.Fatalf("streamed text = %q, want %q", got, "ab")
+	}
+}
+
+func TestViewEnablesMouseScrolling(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	if got := m.View().MouseMode; got != tea.MouseModeNone {
-		t.Errorf("View().MouseMode = %v, want MouseModeNone for native text selection", got)
+	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("View().MouseMode = %v, want MouseModeCellMotion for wheel scrolling", got)
 	}
 }
 
@@ -416,6 +462,29 @@ func TestStreamDeltaShowsSubagentToolCall(t *testing.T) {
 	})
 	if got := m.renderTranscript(); !strings.Contains(got, "1 subagent completed") || strings.Contains(got, "subagent running") {
 		t.Errorf("stream transcript does not complete subagent progress: %q", got)
+	}
+}
+
+func TestActivityShowsAgentToolLifecycle(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+	ch := make(chan chronosstream.Event)
+
+	_, _ = m.handleActivity(activityMsg{event: chronosstream.Event{
+		Type: chronosstream.EventToolCall,
+		Data: map[string]any{"agent": "researcher", "tool": "search", "args": map[string]any{"query": "tokens"}},
+	}, ch: ch})
+	_, _ = m.handleActivity(activityMsg{event: chronosstream.Event{
+		Type: chronosstream.EventToolResult,
+		Data: map[string]any{"agent": "researcher", "tool": "search"},
+	}, ch: ch})
+
+	got := m.renderTranscript()
+	for _, want := range []string{"@researcher", "search", "running", "done"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("activity transcript missing %q: %q", want, got)
+		}
 	}
 }
 
