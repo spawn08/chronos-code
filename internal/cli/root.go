@@ -67,6 +67,8 @@ func Execute() error {
 		return runWhoami()
 	case "providers":
 		return runProviders()
+	case "agents":
+		return runAgents()
 	case "auth":
 		return runAuth()
 	case "session":
@@ -236,6 +238,7 @@ Usage:
   chronos-code logout <provider>   Remove a stored credential
   chronos-code whoami [provider]   Show the effective credential source
   chronos-code providers          List built-in and resolvable providers
+  chronos-code agents list        List resolved built-in, user, and project agents
   chronos-code config show        Print resolved configuration
   chronos-code config validate    Validate all config files
   chronos-code auth login <provider> --api-key <key>   Store a BYO API key
@@ -274,6 +277,20 @@ Global flags:
   --budget <usd>                  Per-session USD cap (up to 6 decimal places; omitted means unlimited)
   --resume <session-id>           Resume a specific session instead of the latest one
 `)
+	return nil
+}
+
+func runAgents() error {
+	if len(os.Args) < 3 || os.Args[2] != "list" || len(os.Args) > 3 {
+		return fmt.Errorf("usage: chronos-code agents list")
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	for _, configured := range cfg.Agents {
+		fmt.Printf("%-16s %-24s %s/%s\n", configured.ID, configured.Name, configured.Model.Provider, configured.Model.Model)
+	}
 	return nil
 }
 
@@ -334,8 +351,6 @@ func runHeadless() error {
 			}
 			message = parts[1]
 		}
-	} else if agentID, matched := orch.Route(ctx, message); matched {
-		_ = orch.SwitchAgent(agentID)
 	}
 
 	if streamMode {

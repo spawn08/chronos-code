@@ -52,6 +52,7 @@ type Orchestrator struct {
 	agents     map[string]*agent.Agent
 	order      []string
 	active     string
+	primary    string
 	store      storage.Storage
 	cfg        *config.Config
 	graphStore *graph.Store
@@ -201,6 +202,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 
 	actBuf := activation.NewBuffer(50)
+	if err := setupSubAgents(agents); err != nil {
+		return nil, fmt.Errorf("configure subagent delegation: %w", err)
+	}
 	var hookRunner *security.HookRunner
 	if len(cfg.Hooks.PreToolCall)+len(cfg.Hooks.PostToolCall)+len(cfg.Hooks.UserPromptSubmit) > 0 {
 		hookRunner, err = security.NewHookRunner(root)
@@ -242,6 +246,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		agents:             agents,
 		order:              order,
 		active:             active,
+		primary:            active,
 		store:              store,
 		cfg:                cfg,
 		graphStore:         graphStore,
@@ -1547,6 +1552,10 @@ func (o *Orchestrator) AuthStatusLine(ctx context.Context, provider string) stri
 
 func (o *Orchestrator) ActiveID() string {
 	return o.active
+}
+
+func (o *Orchestrator) PrimaryID() string {
+	return o.primary
 }
 
 func (o *Orchestrator) ListAgents() []string {

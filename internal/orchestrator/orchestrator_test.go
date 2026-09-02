@@ -92,6 +92,28 @@ type budgetTestProvider struct {
 	err      error
 }
 
+type subagentTestProvider struct {
+	name     string
+	modelID  string
+	response string
+	mu       sync.Mutex
+	requests []*model.ChatRequest
+}
+
+func (p *subagentTestProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+	return &model.ChatResponse{Role: model.RoleAssistant, Content: p.response, StopReason: model.StopReasonEnd}, nil
+}
+
+func (p *subagentTestProvider) StreamChat(context.Context, *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	return nil, errors.New("unexpected streaming call")
+}
+
+func (p *subagentTestProvider) Name() string  { return p.name }
+func (p *subagentTestProvider) Model() string { return p.modelID }
+
 func (p *budgetTestProvider) Chat(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -127,6 +149,67 @@ func newBudgetTestOrchestrator(provider model.Provider) *Orchestrator {
 	}
 	a.Hooks = append(a.Hooks, budgetHook{tracker: orch.budget, orchestrator: orch, agentID: a.ID})
 	return orch
+}
+
+func TestSetupSubAgentsExecutesConfiguredWorker(t *testing.T) {
+	parentProvider := &subagentTestProvider{name: "parent-provider", modelID: "parent", response: "parent"}
+	workerProvider := &subagentTestProvider{name: "worker-provider", modelID: "worker", response: "worker analysis"}
+	reviewerProvider := &subagentTestProvider{name: "reviewer-provider", modelID: "reviewer", response: "review findings"}
+	parent, err := agent.New("coder", "Coder").WithModel(parentProvider).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := agent.New("researcher", "Researcher").WithModel(workerProvider).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer, err := agent.New("reviewer", "Reviewer").WithModel(reviewerProvider).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := map[string]*agent.Agent{"coder": parent, "researcher": worker, "reviewer": reviewer}
+
+	if err := setupSubAgents(agents); err != nil {
+		t.Fatalf("setupSubAgents() error = %v", err)
+	}
+	definition, ok := parent.Tools.Get("spawn_subagent")
+	if !ok {
+		t.Fatal("primary agent has no spawn_subagent tool")
+	}
+	if !strings.Contains(definition.Description, "researcher") || !strings.Contains(definition.Description, "reviewer") {
+		t.Errorf("spawn_subagent description = %q, want configured workers", definition.Description)
+	}
+	result, err := parent.Tools.Execute(context.Background(), "spawn_subagent", map[string]any{
+		"agent": "researcher",
+		"task":  "analyze the project",
+	})
+	if err != nil {
+		t.Fatalf("spawn_subagent execution error = %v", err)
+	}
+	resultMap, ok := result.(map[string]any)
+	if !ok || resultMap["agent"] != "researcher" || resultMap["result"] != "worker analysis" {
+		t.Errorf("spawn_subagent result = %#v", result)
+	}
+	workerProvider.mu.Lock()
+	defer workerProvider.mu.Unlock()
+	if len(workerProvider.requests) != 1 {
+		t.Fatalf("worker requests = %d, want 1", len(workerProvider.requests))
+	}
+	last := workerProvider.requests[0].Messages[len(workerProvider.requests[0].Messages)-1]
+	if last.Content != "analyze the project" {
+		t.Errorf("worker task = %q, want analyze the project", last.Content)
+	}
+
+	reviewResult, err := parent.Tools.Execute(context.Background(), "spawn_subagent", map[string]any{
+		"agent": "reviewer",
+		"task":  "review the project",
+	})
+	if err != nil {
+		t.Fatalf("second spawn_subagent execution error = %v", err)
+	}
+	if got := reviewResult.(map[string]any)["result"]; got != "review findings" {
+		t.Errorf("reviewer result = %#v, want review findings", got)
+	}
 }
 
 func TestBudgetRejectsBeforeProviderInvocation(t *testing.T) {

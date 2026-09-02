@@ -37,6 +37,7 @@ const helpText = `Commands:
   /skills            List discovered skills and winning sources
   /budget            Show token budget status
   /workspace         Show detected workspace info
+  /copy              Copy the last assistant response
   /clear             Start a new session and clear the screen
   /perf              Show frame timing stats (p50/p95/p99)
   /quit              Exit
@@ -51,7 +52,7 @@ Keys:
   ctrl+r             Search message history
   tab                Complete the selected slash command
   pgup / pgdown      Scroll conversation history
-  mouse wheel        Scroll without leaving streaming output pinned
+  drag               Select visible terminal text for native copy
   ctrl+a             Agent picker
   ctrl+/             Command palette (includes /model to switch models)
   ctrl+m             Model picker (use /model or ctrl+/ if terminal key enhancements are unavailable)

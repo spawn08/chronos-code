@@ -299,6 +299,67 @@ func TestStreamingDoesNotForceViewportToBottomAfterPageUp(t *testing.T) {
 	}
 }
 
+func TestViewLeavesMouseCaptureDisabled(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("View().MouseMode = %v, want MouseModeNone for native text selection", got)
+	}
+}
+
+func TestCopyReturnsClipboardCommandForLastAssistantResponse(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastAssistantText = "response to copy"
+	m.input.SetValue("/copy")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("/copy returned no clipboard command")
+	}
+	if m.statusMsg != "copy requested" {
+		t.Errorf("statusMsg = %q, want copy requested", m.statusMsg)
+	}
+}
+
+func TestOrdinaryPromptKeepsPrimaryAgentActive(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("please review and explain this code")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd == nil {
+		t.Fatal("ordinary prompt returned no send command")
+	}
+	if got := m.orch.ActiveID(); got != m.orch.PrimaryID() {
+		t.Errorf("ordinary prompt switched active agent to %q; primary is %q", got, m.orch.PrimaryID())
+	}
+}
+
+func TestDefaultChromeDoesNotExposeInternalAgentOrModel(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	header := m.renderHeaderBar()
+	status := m.renderStatusBar()
+	if strings.Contains(header, "openai/") || strings.Contains(status, "coder") || strings.Contains(m.input.Prompt, "coder") {
+		t.Errorf("default chrome exposes implementation details: header=%q status=%q prompt=%q", header, status, m.input.Prompt)
+	}
+}
+
+func TestPrimaryAssistantTurnUsesProductName(t *testing.T) {
+	m := newTestAppModel(t)
+	m.activeAgentText.WriteString("answer")
+	m.followOutput = true
+	m.finalizeTurn(nil)
+
+	transcript := strings.Join(m.blocks, "\n")
+	if strings.Contains(transcript, "coder") || !strings.Contains(transcript, "chronos-code") {
+		t.Errorf("primary assistant transcript label = %q", transcript)
+	}
+}
+
 func TestHandleSlashSkillsListsDiscoveredCatalog(t *testing.T) {
 	m := newTestAppModel(t)
 	m.input.SetValue("/skills")

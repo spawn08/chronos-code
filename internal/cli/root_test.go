@@ -4,6 +4,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -220,6 +221,45 @@ func TestPrintUsageDocumentsBudget(t *testing.T) {
 		if !strings.Contains(usage, want) {
 			t.Errorf("usage missing %q", want)
 		}
+	}
+}
+
+func TestRunAgentsListsConfiguredAgents(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "agents.yaml")
+	if err := os.WriteFile(configFile, []byte(`agents:
+  - id: custom-worker
+    name: Custom Worker
+    model:
+      provider: openai
+      model: test-model
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resetGlobalFlags(t, []string{"chronos-code", "agents", "list"})
+	configPath = configFile
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		r.Close()
+	})
+	if err := runAgents(); err != nil {
+		t.Fatalf("runAgents() error = %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(output), "custom-worker") || !strings.Contains(string(output), "openai/test-model") {
+		t.Errorf("agents list output = %q", output)
 	}
 }
 
