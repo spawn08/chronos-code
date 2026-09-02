@@ -241,12 +241,12 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	return err
 }
 
-func installApprovalHandlers(orch *orchestrator.Orchestrator, handler tool.ApprovalFunc) {
-	for _, id := range orch.ListAgents() {
-		if a, ok := orch.GetAgent(id); ok {
-			a.Tools.SetApprovalHandler(handler)
-		}
-	}
+type approvalHandlerInstaller interface {
+	SetApprovalHandler(tool.ApprovalFunc)
+}
+
+func installApprovalHandlers(installer approvalHandlerInstaller, handler tool.ApprovalFunc) {
+	installer.SetApprovalHandler(handler)
 }
 
 // autoRemember best-effort extracts a standing instruction/correction from

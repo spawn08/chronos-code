@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/hooks"
@@ -118,6 +119,113 @@ shell:
 	}
 	if p.MaxExecSeconds != defaultMaxExecSeconds {
 		t.Errorf("MaxExecSeconds = %d, want default %d", p.MaxExecSeconds, defaultMaxExecSeconds)
+	}
+}
+
+func TestLoadPolicy_ExtendedRegexTiers(t *testing.T) {
+	const raw = `
+shell:
+  auto_allow: ['^go test']
+  confirm: ['^git push']
+  never_allow: ['^sudo']
+`
+	p, err := LoadPolicy([]byte(raw))
+	if err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+	if len(p.autoAllow) != 1 || len(p.confirm) != 1 || len(p.neverAllow) != 1 {
+		t.Fatalf("compiled regex tiers = (%d, %d, %d), want (1, 1, 1)", len(p.autoAllow), len(p.confirm), len(p.neverAllow))
+	}
+}
+
+func TestLoadPolicy_InvalidRegexIdentifiesField(t *testing.T) {
+	fields := []string{"auto_allow", "confirm", "never_allow"}
+	for _, field := range fields {
+		t.Run(field, func(t *testing.T) {
+			raw := "shell:\n  " + field + ": ['[']\n"
+			_, err := LoadPolicy([]byte(raw))
+			if err == nil {
+				t.Fatal("LoadPolicy returned nil error")
+			}
+			if want := "shell." + field + "[0]"; !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not identify %q", err, want)
+			}
+		})
+	}
+}
+
+func TestPermissionChecker_ClassifiesBuiltins(t *testing.T) {
+	checker := NewPermissionChecker(&Policy{}, "/workspace")
+	cases := []struct {
+		name string
+		want Decision
+	}{
+		{"codebase_map", Auto}, {"codebase_search", Auto}, {"graph_query", Auto},
+		{"find_callers", Auto}, {"find_implementations", Auto}, {"impact_analysis", Auto},
+		{"test_map", Auto}, {"co_change", Auto}, {"multi_resolution_view", Auto},
+		{"resolve_symbol", Auto}, {"file_read", Auto}, {"file_list", Auto},
+		{"file_glob", Auto}, {"file_grep", Auto}, {"semantic_search", Auto},
+		{"workspace_info", Auto}, {"file_write", Confirm},
+		{"shell", Confirm}, {"shell_auto", Auto}, {"external_tool", Confirm},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := checker.Check(tc.name, map[string]any{}, false); got != tc.want {
+				t.Fatalf("Check(%q) = %q, want %q", tc.name, got, tc.want)
+			}
+		})
+	}
+	if got := checker.Check("external_tool", nil, true); got != Confirm {
+		t.Fatalf("unknown tool in yolo = %q, want %q", got, Confirm)
+	}
+}
+
+func TestPermissionChecker_ShellPrecedence(t *testing.T) {
+	const raw = `
+shell:
+  allowed_commands: ["go", "git", "sudo"]
+  auto_allow: ['.*']
+  confirm: ['^git push', '^sudo']
+  never_allow: ['^sudo rm -rf /$']
+`
+	policy, err := LoadPolicy([]byte(raw))
+	if err != nil {
+		t.Fatalf("LoadPolicy: %v", err)
+	}
+	checker := NewPermissionChecker(policy, "/workspace")
+	cases := []struct {
+		command string
+		yolo    bool
+		want    Decision
+	}{
+		{"go test ./...", false, Auto},
+		{"git push origin main", false, Confirm},
+		{"git push origin main", true, Confirm},
+		{"sudo rm -rf /", false, Deny},
+		{"sudo rm -rf /", true, Deny},
+	}
+	for _, tc := range cases {
+		if got := checker.Check("shell", map[string]any{"command": tc.command}, tc.yolo); got != tc.want {
+			t.Errorf("Check(shell, %q, yolo=%v) = %q, want %q", tc.command, tc.yolo, got, tc.want)
+		}
+	}
+}
+
+func TestPermissionChecker_HardRestrictionsOverrideYolo(t *testing.T) {
+	checker := NewPermissionChecker(defaultTestPolicy(), "/workspace")
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"file_read", map[string]any{"path": ".env"}},
+		{"file_write", map[string]any{"path": "/etc/passwd"}},
+		{"shell", map[string]any{"command": "sudo rm -rf /"}},
+		{"shell", map[string]any{"command": "unknown-command"}},
+	}
+	for _, tc := range cases {
+		if got := checker.Check(tc.name, tc.args, true); got != Deny {
+			t.Errorf("Check(%q, %#v, yolo=true) = %q, want %q", tc.name, tc.args, got, Deny)
+		}
 	}
 }
 

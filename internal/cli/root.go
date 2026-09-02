@@ -30,6 +30,7 @@ var (
 	debugMode       bool
 	streamMode      = true
 	permissionMode  string
+	yoloMode        bool
 	resumeSessionID string
 )
 
@@ -131,6 +132,10 @@ func stripGlobalFlags() error {
 			permissionMode = strings.TrimPrefix(arg, "--permission-mode=")
 			i++
 			continue
+		case arg == "--yolo":
+			yoloMode = true
+			i++
+			continue
 		case arg == "--resume":
 			if i+1 >= len(args) {
 				return fmt.Errorf("--resume requires a session id")
@@ -147,6 +152,9 @@ func stripGlobalFlags() error {
 		i++
 	}
 	os.Args = cleaned
+	if yoloMode && permissionMode == "deny" {
+		return fmt.Errorf("--yolo conflicts with --permission-mode deny")
+	}
 	return nil
 }
 
@@ -203,6 +211,7 @@ Global flags:
   -s, --stream                    Enable streaming output
   --no-stream                     Disable streaming output
   --permission-mode <mode>        Tool permission mode (prompt, auto_approve, deny)
+  --yolo                          Auto-approve policy-allowed tools; never overrides deny or destructive confirm
   --resume <session-id>           Resume a specific session instead of the latest one
 `)
 	return nil
@@ -218,10 +227,17 @@ func loadAndBuild() (*orchestrator.Orchestrator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build orchestrator: %w", err)
 	}
-	if err := orch.SetPermissionMode(permissionMode); err != nil {
+	if err := orch.SetPermissionMode(effectivePermissionMode()); err != nil {
 		return nil, fmt.Errorf("apply --permission-mode: %w", err)
 	}
 	return orch, nil
+}
+
+func effectivePermissionMode() string {
+	if yoloMode {
+		return "auto_approve"
+	}
+	return permissionMode
 }
 
 func runREPL() error {

@@ -36,6 +36,13 @@ shell:
     - "sudo"
     - "curl | sh"
     - "wget | sh"
+  auto_allow:
+    - '^go test(\s|$)'
+  confirm:
+    - '^git\s+push(\s|$)'
+  never_allow:
+    - '(^|\s)sudo(\s|$)'
+    - 'rm\s+-rf\s+/(\s|$)'
   max_execution_time_sec: 300
 
 secrets:

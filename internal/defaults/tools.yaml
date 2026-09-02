@@ -8,10 +8,9 @@ meta:
 # Permission model
 permission_model:
   description: |
-    Tools have a default permission level. security.yaml can override
-    any tool's permission to a stricter level. The hierarchy:
-      allow > require_approval > deny
-    security.yaml can only tighten (never loosen) a tool's permission.
+    Tools have a default permission level. security.yaml adds argument-aware
+    shell policy tiers. Hard restrictions and never_allow resolve to deny;
+    confirm takes precedence over auto_allow. Unknown tools require approval.
   levels:
     allow: "Execute without asking the user"
     require_approval: "Show the user what will happen, wait for approval"
@@ -23,6 +22,9 @@ permission_model:
     shell:
       allowed_commands: ["go", "git", "make", "npm", "node", "python", "cargo", "rustc", "ls", "cat", "grep", "find", "wc", "diff", "rg", "jq"]
       denied_patterns: ["rm -rf /", "sudo", "curl | sh", "wget | sh", "> /dev/sd*"]
+      auto_allow: ['^go test(\s|$)']
+      confirm: ['^git\s+push(\s|$)']
+      never_allow: ['(^|\s)sudo(\s|$)', 'rm\s+-rf\s+/(\s|$)']
       max_execution_time_sec: 300
 
 # ── Code Graph Tools (T0 — Zero LLM Cost) ─────────────────────────
@@ -33,6 +35,14 @@ graph_tools:
   description: "Query the code graph for structural code intelligence. Always prefer these over file reads for navigation."
 
   tools:
+    - name: "codebase_map"
+      description: "Render deterministic package maps for repository navigation."
+      permission: "allow"
+
+    - name: "codebase_search"
+      description: "Search indexed symbols by exact name and full-text relevance."
+      permission: "allow"
+
     - name: "graph_query"
       description: "Look up a symbol by name. Returns kind, location, signature, doc, caller/callee counts."
       permission: "allow"
