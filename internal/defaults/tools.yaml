@@ -50,7 +50,7 @@ graph_tools:
       parameters:
         type: "object"
         properties:
-          name:
+          agent:
             type: "string"
             description: "Symbol name (exact or fuzzy match)"
           kind:
@@ -372,7 +372,7 @@ harness_tools:
       parameters:
         type: "object"
         properties:
-          name:
+          agent:
             type: "string"
             description: "Registered subagent name (reviewer, planner, etc.) or empty for dynamic"
           task:
@@ -381,7 +381,7 @@ harness_tools:
           system_prompt:
             type: "string"
             description: "System prompt (for dynamic subagents only)"
-          tool_names:
+          tools:
             type: "array"
             items:
               type: "string"

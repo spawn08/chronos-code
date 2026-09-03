@@ -43,6 +43,10 @@ const helpText = `Commands:
   /session           Show current session and recent history
   /memory            List remembered project/user/feedback notes
   /skills            List discovered skills and winning sources
+  /<skill> <task>    Run a task with an explicitly selected skill
+  /subagent <name> <task>
+                     Run a registered subagent in an isolated context
+  /subagent {JSON}   Run a dynamic subagent (task, system_prompt, tools)
   /budget            Show token budget status
   /workspace         Show detected workspace info
   /copy              Copy the last assistant response
@@ -64,7 +68,8 @@ Keys:
   pgup / pgdown      Scroll conversation history
   ctrl+up / ctrl+down Scroll half a page
   ctrl+home / ctrl+end Jump to top / resume live output
-  drag               Select visible terminal text for native copy
+  mouse wheel        Scroll conversation history
+  shift+drag         Select visible terminal text for native copy
   cmd+v, ctrl+v      Paste text; multiline paste stays in the composer
   permission: y       Allow this call once
   permission: a       Always allow this tool in the current session

@@ -164,14 +164,39 @@ func RenderToolActivity(agent, name string, args any, done bool, eventErr any) s
 		state = "failed"
 		marker = "✗"
 	}
-	details := ""
-	if args != nil {
-		if encoded, err := json.Marshal(args); err == nil {
-			details = " " + SummarizeArgs(string(encoded))
+	details := summarizeActivityValue(args)
+	if eventErr != nil {
+		if failure := summarizeActivityValue(eventErr); failure != "" {
+			details = "error=" + failure
 		}
 	}
+	if details != "" {
+		details = "  " + details
+	}
 	return fmt.Sprintf("  %s %s%s %s%s", styleTool.Render(marker), agent,
-		styleBold.Render(name), styleDim.Render(state), styleDim.Render(details))
+		styleBold.Render(name), styleDim.Render("· "+state), styleDim.Render(details))
+}
+
+func RenderModelActivity(agent, modelName string) string {
+	return fmt.Sprintf("  %s %s%s %s", styleTool.Render("•"), agent,
+		styleBold.Render("model"), styleDim.Render(modelName))
+}
+
+func summarizeActivityValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	if args, ok := value.(map[string]any); ok {
+		return SummarizeArgs(FormatArgs(args))
+	}
+	if text, ok := value.(string); ok {
+		return SummarizeArgs(text)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return SummarizeArgs(fmt.Sprint(value))
+	}
+	return SummarizeArgs(string(encoded))
 }
 
 // RenderTurnHeader renders a turn header line: icon + styled name + trailing separator.
