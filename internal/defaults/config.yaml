@@ -21,7 +21,7 @@ learning:
   output_dir: ".chronos-code/learned"
 
 session:
-  auto_resume: true
+  auto_resume: false
   max_history_turns: 0
 
 defaults:

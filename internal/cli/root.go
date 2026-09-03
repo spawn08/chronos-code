@@ -275,7 +275,7 @@ Global flags:
   --permission-mode <mode>        Tool permission mode (prompt, auto_approve, deny)
   --yolo                          Auto-approve policy-allowed tools; never overrides deny or destructive confirm
   --budget <usd>                  Per-session USD cap (up to 6 decimal places; omitted means unlimited)
-  --resume <session-id>           Resume a specific session instead of the latest one
+  --resume <session-id>           Resume a specific prior session
 `)
 	return nil
 }

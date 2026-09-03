@@ -1163,14 +1163,8 @@ func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatRes
 	return a.ChatWithSession(ctx, sid, message)
 }
 
-// ChatStream streams a response from the active agent. Note: chronos's
-// ChatStream does not append turns to the durable event ledger the way
-// ChatWithSession (used by Chat) does — this is a limitation of the
-// underlying chronos SDK, not something chronos-code layers on top of it.
-// The session id is still threaded through the context so session-scoped
-// features that key off it (tool-result compression, the security audit
-// log, budget tracking, incremental file-read caching) behave consistently
-// whether the caller streams or not.
+// ChatStream streams a response from the active agent, preserving the current
+// durable session when storage is configured.
 func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *model.ChatResponse, error) {
 	a := o.ActiveAgent()
 	if a == nil {
@@ -1180,6 +1174,10 @@ func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *
 	ctx, message, err = o.preparePrompt(ctx, message)
 	if err != nil {
 		return nil, err
+	}
+	sid := o.CurrentSessionID()
+	if sid != "" && a.Storage != nil {
+		return a.ChatStreamWithSession(ctx, sid, message)
 	}
 	return a.ChatStream(ctx, message)
 }

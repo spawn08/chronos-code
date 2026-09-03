@@ -12,6 +12,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestEmbeddedDefaultsStartFreshSession(t *testing.T) {
+	cfg, err := loadEmbeddedDefaults()
+	if err != nil {
+		t.Fatalf("loadEmbeddedDefaults() error = %v", err)
+	}
+	if cfg.Session.AutoResume {
+		t.Fatal("embedded session.auto_resume = true, want false for a clean default startup")
+	}
+}
+
 func TestHooksUnmarshalPreservesDeclarationOrder(t *testing.T) {
 	var cfg Config
 	body := []byte(`hooks:

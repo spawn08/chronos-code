@@ -15,6 +15,7 @@ type keyMap struct {
 	AgentPicker    key.Binding
 	ModelPicker    key.Binding
 	CommandPalette key.Binding
+	CopyLast       key.Binding
 }
 
 var keys = keyMap{
@@ -26,11 +27,16 @@ var keys = keyMap{
 	AgentPicker:    key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "agent picker")),
 	ModelPicker:    key.NewBinding(key.WithKeys("ctrl+m"), key.WithHelp("ctrl+m", "model picker")),
 	CommandPalette: key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "command palette")),
+	CopyLast:       key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "copy last response")),
 }
 
 const helpText = `Commands:
   /agents            List all agents
   /agent <id>        Switch to agent
+  /model [name]      Show or switch the active model
+  /login [provider]  Configure provider authentication
+  /logout <provider> Remove provider authentication
+  /whoami [provider] Show authentication status
   /context           Show model context and usage
   /usage             Show token and USD usage
   /stream            Toggle streaming on/off
@@ -48,18 +54,22 @@ const helpText = `Commands:
   !<cmd>             Execute shell command
 
 Keys:
-  enter              Send message
-  alt+enter, ctrl+j  Insert newline (queues as a follow-up if a turn is streaming)
+  enter              Send; while running, interrupt and replace
+  alt+enter          Queue a follow-up while running
+  ctrl+j             Insert newline
   up / down          Select completion, otherwise recall message history
   ctrl+r             Search message history
+  ctrl+y             Copy the last assistant response
   tab                Complete the selected slash command
-  wheel, pgup/pgdown Scroll conversation history
+  pgup / pgdown      Scroll conversation history
   ctrl+up / ctrl+down Scroll half a page
-  shift+drag         Select visible terminal text for native copy
+  ctrl+home / ctrl+end Jump to top / resume live output
+  drag               Select visible terminal text for native copy
+  cmd+v, ctrl+v      Paste text; multiline paste stays in the composer
   permission: y       Allow this call once
   permission: a       Always allow this tool in the current session
   permission: A       Allow all policy-approved tools in the current session
   ctrl+a             Agent picker
   ctrl+/             Command palette (includes /model to switch models)
   ctrl+m             Model picker (use /model or ctrl+/ if terminal key enhancements are unavailable)
-  ctrl+c             Quit`
+  ctrl+c             Interrupt active work; quit while idle`

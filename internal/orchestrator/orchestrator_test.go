@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"github.com/spawn08/chronos/engine/hooks"
@@ -17,14 +18,59 @@ import (
 	"github.com/spawn08/chronos/sdk/harness"
 	"github.com/spawn08/chronos/storage"
 	storagememory "github.com/spawn08/chronos/storage/adapters/memory"
+	storagesqlite "github.com/spawn08/chronos/storage/adapters/sqlite"
 
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/learning"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
+	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos-code/internal/toolcompress"
 )
+
+func TestSetupSessionsStartupSelection(t *testing.T) {
+	ctx := context.Background()
+	store, err := storagesqlite.New(":memory:")
+	if err != nil {
+		t.Fatalf("sqlite.New(:memory:) error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	mgr := session.NewManager(store, "")
+	now := time.Now()
+	if err := store.CreateSession(ctx, &storage.Session{ID: "existing-session", AgentID: "coder", Status: "running", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("CreateSession(existing session) error = %v", err)
+	}
+	agents := map[string]*agent.Agent{"coder": {ID: "coder"}}
+
+	t.Run("ordinary startup creates fresh session", func(t *testing.T) {
+		got := setupSessions(ctx, &config.Config{}, mgr, agents, "")["coder"]
+		if got == "" || got == "existing-session" {
+			t.Fatalf("session = %q, want a fresh session", got)
+		}
+	})
+
+	t.Run("explicit resume wins", func(t *testing.T) {
+		got := setupSessions(ctx, &config.Config{}, mgr, agents, "existing-session")["coder"]
+		if got != "existing-session" {
+			t.Fatalf("session = %q, want explicit existing-session", got)
+		}
+	})
+
+	t.Run("auto resume remains opt in", func(t *testing.T) {
+		latest, err := mgr.Latest(ctx, "coder")
+		if err != nil || latest == nil {
+			t.Fatalf("Latest() = %+v, %v", latest, err)
+		}
+		got := setupSessions(ctx, &config.Config{Session: config.SessionConfig{AutoResume: true}}, mgr, agents, "")["coder"]
+		if got != latest.ID {
+			t.Fatalf("session = %q, want latest %q", got, latest.ID)
+		}
+	})
+}
 
 type routingTestProvider struct {
 	provider string

@@ -168,7 +168,7 @@ func (m *appModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.Code {
 		case tea.KeyBackspace:
 			if len(p.filter) > 0 {
-				p.filter = p.filter[:len(p.filter)-1]
+				p.filter = removeLastRune(p.filter)
 				p.applyFilter()
 			}
 			return m, nil

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -39,7 +41,8 @@ import (
 // constants that can drift out of sync.
 const (
 	headerHeight         = 1
-	inputRows            = 2
+	minInputRows         = 1
+	maxInputRows         = 8
 	inputBoxBorderWidth  = 2 // rounded border, left + right
 	inputBoxPaddingWidth = 2 // styleInputBox.Padding(0, 1), left + right
 	statusHeight         = 1
@@ -60,29 +63,39 @@ type pendingApproval struct {
 // responsive to key events (including the approval modal) while a response
 // streams in.
 type streamStartedMsg struct {
-	ch <-chan *model.ChatResponse
+	turnID uint64
+	ctx    context.Context
+	ch     <-chan *model.ChatResponse
 }
 
 type streamDeltaMsg struct {
-	resp *model.ChatResponse
-	ch   <-chan *model.ChatResponse
+	turnID uint64
+	ctx    context.Context
+	resp   *model.ChatResponse
+	ch     <-chan *model.ChatResponse
 }
 
-type streamDoneMsg struct{}
+type streamDoneMsg struct {
+	turnID uint64
+	err    error
+}
 
 type streamRenderTickMsg struct{}
 
 type activityMsg struct {
-	event chronosstream.Event
-	ch    <-chan chronosstream.Event
+	turnID uint64
+	ctx    context.Context
+	event  chronosstream.Event
+	ch     <-chan chronosstream.Event
 }
 
-type activityDoneMsg struct{}
+type activityDoneMsg struct{ turnID uint64 }
 
 // chatDoneMsg carries the result of a non-streaming orch.Chat call.
 type chatDoneMsg struct {
-	resp *model.ChatResponse
-	err  error
+	turnID uint64
+	resp   *model.ChatResponse
+	err    error
 }
 
 type shellDoneMsg struct{ err error }
@@ -184,6 +197,8 @@ type appModel struct {
 	transcriptBuf     strings.Builder
 	activeAgentText   strings.Builder
 	activeToolLines   []string
+	activityIndex     map[string]int
+	activityArgs      map[string]any
 	pendingToolCalls  int
 	pendingSubagents  int
 	turnModelCalls    int
@@ -202,6 +217,10 @@ type appModel struct {
 	turnCostStart   budget.SessionCost
 	lastTurnCost    budget.SessionCost
 	sending         bool
+	turnID          uint64
+	turnCtx         context.Context
+	turnCancel      context.CancelFunc
+	turnInterrupted bool
 	renderScheduled bool
 	activityCh      <-chan chronosstream.Event
 	stopActivity    func()
@@ -214,11 +233,7 @@ type appModel struct {
 	wizard   *loginWizard
 	picker   *picker
 
-	// queuedMessage holds a message typed with Alt+Enter while a turn was
-	// still streaming (m.sending); finalizeTurn dispatches it once that
-	// turn completes, so the user doesn't have to wait to start typing the
-	// next message.
-	queuedMessage string
+	queuedMessages []string
 
 	searching     bool
 	searchQuery   string
@@ -237,12 +252,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ta := textarea.New()
-	ta.Placeholder = "Message chronos-code..."
-	ta.Prompt = "❯ "
-	ta.ShowLineNumbers = false
-	ta.SetHeight(inputRows)
-	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	ta := newComposer()
 	ta.Focus()
 
 	wd, _ := os.Getwd()
@@ -264,6 +274,20 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 
 	_, err := p.Run()
 	return err
+}
+
+func newComposer() textarea.Model {
+	ta := textarea.New()
+	ta.Placeholder = "Message chronos-code..."
+	ta.Prompt = "❯ "
+	ta.ShowLineNumbers = false
+	ta.DynamicHeight = true
+	ta.MinHeight = minInputRows
+	ta.MaxHeight = maxInputRows
+	ta.MaxContentHeight = 500
+	ta.SetHeight(minInputRows)
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	return ta
 }
 
 type approvalHandlerInstaller interface {
@@ -298,26 +322,38 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		contentWidth := msg.Width
+		if contentWidth < 1 {
+			contentWidth = 1
+		}
 		vh := m.viewportHeight()
 		if vh < 1 && m.approval == nil {
 			vh = 1
 		}
 		if !m.ready {
 			m.viewport = viewport.New()
-			m.viewport.SetWidth(msg.Width)
+			m.viewport.SetWidth(contentWidth)
 			m.viewport.SetHeight(vh)
 			m.ready = true
 		} else {
-			m.viewport.SetWidth(msg.Width)
+			m.viewport.SetWidth(contentWidth)
 			m.viewport.SetHeight(vh)
 		}
-		m.input.SetWidth(msg.Width - inputBoxBorderWidth - inputBoxPaddingWidth)
+		m.resizeViewport()
 		m.refreshPrompt()
 		m.viewport.SetContent(m.renderTranscript())
 		return m, nil
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+
+	case tea.PasteMsg:
+		if m.approval != nil || m.wizard != nil || m.picker != nil || m.searching {
+			return m, nil
+		}
+		m.input.InsertString(msg.Content)
+		m.resizeViewport()
+		return m, nil
 
 	case tea.MouseWheelMsg:
 		if !m.ready {
@@ -342,7 +378,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamStartedMsg:
-		return m, listenStream(msg.ch)
+		if msg.turnID != m.turnID {
+			return m, nil
+		}
+		return m, listenStream(msg.ctx, msg.turnID, msg.ch)
 
 	case streamDeltaMsg:
 		return m.handleStreamDelta(msg)
@@ -359,9 +398,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamDoneMsg:
-		return m, m.finalizeTurn(nil)
+		if msg.turnID != m.turnID {
+			return m, nil
+		}
+		return m, m.finalizeTurn(msg.err)
 
 	case chatDoneMsg:
+		if msg.turnID != m.turnID {
+			return m, nil
+		}
 		if msg.resp != nil {
 			if m.activityCh == nil {
 				for _, tc := range msg.resp.ToolCalls {
@@ -388,6 +433,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, keys.Quit) {
+		if m.sending {
+			m.interruptTurn()
+			return m, nil
+		}
 		m.cancel()
 		m.quitting = true
 		return m, tea.Quit
@@ -419,6 +468,24 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.followOutput = m.viewport.AtBottom()
 		return m, nil
 	}
+	if m.ready && msg.Mod.Contains(tea.ModCtrl) && (msg.Code == tea.KeyHome || msg.Code == tea.KeyEnd) {
+		if msg.Code == tea.KeyHome {
+			m.viewport.GotoTop()
+			m.followOutput = false
+		} else {
+			m.viewport.GotoBottom()
+			m.followOutput = true
+		}
+		return m, nil
+	}
+	if key.Matches(msg, keys.CopyLast) {
+		if m.lastAssistantText == "" {
+			m.statusMsg = "nothing to copy"
+			return m, nil
+		}
+		m.statusMsg = "copy requested"
+		return m, tea.SetClipboard(m.lastAssistantText)
+	}
 	if completions := commandCompletions(m.input.Value()); len(completions) > 0 {
 		if m.completionIdx >= len(completions) {
 			m.completionIdx = 0
@@ -448,11 +515,20 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.input.Reset()
 		m.completionIdx = 0
 		m.resizeViewport()
+		if m.sending {
+			m.queuedMessages = append([]string{line}, m.queuedMessages...)
+			m.interruptTurn()
+			return m, nil
+		}
 		return m.handleSubmit(line)
 	case msg.String() == "alt+enter" && m.sending:
-		m.queuedMessage = m.input.Value()
+		line := strings.TrimSpace(m.input.Value())
+		if line == "" {
+			return m, nil
+		}
+		m.queuedMessages = append(m.queuedMessages, line)
 		m.input.Reset()
-		m.statusMsg = "queued — will send after the current turn finishes"
+		m.statusMsg = fmt.Sprintf("running │ %d queued", len(m.queuedMessages))
 		return m, nil
 	case key.Matches(msg, keys.AgentPicker):
 		m.picker = newAgentPicker(m)
@@ -496,18 +572,43 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *appModel) viewportHeight() int {
-	bottomHeight := inputRows + inputBoxBorderWidth
+func (m *appModel) interruptTurn() {
+	if !m.sending || m.turnCancel == nil {
+		return
+	}
+	m.turnInterrupted = true
+	m.statusMsg = "interrupting..."
+	m.turnCancel()
 	if m.approval != nil {
+		m.approval = nil
+		m.resizeViewport()
+	}
+}
+
+func (m *appModel) viewportHeight() int {
+	bottomHeight := m.input.Height() + inputBoxBorderWidth
+	modal := false
+	switch {
+	case m.approval != nil:
 		bottomHeight = lipgloss.Height(m.renderApprovalModal())
-	} else if len(commandCompletions(m.input.Value())) > 0 {
+		modal = true
+	case m.wizard != nil:
+		bottomHeight = lipgloss.Height(m.renderWizardModal())
+		modal = true
+	case m.picker != nil:
+		bottomHeight = lipgloss.Height(m.renderPickerModal())
+		modal = true
+	case m.searching:
+		bottomHeight = lipgloss.Height(m.renderSearchOverlay())
+		modal = true
+	case len(commandCompletions(m.input.Value())) > 0:
 		bottomHeight++
 	}
 	height := m.height - headerHeight - bottomHeight - statusHeight
-	if m.approval != nil && height < 0 {
+	if modal && height < 0 {
 		return 0
 	}
-	if m.approval == nil && height < 1 {
+	if !modal && height < 1 {
 		return 1
 	}
 	return height
@@ -515,6 +616,19 @@ func (m *appModel) viewportHeight() int {
 
 func (m *appModel) resizeViewport() {
 	if m.ready {
+		maxHeight := maxInputRows
+		if available := (m.height - headerHeight - statusHeight - inputBoxBorderWidth) / 3; available < maxHeight {
+			maxHeight = available
+		}
+		if maxHeight < minInputRows {
+			maxHeight = minInputRows
+		}
+		m.input.MaxHeight = maxHeight
+		width := m.width - inputBoxBorderWidth - inputBoxPaddingWidth
+		if width < 1 {
+			width = 1
+		}
+		m.input.SetWidth(width)
 		m.viewport.SetHeight(m.viewportHeight())
 	}
 }
@@ -562,7 +676,7 @@ func (m *appModel) handleSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyBackspace:
 		if len(m.searchQuery) > 0 {
-			m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+			m.searchQuery = removeLastRune(m.searchQuery)
 			m.updateSearchResults()
 		}
 		return m, nil
@@ -610,9 +724,16 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	m.refreshPrompt()
 
 	m.sending = true
+	m.turnID++
+	m.turnCtx, m.turnCancel = context.WithCancel(m.ctx)
+	m.turnInterrupted = false
+	turnID := m.turnID
+	turnCtx := m.turnCtx
 	m.turnCostStart = m.orch.SessionCost()
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
+	m.activityIndex = make(map[string]int)
+	m.activityArgs = make(map[string]any)
 	m.turnModelCalls = 0
 	m.turnSubagents = 0
 	m.lastChunk = ""
@@ -620,52 +741,65 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	if ch, stop, err := m.orch.SubscribeActivity(); err == nil {
 		m.activityCh = ch
 		m.stopActivity = stop
-		activityCmd = listenActivity(ch)
+		activityCmd = listenActivity(turnCtx, turnID, ch)
 	}
 	m.refreshViewport()
-	return m, tea.Batch(m.sendCmd(line), m.spin.Tick, activityCmd)
+	return m, tea.Batch(m.sendCmd(turnCtx, turnID, line), m.spin.Tick, activityCmd)
 }
 
-func (m *appModel) sendCmd(message string) tea.Cmd {
+func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) tea.Cmd {
 	orch := m.orch
-	ctx := m.ctx
 	stream := m.stream
 	return func() tea.Msg {
 		if stream {
 			ch, err := orch.ChatStream(ctx, message)
 			if err != nil {
-				return chatDoneMsg{err: err}
+				return chatDoneMsg{turnID: turnID, err: err}
 			}
-			return streamStartedMsg{ch: ch}
+			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: ch}
 		}
 		resp, err := orch.Chat(ctx, message)
-		return chatDoneMsg{resp: resp, err: err}
+		return chatDoneMsg{turnID: turnID, resp: resp, err: err}
 	}
 }
 
-func listenStream(ch <-chan *model.ChatResponse) tea.Cmd {
+func listenStream(ctx context.Context, turnID uint64, ch <-chan *model.ChatResponse) tea.Cmd {
 	return func() tea.Msg {
-		resp, ok := <-ch
-		if !ok {
-			return streamDoneMsg{}
+		select {
+		case resp, ok := <-ch:
+			if !ok {
+				return streamDoneMsg{turnID: turnID}
+			}
+			return streamDeltaMsg{turnID: turnID, ctx: ctx, resp: resp, ch: ch}
+		case <-ctx.Done():
+			return streamDoneMsg{turnID: turnID, err: ctx.Err()}
 		}
-		return streamDeltaMsg{resp: resp, ch: ch}
 	}
 }
 
-func listenActivity(ch <-chan chronosstream.Event) tea.Cmd {
+func listenActivity(ctx context.Context, turnID uint64, ch <-chan chronosstream.Event) tea.Cmd {
 	return func() tea.Msg {
-		for event := range ch {
-			switch event.Type {
-			case chronosstream.EventModelCall, chronosstream.EventToolCall, chronosstream.EventToolResult:
-				return activityMsg{event: event, ch: ch}
+		for {
+			select {
+			case event, ok := <-ch:
+				if !ok {
+					return activityDoneMsg{turnID: turnID}
+				}
+				switch event.Type {
+				case chronosstream.EventModelCall, chronosstream.EventToolCall, chronosstream.EventToolResult:
+					return activityMsg{turnID: turnID, ctx: ctx, event: event, ch: ch}
+				}
+			case <-ctx.Done():
+				return activityDoneMsg{turnID: turnID}
 			}
 		}
-		return activityDoneMsg{}
 	}
 }
 
 func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
+	if msg.turnID != m.turnID {
+		return m, nil
+	}
 	resp := msg.resp
 	if resp.Err != nil {
 		return m, m.finalizeTurn(resp.Err)
@@ -695,7 +829,7 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		m.activeAgentText.WriteString(resp.Content)
 		m.lastChunk = resp.Content
 	}
-	cmds := []tea.Cmd{listenStream(msg.ch)}
+	cmds := []tea.Cmd{listenStream(msg.ctx, msg.turnID, msg.ch)}
 	if !m.renderScheduled {
 		m.renderScheduled = true
 		cmds = append(cmds, tea.Tick(time.Second/30, func(time.Time) tea.Msg { return streamRenderTickMsg{} }))
@@ -704,9 +838,17 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
+	if msg.turnID != m.turnID {
+		return m, nil
+	}
 	data, _ := msg.event.Data.(map[string]any)
 	agentID, _ := data["agent"].(string)
+	callID, _ := data["id"].(string)
 	toolName, _ := data["tool"].(string)
+	activityKey := agentID + "/" + callID
+	if callID == "" {
+		activityKey = agentID + "/" + toolName
+	}
 	label := ""
 	if agentID != "" {
 		label = "@" + agentID + " "
@@ -718,14 +860,26 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		modelName, _ := data["model"].(string)
 		m.activeToolLines = append(m.activeToolLines, styleDim.Render("  "+label+"model "+modelName))
 	case chronosstream.EventToolCall:
-		m.activeToolLines = append(m.activeToolLines, RenderToolActivity(label, toolName, data["args"], false, data["error"]))
+		line := RenderToolActivity(label, toolName, data["args"], false, data["error"])
+		m.activeToolLines = append(m.activeToolLines, line)
+		if m.activityIndex == nil {
+			m.activityIndex = make(map[string]int)
+			m.activityArgs = make(map[string]any)
+		}
+		m.activityIndex[activityKey] = len(m.activeToolLines) - 1
+		m.activityArgs[activityKey] = data["args"]
 		m.pendingToolCalls++
 		if toolName == "spawn_subagent" {
 			m.pendingSubagents++
 			m.turnSubagents++
 		}
 	case chronosstream.EventToolResult:
-		m.activeToolLines = append(m.activeToolLines, RenderToolActivity(label, toolName, nil, true, data["error"]))
+		line := RenderToolActivity(label, toolName, m.activityArgs[activityKey], true, data["error"])
+		if idx, ok := m.activityIndex[activityKey]; ok && idx < len(m.activeToolLines) {
+			m.activeToolLines[idx] = line
+		} else {
+			m.activeToolLines = append(m.activeToolLines, line)
+		}
 		if m.pendingToolCalls > 0 {
 			m.pendingToolCalls--
 		}
@@ -738,7 +892,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	if changed {
 		m.refreshViewport()
 	}
-	return m, listenActivity(msg.ch)
+	return m, listenActivity(msg.ctx, msg.turnID, msg.ch)
 }
 
 func (m *appModel) refreshViewport() {
@@ -1238,7 +1392,10 @@ func formatTokenCount(n int) string {
 // completed yet. The window comes from modelinfo; an unregistered model
 // still shows the used-token count, just without a window/percentage.
 func (m *appModel) contextUsageSegment() string {
-	used := m.lastKnownUsage.PromptTokens + m.lastKnownUsage.CompletionTokens
+	used := m.lastKnownUsage.ContextTokens
+	if used == 0 {
+		used = m.lastKnownUsage.PromptTokens + m.lastKnownUsage.CompletionTokens
+	}
 	if used == 0 {
 		return ""
 	}
@@ -1305,11 +1462,19 @@ func (m *appModel) appendBlock(block string) {
 // finalizeTurn closes out the in-progress agent turn (streamed or not),
 // folding activeAgentText/activeToolLines into a permanent transcript block
 // and resetting the in-progress state. err, if non-nil, replaces the turn
-// with an error block instead. If the user queued a follow-up message with
-// Alt+Enter while this turn was still streaming, it is dispatched now via
-// the returned tea.Cmd — the same path a typed Enter would use.
+// with an error block instead. One queued follow-up is dispatched after the
+// active turn has fully settled.
 func (m *appModel) finalizeTurn(err error) tea.Cmd {
+	interrupted := m.turnInterrupted && (err == nil || errors.Is(err, context.Canceled))
+	if interrupted {
+		err = nil
+	}
 	m.sending = false
+	if m.turnCancel != nil {
+		m.turnCancel()
+		m.turnCancel = nil
+		m.turnCtx = nil
+	}
 	if m.stopActivity != nil {
 		m.stopActivity()
 		m.stopActivity = nil
@@ -1322,10 +1487,14 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
 		b.WriteString("\n")
 		for _, l := range m.activeToolLines {
-			b.WriteString(l)
+			b.WriteString(truncateToWidth(l, m.viewport.Width()))
 			b.WriteString("\n")
 		}
-		b.WriteString(RenderMarkdownLite(m.activeAgentText.String(), m.viewport.Width()))
+		if interrupted && m.activeAgentText.Len() == 0 {
+			b.WriteString(styleDim.Render("interrupted"))
+		} else {
+			b.WriteString(RenderMarkdownLite(m.activeAgentText.String(), m.viewport.Width()))
+		}
 		m.appendBlock(b.String())
 		m.lastAssistantText = m.activeAgentText.String()
 	}
@@ -1346,13 +1515,18 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.lastModelCalls = m.turnModelCalls
 		m.lastSubagents = m.turnSubagents
 	}
-	if err != nil {
+	if interrupted {
+		m.statusMsg = "interrupted"
+	} else if err != nil {
 		m.statusMsg = "request failed │ previous " + strings.TrimPrefix(m.usageStatus(), "last ")
 	} else {
 		m.statusMsg = m.usageStatus()
 	}
+	m.turnInterrupted = false
 	m.activeAgentText.Reset()
 	m.activeToolLines = nil
+	m.activityIndex = nil
+	m.activityArgs = nil
 	m.pendingToolCalls = 0
 	m.pendingSubagents = 0
 	m.lastChunk = ""
@@ -1362,11 +1536,11 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.viewport.GotoBottom()
 	}
 
-	if m.queuedMessage == "" {
+	if len(m.queuedMessages) == 0 {
 		return nil
 	}
-	queued := m.queuedMessage
-	m.queuedMessage = ""
+	queued := m.queuedMessages[0]
+	m.queuedMessages = m.queuedMessages[1:]
 	_, cmd := m.handleSubmit(queued)
 	return cmd
 }
@@ -1397,7 +1571,7 @@ func (m *appModel) renderTranscript() string {
 			m.transcriptBuf.WriteString("\n\n")
 		}
 		for _, tl := range m.activeToolLines {
-			m.transcriptBuf.WriteString(tl)
+			m.transcriptBuf.WriteString(truncateToWidth(tl, m.viewport.Width()))
 			m.transcriptBuf.WriteByte('\n')
 		}
 		if txt := m.activeAgentText.String(); txt != "" {
@@ -1462,7 +1636,7 @@ func (m *appModel) View() tea.View {
 	return tea.View{
 		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), bottom, m.renderStatusBar()),
 		AltScreen: true,
-		MouseMode: tea.MouseModeCellMotion,
+		MouseMode: tea.MouseModeNone,
 	}
 }
 
@@ -1489,6 +1663,9 @@ func (m *appModel) renderCommandCompletions(completions []string) string {
 // two bookkeeping styles is what originally caused the status bar to
 // overflow by its padding width and wrap onto a second line).
 func (m *appModel) renderHeaderBar() string {
+	if m.width <= 0 {
+		return ""
+	}
 	left := " ◆ chronos-code "
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
 		left = " ◆ chronos-code · @" + m.orch.ActiveID() + " "
@@ -1503,6 +1680,10 @@ func (m *appModel) renderHeaderBar() string {
 		}
 		right = " " + dir + " "
 	}
+	if lipgloss.Width(left) >= m.width {
+		return styleHeaderBar.Render(truncateToWidth(left, m.width))
+	}
+	right = truncateToWidth(right, m.width-lipgloss.Width(left))
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
 		gap = 0
@@ -1588,23 +1769,53 @@ func (m *appModel) renderSearchOverlay() string {
 }
 
 func (m *appModel) renderStatusBar() string {
+	if m.width <= 0 {
+		return ""
+	}
 	streamLabel := "batch"
 	if m.stream {
 		streamLabel = "stream"
 	}
-	leftText := " ● " + streamLabel
+	runLabel := "idle"
+	if m.sending {
+		runLabel = "running"
+		if m.turnInterrupted {
+			runLabel = "stopping"
+		}
+	}
+	leftText := " ● " + runLabel + " │ " + streamLabel
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
-		leftText = " ● @" + m.orch.ActiveID() + " │ " + streamLabel
+		leftText = " ● " + runLabel + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
 	}
 	if ctxSeg := m.contextUsageSegment(); ctxSeg != "" {
 		leftText += " │ " + ctxSeg
 	}
+	if !m.followOutput {
+		leftText += fmt.Sprintf(" │ scrolled %d%% · ctrl+end follow", int(m.viewport.ScrollPercent()*100))
+	}
+	if len(m.queuedMessages) > 0 {
+		leftText += fmt.Sprintf(" │ queued %d", len(m.queuedMessages))
+	}
 	leftText += " "
+	if m.width < 72 {
+		leftText = " ● " + runLabel
+		if len(m.queuedMessages) > 0 {
+			leftText += fmt.Sprintf(" +%d", len(m.queuedMessages))
+		}
+		if !m.followOutput {
+			leftText += " ↑"
+		}
+		leftText += " "
+	}
+	leftText = truncateToWidth(leftText, m.width)
 	leftSeg := styleStatusLeft.Render(leftText)
 
-	rightText := " ctrl+a agents │ ctrl+/ palette │ ctrl+c quit "
+	rightText := " ctrl+a agents │ ctrl+/ commands │ ctrl+c interrupt/quit "
 	if m.statusMsg != "" {
 		rightText = " " + m.statusMsg + " │" + rightText
+	}
+	if m.width < 90 {
+		rightText = " " + m.statusMsg + " "
 	}
 	rightSeg := styleStatusRight.Render(rightText)
 	if lipgloss.Width(leftSeg)+lipgloss.Width(rightSeg) > m.width {
@@ -1621,4 +1832,12 @@ func (m *appModel) renderStatusBar() string {
 		gap = 0
 	}
 	return leftSeg + styleStatusFill.Render(strings.Repeat(" ", gap)) + rightSeg
+}
+
+func removeLastRune(s string) string {
+	_, size := utf8.DecodeLastRuneInString(s)
+	if size == 0 {
+		return s
+	}
+	return s[:len(s)-size]
 }
