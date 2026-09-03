@@ -70,7 +70,7 @@ func newModelPicker(m *appModel) *picker {
 var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/login", "/logout", "/whoami",
 	"/context", "/usage", "/stream", "/session", "/memory", "/budget", "/workspace",
-	"/skills", "/copy", "/clear", "/perf", "/help", "/quit",
+	"/skills", "/subagent", "/copy", "/clear", "/perf", "/help", "/quit",
 }
 
 func newCommandPalette() *picker {
@@ -141,6 +141,7 @@ func (m *appModel) renderPickerModal() string {
 // handlePickerKey routes a key event while a picker is active, mirroring
 // handleWizardKey/handleSearchKey's modal-takes-all-input pattern.
 func (m *appModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	defer m.resizeViewport()
 	p := m.picker
 	switch msg.Code {
 	case tea.KeyEsc:

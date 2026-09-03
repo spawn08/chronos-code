@@ -134,6 +134,7 @@ func (w *loginWizard) View() string {
 // handleWizardKey routes a key event while a wizard is active, mirroring
 // handleApprovalKey/handleSearchKey's modal-takes-all-input pattern.
 func (m *appModel) handleWizardKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	defer m.resizeViewport()
 	w := m.wizard
 	if w.step == stepTextInput {
 		switch msg.Code {

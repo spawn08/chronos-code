@@ -102,6 +102,26 @@ func TestSummarizeArgs(t *testing.T) {
 	}
 }
 
+func TestRenderToolActivityFormatsReadableArgumentsAndErrors(t *testing.T) {
+	got := RenderToolActivity("@coder ", "file_read", map[string]any{
+		"path": "/tmp/app.go",
+		"line": 20,
+	}, true, nil)
+	for _, want := range []string{"@coder", "file_read", "· done", "line=20", "path=/tmp/app.go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("completed activity missing %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, `{"`) {
+		t.Errorf("activity uses raw JSON instead of readable arguments: %q", got)
+	}
+
+	failed := RenderToolActivity("", "shell", map[string]any{"command": "false"}, true, "exit status 1")
+	if !strings.Contains(failed, "· failed") || !strings.Contains(failed, "error=exit status 1") {
+		t.Errorf("failed activity does not expose its error: %q", failed)
+	}
+}
+
 func TestFormatArgsExcept(t *testing.T) {
 	args := map[string]any{"command": "ls -la", "working_dir": "/tmp", "timeout_sec": 30}
 	got := FormatArgsExcept(args, "command", "working_dir")

@@ -129,54 +129,45 @@ func TestFrameTiming_Wraps(t *testing.T) {
 }
 
 func TestRenderTranscript_CachesBlocks(t *testing.T) {
-	m := &appModel{renderWidth: 0}
-	m.blocks = []string{"block-A", "block-B"}
+	m := &appModel{}
+	m.appendBlock("block-A")
+	m.appendBlock("block-B")
 
-	_ = m.renderTranscript()
-	if len(m.renderedBlocks) != 2 {
-		t.Fatalf("renderedBlocks len = %d, want 2", len(m.renderedBlocks))
+	first := m.renderTranscript()
+	if m.finalizedDirty || m.finalizedText == "" {
+		t.Fatal("renderTranscript() did not cache finalized transcript")
 	}
 
-	m.blocks = append(m.blocks, "block-C")
+	m.appendBlock("block-C")
 	got := m.renderTranscript()
-	if len(m.renderedBlocks) != 3 {
-		t.Fatalf("renderedBlocks len = %d after append, want 3", len(m.renderedBlocks))
-	}
-	if !strings.Contains(got, "block-A") || !strings.Contains(got, "block-C") {
+	if got == first || !strings.Contains(got, "block-A") || !strings.Contains(got, "block-C") {
 		t.Errorf("renderTranscript() = %q, want all blocks present", got)
 	}
 }
 
-func TestRenderTranscript_WidthChangeInvalidatesCache(t *testing.T) {
-	m := &appModel{renderWidth: 0}
-	m.blocks = []string{"hello"}
-
-	_ = m.renderTranscript()
-	if m.renderWidth != 0 {
-		t.Fatalf("renderWidth = %d, want 0", m.renderWidth)
+func TestRenderTurnItems_CachesMarkdownByWidth(t *testing.T) {
+	m := &appModel{activeTurnItems: []turnItem{{kind: turnItemText, content: "hello"}}}
+	_ = m.renderTurnItems()
+	if m.activeTurnItems[0].rendered != "hello" {
+		t.Fatalf("rendered text = %q, want hello", m.activeTurnItems[0].rendered)
 	}
-	if len(m.renderedBlocks) != 1 {
-		t.Fatalf("renderedBlocks len = %d, want 1", len(m.renderedBlocks))
-	}
-
-	// Simulate width change by directly setting viewport width via renderWidth check
-	m.renderWidth = 0 // matches viewport width of 0
-	_ = m.renderTranscript()
-	if len(m.renderedBlocks) != 1 {
-		t.Fatalf("cache should still be valid, got len %d", len(m.renderedBlocks))
+	m.invalidateRenderCache()
+	if m.activeTurnItems[0].rendered != "" {
+		t.Fatal("width invalidation retained active markdown cache")
 	}
 }
 
 func TestInvalidateRenderCache(t *testing.T) {
 	m := &appModel{}
-	m.blocks = []string{"a", "b"}
+	m.appendBlock("a")
+	m.appendBlock("b")
 	_ = m.renderTranscript()
-	if len(m.renderedBlocks) != 2 {
-		t.Fatalf("renderedBlocks len = %d, want 2", len(m.renderedBlocks))
+	if m.finalizedText == "" {
+		t.Fatal("finalized transcript was not cached")
 	}
 	m.invalidateRenderCache()
-	if m.renderedBlocks != nil {
-		t.Errorf("renderedBlocks = %v after invalidate, want nil", m.renderedBlocks)
+	if m.finalizedText != "" || !m.finalizedDirty {
+		t.Errorf("finalized cache was not invalidated: text=%q dirty=%v", m.finalizedText, m.finalizedDirty)
 	}
 }
 
@@ -262,6 +253,7 @@ func TestHandleKey_EnterSubmitsWithoutOpeningModelPicker(t *testing.T) {
 	oldSessionID := m.orch.CurrentSessionID()
 	m.blocks = []string{"clear me"}
 	m.lastKnownUsage.PromptTokens = 10
+	m.queuedMessages = []string{"stale follow-up"}
 	m.input.SetValue("/clear")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -280,6 +272,9 @@ func TestHandleKey_EnterSubmitsWithoutOpeningModelPicker(t *testing.T) {
 	}
 	if m.lastKnownUsage.PromptTokens != 0 {
 		t.Errorf("/clear retained last usage: %+v", m.lastKnownUsage)
+	}
+	if len(m.queuedMessages) != 0 {
+		t.Errorf("/clear retained queued messages: %q", m.queuedMessages)
 	}
 }
 
@@ -361,12 +356,12 @@ func TestStreamDeltaSchedulesBoundedRender(t *testing.T) {
 	}
 }
 
-func TestViewUsesNativeSelection(t *testing.T) {
+func TestViewEnablesMouseWheelEvents(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	if got := m.View().MouseMode; got != tea.MouseModeNone {
-		t.Errorf("View().MouseMode = %v, want MouseModeNone for native selection", got)
+	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Errorf("View().MouseMode = %v, want MouseModeCellMotion", got)
 	}
 }
 
@@ -459,7 +454,7 @@ func TestDefaultChromeDoesNotExposeInternalAgentOrModel(t *testing.T) {
 
 func TestPrimaryAssistantTurnUsesProductName(t *testing.T) {
 	m := newTestAppModel(t)
-	m.activeAgentText.WriteString("answer")
+	m.appendTurnText("answer")
 	m.followOutput = true
 	m.finalizeTurn(nil)
 
@@ -515,7 +510,7 @@ func TestStreamDeltaShowsSubagentToolCall(t *testing.T) {
 		ch: make(chan *model.ChatResponse),
 	})
 
-	if got := m.renderTranscript(); !strings.Contains(got, "spawn_subagent") || !strings.Contains(got, "researcher") || !strings.Contains(got, "1 subagent running") {
+	if got := m.renderTranscript(); !strings.Contains(got, "spawn_subagent") || !strings.Contains(got, "researcher") {
 		t.Errorf("stream transcript does not show subagent call: %q", got)
 	}
 	_, _ = m.handleStreamDelta(streamDeltaMsg{
@@ -548,8 +543,52 @@ func TestActivityShowsAgentToolLifecycle(t *testing.T) {
 			t.Errorf("activity transcript missing %q: %q", want, got)
 		}
 	}
-	if strings.Contains(got, "search running") || strings.Count(got, " search ") != 1 {
+	if strings.Contains(got, "search · running") || strings.Count(got, " search ") != 1 {
 		t.Errorf("activity lifecycle was not updated in place: %q", got)
+	}
+}
+
+func TestActivityRefreshIsRateLimited(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+	ch := make(chan chronosstream.Event)
+
+	_, cmd := m.handleActivity(activityMsg{event: chronosstream.Event{
+		Type: chronosstream.EventToolCall,
+		Data: map[string]any{"agent": "coder", "id": "one", "tool": "file_read", "args": map[string]any{"path": "app.go"}},
+	}, ch: ch})
+
+	if cmd == nil || !m.renderScheduled {
+		t.Fatal("activity did not schedule a bounded render tick")
+	}
+	if strings.Contains(m.viewport.View(), "file_read") {
+		t.Fatal("activity refreshed the viewport before the scheduled render tick")
+	}
+}
+
+func TestTurnTimelinePreservesNarrationAndToolOrder(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+	m.appendTurnText("I will inspect the renderer.")
+	m.appendTurnActivity(RenderToolActivity("@coder ", "file_read", map[string]any{"path": "app.go"}, true, nil))
+	m.appendTurnText("The render loop rebuilds the transcript.")
+
+	got := m.renderTranscript()
+	first := strings.Index(got, "I will inspect")
+	tool := strings.Index(got, "file_read")
+	last := strings.Index(got, "The render loop")
+	if first < 0 || tool <= first || last <= tool {
+		t.Fatalf("turn chronology was not preserved: %q", got)
+	}
+	lines := strings.Split(got, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " ")
+	}
+	compact := strings.Join(lines, "\n")
+	if !strings.Contains(compact, "renderer.\n\n") || !strings.Contains(compact, "app.go\n\nThe render") {
+		t.Fatalf("turn phases are not visually separated: %q", got)
 	}
 }
 
@@ -567,7 +606,7 @@ func TestActivityCorrelatesParallelToolsOutOfOrder(t *testing.T) {
 	}
 
 	got := m.renderTranscript()
-	if strings.Count(got, "read") != 1 || strings.Count(got, "search") != 1 || !strings.Contains(got, "read running") || !strings.Contains(got, "search done") {
+	if strings.Count(got, "read") != 1 || strings.Count(got, "search") != 1 || !strings.Contains(got, "read · running") || !strings.Contains(got, "search · done") {
 		t.Fatalf("parallel activity state = %q", got)
 	}
 }
@@ -587,6 +626,53 @@ func TestHandleSlashSkillsListsDiscoveredCatalog(t *testing.T) {
 	}
 }
 
+func TestSkillSlashInvocationStartsTurn(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	_, cmd := m.handleSubmit("/code-review review the current diff")
+
+	if cmd == nil || !m.sending {
+		t.Fatal("explicit skill invocation did not start a turn")
+	}
+	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "/code-review review the current diff") {
+		t.Fatalf("transcript did not retain explicit skill invocation: %q", got)
+	}
+	m.turnCancel()
+}
+
+func TestSubagentSlashInvocationStartsIsolatedTurn(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	_, cmd := m.handleSubmit("/subagent researcher inspect the renderer")
+
+	if cmd == nil || !m.sending {
+		t.Fatal("direct subagent invocation did not start a turn")
+	}
+	got := m.renderTranscript()
+	if !strings.Contains(got, "subagent:researcher") || !strings.Contains(got, "· running") {
+		t.Fatalf("direct subagent activity is not visible: %q", got)
+	}
+	m.turnCancel()
+}
+
+func TestDynamicSubagentSlashInvocationAcceptsToolSchemaJSON(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	_, cmd := m.handleSubmit(`/subagent {"task":"inspect","system_prompt":"Be precise","tools":["file_read"]}`)
+
+	if cmd == nil || !m.sending {
+		t.Fatal("dynamic subagent invocation did not start a turn")
+	}
+	args, ok := m.activityArgs["direct-subagent"].(map[string]any)
+	if !ok || args["system_prompt"] != "Be precise" {
+		t.Fatalf("dynamic subagent arguments = %#v", m.activityArgs["direct-subagent"])
+	}
+	m.turnCancel()
+}
+
 func TestHandleKey_TabCompletesSlashCommand(t *testing.T) {
 	m := newTestAppModel(t)
 	m.input.SetValue("/ag")
@@ -598,6 +684,30 @@ func TestHandleKey_TabCompletesSlashCommand(t *testing.T) {
 	}
 	if got := m.input.Value(); got != "/agent" {
 		t.Errorf("input after Tab = %q, want /agent", got)
+	}
+}
+
+func TestHandleKey_TabCompletesSkillAndAgent(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "skill", input: "/code-r", want: "/code-review"},
+		{name: "agent mention", input: "@cod", want: "@coder "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestAppModel(t)
+			m.input.SetValue(tt.input)
+			_, cmd := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+			if cmd != nil {
+				t.Fatal("Tab completion returned a command")
+			}
+			if got := m.input.Value(); got != tt.want {
+				t.Fatalf("completed input = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -659,7 +769,7 @@ func TestFinalizeTurn_DispatchesQueuedFollowUp(t *testing.T) {
 	m := newTestAppModel(t)
 	m.sending = true
 	m.queuedMessages = []string{"follow-up message"}
-	m.activeAgentText.WriteString("first response")
+	m.appendTurnText("first response")
 
 	cmd := m.finalizeTurn(nil)
 
@@ -675,6 +785,54 @@ func TestFinalizeTurn_DispatchesQueuedFollowUp(t *testing.T) {
 	if got, ok := m.history.Prev(""); !ok || got != "follow-up message" {
 		t.Errorf("history.Prev() = %q, %v; want queued follow-up", got, ok)
 	}
+}
+
+func TestFinalizeTurn_BudgetErrorStopsQueuedRetries(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.budgetRetried = true
+	m.queuedMessages = []string{"do not retry yet"}
+	m.appendTurnActivity(RenderToolActivity("@coder ", "file_read", map[string]any{"path": "app.go"}, true, nil))
+
+	cmd := m.finalizeTurn(fmt.Errorf("agent stream: token budget exceeded for session %q: used 10 of 10 tokens", "session"))
+
+	if cmd != nil {
+		t.Fatal("budget exhaustion dispatched a queued request")
+	}
+	transcript := strings.Join(m.blocks, "\n")
+	if !strings.Contains(transcript, "Use /clear to start a fresh session") {
+		t.Fatalf("budget error did not explain recovery: %q", m.blocks)
+	}
+	if !strings.Contains(transcript, "file_read") {
+		t.Fatalf("failed turn discarded its activity timeline: %q", transcript)
+	}
+	if m.statusMsg != "budget exhausted │ /clear to continue" {
+		t.Fatalf("statusMsg = %q", m.statusMsg)
+	}
+}
+
+func TestFinalizeTurn_BudgetErrorRetriesOnceInFreshSession(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.activeRequest = "continue the task"
+	m.lastKnownUsage.PromptTokens = 10
+	oldSession := m.orch.CurrentSessionID()
+
+	cmd := m.finalizeTurn(fmt.Errorf("token budget exceeded for session %q: used 10 of 10 tokens", oldSession))
+
+	if cmd == nil || !m.sending || !m.budgetRetried {
+		t.Fatal("budget exhaustion did not schedule one retry")
+	}
+	if got := m.orch.CurrentSessionID(); got == "" || got == oldSession {
+		t.Fatalf("session was not renewed: old=%q new=%q", oldSession, got)
+	}
+	if m.lastKnownUsage.PromptTokens != 0 {
+		t.Fatalf("session rollover retained usage: %+v", m.lastKnownUsage)
+	}
+	if got := m.renderTranscript(); !strings.Contains(got, "continuing in a fresh session") {
+		t.Fatalf("automatic rollover is not visible in transcript: %q", got)
+	}
+	m.turnCancel()
 }
 
 func TestEnterWhileSendingInterruptsBeforeReplacement(t *testing.T) {
@@ -769,8 +927,8 @@ func TestNarrowViewStaysWithinTerminalBounds(t *testing.T) {
 			m := newTestAppModel(t)
 			_, _ = m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
 			m.sending = true
-			m.activeToolLines = []string{RenderToolCall("very_long_tool_name", strings.Repeat("x", 100))}
-			m.activeAgentText.WriteString("A response that must wrap within a narrow terminal pane.")
+			m.appendTurnActivity(RenderToolCall("very_long_tool_name", strings.Repeat("x", 100)))
+			m.appendTurnText("A response that must wrap within a narrow terminal pane.")
 			m.refreshViewport()
 
 			view := m.View().Content

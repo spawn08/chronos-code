@@ -7,11 +7,29 @@ import (
 
 const maxCommandCompletions = 5
 
-// commandCompletions returns fuzzy matches while the user is typing a slash
-// command. Arguments disable completion so Tab remains available to the
-// textarea once a command has been chosen.
-func commandCompletions(input string) []string {
-	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \t\n") {
+// inputCompletions returns fuzzy matches for commands, explicit skill
+// invocations, agent mentions, and agent-valued command arguments.
+func inputCompletions(input string, agents, subagents, skillNames []string) []string {
+	var candidates []string
+	switch {
+	case strings.HasPrefix(input, "@") && !strings.ContainsAny(input, " \t\n"):
+		for _, name := range agents {
+			candidates = append(candidates, "@"+name+" ")
+		}
+	case strings.HasPrefix(input, "/agent ") && !strings.ContainsAny(strings.TrimPrefix(input, "/agent "), " \t\n"):
+		for _, name := range agents {
+			candidates = append(candidates, "/agent "+name)
+		}
+	case strings.HasPrefix(input, "/subagent ") && !strings.ContainsAny(strings.TrimPrefix(input, "/subagent "), " \t\n"):
+		for _, name := range subagents {
+			candidates = append(candidates, "/subagent "+name+" ")
+		}
+	case strings.HasPrefix(input, "/") && !strings.ContainsAny(input, " \t\n"):
+		candidates = append(candidates, paletteCommands...)
+		for _, name := range skillNames {
+			candidates = append(candidates, "/"+name)
+		}
+	default:
 		return nil
 	}
 
@@ -21,7 +39,7 @@ func commandCompletions(input string) []string {
 	}
 	var matches []match
 	query := strings.ToLower(input)
-	for _, command := range paletteCommands {
+	for _, command := range candidates {
 		candidate := strings.ToLower(command)
 		score := fuzzyCommandScore(candidate, query)
 		if score >= 0 {
@@ -44,6 +62,24 @@ func commandCompletions(input string) []string {
 		result[i] = matches[i].command
 	}
 	return result
+}
+
+func (m *appModel) inputCompletions() []string {
+	if m.orch == nil {
+		return inputCompletions(m.input.Value(), nil, nil, nil)
+	}
+	skillNames := make([]string, 0, len(m.orch.ListSkills()))
+	for _, skill := range m.orch.ListSkills() {
+		skillNames = append(skillNames, skill.Name)
+	}
+	return inputCompletions(m.input.Value(), m.orch.ListAgents(), m.orch.ListSubagents(), skillNames)
+}
+
+func commandCompletions(input string) []string {
+	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \t\n") {
+		return nil
+	}
+	return inputCompletions(input, nil, nil, nil)
 }
 
 func fuzzyCommandScore(candidate, query string) int {

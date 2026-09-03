@@ -20,6 +20,7 @@ import (
 	"github.com/spawn08/chronos/engine/tool"
 	chronostrace "github.com/spawn08/chronos/os/trace"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/sdk/harness"
 	"github.com/spawn08/chronos/storage"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 
@@ -696,6 +697,7 @@ func numericValue(value any) int {
 // messageKey is a context key for the current user message, set by Chat so
 // ContextPinsFn can use it for relevance-ranked memory recall (P3-009).
 type messageKey struct{}
+type explicitSkillKey struct{}
 
 const maxRecentSkillTools = 5
 
@@ -939,6 +941,10 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 			}
 			msg, _ := ctx.Value(messageKey{}).(string)
 			if msg == "" {
+				return msgs
+			}
+			if selected, _ := ctx.Value(explicitSkillKey{}).(*skills.Skill); selected != nil {
+				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: skills.Render([]*skills.Skill{selected})})
 				return msgs
 			}
 			query := history.query(ctx, msg)
@@ -1577,6 +1583,16 @@ func (o *Orchestrator) ListAgents() []string {
 	return o.order
 }
 
+func (o *Orchestrator) ListSubagents() []string {
+	result := make([]string, 0, len(o.order))
+	for _, id := range o.order {
+		if id != o.active {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
 func (o *Orchestrator) ListSkills() []SkillInfo {
 	result := make([]SkillInfo, len(o.skillCatalog))
 	for i, skill := range o.skillCatalog {
@@ -1586,6 +1602,42 @@ func (o *Orchestrator) ListSkills() []SkillInfo {
 		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
 	})
 	return result
+}
+
+// WithSkill pins one named skill for the next turn, bypassing automatic
+// relevance selection while retaining the same isolated system context.
+func (o *Orchestrator) WithSkill(ctx context.Context, name string) (context.Context, error) {
+	for _, skill := range o.skillCatalog {
+		if strings.EqualFold(skill.Name, name) {
+			return context.WithValue(ctx, explicitSkillKey{}, skill), nil
+		}
+	}
+	return ctx, fmt.Errorf("skill %q not found", name)
+}
+
+// RunSubagent invokes the active agent's spawn_subagent tool directly. The
+// supplied arguments use the tool's public schema: task plus either agent, or
+// system_prompt and an optional tools list for a dynamic subagent.
+func (o *Orchestrator) RunSubagent(ctx context.Context, args map[string]any) (string, error) {
+	active := o.ActiveAgent()
+	if active == nil {
+		return "", fmt.Errorf("no active agent")
+	}
+	task, _ := args["task"].(string)
+	ctx = o.turnContext(ctx, task)
+	result, err := active.Tools.Execute(ctx, harness.SpawnToolName, args)
+	if err != nil {
+		return "", err
+	}
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("spawn_subagent returned %T, want result object", result)
+	}
+	text, ok := resultMap["result"].(string)
+	if !ok {
+		return "", fmt.Errorf("spawn_subagent result is not text")
+	}
+	return text, nil
 }
 
 func (o *Orchestrator) GetAgent(id string) (*agent.Agent, bool) {

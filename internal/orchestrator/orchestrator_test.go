@@ -237,14 +237,22 @@ func TestSetupSubAgentsExecutesConfiguredWorker(t *testing.T) {
 	if !ok || resultMap["agent"] != "researcher" || resultMap["result"] != "worker analysis" {
 		t.Errorf("spawn_subagent result = %#v", result)
 	}
+	orch := &Orchestrator{agents: agents, active: "coder", sessions: map[string]string{"coder": "session-1"}}
+	direct, err := orch.RunSubagent(context.Background(), map[string]any{
+		"agent": "researcher",
+		"task":  "inspect directly",
+	})
+	if err != nil || direct != "worker analysis" {
+		t.Fatalf("RunSubagent() = %q, %v", direct, err)
+	}
 	workerProvider.mu.Lock()
 	defer workerProvider.mu.Unlock()
-	if len(workerProvider.requests) != 1 {
-		t.Fatalf("worker requests = %d, want 1", len(workerProvider.requests))
+	if len(workerProvider.requests) != 2 {
+		t.Fatalf("worker requests = %d, want 2", len(workerProvider.requests))
 	}
-	last := workerProvider.requests[0].Messages[len(workerProvider.requests[0].Messages)-1]
-	if last.Content != "analyze the project" {
-		t.Errorf("worker task = %q, want analyze the project", last.Content)
+	last := workerProvider.requests[1].Messages[len(workerProvider.requests[1].Messages)-1]
+	if last.Content != "inspect directly" {
+		t.Errorf("worker task = %q, want inspect directly", last.Content)
 	}
 
 	reviewResult, err := parent.Tools.Execute(context.Background(), "spawn_subagent", map[string]any{
@@ -696,6 +704,28 @@ func TestSkillContextParityPreservesExistingPins(t *testing.T) {
 	joined := strings.Join(blockingPins, "\n")
 	if !strings.Contains(joined, "existing pin") || !strings.Contains(joined, "parity skill body") {
 		t.Fatalf("pins = %q, want existing pin and selected current-message skill", joined)
+	}
+}
+
+func TestWithSkillPinsExactSkill(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	writeTestSkill(t, root, "explicit-skill", "unlikely-trigger", "explicit skill body")
+
+	a := &agent.Agent{ID: "coder", Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	catalog := setupSkills(&config.Config{}, root, map[string]*agent.Agent{"coder": a})
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", skillCatalog: catalog}
+	ctx, err := orch.WithSkill(context.Background(), "EXPLICIT-SKILL")
+	if err != nil {
+		t.Fatalf("WithSkill() error = %v", err)
+	}
+	ctx = context.WithValue(ctx, messageKey{}, "unrelated request")
+	pins := a.ContextPinsFn(ctx)
+	if got := strings.Join(systemContents(&model.ChatRequest{Messages: pins}), "\n"); !strings.Contains(got, "explicit skill body") {
+		t.Fatalf("explicit skill was not pinned: %q", got)
+	}
+	if _, err := orch.WithSkill(context.Background(), "missing"); err == nil {
+		t.Fatal("WithSkill() accepted an unknown skill")
 	}
 }
 
