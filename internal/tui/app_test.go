@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ func newTestAppModel(t *testing.T) *appModel {
 		}
 	})
 
-	ta := textarea.New()
+	ta := newComposer()
 	return &appModel{
 		orch:    orch,
 		ctx:     context.Background(),
@@ -196,7 +197,7 @@ func TestAppendBlockBoundsTranscriptMemory(t *testing.T) {
 }
 
 // TestHandleKey_AltEnterQueuesWhileSending covers AC-2: Alt+Enter while a
-// turn is streaming captures the input into queuedMessage instead of
+// turn is streaming captures the input into queuedMessages instead of
 // inserting a newline.
 func TestHandleKey_AltEnterQueuesWhileSending(t *testing.T) {
 	ta := textarea.New()
@@ -205,8 +206,8 @@ func TestHandleKey_AltEnterQueuesWhileSending(t *testing.T) {
 
 	_, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 
-	if m.queuedMessage != "follow-up message" {
-		t.Errorf("queuedMessage = %q, want %q", m.queuedMessage, "follow-up message")
+	if got := m.queuedMessages; len(got) != 1 || got[0] != "follow-up message" {
+		t.Errorf("queuedMessages = %q, want one follow-up", got)
 	}
 	if m.input.Value() != "" {
 		t.Errorf("input.Value() = %q after queuing, want empty", m.input.Value())
@@ -214,7 +215,7 @@ func TestHandleKey_AltEnterQueuesWhileSending(t *testing.T) {
 }
 
 // TestHandleKey_AltEnterDoesNotQueueWhenIdle covers the negative case: with
-// no turn streaming, Alt+Enter must not touch queuedMessage (it falls
+// no turn streaming, Alt+Enter must not touch queuedMessages (it falls
 // through to the textarea's own insert-newline binding instead).
 func TestHandleKey_AltEnterDoesNotQueueWhenIdle(t *testing.T) {
 	ta := textarea.New()
@@ -223,8 +224,8 @@ func TestHandleKey_AltEnterDoesNotQueueWhenIdle(t *testing.T) {
 
 	_, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 
-	if m.queuedMessage != "" {
-		t.Errorf("queuedMessage = %q, want empty when not sending", m.queuedMessage)
+	if len(m.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %q, want empty when not sending", m.queuedMessages)
 	}
 }
 
@@ -293,6 +294,20 @@ func TestHandleModelCommand_InfersActiveProviderForUnknownLiveModel(t *testing.T
 	}
 }
 
+func TestContextUsageSegmentUsesFinalModelCall(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastKnownUsage = model.Usage{
+		PromptTokens:     315_000,
+		CompletionTokens: 5_000,
+		ContextTokens:    42_000,
+	}
+
+	got := m.contextUsageSegment()
+	if got != "ctx 42.0k/128.0k (32%)" {
+		t.Fatalf("contextUsageSegment() = %q, want final model call usage", got)
+	}
+}
+
 func TestStreamingDoesNotForceViewportToBottomAfterPageUp(t *testing.T) {
 	m := newTestAppModel(t)
 	m.followOutput = true
@@ -346,12 +361,48 @@ func TestStreamDeltaSchedulesBoundedRender(t *testing.T) {
 	}
 }
 
-func TestViewEnablesMouseScrolling(t *testing.T) {
+func TestViewUsesNativeSelection(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
-		t.Errorf("View().MouseMode = %v, want MouseModeCellMotion for wheel scrolling", got)
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("View().MouseMode = %v, want MouseModeNone for native selection", got)
+	}
+}
+
+func TestPasteInsertsMultilineComposerWithoutSubmitting(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	_, cmd := m.Update(tea.PasteMsg{Content: "first line\nsecond line\nthird line"})
+
+	if cmd != nil {
+		t.Fatal("paste returned an unexpected command")
+	}
+	if got := m.input.Value(); got != "first line\nsecond line\nthird line" {
+		t.Fatalf("pasted composer = %q", got)
+	}
+	if m.sending {
+		t.Fatal("paste submitted the prompt")
+	}
+	if got := m.input.Height(); got != 3 {
+		t.Fatalf("composer height = %d, want 3", got)
+	}
+}
+
+func TestTranscriptNavigationResumesFollowAtBottom(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{strings.Repeat("line\n", 40)}
+	m.refreshViewport()
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyHome, Mod: tea.ModCtrl})
+	if m.followOutput || !m.viewport.AtTop() {
+		t.Fatal("Ctrl+Home did not detach at transcript top")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd, Mod: tea.ModCtrl})
+	if !m.followOutput || !m.viewport.AtBottom() {
+		t.Fatal("Ctrl+End did not resume live output")
 	}
 }
 
@@ -367,6 +418,17 @@ func TestCopyReturnsClipboardCommandForLastAssistantResponse(t *testing.T) {
 	}
 	if m.statusMsg != "copy requested" {
 		t.Errorf("statusMsg = %q, want copy requested", m.statusMsg)
+	}
+}
+
+func TestCopyShortcutReturnsClipboardCommand(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastAssistantText = "response to copy"
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+
+	if cmd == nil || m.statusMsg != "copy requested" {
+		t.Fatalf("Ctrl+Y copy command = %v, status = %q", cmd != nil, m.statusMsg)
 	}
 }
 
@@ -435,7 +497,7 @@ func TestApprovalModalFitsSmallTerminalAndShowsAllChoices(t *testing.T) {
 	if !decision.allow || !decision.all {
 		t.Errorf("uppercase A decision = %+v, want allow all session", decision)
 	}
-	if got, want := m.viewport.Height(), 6; got != want {
+	if got, want := m.viewport.Height(), 7; got != want {
 		t.Errorf("viewport height after approval = %d, want %d", got, want)
 	}
 }
@@ -481,10 +543,32 @@ func TestActivityShowsAgentToolLifecycle(t *testing.T) {
 	}, ch: ch})
 
 	got := m.renderTranscript()
-	for _, want := range []string{"@researcher", "search", "running", "done"} {
+	for _, want := range []string{"@researcher", "search", "done"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("activity transcript missing %q: %q", want, got)
 		}
+	}
+	if strings.Contains(got, "search running") || strings.Count(got, " search ") != 1 {
+		t.Errorf("activity lifecycle was not updated in place: %q", got)
+	}
+}
+
+func TestActivityCorrelatesParallelToolsOutOfOrder(t *testing.T) {
+	m := newTestAppModel(t)
+	m.turnID = 1
+	m.sending = true
+	ch := make(chan chronosstream.Event)
+	for _, event := range []chronosstream.Event{
+		{Type: chronosstream.EventToolCall, Data: map[string]any{"agent": "coder", "id": "a", "tool": "read", "args": map[string]any{"path": "a.go"}}},
+		{Type: chronosstream.EventToolCall, Data: map[string]any{"agent": "coder", "id": "b", "tool": "search", "args": map[string]any{"query": "token"}}},
+		{Type: chronosstream.EventToolResult, Data: map[string]any{"agent": "coder", "id": "b", "tool": "search"}},
+	} {
+		_, _ = m.handleActivity(activityMsg{turnID: 1, ctx: context.Background(), event: event, ch: ch})
+	}
+
+	got := m.renderTranscript()
+	if strings.Count(got, "read") != 1 || strings.Count(got, "search") != 1 || !strings.Contains(got, "read running") || !strings.Contains(got, "search done") {
+		t.Fatalf("parallel activity state = %q", got)
 	}
 }
 
@@ -539,7 +623,7 @@ func TestView_ShowsSlashCommandCompletions(t *testing.T) {
 	if !strings.Contains(view.Content, "tab complete") || !strings.Contains(view.Content, "/model") {
 		t.Errorf("View() does not show slash completions: %q", view.Content)
 	}
-	if got, want := m.viewport.Height(), 23; got != want {
+	if got, want := m.viewport.Height(), 24; got != want {
 		t.Errorf("viewport height with completions = %d, want %d", got, want)
 	}
 }
@@ -559,13 +643,13 @@ func TestUpdate_KeyReleasesDoNotTriggerPressActions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := &appModel{cancel: func() {}, queuedMessage: "existing"}
+			m := &appModel{cancel: func() {}, queuedMessages: []string{"existing"}}
 			_, cmd := m.Update(tt.msg)
 			if cmd != nil {
 				t.Fatal("key release returned a command")
 			}
-			if m.quitting || m.picker != nil || m.queuedMessage != "existing" {
-				t.Fatalf("key release changed action state: quitting=%v picker=%v queuedMessage=%q", m.quitting, m.picker != nil, m.queuedMessage)
+			if m.quitting || m.picker != nil || len(m.queuedMessages) != 1 || m.queuedMessages[0] != "existing" {
+				t.Fatalf("key release changed action state: quitting=%v picker=%v queuedMessages=%q", m.quitting, m.picker != nil, m.queuedMessages)
 			}
 		})
 	}
@@ -574,7 +658,7 @@ func TestUpdate_KeyReleasesDoNotTriggerPressActions(t *testing.T) {
 func TestFinalizeTurn_DispatchesQueuedFollowUp(t *testing.T) {
 	m := newTestAppModel(t)
 	m.sending = true
-	m.queuedMessage = "follow-up message"
+	m.queuedMessages = []string{"follow-up message"}
 	m.activeAgentText.WriteString("first response")
 
 	cmd := m.finalizeTurn(nil)
@@ -582,14 +666,129 @@ func TestFinalizeTurn_DispatchesQueuedFollowUp(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("finalizeTurn() did not return the queued message command")
 	}
-	if m.queuedMessage != "" {
-		t.Errorf("queuedMessage = %q after finalizeTurn, want empty", m.queuedMessage)
+	if len(m.queuedMessages) != 0 {
+		t.Errorf("queuedMessages = %q after finalizeTurn, want empty", m.queuedMessages)
 	}
 	if !m.sending {
 		t.Fatal("queued follow-up was not dispatched")
 	}
 	if got, ok := m.history.Prev(""); !ok || got != "follow-up message" {
 		t.Errorf("history.Prev() = %q, %v; want queued follow-up", got, ok)
+	}
+}
+
+func TestEnterWhileSendingInterruptsBeforeReplacement(t *testing.T) {
+	m := newTestAppModel(t)
+	canceled := false
+	m.sending = true
+	m.turnCancel = func() { canceled = true }
+	m.input.SetValue("replacement prompt")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if cmd != nil {
+		t.Fatal("replacement started before interrupted turn settled")
+	}
+	if !canceled || !m.turnInterrupted {
+		t.Fatal("active turn was not interrupted")
+	}
+	if got := m.queuedMessages; len(got) != 1 || got[0] != "replacement prompt" {
+		t.Fatalf("queued replacement = %q", got)
+	}
+}
+
+func TestQueuedFollowUpsPreserveFIFOOrder(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	for _, prompt := range []string{"first", "second", "third"} {
+		m.input.SetValue(prompt)
+		_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	}
+
+	if got, want := strings.Join(m.queuedMessages, "|"), "first|second|third"; got != want {
+		t.Fatalf("queued order = %q, want %q", got, want)
+	}
+}
+
+func TestCtrlCInterruptsActiveTurnBeforeQuitting(t *testing.T) {
+	m := newTestAppModel(t)
+	canceled := false
+	m.sending = true
+	m.turnCancel = func() { canceled = true }
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+
+	if cmd != nil || m.quitting {
+		t.Fatal("Ctrl+C quit while a turn was active")
+	}
+	if !canceled || m.statusMsg != "interrupting..." {
+		t.Fatalf("Ctrl+C cancellation = %v, status = %q", canceled, m.statusMsg)
+	}
+}
+
+func TestStaleStreamDeltaDoesNotMutateActiveTurn(t *testing.T) {
+	m := newTestAppModel(t)
+	m.turnID = 2
+	m.activeAgentText.WriteString("current")
+
+	_, cmd := m.handleStreamDelta(streamDeltaMsg{
+		turnID: 1,
+		resp:   &model.ChatResponse{Content: "stale"},
+	})
+
+	if cmd != nil || m.activeAgentText.String() != "current" {
+		t.Fatalf("stale stream mutated active text: %q", m.activeAgentText.String())
+	}
+}
+
+func TestResponsiveChromeFitsTerminalWidth(t *testing.T) {
+	for _, width := range []int{120, 80, 40, 20} {
+		t.Run(fmt.Sprintf("width_%d", width), func(t *testing.T) {
+			m := newTestAppModel(t)
+			m.workDir = "/a/very/long/workspace/path/that/must/not/wrap/the/header"
+			m.statusMsg = "a long status message that must degrade before wrapping"
+			m.sending = true
+			m.queuedMessages = []string{"one", "two"}
+			_, _ = m.Update(tea.WindowSizeMsg{Width: width, Height: 24})
+
+			for name, line := range map[string]string{
+				"header": m.renderHeaderBar(),
+				"status": m.renderStatusBar(),
+			} {
+				if got := lipgloss.Width(line); got > width {
+					t.Fatalf("%s width = %d, terminal width = %d: %q", name, got, width, line)
+				}
+			}
+		})
+	}
+}
+
+func TestNarrowViewStaysWithinTerminalBounds(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{40, 10}, {20, 6}} {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			m := newTestAppModel(t)
+			_, _ = m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+			m.sending = true
+			m.activeToolLines = []string{RenderToolCall("very_long_tool_name", strings.Repeat("x", 100))}
+			m.activeAgentText.WriteString("A response that must wrap within a narrow terminal pane.")
+			m.refreshViewport()
+
+			view := m.View().Content
+			for i, line := range strings.Split(view, "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Fatalf("line %d width = %d, terminal width = %d: %q", i, got, size.width, line)
+				}
+			}
+			if got := lipgloss.Height(view); got > size.height {
+				t.Fatalf("view height = %d, terminal height = %d", got, size.height)
+			}
+		})
+	}
+}
+
+func TestUnicodeBackspaceRemovesWholeRune(t *testing.T) {
+	if got := removeLastRune("model界"); got != "model" {
+		t.Fatalf("removeLastRune() = %q, want model", got)
 	}
 }
 

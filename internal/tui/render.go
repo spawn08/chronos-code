@@ -19,6 +19,14 @@ var (
 	reBlockquote = regexp.MustCompile(`^>\s?(.*)$`)
 )
 
+// Fix Issue 3: pre-allocated base styles instead of lipgloss.NewStyle() per call.
+// lipgloss.Style is a value type — calling .Width() / .MaxWidth() on these returns
+// a new copy without mutating the base, so sharing them across concurrent calls is safe.
+var (
+	wrapBaseStyle     = lipgloss.NewStyle()
+	truncateBaseStyle = lipgloss.NewStyle()
+)
+
 // RenderMarkdownLite converts a small, deliberately restricted markdown
 // subset (headers, **bold**, _italic_, `inline code`, fenced code blocks,
 // bullet/numbered lists, blockquotes) to ANSI via lipgloss, in place of
@@ -79,15 +87,26 @@ func RenderMarkdownLite(s string, width int) string {
 // Order matters only in that ** is checked before _ so "**_x_**" nests
 // correctly; overlapping markers in adversarial input aren't guaranteed to
 // render perfectly, which is an accepted limit of a "lite" renderer.
+//
+// Fix Issue 4: the original code used ReplaceAllStringFunc + FindStringSubmatch
+// inside the closure, running the regex TWICE per match (once to find the match,
+// once to extract the capture group). We now extract the inner text with simple
+// O(1) string slicing of the already-matched string instead:
+//   - **text** → match[2 : len-2]
+//   - _text_   → match[1 : len-1]
+//   - `text`   → match[1 : len-1]
 func inlineStyle(s string) string {
-	s = reBold.ReplaceAllStringFunc(s, func(m string) string {
-		return styleBold.Render(reBold.FindStringSubmatch(m)[1])
+	s = reBold.ReplaceAllStringFunc(s, func(match string) string {
+		// match is "**inner**" — slice off the two leading/trailing asterisks
+		return styleBold.Render(match[2 : len(match)-2])
 	})
-	s = reItalic.ReplaceAllStringFunc(s, func(m string) string {
-		return styleItalic.Render(reItalic.FindStringSubmatch(m)[1])
+	s = reItalic.ReplaceAllStringFunc(s, func(match string) string {
+		// match is "_inner_" — slice off the one leading/trailing underscore
+		return styleItalic.Render(match[1 : len(match)-1])
 	})
-	s = reInlineCode.ReplaceAllStringFunc(s, func(m string) string {
-		return styleInlineCode.Render(reInlineCode.FindStringSubmatch(m)[1])
+	s = reInlineCode.ReplaceAllStringFunc(s, func(match string) string {
+		// match is "`inner`" — slice off the one leading/trailing backtick
+		return styleInlineCode.Render(match[1 : len(match)-1])
 	})
 	return s
 }
@@ -95,21 +114,27 @@ func inlineStyle(s string) string {
 // wrapText word-wraps s to width columns via lipgloss (which is ANSI-aware,
 // so it wraps around the escape codes inlineStyle already inserted rather
 // than counting them as visible characters). width <= 0 disables wrapping.
+//
+// Fix Issue 3: reuses the package-level wrapBaseStyle instead of allocating
+// a fresh lipgloss.Style on every call.
 func wrapText(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	return lipgloss.NewStyle().Width(width).Render(s)
+	return wrapBaseStyle.Width(width).Render(s)
 }
 
 // truncateToWidth clips s to width columns (ANSI-aware) instead of wrapping
 // it — used for code block lines, where word-wrapping would corrupt the
 // code. width <= 0 disables truncation.
+//
+// Fix Issue 3: reuses the package-level truncateBaseStyle instead of allocating
+// a fresh lipgloss.Style on every call.
 func truncateToWidth(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	return lipgloss.NewStyle().MaxWidth(width).Render(s)
+	return truncateBaseStyle.MaxWidth(width).Render(s)
 }
 
 // SummarizeArgs compacts a tool call's JSON arguments string for a one-line
@@ -152,6 +177,9 @@ func RenderToolActivity(agent, name string, args any, done bool, eventErr any) s
 // RenderTurnHeader renders a turn header line: icon + styled name + trailing separator.
 func RenderTurnHeader(icon, name string, nameStyle terminalStyle, width int) string {
 	prefix := icon + " " + nameStyle.Render(name) + " "
+	if width > 0 && lipgloss.Width(prefix) >= width {
+		return truncateToWidth(prefix, width)
+	}
 	prefixWidth := lipgloss.Width(prefix)
 	remaining := width - prefixWidth
 	if remaining < 0 {
