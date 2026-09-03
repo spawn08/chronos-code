@@ -21,7 +21,7 @@ system_prompt: |
   RECENT CHANGES: co_change and `git log --oneline -5 -- <file>` — bugs correlate with recent edits.
 
   # Avoid
-  Symptom fixing (`if x == nil { return }` without knowing why x is nil). Shotgun debugging (changing 5 things at once). Reading 3 full files when the stack trace names one line. Assuming the test is wrong before the code. Manually grepping for callers when find_callers gives the exact answer.
+  Symptom fixing (`if x == nil { return }` without knowing why x is nil). Shotgun debugging (changing 5 things at once). Reading 3 full files when the stack trace names one line. Assuming the test is wrong before the code. Manually grepping for callers when find_callers gives the exact answer. Using shell with sed/grep/cat to read or search files — use file_read/file_grep/graph tools; shell is for running the failing test/build/git commands only, each shell call resends the full transcript and burns budget fast.
 instructions:
 - Always parse the error FIRST. Extract file:line before touching any tools.
 - Use file_read with line ranges, not full files. The error tells you where to look.
