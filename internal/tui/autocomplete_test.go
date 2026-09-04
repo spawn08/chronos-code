@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -97,5 +98,19 @@ func TestAppInputCompletionsSkipCatalogForPlainText(t *testing.T) {
 	m.input.SetValue("/cop")
 	if got := m.inputCompletions(); len(got) == 0 {
 		t.Fatal("slash prefix produced no completions")
+	}
+}
+
+func TestFileMentionCandidatesEmptyNeedleDoesNotScanAll(t *testing.T) {
+	files := make([]string, 200)
+	for i := range files {
+		files[i] = fmt.Sprintf("pkg/file_%03d.go", i)
+	}
+	got := fileMentionCandidates("", files)
+	if len(got) != maxCommandCompletions {
+		t.Fatalf("empty needle completions = %d, want %d", len(got), maxCommandCompletions)
+	}
+	if got[0] != "@pkg/file_000.go" || got[maxCommandCompletions-1] != "@pkg/file_004.go" {
+		t.Fatalf("empty needle completions = %v", got)
 	}
 }

@@ -52,6 +52,8 @@ const (
 	inputBoxPaddingWidth = 2 // styleInputBox.Padding(0, 1), left + right
 	statusHeight         = 1
 	maxTranscriptBytes   = 4 << 20
+	maxViewportLines     = 2000
+	authIdentityTTL      = 30 * time.Second
 )
 
 // pendingApproval mirrors an in-flight approvalRequestMsg while the modal is
@@ -308,6 +310,12 @@ type appModel struct {
 	headerCacheWidth   int
 	headerCacheAgent   string
 	headerCacheDir     string
+
+	authCheckedAt time.Time
+	authSignedIn  bool
+	authModelID   string
+	authCatalog   []string
+	authCatalogAt time.Time
 
 	quitting bool
 }
@@ -765,7 +773,7 @@ func (m *appModel) renderBottom() (string, bool) {
 	default:
 		input := styleInputBox.Width(m.width - inputBoxBorderWidth).Render(m.input.View())
 		if completions := m.inputCompletions(); len(completions) > 0 {
-			return lipgloss.JoinVertical(lipgloss.Left, m.renderCommandCompletions(completions), input), false
+			return joinLayout(m.renderCommandCompletions(completions), input), false
 		}
 		return input, false
 	}
@@ -1319,8 +1327,46 @@ func (m *appModel) appendTurnActivity(line string) {
 }
 
 func (m *appModel) setViewportContent(s string) {
-	m.viewport.SetContent(s)
+	m.viewport.SetContentLines(lastNLines(s, maxViewportLines))
 	m.viewportViewValid = false
+}
+
+func lastNLines(s string, n int) []string {
+	if s == "" {
+		return nil
+	}
+	if n <= 0 {
+		return nil
+	}
+	cut := 0
+	newlines := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] != '\n' {
+			continue
+		}
+		newlines++
+		if newlines == n {
+			cut = i + 1
+			break
+		}
+	}
+	return strings.Split(s[cut:], "\n")
+}
+
+func joinLayout(parts ...string) string {
+	var b strings.Builder
+	size := 0
+	for _, part := range parts {
+		size += len(part) + 1
+	}
+	b.Grow(size)
+	for i, part := range parts {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(part)
+	}
+	return b.String()
 }
 
 func (m *appModel) refreshViewport() {
@@ -1466,6 +1512,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		if err := m.orch.Logout(arg); err != nil {
 			m.appendError(err)
 		} else {
+			m.invalidateAuthIdentity()
+			m.refreshPrompt()
 			m.appendSystem(fmt.Sprintf("logged out of %q", arg))
 		}
 	case "/whoami":
@@ -1665,7 +1713,7 @@ func (m *appModel) copyText(arg string) (content, okStatus string, err error) {
 		}
 		return visible, "copied visible output", nil
 	case "all", "transcript":
-		all := strings.TrimRight(ansi.Strip(m.viewport.GetContent()), "\n")
+		all := strings.TrimRight(ansi.Strip(m.renderTranscript()), "\n")
 		if strings.TrimSpace(all) == "" {
 			return "", "", fmt.Errorf("nothing to copy")
 		}
@@ -1871,10 +1919,12 @@ func (m *appModel) handleLoginCommand(arg string) tea.Cmd {
 	}
 
 	apiKey := parts[1]
-	if err := m.orch.Login(m.ctx, provider, apiKey); err != nil {
+		if err := m.orch.Login(m.ctx, provider, apiKey); err != nil {
 		m.appendError(err)
 		return nil
 	}
+	m.invalidateAuthIdentity()
+	m.refreshPrompt()
 	m.appendSystem(fmt.Sprintf("stored API key for %q", provider))
 	return nil
 }
@@ -1917,6 +1967,8 @@ func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
 	if msg.ev.err != nil {
 		m.appendError(msg.ev.err)
 	} else {
+		m.invalidateAuthIdentity()
+		m.refreshPrompt()
 		m.appendSystem("OAuth login complete")
 	}
 	m.setViewportContent(m.renderTranscript())
@@ -2149,29 +2201,60 @@ func (m *appModel) refreshPrompt() {
 	}
 }
 
-func (m *appModel) signedIn() bool {
+func (m *appModel) invalidateAuthIdentity() {
+	m.authCheckedAt = time.Time{}
+	m.authCatalogAt = time.Time{}
+	m.authCatalog = nil
+}
+
+func (m *appModel) ensureAuthIdentity() {
 	if m.orch == nil {
-		return false
+		m.authSignedIn = false
+		m.authModelID = ""
+		return
+	}
+	if !m.authCheckedAt.IsZero() && time.Since(m.authCheckedAt) < authIdentityTTL {
+		return
 	}
 	candidates := []string{"anthropic", "openai"}
-	if provider, _ := m.orch.ActiveModelInfo(); provider != "" {
-		candidates = append([]string{provider}, candidates...)
+	provider, modelID := m.orch.ActiveModelInfo()
+	m.authModelID = modelID
+	if provider != "" && provider != "anthropic" && provider != "openai" {
+		candidates = append(candidates, provider)
 	}
-	return len(m.orch.AuthorizedProviders(m.ctx, candidates)) > 0
+	m.authSignedIn = len(m.orch.AuthorizedProviders(m.ctx, candidates)) > 0
+	m.authCheckedAt = time.Now()
+}
+
+func (m *appModel) authorizedProviderNames() []string {
+	if m.orch == nil {
+		return nil
+	}
+	if !m.authCatalogAt.IsZero() && time.Since(m.authCatalogAt) < authIdentityTTL {
+		return m.authCatalog
+	}
+	m.authCatalog = m.orch.AuthorizedProviders(m.ctx, distinctProviders(modelinfo.All()))
+	m.authCatalogAt = time.Now()
+	return m.authCatalog
+}
+
+func (m *appModel) signedIn() bool {
+	m.ensureAuthIdentity()
+	return m.authSignedIn
 }
 
 func (m *appModel) sessionIdentitySegment() string {
 	if m.orch == nil {
 		return ""
 	}
-	if !m.signedIn() {
+	m.ensureAuthIdentity()
+	if !m.authSignedIn {
 		return "not signed in · /login"
 	}
-	_, modelID := m.orch.ActiveModelInfo()
-	if modelID == "" {
+	if m.authModelID == "" {
 		return "signed in"
 	}
-	return modelID
+	return m.authModelID
 }
 
 // appendUserTurn, appendSystem and appendError all wrap to m.viewport.Width():
@@ -2683,7 +2766,7 @@ func (m *appModel) View() tea.View {
 	}
 
 	view := tea.View{
-		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.transcriptView(), m.bottomView, m.renderStatusBar()),
+		Content:   joinLayout(m.renderHeaderBar(), m.transcriptView(), m.bottomView, m.renderStatusBar()),
 		AltScreen: true,
 	}
 	if m.mouseCapture {
