@@ -709,6 +709,43 @@ func TestRouteAppliesResolvedModelWithoutChangingSelectedAgent(t *testing.T) {
 	}
 }
 
+func TestSelectPrimaryAgentPrefersChronosCode(t *testing.T) {
+	got := selectPrimaryAgent(map[string]*agent.Agent{
+		"coder":        {ID: "coder"},
+		"chronos-code": {ID: "chronos-code"},
+		"reviewer":     {ID: "reviewer"},
+	}, []string{"coder", "chronos-code", "reviewer"})
+	if got != DefaultPrimaryAgentID {
+		t.Fatalf("selectPrimaryAgent() = %q, want %q", got, DefaultPrimaryAgentID)
+	}
+	got = selectPrimaryAgent(map[string]*agent.Agent{"reviewer": {ID: "reviewer"}}, []string{"reviewer"})
+	if got != "reviewer" {
+		t.Fatalf("selectPrimaryAgent() fallback = %q, want reviewer", got)
+	}
+}
+
+func TestFormatRoutingHintStaysAdvisory(t *testing.T) {
+	class := router.Classification{Complexity: router.ComplexityHigh, Kind: router.TaskKindDebug}
+	path := router.DefaultPath(class.Complexity)
+	hint := formatRoutingHint("chronos-code", "debug", "debugger", true, class, path, nil)
+	if !strings.Contains(hint, "spawn_subagent debugger") || !strings.Contains(hint, "You remain chronos-code") || !strings.Contains(hint, "Path: complexity=high") {
+		t.Fatalf("hint = %q", hint)
+	}
+	same := formatRoutingHint("debugger", "debug", "debugger", true, class, path, nil)
+	if !strings.Contains(same, "Path:") || strings.Contains(same, "spawn_subagent debugger") {
+		t.Fatalf("same-agent hint = %q", same)
+	}
+	shadow := &router.PPDDecision{Action: router.PPDActionShadow, Specialist: "ppd-planner"}
+	low := router.Classification{Complexity: router.ComplexityLow, Kind: router.TaskKindEdit}
+	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), shadow); !strings.Contains(got, "ppd-planner") || !strings.Contains(got, "Path:") {
+		t.Fatalf("shadow hint = %q", got)
+	}
+	delegate := &router.PPDDecision{Action: router.PPDActionDelegate, Specialist: "ppd-planner"}
+	if got := formatRoutingHint("ppd-planner", "code", "coder", true, class, path, delegate); got != "" {
+		t.Fatalf("delegate hint = %q, want empty", got)
+	}
+}
+
 func TestModelEscalationIsCapped(t *testing.T) {
 	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
 		router.ComplexityLow:    {router.TaskKindEdit: {Provider: "routed", Model: "low"}},

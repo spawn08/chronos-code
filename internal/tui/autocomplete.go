@@ -20,6 +20,24 @@ func inputCompletions(input string, agents, subagents, skillNames, files, mcpSer
 
 	var candidates []string
 	switch {
+	case strings.HasPrefix(input, "/learn") && (input == "/learn" || strings.HasPrefix(input, "/learn ")):
+		rest := strings.TrimSpace(strings.TrimPrefix(input, "/learn"))
+		if strings.ContainsAny(rest, " \t\n") {
+			return nil
+		}
+		for _, name := range []string{"list", "accept", "reject"} {
+			candidates = append(candidates, "/learn "+name)
+		}
+		candidates = append(candidates, "/learn")
+	case strings.HasPrefix(input, "/copy") && (input == "/copy" || strings.HasPrefix(input, "/copy ")):
+		rest := strings.TrimSpace(strings.TrimPrefix(input, "/copy"))
+		if strings.ContainsAny(rest, " \t\n") {
+			return nil
+		}
+		for _, name := range []string{"last", "visible", "all", "code"} {
+			candidates = append(candidates, "/copy "+name)
+		}
+		candidates = append(candidates, "/copy")
 	case strings.HasPrefix(input, "/mcp connect") && (input == "/mcp connect" || strings.HasPrefix(input, "/mcp connect ")):
 		rest := strings.TrimSpace(strings.TrimPrefix(input, "/mcp connect"))
 		if strings.ContainsAny(rest, " \t\n") {

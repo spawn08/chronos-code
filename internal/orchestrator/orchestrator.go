@@ -87,6 +87,12 @@ type Orchestrator struct {
 	permissionYolo     atomic.Bool
 	hookRunner         *security.HookRunner
 	learningStore      *learning.SQLStore
+	planMode           atomic.Bool
+	editsMu            sync.Mutex
+	edits              []fileCheckpoint
+	lastExecMu         sync.Mutex
+	lastExecRoute      router.Classification
+	lastExecAgent      string
 	lspManager         interface{ Close() error }
 	broker             *chronosstream.Broker
 	policy             *security.Policy
@@ -160,7 +166,10 @@ func ExecutionPolicyContext(ctx context.Context) map[string]any {
 	return policy
 }
 
-const userHookPromptContextTokens = 1000
+const (
+	userHookPromptContextTokens = 1000
+	DefaultPrimaryAgentID       = "chronos-code"
+)
 
 // OpenStorageForCLI opens the same storage.Storage backend New would (per
 // cfg.Defaults.Storage), without building any agents. It lets lightweight CLI
@@ -267,7 +276,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	skillCatalog := setupSkills(cfg, root, agents)
 	languageServerManager = setupLSP(root, wsInfo, agents)
 
-	rt, routingConfig := setupRouter(cfg, projectDir)
+	rt, routingConfig := setupRouter(cfg, projectDir, selectPrimaryAgent(agents, order))
 
 	policy, err := setupSecurity(projectDir, userDir, root, store, agents)
 	if err != nil {
@@ -329,10 +338,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	normalizeToolPermissions(agents)
 
-	active := "coder"
-	if _, ok := agents[active]; !ok && len(order) > 0 {
-		active = order[0]
-	}
+	active := selectPrimaryAgent(agents, order)
 
 	orch := &Orchestrator{
 		agents:             agents,
@@ -373,6 +379,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// Context guard runs before budget: it trims messages that would exceed
 		// the model's context window, preventing 413/400 token-limit errors that
 		// the SDK's tool-calling loop doesn't guard against.
+		a.Hooks = append(a.Hooks, sessionUXHook{orchestrator: orch})
 		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List())))
 		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
 		// Keep the budget hook last: if it reserves, no later Before hook can
@@ -1189,7 +1196,7 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 // T0 pattern are classified by that cheap model instead of always defaulting
 // to the "code" intent. Failure to build the T1 provider (e.g. missing API
 // key) is non-fatal — the router still works with T0-only matching.
-func setupRouter(cfg *config.Config, projectDir string) (*router.Router, *router.Config) {
+func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*router.Router, *router.Config) {
 	if !cfg.Router.Enabled {
 		return nil, nil
 	}
@@ -1203,7 +1210,10 @@ func setupRouter(cfg *config.Config, projectDir string) (*router.Router, *router
 		fmt.Printf("warning: parse routing.yaml: %v\n", err)
 		return nil, nil
 	}
-	rt, err := router.New(rcfg, "coder")
+	if defaultAgent == "" {
+		defaultAgent = DefaultPrimaryAgentID
+	}
+	rt, err := router.New(rcfg, defaultAgent)
 	if err != nil {
 		fmt.Printf("warning: build router: %v\n", err)
 		return nil, nil
@@ -1384,14 +1394,26 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	agentID := request.RequestedAgent
 	var ppdDecision *router.PPDDecision
+	var routeIntent, routeSpecialist string
+	var routeMatched bool
+	var classification router.Classification
 	if agentID == "" {
-		agentID, _ = o.Route(ctx, request.Message)
+		agentID = o.active
+		classification = router.ClassifyTask(request.Message)
+		o.recordRoute(classification, agentID)
+		if o.router != nil {
+			routeIntent, routeSpecialist, routeMatched = o.router.ClassifyWithFallback(ctx, request.Message)
+			if _, ok := o.agents[routeSpecialist]; !ok {
+				routeMatched = false
+				routeSpecialist = ""
+			}
+			o.applyResolvedModel(ctx, agentID, request.Message)
+		}
 		if o.routingConfig != nil {
 			ppdRequest := router.PPDRequest{}
 			if request.PPD != nil {
 				ppdRequest = *request.PPD
 			}
-			classification := router.ClassifyTask(request.Message)
 			ppdRequest.Kind = classification.Kind
 			ppdRequest.HighRisk = ppdRequest.HighRisk || classification.Complexity == router.ComplexityHigh
 			decision := router.NewPPDPolicy(o.routingConfig.PPD, nil).Decide(ppdRequest)
@@ -1441,6 +1463,11 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	if err != nil {
 		result.ContextReport = o.contextReport(collector)
 		return result, err
+	}
+	if !hasIntent {
+		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, classification, o.implementationPath(classification.Complexity), ppdDecision); hint != "" {
+			message = hint + "\n\n" + message
+		}
 	}
 	if hasIntent && intent.Action == memory.IntentRecallPast && result.MemoryIntent.Applied {
 		ctx = context.WithValue(ctx, messageKey{}, intent.Payload)
@@ -1705,6 +1732,9 @@ func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *
 
 func (o *Orchestrator) preparePrompt(ctx context.Context, message, agentID, sessionID string) (context.Context, string, error) {
 	ctx = o.turnContextFor(ctx, message, agentID, sessionID)
+	if o.PlanMode() {
+		message = planModePrompt + "\n\n" + message
+	}
 	if o.hookRunner == nil || o.cfg == nil || len(o.cfg.Hooks.UserPromptSubmit) == 0 {
 		return ctx, message, nil
 	}
@@ -1755,14 +1785,51 @@ func (o *Orchestrator) turnContextFor(ctx context.Context, message, agentID, ses
 	return ctx
 }
 
+func selectPrimaryAgent(agents map[string]*agent.Agent, order []string) string {
+	for _, id := range []string{DefaultPrimaryAgentID, "coder"} {
+		if _, ok := agents[id]; ok {
+			return id
+		}
+	}
+	if len(order) > 0 {
+		return order[0]
+	}
+	return ""
+}
+
+func (o *Orchestrator) implementationPath(complexity router.Complexity) router.ImplementationPath {
+	if o.routingConfig != nil {
+		return o.routingConfig.PathFor(complexity)
+	}
+	return router.DefaultPath(complexity)
+}
+
+func formatRoutingHint(agentID, intent, specialist string, matched bool, class router.Classification, path router.ImplementationPath, ppd *router.PPDDecision) string {
+	if ppd != nil && ppd.Action == router.PPDActionDelegate {
+		return ""
+	}
+	if path.Hint == "" {
+		path = router.DefaultPath(class.Complexity)
+	}
+	parts := []string{fmt.Sprintf("Path: complexity=%s kind=%s graph=%s plan=%s max_tools=%d. %s. Graph before files before shell. Recall-past and learned patterns before repeating a search.", class.Complexity, class.Kind, path.Graph, path.Plan, path.MaxToolCalls, path.Hint)}
+	if class.Complexity == "" {
+		parts = parts[:0]
+	}
+	if matched && specialist != "" && specialist != agentID {
+		parts = append(parts, fmt.Sprintf("Routing hint: intent=%s specialist=%s. You remain %s; spawn_subagent %s if that specialist loop is needed.", intent, specialist, agentID, specialist))
+	}
+	if ppd != nil && ppd.Action == router.PPDActionShadow && ppd.Specialist != "" && ppd.Specialist != agentID {
+		parts = append(parts, "PPD: this looks like multi-step or cross-package work. spawn_subagent "+ppd.Specialist+" before implementing.")
+	}
+	return strings.Join(parts, "\n")
+}
+
 // Route classifies message via the T0 intent router, falling back to the T1
-// cheap-model classifier when configured (PRD P2-006), and returns the agent
-// id it should be sent to. If routing is disabled or the message doesn't
-// match any T0 pattern or T1 classification, it returns the currently active
-// agent id and matched=false, so callers can always safely call Route
-// without special-casing "router present or not." When model routing is
-// configured, the resolved provider is applied to the returned agent without
-// changing which agent is active.
+// cheap-model classifier when configured (PRD P2-006), and returns the
+// specialist the classifier would pick. Execute keeps the active Chronos
+// Code conversation unless the caller requested an agent or PPD delegates.
+// Model routing is applied to the classified agent for Route callers and
+// tests; Execute applies it to the agent that actually runs.
 func (o *Orchestrator) Route(ctx context.Context, message string) (agentID string, matched bool) {
 	if o.router == nil {
 		return o.active, false
@@ -1774,22 +1841,25 @@ func (o *Orchestrator) Route(ctx context.Context, message string) (agentID strin
 	if !matched {
 		agentID = o.active
 	}
+	o.applyResolvedModel(ctx, agentID, message)
+	return agentID, matched
+}
 
+func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message string) {
 	classification := router.ClassifyTask(message)
 	o.routingMu.Lock()
 	defer o.routingMu.Unlock()
 	if o.routingConfig == nil || o.modelOverrides[agentID] {
-		return agentID, matched
+		return
 	}
 	delete(o.routingState, agentID)
 	spec, ok := o.routingConfig.ResolveModel(classification.Complexity, classification.Kind)
 	if !ok {
-		return agentID, matched
+		return
 	}
 	if err := o.switchModel(ctx, agentID, spec.Provider, spec.Model); err == nil {
 		o.routingState[agentID] = classification
 	}
-	return agentID, matched
 }
 
 type modelEscalationHook struct {
@@ -2033,10 +2103,10 @@ type ExternalLogin struct {
 func (o *Orchestrator) DetectedExternalLogins() []ExternalLogin {
 	var found []ExternalLogin
 	if _, err := auth.LoadClaudeCodeCredential(); err == nil {
-		found = append(found, ExternalLogin{Provider: "anthropic", Label: "anthropic — via existing Claude Code login"})
+		found = append(found, ExternalLogin{Provider: "anthropic", Label: "Claude Code / Claude Enterprise (existing login)"})
 	}
 	if _, err := auth.LoadCodexCredential(); err == nil {
-		found = append(found, ExternalLogin{Provider: "openai", Label: "openai — via existing Codex CLI login"})
+		found = append(found, ExternalLogin{Provider: "openai", Label: "Codex CLI (existing login)"})
 	}
 	return found
 }

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="chronos-arch-title chronos-arch-desc">
+      <title id="chronos-arch-title">Chronos Code high-level architecture</title>
+      <desc id="chronos-arch-desc">Architecture diagram showing the TUI and HTTP server handing requests to an Orchestrator, which resolves YAML config, executes through the Chronos framework library, and coordinates MCP tool servers, guardrail enforcement, and a self-learning loop.</desc>
+      <defs>
+<style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap');</style>
+        <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/>
+        </pattern>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+      </defs>
+
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+      <rect width="100%" height="100%" fill="url(#dots)" opacity="0.5"/>
+
+      <!-- Zone: Interfaces -->
+      <rect x="308" y="60" width="560" height="112" rx="8"
+            fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <rect x="756" y="64" width="96" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="804" y="73" fill="rgba(45,49,66,0.40)" font-size="7" font-family="'Geist Mono', monospace"
+            text-anchor="middle" letter-spacing="0.14em">INTERFACES</text>
+
+      <!-- Arrows (drawn before boxes) -->
+      <!-- A1: TUI -> Orchestrator -->
+      <path d="M 432,156 V 192 Q 432,200 440,200 H 460 Q 468,200 468,208 V 232"
+            fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- A2: HTTP Server -> Orchestrator -->
+      <path d="M 728,156 V 192 Q 728,200 720,200 H 596 Q 588,200 588,208 V 232"
+            fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- A3: Orchestrator -> Config Resolver -->
+      <line x1="648" y1="264" x2="768" y2="264" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- A4: Orchestrator -> Chronos Framework (primary execution flow) -->
+      <line x1="528" y1="296" x2="528" y2="372" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+      <!-- A5: Config Resolver -> Chronos Framework -->
+      <line x1="868" y1="296" x2="868" y2="372" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- A6: Chronos Framework -> MCP Servers -->
+      <line x1="488" y1="444" x2="488" y2="524" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- A7: Chronos Framework -> Guardrails -->
+      <line x1="688" y1="444" x2="688" y2="524" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <!-- A8: Chronos Framework -> Self-Learning Loop -->
+      <line x1="888" y1="444" x2="888" y2="524" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+      <!-- Arrow labels -->
+      <rect x="684" y="244" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="708" y="253" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CONFIG</text>
+
+      <rect x="504" y="320" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="528" y="329" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EXECUTE</text>
+
+      <rect x="464" y="472" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="488" y="481" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CALL</text>
+
+      <rect x="664" y="472" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="688" y="481" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ENFORCE</text>
+
+      <rect x="864" y="472" width="48" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="888" y="481" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TRACE</text>
+
+      <!-- Node: TUI (REPL) -->
+      <rect x="332" y="92" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="332" y="92" width="200" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="340" y="100" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="354" y="109" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TUI</text>
+      <text x="432" y="128" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">TUI (REPL)</text>
+      <text x="432" y="144" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">interactive session</text>
+
+      <!-- Node: HTTP Server -->
+      <rect x="628" y="92" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="628" y="92" width="200" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="636" y="100" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="650" y="109" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">API</text>
+      <text x="728" y="128" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">HTTP Server</text>
+      <text x="728" y="144" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">team / enterprise</text>
+
+      <!-- Node: Orchestrator (focal) -->
+      <rect x="408" y="232" width="240" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="408" y="232" width="240" height="64" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <rect x="416" y="240" width="36" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.50)" stroke-width="0.8"/>
+      <text x="434" y="249" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CORE</text>
+      <text x="528" y="268" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Orchestrator</text>
+      <text x="528" y="284" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">agent lifecycle · routing</text>
+
+      <!-- Node: Config Resolver -->
+      <rect x="768" y="232" width="200" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="768" y="232" width="200" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="776" y="240" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.40)" stroke-width="0.8"/>
+      <text x="790" y="249" fill="#2d3142" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CFG</text>
+      <text x="868" y="268" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Config Resolver</text>
+      <text x="868" y="284" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">.chronos-code/*.yaml</text>
+
+      <!-- Node: Chronos Framework (library) -->
+      <rect x="408" y="372" width="560" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="408" y="372" width="560" height="72" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+      <rect x="416" y="380" width="28" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.50)" stroke-width="0.8"/>
+      <text x="430" y="389" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">LIB</text>
+      <text x="688" y="410" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Chronos Framework</text>
+      <text x="688" y="428" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Agent SDK · Harness · Memory · Engine · Store</text>
+
+      <!-- Node: MCP Servers (external) -->
+      <rect x="408" y="524" width="160" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="408" y="524" width="160" height="64" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <rect x="416" y="532" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+      <text x="430" y="541" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+      <text x="488" y="560" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">MCP Servers</text>
+      <text x="488" y="576" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">stdio · SSE tools</text>
+
+      <!-- Node: Guardrails (security) -->
+      <rect x="608" y="524" width="160" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="608" y="524" width="160" height="64" rx="6" fill="rgba(235,108,54,0.05)" stroke="#eb6c36" stroke-width="1" stroke-dasharray="4,4"/>
+      <rect x="616" y="532" width="28" height="12" rx="2" fill="transparent" stroke="rgba(235,108,54,0.40)" stroke-width="0.8"/>
+      <text x="630" y="541" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SEC</text>
+      <text x="688" y="560" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Guardrails</text>
+      <text x="688" y="576" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">security policy · caps</text>
+
+      <!-- Node: Self-Learning Loop (optional) -->
+      <rect x="808" y="524" width="160" height="64" rx="6" fill="#f5f5f5"/>
+      <rect x="808" y="524" width="160" height="64" rx="6" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+      <rect x="816" y="532" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.20)" stroke-width="0.8"/>
+      <text x="830" y="541" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OPT</text>
+      <text x="888" y="560" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Self-Learning Loop</text>
+      <text x="888" y="576" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">trace → distill → YAML</text>
+
+      <!-- Legend strip -->
+      <line x1="40" y1="628" x2="1240" y2="628" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <text x="40" y="644" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+
+      <rect x="40" y="660" width="14" height="10" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <text x="60" y="668" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Focal / core</text>
+
+      <rect x="180" y="660" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="200" y="668" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Backend</text>
+
+      <rect x="320" y="660" width="14" height="10" rx="2" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+      <text x="340" y="668" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Library (Chronos)</text>
+
+      <rect x="500" y="660" width="14" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <text x="520" y="668" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">External</text>
+
+      <rect x="640" y="660" width="14" height="10" rx="2" fill="rgba(235,108,54,0.05)" stroke="#eb6c36" stroke-width="1" stroke-dasharray="3,2"/>
+      <text x="660" y="668" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Security enforcement</text>
+
+      <line x1="880" y1="665" x2="908" y2="665" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+      <text x="916" y="668" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Primary execution flow</text>
+    </svg>

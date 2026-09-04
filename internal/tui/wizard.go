@@ -59,9 +59,9 @@ func newLoginWizard(m *appModel) *loginWizard {
 		w.items = append(w.items, wizardItem{label: "Use existing login", hint: d.Label, value: "existing:" + d.Provider})
 	}
 	w.items = append(w.items,
-		wizardItem{label: "Sign in with ChatGPT subscription", hint: "opens your browser · OpenAI only, see /help", value: subscriptionLoginValue},
-		wizardItem{label: "Use an API key", value: "apikey"},
-		wizardItem{label: "Custom OAuth (enterprise IdP)", hint: "requires your own registered OAuth app", value: "oauth"},
+		wizardItem{label: "Sign in with ChatGPT / Codex subscription", hint: "opens your browser · OpenAI Codex / ChatGPT", value: subscriptionLoginValue},
+		wizardItem{label: "Use an API key", hint: "Anthropic, OpenAI, Azure, Gemini, …", value: "apikey"},
+		wizardItem{label: "Enterprise OAuth (your IdP)", hint: "requires your own registered OAuth app", value: "oauth"},
 	)
 	return w
 }

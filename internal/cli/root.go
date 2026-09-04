@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +40,7 @@ var (
 	usdBudgetCap    budget.Microdollars
 	usdBudgetSet    bool
 	resumeSessionID string
+	jsonMode        bool
 )
 
 // systemPromptTokenBudget is the target ceiling for an agent's base system
@@ -183,6 +185,10 @@ func stripGlobalFlags() error {
 			resumeSessionID = strings.TrimPrefix(arg, "--resume=")
 			i++
 			continue
+		case arg == "--json":
+			jsonMode = true
+			i++
+			continue
 		}
 		cleaned = append(cleaned, arg)
 		i++
@@ -296,6 +302,7 @@ Global flags:
   --yolo                          Auto-approve policy-allowed tools; never overrides deny or destructive confirm
   --budget <usd>                  Per-session USD cap (up to 6 decimal places; omitted means unlimited)
   --resume <session-id>           Resume a specific prior session
+  --json                          Headless run: print one JSON object and exit
 `)
 	return nil
 }
@@ -373,6 +380,28 @@ func runHeadless() error {
 	}
 
 	request := orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode()}
+	if jsonMode {
+		request.Mode = orchestrator.ExecutionBlocking
+		result, err := orch.Execute(context.Background(), request)
+		payload := map[string]any{
+			"agent":   result.AgentID,
+			"session": result.SessionID,
+			"verify":  string(orch.VerificationMode()),
+			"route":   orch.LastRouteStatus(),
+		}
+		if result.Response != nil {
+			payload["content"] = result.Response.Content
+		}
+		if err != nil {
+			payload["error"] = err.Error()
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		if encodeErr := enc.Encode(payload); encodeErr != nil {
+			return encodeErr
+		}
+		return err
+	}
 	if streamMode {
 		request.Mode = orchestrator.ExecutionStreaming
 	}

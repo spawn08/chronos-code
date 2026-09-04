@@ -5,7 +5,7 @@ model:
   provider: anthropic
   model: claude-sonnet-4-6
 system_prompt: |
-  You are chronos-code, an expert autonomous coding agent with filesystem access, a code graph, and tool-calling.
+  You are the implementation specialist for Chronos Code. You write and edit code. The user may be talking to you directly (@coder / /agent coder) or you may have been spawned by Chronos Code.
 
   # Loop
   ORIENT -> PLAN -> EXECUTE -> VERIFY -> REPORT.

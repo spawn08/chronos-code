@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/spawn08/chronos/engine/model"
 	chronosstream "github.com/spawn08/chronos/engine/stream"
@@ -128,7 +130,10 @@ type subagentDoneMsg struct {
 
 type shellDoneMsg struct{ err error }
 
-type clipboardWriteResultMsg struct{ err error }
+type clipboardWriteResultMsg struct {
+	err      error
+	okStatus string
+}
 
 type clipboardReadResultMsg struct {
 	content string
@@ -226,29 +231,35 @@ type appModel struct {
 	workDir       string
 	ready         bool
 
-	blocks            []string // finalized, already-rendered transcript entries
-	blockBytes        int
-	trimmedBlocks     int
-	finalizedText     string
-	finalizedDirty    bool
-	finalizedCount    int
-	transcriptBuf     strings.Builder
-	activeAgentText   strings.Builder
-	activeTurnItems   []turnItem
-	activityIndex     map[string]int
-	activityArgs      map[string]any
-	pendingToolCalls  int
-	pendingSubagents  int
-	turnModelCalls    int
-	turnSubagents     int
-	lastModelCalls    int
-	lastSubagents     int
-	lastChunk         string
-	lastAssistantText string
-	activeRequest     string
-	activeSkill       string
-	budgetRetried     bool
-	lastUsage         model.Usage
+	blocks              []string // finalized, already-rendered transcript entries
+	blockBytes          int
+	trimmedBlocks       int
+	finalizedText       string
+	finalizedDirty      bool
+	finalizedCount      int
+	transcriptBuf       strings.Builder
+	activeAgentText     strings.Builder
+	activeTurnItems     []turnItem
+	activityIndex       map[string]int
+	activityArgs        map[string]any
+	pendingToolCalls    int
+	pendingSubagents    int
+	turnModelCalls      int
+	turnSubagents       int
+	lastModelCalls      int
+	lastSubagents       int
+	lastChunk           string
+	lastAssistantText   string
+	lastTurnItems       []turnItem
+	lastTurnErr         error
+	lastTurnInterrupted bool
+	lastTurnBlockIdx    int
+	hasLastTurn         bool
+	toolsExpanded       bool
+	activeRequest       string
+	activeSkill         string
+	budgetRetried       bool
+	lastUsage           model.Usage
 	// lastKnownUsage persists the most recent non-zero lastUsage across
 	// turns (finalizeTurn zeroes lastUsage itself once each turn's status
 	// line is computed), so /context and the status bar's context-usage
@@ -313,9 +324,10 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		history:        NewHistory(),
 		clipboardRead:  clipboard.ReadAll,
 		clipboardWrite: clipboard.WriteAll,
-		mouseCapture:   true,
+		mouseCapture:   false,
 		workDir:        wd,
 		followOutput:   true,
+		statusMsg:      orch.StartupHints(ctx),
 	}
 
 	p := tea.NewProgram(m)
@@ -471,6 +483,10 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clipboardWriteResultMsg:
 		if msg.err != nil {
 			m.statusMsg = "copy failed: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.okStatus != "" {
+			m.statusMsg = msg.okStatus
 		} else {
 			m.statusMsg = "copied response"
 		}
@@ -541,11 +557,23 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key.Matches(msg, keys.CopyLast) {
-		if m.lastAssistantText == "" {
-			m.statusMsg = "nothing to copy"
+		content, okStatus, err := m.copyText("")
+		if err != nil {
+			m.statusMsg = err.Error()
 			return m, nil
 		}
-		return m, m.copyClipboardCmd()
+		return m, m.copyClipboardCmd(content, okStatus)
+	}
+	if key.Matches(msg, keys.CopyCode) {
+		content, okStatus, err := m.copyText("code")
+		if err != nil {
+			m.statusMsg = err.Error()
+			return m, nil
+		}
+		return m, m.copyClipboardCmd(content, okStatus)
+	}
+	if key.Matches(msg, keys.ToggleTools) {
+		return m.toggleToolDetails()
 	}
 	if key.Matches(msg, keys.Paste) {
 		m.statusMsg = "pasting"
@@ -611,6 +639,10 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, keys.ModelPicker):
 		m.picker = newModelPicker(m)
+		m.resizeViewport()
+		return m, nil
+	case key.Matches(msg, keys.LoginWizard):
+		m.wizard = newLoginWizard(m)
 		m.resizeViewport()
 		return m, nil
 	case key.Matches(msg, keys.CommandPalette):
@@ -1321,13 +1353,26 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			if id == m.orch.ActiveID() {
 				marker = "* "
 			}
-			a, _ := m.orch.GetAgent(id)
-			fmt.Fprintf(&b, "%s%s — %s\n", marker, id, a.Name)
+			role := ""
+			if id == m.orch.PrimaryID() {
+				role = " (primary)"
+			}
+			a, ok := m.orch.GetAgent(id)
+			name := id
+			if ok {
+				name = a.Name
+			}
+			fmt.Fprintf(&b, "%s%s%s — %s\n", marker, id, role, name)
 		}
 		m.appendSystem(strings.TrimRight(b.String(), "\n"))
 	case "/agent":
 		if arg == "" {
-			m.appendSystem(fmt.Sprintf("active: %s", m.orch.ActiveID()))
+			active := m.orch.ActiveID()
+			if active == m.orch.PrimaryID() {
+				m.appendSystem(fmt.Sprintf("active: %s (primary Chronos Code)", active))
+			} else {
+				m.appendSystem(fmt.Sprintf("active: %s (specialist; primary is %s)", active, m.orch.PrimaryID()))
+			}
 		} else if err := m.orch.SwitchAgent(arg); err != nil {
 			m.appendError(err)
 		} else {
@@ -1384,15 +1429,21 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.lastModelCalls = 0
 		m.lastSubagents = 0
 		m.lastAssistantText = ""
+		m.lastTurnItems = nil
+		m.lastTurnErr = nil
+		m.lastTurnInterrupted = false
+		m.hasLastTurn = false
+		m.lastTurnBlockIdx = -1
 		m.queuedMessages = nil
 		m.statusMsg = "new session started"
 		m.followOutput = true
 	case "/copy":
-		if m.lastAssistantText == "" {
-			m.statusMsg = "nothing to copy"
+		content, okStatus, err := m.copyText(arg)
+		if err != nil {
+			m.statusMsg = err.Error()
 			break
 		}
-		copyCmd := m.copyClipboardCmd()
+		copyCmd := m.copyClipboardCmd(content, okStatus)
 		m.viewport.SetContent(m.renderTranscript())
 		m.viewport.GotoBottom()
 		return m, copyCmd
@@ -1454,9 +1505,62 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.appendSystem(status)
 		}
 	case "/workspace":
+		var b strings.Builder
 		if ws := m.orch.Workspace(); ws != nil {
-			m.appendSystem(ws.Banner())
+			b.WriteString(ws.Banner())
+			b.WriteByte('\n')
 		}
+		b.WriteString(m.orch.GraphStatus(m.ctx))
+		m.appendSystem(strings.TrimRight(b.String(), "\n"))
+	case "/resume":
+		if m.sending {
+			m.appendError(fmt.Errorf("cannot resume a session while a response is in progress"))
+			break
+		}
+		id, err := m.orch.ResumeSession(m.ctx, arg)
+		if err != nil {
+			m.appendError(err)
+			break
+		}
+		m.appendSystem("resumed session " + id)
+	case "/compact":
+		if m.sending {
+			m.appendError(fmt.Errorf("cannot compact while a response is in progress"))
+			break
+		}
+		if err := m.orch.CompactActiveSession(m.ctx); err != nil {
+			m.appendError(err)
+			break
+		}
+		m.appendSystem("session compacted")
+	case "/rewind", "/undo":
+		path, err := m.orch.UndoLastEdit()
+		if err != nil {
+			m.appendError(err)
+			break
+		}
+		m.appendSystem("undid last edit: " + path)
+	case "/plan":
+		switch strings.ToLower(arg) {
+		case "", "status":
+			if m.orch.PlanMode() {
+				m.appendSystem("plan mode on · mutating tools blocked · /plan off to execute")
+			} else {
+				m.appendSystem("plan mode off · /plan on to plan without edits")
+			}
+		case "on", "true", "1":
+			m.orch.SetPlanMode(true)
+			m.appendSystem("plan mode on · agent may not write files or run shell")
+		case "off", "false", "0":
+			m.orch.SetPlanMode(false)
+			m.appendSystem("plan mode off · edits allowed under the usual permission prompt")
+		default:
+			m.appendError(fmt.Errorf("usage: /plan [on|off]"))
+		}
+	case "/learn":
+		m.handleLearnCommand(arg)
+	case "/sandbox":
+		m.appendSystem(m.orch.SandboxStatus())
 	case "/mouse":
 		m.mouseCapture = !m.mouseCapture
 		if m.mouseCapture {
@@ -1472,15 +1576,69 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *appModel) copyClipboardCmd() tea.Cmd {
+func (m *appModel) copyText(arg string) (content, okStatus string, err error) {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(arg)))
+	if len(fields) > 0 && fields[0] == "code" {
+		return m.copyCodeBlock(fields[1:])
+	}
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "", "last", "response":
+		if m.lastAssistantText != "" {
+			return m.lastAssistantText, "copied response", nil
+		}
+		if visible := m.visiblePlainText(); strings.TrimSpace(visible) != "" {
+			return visible, "copied visible output", nil
+		}
+		return "", "", fmt.Errorf("nothing to copy")
+	case "visible":
+		visible := m.visiblePlainText()
+		if strings.TrimSpace(visible) == "" {
+			return "", "", fmt.Errorf("nothing to copy")
+		}
+		return visible, "copied visible output", nil
+	case "all", "transcript":
+		all := strings.TrimRight(ansi.Strip(m.viewport.GetContent()), "\n")
+		if strings.TrimSpace(all) == "" {
+			return "", "", fmt.Errorf("nothing to copy")
+		}
+		return all, "copied transcript", nil
+	default:
+		return "", "", fmt.Errorf("usage: /copy [last|visible|all|code]")
+	}
+}
+
+func (m *appModel) copyCodeBlock(args []string) (content, okStatus string, err error) {
+	src := m.lastAssistantText
+	if src == "" {
+		src = m.activeAgentText.String()
+	}
+	blocks := extractFencedBlocks(src)
+	if len(blocks) == 0 {
+		return "", "", fmt.Errorf("no code block to copy")
+	}
+	idx := len(blocks) - 1
+	if len(args) > 0 {
+		n, parseErr := strconv.Atoi(args[0])
+		if parseErr != nil || n < 1 || n > len(blocks) {
+			return "", "", fmt.Errorf("code block %s not found (%d in reply)", args[0], len(blocks))
+		}
+		idx = n - 1
+	}
+	return blocks[idx], "copied code block", nil
+}
+
+func (m *appModel) visiblePlainText() string {
+	return strings.TrimRight(ansi.Strip(m.viewport.View()), "\n")
+}
+
+func (m *appModel) copyClipboardCmd(content, okStatus string) tea.Cmd {
 	m.statusMsg = "copying"
 	write := m.clipboardWrite
-	content := m.lastAssistantText
 	return func() tea.Msg {
 		if write == nil {
 			return clipboardWriteResultMsg{err: fmt.Errorf("clipboard writer unavailable")}
 		}
-		return clipboardWriteResultMsg{err: write(content)}
+		return clipboardWriteResultMsg{err: write(content), okStatus: okStatus}
 	}
 }
 
@@ -1731,7 +1889,57 @@ func (m *appModel) handleContextCommand() {
 		b.WriteString(RenderContextReport(*m.lastContextReport, m.lastMemoryIntent, m.viewport.Width()))
 		b.WriteByte('\n')
 	}
+	b.WriteString(m.orch.LastRouteStatus() + " · verify:" + string(m.orch.VerificationMode()) + "\n")
+	b.WriteString(m.orch.GraphStatus(m.ctx) + "\n")
+	if files := m.orch.ProjectInstructionFiles(); len(files) > 0 {
+		b.WriteString("project instructions: " + strings.Join(files, ", ") + "\n")
+	} else {
+		b.WriteString("project instructions: none discovered (AGENTS.md / CLAUDE.md)\n")
+	}
 	m.appendSystem(strings.TrimRight(b.String(), "\n"))
+}
+
+func (m *appModel) handleLearnCommand(arg string) {
+	fields := strings.Fields(arg)
+	if len(fields) == 0 || fields[0] == "list" {
+		pending, err := m.orch.ListPendingSuggestions()
+		if err != nil {
+			m.appendError(err)
+			return
+		}
+		if len(pending) == 0 {
+			m.appendSystem("no pending learning suggestions · run: chronos-code learn suggest")
+			return
+		}
+		var b strings.Builder
+		b.WriteString("pending suggestions (accept is review-gated):\n")
+		for _, sug := range pending {
+			fmt.Fprintf(&b, "  %s  %-8s  %s\n", sug.ID, sug.Kind, sug.Title)
+		}
+		b.WriteString("use /learn accept <id> or /learn reject <id>")
+		m.appendSystem(strings.TrimRight(b.String(), "\n"))
+		return
+	}
+	if len(fields) < 2 {
+		m.appendError(fmt.Errorf("usage: /learn [list|accept <id>|reject <id>]"))
+		return
+	}
+	switch fields[0] {
+	case "accept":
+		if err := m.orch.AcceptSuggestion(fields[1]); err != nil {
+			m.appendError(err)
+			return
+		}
+		m.appendSystem("accepted " + fields[1] + " · takes effect on next start")
+	case "reject":
+		if err := m.orch.RejectSuggestion(fields[1]); err != nil {
+			m.appendError(err)
+			return
+		}
+		m.appendSystem("rejected " + fields[1])
+	default:
+		m.appendError(fmt.Errorf("usage: /learn [list|accept <id>|reject <id>]"))
+	}
 }
 
 func (m *appModel) usageSummary() string {
@@ -1841,9 +2049,39 @@ func (m *appModel) refreshPrompt() {
 	} else {
 		m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " ❯ "
 	}
+	if m.signedIn() {
+		m.input.Placeholder = "Message chronos-code..."
+	} else {
+		m.input.Placeholder = "Not signed in — /login or Ctrl+L · Claude Code, Codex, or API key"
+	}
 	if m.width > 0 {
 		m.input.SetWidth(m.width - inputBoxBorderWidth - inputBoxPaddingWidth)
 	}
+}
+
+func (m *appModel) signedIn() bool {
+	if m.orch == nil {
+		return false
+	}
+	candidates := []string{"anthropic", "openai"}
+	if provider, _ := m.orch.ActiveModelInfo(); provider != "" {
+		candidates = append([]string{provider}, candidates...)
+	}
+	return len(m.orch.AuthorizedProviders(m.ctx, candidates)) > 0
+}
+
+func (m *appModel) sessionIdentitySegment() string {
+	if m.orch == nil {
+		return ""
+	}
+	if !m.signedIn() {
+		return "not signed in · /login"
+	}
+	_, modelID := m.orch.ActiveModelInfo()
+	if modelID == "" {
+		return "signed in"
+	}
+	return modelID
 }
 
 // appendUserTurn, appendSystem and appendError all wrap to m.viewport.Width():
@@ -1905,17 +2143,24 @@ func (m *appModel) appendBlock(block string) {
 	} else {
 		m.finalizedDirty = true
 	}
-	trimmed := false
+	trimmed := 0
 	for m.blockBytes > maxTranscriptBytes && len(m.blocks) > 1 {
 		m.blockBytes -= len(m.blocks[0])
 		m.blocks = m.blocks[1:]
 		m.trimmedBlocks++
-		trimmed = true
+		trimmed++
 	}
-	if trimmed {
+	if trimmed > 0 {
 		m.finalizedText = ""
 		m.finalizedCount = 0
 		m.finalizedDirty = true
+		if m.hasLastTurn {
+			m.lastTurnBlockIdx -= trimmed
+			if m.lastTurnBlockIdx < 0 {
+				m.hasLastTurn = false
+				m.lastTurnItems = nil
+			}
+		}
 	}
 }
 
@@ -1949,30 +2194,13 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.stopActivity = nil
 		m.activityCh = nil
 	}
-	if err != nil {
-		var b strings.Builder
-		b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
-		b.WriteByte('\n')
-		if len(m.activeTurnItems) > 0 {
-			b.WriteString(m.renderTurnItems())
-			b.WriteString("\n\n")
-		}
-		message := classifyErrorMessage(err)
-		if budgetExhausted {
-			message += "\n\nThis session has reached its cumulative token limit. Use /clear to start a fresh session."
-		}
-		b.WriteString(wrapText(styleError.Render(message), m.viewport.Width()))
-		m.appendBlock(b.String())
-	} else {
-		var b strings.Builder
-		b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
-		b.WriteString("\n")
-		if interrupted && m.activeAgentText.Len() == 0 {
-			b.WriteString(styleDim.Render("interrupted"))
-		} else {
-			b.WriteString(m.renderTurnItems())
-		}
-		m.appendBlock(b.String())
+	m.lastTurnItems = cloneTurnItems(m.activeTurnItems)
+	m.lastTurnErr = err
+	m.lastTurnInterrupted = interrupted
+	m.appendBlock(m.buildAssistantBlock(m.lastTurnItems, interrupted, err))
+	m.hasLastTurn = true
+	m.lastTurnBlockIdx = len(m.blocks) - 1
+	if err == nil {
 		m.lastAssistantText = m.activeAgentText.String()
 	}
 	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 {
@@ -2142,30 +2370,178 @@ func (m *appModel) renderFinalizedTranscript() string {
 	return m.finalizedText
 }
 
-func (m *appModel) renderTurnItems() string {
+func (m *appModel) toggleToolDetails() (tea.Model, tea.Cmd) {
+	m.toolsExpanded = !m.toolsExpanded
+	if m.toolsExpanded {
+		m.statusMsg = "tool details expanded · ctrl+o collapses"
+	} else {
+		m.statusMsg = "tool details collapsed · ctrl+o expands"
+	}
+	if !m.sending {
+		m.rewriteLastTurnBlock()
+	}
+	if m.ready {
+		m.refreshViewport()
+	}
+	return m, nil
+}
+
+func (m *appModel) rewriteLastTurnBlock() {
+	if !m.hasLastTurn || m.lastTurnBlockIdx < 0 || m.lastTurnBlockIdx >= len(m.blocks) {
+		return
+	}
+	next := m.buildAssistantBlock(m.lastTurnItems, m.lastTurnInterrupted, m.lastTurnErr)
+	prev := m.blocks[m.lastTurnBlockIdx]
+	m.blockBytes -= len(prev)
+	m.blocks[m.lastTurnBlockIdx] = next
+	m.blockBytes += len(next)
+	m.finalizedDirty = true
+}
+
+func cloneTurnItems(items []turnItem) []turnItem {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]turnItem, len(items))
+	copy(out, items)
+	return out
+}
+
+func turnHasText(items []turnItem) bool {
+	for _, item := range items {
+		if item.kind == turnItemText && item.content != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *appModel) buildAssistantBlock(items []turnItem, interrupted bool, err error) string {
 	var b strings.Builder
-	for i := range m.activeTurnItems {
-		item := &m.activeTurnItems[i]
+	b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
+	if err != nil {
+		b.WriteByte('\n')
+		if len(items) > 0 {
+			b.WriteString(m.renderItemList(items))
+			b.WriteString("\n\n")
+		}
+		message := classifyErrorMessage(err)
+		if strings.Contains(err.Error(), "token budget exceeded for session") {
+			message += "\n\nThis session has reached its cumulative token limit. Use /clear to start a fresh session."
+		}
+		b.WriteString(wrapText(styleError.Render(message), m.viewport.Width()))
+		return b.String()
+	}
+	b.WriteString("\n")
+	if interrupted && !turnHasText(items) {
+		b.WriteString(styleDim.Render("interrupted"))
+		return b.String()
+	}
+	b.WriteString(m.renderItemList(items))
+	return b.String()
+}
+
+func activityNeedsPeek(content string) bool {
+	return strings.Contains(content, "· running") ||
+		strings.Contains(content, "· working") ||
+		strings.Contains(content, "· failed")
+}
+
+func (m *appModel) renderTurnItems() string {
+	return m.renderItemList(m.activeTurnItems)
+}
+
+func (m *appModel) renderItemList(items []turnItem) string {
+	if m.toolsExpanded {
+		return m.renderExpandedItems(items)
+	}
+	return m.renderCollapsedItems(items)
+}
+
+func (m *appModel) renderExpandedItems(items []turnItem) string {
+	var b strings.Builder
+	for i := range items {
+		item := &items[i]
 		if i > 0 {
-			if item.kind == turnItemText || m.activeTurnItems[i-1].kind == turnItemText {
+			if item.kind == turnItemText || items[i-1].kind == turnItemText {
 				b.WriteString("\n\n")
 			} else {
 				b.WriteByte('\n')
 			}
 		}
-		if item.kind == turnItemActivity {
-			b.WriteString(truncateToWidth(item.content, m.viewport.Width()))
-			continue
-		}
-		if item.rendered != "" && item.renderedWidth == m.viewport.Width() {
-			b.WriteString(item.rendered)
-			continue
-		}
-		item.rendered = RenderMarkdownLite(item.content, m.viewport.Width())
-		item.renderedWidth = m.viewport.Width()
-		b.WriteString(item.rendered)
+		b.WriteString(m.renderOneItem(item))
 	}
 	return b.String()
+}
+
+func (m *appModel) renderCollapsedItems(items []turnItem) string {
+	var b strings.Builder
+	i := 0
+	wrote := false
+	for i < len(items) {
+		if items[i].kind == turnItemText {
+			if wrote {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(m.renderOneItem(&items[i]))
+			wrote = true
+			i++
+			continue
+		}
+		j := i
+		for j < len(items) && items[j].kind == turnItemActivity {
+			j++
+		}
+		if wrote {
+			if i > 0 && items[i-1].kind == turnItemText {
+				b.WriteString("\n\n")
+			} else {
+				b.WriteByte('\n')
+			}
+		}
+		b.WriteString(m.renderActivityRun(items[i:j]))
+		wrote = true
+		i = j
+	}
+	return b.String()
+}
+
+func (m *appModel) renderActivityRun(run []turnItem) string {
+	if len(run) <= 1 {
+		return m.renderOneItem(&run[0])
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %s %s %s",
+		styleTool.Render("▸"),
+		styleBold.Render(fmt.Sprintf("%d tool calls", len(run))),
+		styleDim.Render("· ctrl+o expand"))
+	seenLast := false
+	for i := range run {
+		if activityNeedsPeek(run[i].content) || i == len(run)-1 {
+			if i == len(run)-1 {
+				seenLast = true
+			}
+			b.WriteByte('\n')
+			b.WriteString(m.renderOneItem(&run[i]))
+		}
+	}
+	if !seenLast {
+		b.WriteByte('\n')
+		b.WriteString(m.renderOneItem(&run[len(run)-1]))
+	}
+	return b.String()
+}
+
+func (m *appModel) renderOneItem(item *turnItem) string {
+	if item.kind == turnItemActivity {
+		return truncateToWidth(item.content, m.viewport.Width())
+	}
+	if item.rendered != "" && item.renderedWidth == m.viewport.Width() {
+		return item.rendered
+	}
+	item.rendered = RenderMarkdownLite(item.content, m.viewport.Width())
+	item.renderedWidth = m.viewport.Width()
+	return item.rendered
 }
 
 func progressLabel(toolCalls, subagents int, state string) string {
@@ -2353,6 +2729,18 @@ func (m *appModel) renderStatusBar() string {
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
 		leftText = " ● " + runLabel + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
 	}
+	if m.width >= 100 {
+		if m.orch.PlanMode() {
+			leftText += " │ plan"
+		}
+		leftText += " │ " + string(m.orch.VerificationMode())
+		if route := m.orch.LastRouteStatus(); route != "route:—" {
+			leftText += " │ " + route
+		}
+	}
+	if ident := m.sessionIdentitySegment(); ident != "" {
+		leftText += " │ " + ident
+	}
 	if ctxSeg := m.contextUsageSegment(); ctxSeg != "" {
 		leftText += " │ " + ctxSeg
 	}
@@ -2376,7 +2764,10 @@ func (m *appModel) renderStatusBar() string {
 	leftText = truncateToWidth(leftText, m.width)
 	leftSeg := styleStatusLeft.Render(leftText)
 
-	rightText := " wheel scroll │ ctrl+a agents │ ctrl+/ commands │ ctrl+c interrupt/quit "
+	rightText := " drag-select copy │ ctrl+shift+c last │ ctrl+/ commands │ ctrl+c interrupt/quit "
+	if m.mouseCapture {
+		rightText = " shift+drag copy │ ctrl+shift+c last │ ctrl+/ commands │ ctrl+c interrupt/quit "
+	}
 	if m.statusMsg != "" {
 		rightText = " " + m.statusMsg + " │" + rightText
 	}

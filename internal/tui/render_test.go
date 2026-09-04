@@ -89,6 +89,24 @@ func TestRenderMarkdownLite_FencedCodeBlockVerbatim(t *testing.T) {
 	}
 }
 
+func TestExtractFencedBlocks(t *testing.T) {
+	src := "intro\n```go\nfunc A() {}\n```\nmid\n```\nsecond\nblock\n```\n"
+	got := extractFencedBlocks(src)
+	want := []string{"func A() {}", "second\nblock"}
+	if len(got) != len(want) {
+		t.Fatalf("extractFencedBlocks() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("extractFencedBlocks()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	open := extractFencedBlocks("```python\nprint(1)")
+	if len(open) != 1 || open[0] != "print(1)" {
+		t.Fatalf("unclosed fence = %#v", open)
+	}
+}
+
 func TestRenderMarkdownLite_Empty(t *testing.T) {
 	if got := RenderMarkdownLite("", 0); got != "" {
 		t.Errorf("RenderMarkdownLite(\"\") = %q, want empty", got)

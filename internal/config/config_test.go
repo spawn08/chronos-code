@@ -32,6 +32,30 @@ func TestEmbeddedDefaultsStartFreshSession(t *testing.T) {
 	}
 }
 
+func TestEmbeddedDefaultsStartWithChronosCodePrimary(t *testing.T) {
+	cfg, err := loadEmbeddedDefaults()
+	if err != nil {
+		t.Fatalf("loadEmbeddedDefaults() error = %v", err)
+	}
+	injectSystemPrompts(cfg)
+	if len(cfg.Agents) == 0 || cfg.Agents[0].ID != "chronos-code" {
+		t.Fatalf("first embedded agent = %#v, want chronos-code", cfg.Agents)
+	}
+	if cfg.Agents[0].System == "" {
+		t.Fatal("chronos-code system prompt was not injected")
+	}
+	foundCoder := false
+	for _, configured := range cfg.Agents {
+		if configured.ID == "coder" {
+			foundCoder = true
+			break
+		}
+	}
+	if !foundCoder {
+		t.Fatal("embedded defaults dropped the coder specialist")
+	}
+}
+
 func TestEmbeddedDefaultsUseReportVerification(t *testing.T) {
 	cfg, err := loadEmbeddedDefaults()
 	if err != nil {

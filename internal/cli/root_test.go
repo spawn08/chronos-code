@@ -16,6 +16,19 @@ import (
 	"github.com/spawn08/chronos/engine/mcp"
 )
 
+func TestStripGlobalFlagsJSON(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "--json", "run", "hello"})
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	if !jsonMode {
+		t.Fatal("--json was not parsed")
+	}
+	if got := strings.Join(os.Args, " "); got != "chronos-code run hello" {
+		t.Fatalf("args after strip = %q", got)
+	}
+}
+
 func TestStripGlobalFlagsBudget(t *testing.T) {
 	tests := []struct {
 		name string
@@ -463,6 +476,7 @@ func resetGlobalFlags(t *testing.T, args []string) {
 	originalUSDBudgetCap := usdBudgetCap
 	originalUSDBudgetSet := usdBudgetSet
 	originalResumeSessionID := resumeSessionID
+	originalJSONMode := jsonMode
 
 	os.Args = append([]string(nil), args...)
 	configPath = ""
@@ -473,6 +487,7 @@ func resetGlobalFlags(t *testing.T, args []string) {
 	usdBudgetCap = 0
 	usdBudgetSet = false
 	resumeSessionID = ""
+	jsonMode = false
 
 	t.Cleanup(func() {
 		os.Args = originalArgs
@@ -484,5 +499,6 @@ func resetGlobalFlags(t *testing.T, args []string) {
 		usdBudgetCap = originalUSDBudgetCap
 		usdBudgetSet = originalUSDBudgetSet
 		resumeSessionID = originalResumeSessionID
+		jsonMode = originalJSONMode
 	})
 }

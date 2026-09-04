@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -87,7 +88,7 @@ func newExecutionTestAgent(id string, provider model.Provider) *agent.Agent {
 	}
 }
 
-func TestExecuteRoutesToSpecialistAndModel(t *testing.T) {
+func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 	coder := &executionTestProvider{name: "coder", modelID: "coder-model"}
 	debugger := &executionTestProvider{name: "debugger", modelID: "debugger-model"}
 	routed := &executionTestProvider{name: "routed", modelID: "high-debug"}
@@ -107,6 +108,7 @@ func TestExecuteRoutesToSpecialistAndModel(t *testing.T) {
 			"debugger": newExecutionTestAgent("debugger", debugger),
 		},
 		active:         "coder",
+		primary:        "coder",
 		router:         rt,
 		routingConfig:  cfg,
 		routingState:   make(map[string]router.Classification),
@@ -120,11 +122,25 @@ func TestExecuteRoutesToSpecialistAndModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if result.AgentID != "debugger" || result.Response == nil || result.Response.Content != "routed" {
-		t.Fatalf("Execute() result = %#v, want routed debugger response", result)
+	if result.AgentID != "coder" || result.Response == nil || result.Response.Content != "routed" {
+		t.Fatalf("Execute() result = %#v, want routed primary response", result)
 	}
-	if got := orch.agents["debugger"].Model; got.Name() != "routed" || got.Model() != "high-debug" {
-		t.Fatalf("debugger model = (%q, %q), want (routed, high-debug)", got.Name(), got.Model())
+	if len(debugger.requests) != 0 {
+		t.Fatalf("debugger requests = %d, want 0 (specialists are advisory)", len(debugger.requests))
+	}
+	if got := orch.agents["coder"].Model; got.Name() != "routed" || got.Model() != "high-debug" {
+		t.Fatalf("primary model = (%q, %q), want (routed, high-debug)", got.Name(), got.Model())
+	}
+	req := routed.request(0)
+	if req == nil {
+		t.Fatal("expected a model request on the routed primary provider")
+	}
+	joined := ""
+	for _, msg := range req.Messages {
+		joined += msg.Content
+	}
+	if !strings.Contains(joined, "spawn_subagent debugger") || !strings.Contains(joined, "Path: complexity=") {
+		t.Fatalf("prompt missing specialist or path hint: %q", joined)
 	}
 }
 
@@ -395,9 +411,9 @@ func contains(text, substring string) bool {
 
 // failNProvider fails the first N calls with the given error, then succeeds.
 type failNProvider struct {
-	mu       sync.Mutex
+	mu        sync.Mutex
 	failsLeft int
-	failErr  error
+	failErr   error
 }
 
 func (p *failNProvider) Chat(_ context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
