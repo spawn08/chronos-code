@@ -356,6 +356,30 @@ func TestStreamDeltaSchedulesBoundedRender(t *testing.T) {
 	}
 }
 
+func TestStreamDeltaPreservesConsecutiveIdenticalChunks(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	ch := make(chan *model.ChatResponse)
+
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{Content: "\n", Delta: true}, ch: ch})
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{Content: "\n", Delta: true}, ch: ch})
+	if got := m.activeAgentText.String(); got != "\n\n" {
+		t.Fatalf("streamed text = %q, want both identical deltas", got)
+	}
+}
+
+func TestStreamDeltaDoesNotDuplicateCumulativeFrame(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	ch := make(chan *model.ChatResponse)
+
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{Content: "hello", Delta: true}, ch: ch})
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{Content: "hello world"}, ch: ch})
+	if got := m.activeAgentText.String(); got != "hello world" {
+		t.Fatalf("streamed text = %q, want cumulative frame merged once", got)
+	}
+}
+
 func TestViewEnablesMouseWheelEvents(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -510,7 +534,7 @@ func TestStreamDeltaShowsSubagentToolCall(t *testing.T) {
 		ch: make(chan *model.ChatResponse),
 	})
 
-	if got := m.renderTranscript(); !strings.Contains(got, "spawn_subagent") || !strings.Contains(got, "researcher") {
+	if got := m.renderTranscript(); !strings.Contains(got, "@researcher") || !strings.Contains(got, "working") {
 		t.Errorf("stream transcript does not show subagent call: %q", got)
 	}
 	_, _ = m.handleStreamDelta(streamDeltaMsg{
@@ -545,6 +569,58 @@ func TestActivityShowsAgentToolLifecycle(t *testing.T) {
 	}
 	if strings.Contains(got, "search · running") || strings.Count(got, " search ") != 1 {
 		t.Errorf("activity lifecycle was not updated in place: %q", got)
+	}
+}
+
+func TestSubagentStreamPreviewIsUpdatedByActivityWithoutDuplication(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+	m.activityCh = make(chan chronosstream.Event)
+	responses := make(chan *model.ChatResponse)
+
+	_, _ = m.handleStreamDelta(streamDeltaMsg{resp: &model.ChatResponse{ToolCalls: []model.ToolCall{{
+		ID: "call-1", Name: "spawn_subagent", Arguments: `{"agent":"researcher","task":"inspect routing"}`,
+	}}}, ch: responses})
+	_, _ = m.handleActivity(activityMsg{event: chronosstream.Event{
+		Type: chronosstream.EventToolCall,
+		Data: map[string]any{"agent": "coder", "id": "call-1", "tool": "spawn_subagent", "args": map[string]any{"agent": "researcher", "task": "inspect routing"}},
+	}, ch: m.activityCh})
+	_, _ = m.handleActivity(activityMsg{event: chronosstream.Event{
+		Type: chronosstream.EventToolResult,
+		Data: map[string]any{"agent": "coder", "id": "call-1", "tool": "spawn_subagent"},
+	}, ch: m.activityCh})
+
+	got := m.renderTranscript()
+	if strings.Count(got, "@researcher") != 1 || !strings.Contains(got, "completed") || strings.Contains(got, "working") {
+		t.Fatalf("subagent lifecycle was not updated in place: %q", got)
+	}
+}
+
+func TestFinalizeTurnSettlesVisibleSubagentPreview(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+	m.appendTurnActivity(RenderSubagentActivity("@coder ", map[string]any{"agent": "researcher", "task": "inspect routing"}, false, nil))
+	m.appendTurnText("final answer")
+	m.finalizeTurn(nil)
+
+	got := m.renderTranscript()
+	if !strings.Contains(got, "@researcher") || !strings.Contains(got, "completed") || strings.Contains(got, "working") {
+		t.Fatalf("final transcript retained stale subagent state: %q", got)
+	}
+}
+
+func TestLateActivityAfterFinalizationIsIgnored(t *testing.T) {
+	m := newTestAppModel(t)
+	m.turnID = 3
+	m.sending = false
+	_, cmd := m.handleActivity(activityMsg{turnID: 3, event: chronosstream.Event{
+		Type: chronosstream.EventToolCall,
+		Data: map[string]any{"agent": "researcher", "tool": "file_read"},
+	}})
+	if cmd != nil || len(m.activeTurnItems) != 0 {
+		t.Fatalf("late activity mutated finalized turn: items=%#v", m.activeTurnItems)
 	}
 }
 

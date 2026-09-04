@@ -31,6 +31,20 @@ func TestRenderMarkdownLite_BoldItalicCode(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownLite_InlineCodePreservesMarkdownCharacters(t *testing.T) {
+	got := RenderMarkdownLite("call `foo_bar` with `**literal**`", 0)
+	if got != "call foo_bar with **literal**" {
+		t.Fatalf("RenderMarkdownLite(inline code) = %q", got)
+	}
+}
+
+func TestRenderMarkdownLite_DoesNotPadShortLines(t *testing.T) {
+	got := RenderMarkdownLite("short", 40)
+	if got != "short" {
+		t.Fatalf("RenderMarkdownLite(short) = %q, want no right padding", got)
+	}
+}
+
 func TestRenderMarkdownLite_BulletList(t *testing.T) {
 	got := RenderMarkdownLite("- first\n- second", 0)
 	want := "• first\n• second"
@@ -119,6 +133,19 @@ func TestRenderToolActivityFormatsReadableArgumentsAndErrors(t *testing.T) {
 	failed := RenderToolActivity("", "shell", map[string]any{"command": "false"}, true, "exit status 1")
 	if !strings.Contains(failed, "· failed") || !strings.Contains(failed, "error=exit status 1") {
 		t.Errorf("failed activity does not expose its error: %q", failed)
+	}
+}
+
+func TestRenderSubagentActivityShowsIdentityTaskAndLifecycle(t *testing.T) {
+	running := RenderToolActivity("@coder ", "spawn_subagent", map[string]any{"agent": "researcher", "task": "inspect routing"}, false, nil)
+	for _, want := range []string{"@coder", "@researcher", "working", "inspect routing"} {
+		if !strings.Contains(running, want) {
+			t.Errorf("running subagent activity missing %q: %q", want, running)
+		}
+	}
+	completed := RenderToolActivity("@coder ", "spawn_subagent", map[string]any{"agent": "researcher", "task": "inspect routing"}, true, nil)
+	if !strings.Contains(completed, "completed") || strings.Contains(completed, "working") {
+		t.Errorf("completed subagent activity = %q", completed)
 	}
 }
 

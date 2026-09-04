@@ -922,6 +922,7 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 			result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
 				Message:          message,
 				Mode:             orchestrator.ExecutionStreaming,
+				SessionID:        orch.CurrentSessionID(),
 				VerificationMode: orch.VerificationMode(),
 			})
 			if err != nil {
@@ -929,7 +930,9 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 			}
 			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream}
 		}
-		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode()})
+		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
+			Message: message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
+		})
 		return chatDoneMsg{turnID: turnID, resp: result.Response, err: err}
 	}
 }
@@ -986,24 +989,36 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	if resp.Usage.CompletionTokens > m.lastUsage.CompletionTokens {
 		m.lastUsage.CompletionTokens = resp.Usage.CompletionTokens
 	}
-	if m.activityCh == nil {
-		for _, tc := range resp.ToolCalls {
+	for _, tc := range resp.ToolCalls {
+		if tc.Name == "spawn_subagent" {
+			if m.activityIndex == nil {
+				m.activityIndex = make(map[string]int)
+				m.activityArgs = make(map[string]any)
+			}
+			key := "stream/" + tc.ID
+			if _, exists := m.activityIndex[key]; !exists {
+				var args map[string]any
+				_ = json.Unmarshal([]byte(tc.Arguments), &args)
+				m.appendTurnActivity(RenderToolActivity("", tc.Name, args, false, nil))
+				m.activityIndex[key] = len(m.activeTurnItems) - 1
+				m.activityArgs[key] = args
+				m.pendingToolCalls++
+				m.pendingSubagents++
+				m.turnSubagents++
+			}
+		} else if m.activityCh == nil {
 			m.appendTurnActivity(RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
 			m.pendingToolCalls++
-			if tc.Name == "spawn_subagent" {
-				m.pendingSubagents++
-			}
 		}
 	}
-	if resp.Content != "" && resp.Content != m.lastChunk {
+	if text := m.streamText(resp); text != "" {
 		if m.activityCh == nil && m.pendingToolCalls > 0 && len(resp.ToolCalls) == 0 {
 			label := progressLabel(m.pendingToolCalls, m.pendingSubagents, "completed")
 			m.appendTurnActivity(styleAgentName.Render("  ✓ " + label))
 			m.pendingToolCalls = 0
 			m.pendingSubagents = 0
 		}
-		m.appendTurnText(resp.Content)
-		m.lastChunk = resp.Content
+		m.appendTurnText(text)
 	}
 	cmds := []tea.Cmd{listenStream(msg.ctx, msg.turnID, msg.ch)}
 	if !m.renderScheduled {
@@ -1013,8 +1028,29 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *appModel) streamText(resp *model.ChatResponse) string {
+	if resp == nil || resp.Content == "" {
+		return ""
+	}
+	if resp.Delta {
+		return resp.Content
+	}
+	current := m.activeAgentText.String()
+	if current == "" {
+		return resp.Content
+	}
+	if strings.HasPrefix(resp.Content, current) {
+		return strings.TrimPrefix(resp.Content, current)
+	}
+	if resp.Content == m.lastChunk {
+		return ""
+	}
+	m.lastChunk = resp.Content
+	return resp.Content
+}
+
 func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
-	if msg.turnID != m.turnID {
+	if msg.turnID != m.turnID || !m.sending {
 		return m, nil
 	}
 	data, _ := msg.event.Data.(map[string]any)
@@ -1037,18 +1073,25 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		m.appendTurnActivity(RenderModelActivity(label, modelName))
 	case chronosstream.EventToolCall:
 		line := RenderToolActivity(label, toolName, data["args"], false, data["error"])
-		m.appendTurnActivity(line)
 		if m.activityIndex == nil {
 			m.activityIndex = make(map[string]int)
 			m.activityArgs = make(map[string]any)
 		}
-		m.activityIndex[activityKey] = len(m.activeTurnItems) - 1
-		m.activityArgs[activityKey] = data["args"]
-		m.pendingToolCalls++
-		if toolName == "spawn_subagent" {
-			m.pendingSubagents++
-			m.turnSubagents++
+		provisionalKey := "stream/" + callID
+		if idx, ok := m.activityIndex[provisionalKey]; toolName == "spawn_subagent" && callID != "" && ok {
+			m.activeTurnItems[idx].content = line
+			m.activityIndex[activityKey] = idx
+			delete(m.activityIndex, provisionalKey)
+		} else {
+			m.appendTurnActivity(line)
+			m.activityIndex[activityKey] = len(m.activeTurnItems) - 1
+			m.pendingToolCalls++
+			if toolName == "spawn_subagent" {
+				m.pendingSubagents++
+				m.turnSubagents++
+			}
 		}
+		m.activityArgs[activityKey] = data["args"]
 	case chronosstream.EventToolResult:
 		line := RenderToolActivity(label, toolName, m.activityArgs[activityKey], true, data["error"])
 		if idx, ok := m.activityIndex[activityKey]; ok && idx < len(m.activeTurnItems) {
@@ -1684,6 +1727,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 			err = fmt.Errorf("%w; automatic session rollover failed: %v", err, resetErr)
 		}
 	}
+	m.settleTurnActivities(err)
 	m.sending = false
 	if m.turnCancel != nil {
 		m.turnCancel()
@@ -1773,6 +1817,21 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.queuedMessages = m.queuedMessages[1:]
 	_, cmd := m.handleSubmit(queued)
 	return cmd
+}
+
+func (m *appModel) settleTurnActivities(err error) {
+	for i := range m.activeTurnItems {
+		if m.activeTurnItems[i].kind != turnItemActivity {
+			continue
+		}
+		if err == nil {
+			m.activeTurnItems[i].content = strings.ReplaceAll(m.activeTurnItems[i].content, "· working", "· completed")
+			m.activeTurnItems[i].content = strings.ReplaceAll(m.activeTurnItems[i].content, "· running", "· done")
+		} else {
+			m.activeTurnItems[i].content = strings.ReplaceAll(m.activeTurnItems[i].content, "· working", "· failed")
+			m.activeTurnItems[i].content = strings.ReplaceAll(m.activeTurnItems[i].content, "· running", "· failed")
+		}
+	}
 }
 
 func (m *appModel) retryInFreshSession() (tea.Cmd, error) {

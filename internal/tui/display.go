@@ -10,8 +10,6 @@ import (
 
 func StreamResponse(ch <-chan *model.ChatResponse, w io.Writer) (model.Usage, error) {
 	var usage model.Usage
-	var lastContent string
-
 	for resp := range ch {
 		if resp.Err != nil {
 			return usage, resp.Err
@@ -28,13 +26,8 @@ func StreamResponse(ch <-chan *model.ChatResponse, w io.Writer) (model.Usage, er
 			fmt.Fprintf(w, "\n  \033[36m> %s(%s)\033[0m\n", tc.Name, argSummary)
 		}
 
-		if resp.Content != "" && resp.Content != lastContent {
-			if resp.Delta {
-				fmt.Fprint(w, resp.Content)
-			} else {
-				fmt.Fprint(w, resp.Content)
-			}
-			lastContent = resp.Content
+		if resp.Content != "" {
+			fmt.Fprint(w, resp.Content)
 		}
 	}
 	fmt.Fprintln(w)
