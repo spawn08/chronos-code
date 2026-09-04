@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/spawn08/chronos-code/internal/modelinfo"
 )
 
 const maxCommandCompletions = 5
@@ -12,7 +14,7 @@ var mcpSubcommands = []string{"/mcp connect"}
 
 // inputCompletions returns fuzzy matches for commands, explicit skill
 // invocations, agent mentions, file mentions, and command arguments.
-func inputCompletions(input string, agents, subagents, skillNames, files, mcpServers []string) []string {
+func inputCompletions(input string, agents, subagents, skillNames, files, mcpServers, models []string) []string {
 	_, query := completionSpan(input)
 	if strings.HasPrefix(query, "@") {
 		return atCompletions(query, agents, files)
@@ -20,6 +22,22 @@ func inputCompletions(input string, agents, subagents, skillNames, files, mcpSer
 
 	var candidates []string
 	switch {
+	case strings.HasPrefix(input, "/think") && (input == "/think" || strings.HasPrefix(input, "/think ")):
+		rest := strings.TrimSpace(strings.TrimPrefix(input, "/think"))
+		if strings.ContainsAny(rest, " \t\n") {
+			return nil
+		}
+		for _, name := range []string{"off", "low", "medium", "high"} {
+			candidates = append(candidates, "/think "+name)
+		}
+		candidates = append(candidates, "/think")
+	case strings.HasPrefix(input, "/model "):
+		for _, name := range models {
+			candidates = append(candidates, "/model "+name)
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
 	case strings.HasPrefix(input, "/learn") && (input == "/learn" || strings.HasPrefix(input, "/learn ")):
 		rest := strings.TrimSpace(strings.TrimPrefix(input, "/learn"))
 		if strings.ContainsAny(rest, " \t\n") {
@@ -179,29 +197,76 @@ func fileMentionScore(path, needle string) int {
 }
 
 func (m *appModel) inputCompletions() []string {
+	value := m.input.Value()
+	if m.completionCached && m.completionCacheKey == value {
+		return m.completionCache
+	}
+	out := m.computeInputCompletions(value)
+	m.completionCacheKey = value
+	m.completionCache = out
+	m.completionCached = true
+	return out
+}
+
+func (m *appModel) computeInputCompletions(value string) []string {
 	if m.orch == nil {
-		return inputCompletions(m.input.Value(), nil, nil, nil, nil, nil)
+		return inputCompletions(value, nil, nil, nil, nil, nil, nil)
 	}
-	skillNames := make([]string, 0, len(m.orch.ListSkills()))
-	for _, skill := range m.orch.ListSkills() {
-		skillNames = append(skillNames, skill.Name)
+	_, query := completionSpan(value)
+	at := strings.HasPrefix(query, "@")
+	slash := strings.HasPrefix(value, "/")
+	if !at && !slash {
+		return nil
 	}
-	var files []string
-	if ws := m.orch.Workspace(); ws != nil {
-		files = ws.Files
+
+	var agents, subagents, skillNames, files, mcpServers, models []string
+	if at || strings.HasPrefix(value, "/agent ") || strings.HasPrefix(value, "/subagent ") {
+		agents = m.orch.ListAgents()
 	}
-	var mcpServers []string
-	for _, status := range m.orch.MCPStatuses() {
-		mcpServers = append(mcpServers, status.Name)
+	if strings.HasPrefix(value, "/subagent ") {
+		subagents = m.orch.ListSubagents()
 	}
-	return inputCompletions(m.input.Value(), m.orch.ListAgents(), m.orch.ListSubagents(), skillNames, files, mcpServers)
+	if slash && !strings.ContainsAny(value, " \t\n") {
+		for _, skill := range m.orch.ListSkills() {
+			skillNames = append(skillNames, skill.Name)
+		}
+	}
+	if at {
+		if ws := m.orch.Workspace(); ws != nil {
+			files = ws.Files
+		}
+	}
+	if strings.HasPrefix(value, "/mcp") {
+		for _, status := range m.orch.MCPStatuses() {
+			mcpServers = append(mcpServers, status.Name)
+		}
+	}
+	if strings.HasPrefix(value, "/model ") {
+		models = m.modelCompletionValues()
+	}
+	return inputCompletions(value, agents, subagents, skillNames, files, mcpServers, models)
+}
+
+func (m *appModel) modelCompletionValues() []string {
+	list := modelinfo.All()
+	if m.orch != nil {
+		authorized := m.orch.AuthorizedProviders(m.ctx, distinctProviders(list))
+		if len(authorized) > 0 {
+			list = filterByProviders(list, authorized)
+		}
+	}
+	out := make([]string, 0, len(list))
+	for _, info := range list {
+		out = append(out, info.Provider+" "+info.Model)
+	}
+	return out
 }
 
 func commandCompletions(input string) []string {
 	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \t\n") {
 		return nil
 	}
-	return inputCompletions(input, nil, nil, nil, nil, nil)
+	return inputCompletions(input, nil, nil, nil, nil, nil, nil)
 }
 
 func fuzzyCommandScore(candidate, query string) int {

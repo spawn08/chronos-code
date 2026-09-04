@@ -44,7 +44,7 @@ func TestBuffer_PromotePreventsEviction(t *testing.T) {
 	buf.Put("A", &Entry{Symbol: graph.Symbol{Name: "A"}})
 	buf.Put("B", &Entry{Symbol: graph.Symbol{Name: "B"}})
 	buf.Put("C", &Entry{Symbol: graph.Symbol{Name: "C"}})
-	buf.Get("A") // promote A
+	buf.Get("A")                                          // promote A
 	buf.Put("D", &Entry{Symbol: graph.Symbol{Name: "D"}}) // evicts B (oldest after promotion)
 
 	if _, ok := buf.Get("A"); !ok {

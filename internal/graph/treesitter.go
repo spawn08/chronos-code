@@ -156,9 +156,9 @@ func tsLangFor(ext string) *tsLangSpec {
 		return &tsLangSpec{
 			lang: ruby.GetLanguage(),
 			declKinds: map[string]SymbolKind{
-				"method":  KindMethod,
-				"class":   KindStruct,
-				"module":  KindType,
+				"method": KindMethod,
+				"class":  KindStruct,
+				"module": KindType,
 			},
 		}
 	case ".php":

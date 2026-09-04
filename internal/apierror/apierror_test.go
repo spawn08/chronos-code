@@ -17,10 +17,10 @@ func TestClassifyNil(t *testing.T) {
 
 func TestClassifyAPIError(t *testing.T) {
 	tests := []struct {
-		name       string
-		err        error
-		wantCat    Category
-		retryable  bool
+		name        string
+		err         error
+		wantCat     Category
+		retryable   bool
 		compactable bool
 	}{
 		{

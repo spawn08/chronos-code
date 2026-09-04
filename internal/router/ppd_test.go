@@ -86,7 +86,7 @@ func TestPPDPolicy_PlannerLimitAndFallbackFailureBypass(t *testing.T) {
 	}
 }
 
-func TestPPDPolicy_BundledConfigDefaultsToShadow(t *testing.T) {
+func TestPPDPolicy_BundledConfigDefaultsToEnabled(t *testing.T) {
 	data, err := defaults.ReadFile("routing.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -95,9 +95,12 @@ func TestPPDPolicy_BundledConfigDefaultsToShadow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.PPD.Mode != PPDModeEnabled {
+		t.Fatalf("bundled PPD mode = %q, want %q", cfg.PPD.Mode, PPDModeEnabled)
+	}
 	decision := NewPPDPolicy(cfg.PPD, nil).Decide(PPDRequest{PackageCount: cfg.PPD.Thresholds.MinPackages})
-	if decision.Action != PPDActionShadow || decision.ClassifierVersion != cfg.PPD.Version {
-		t.Errorf("bundled policy decision = %+v, want shadow with version %q", decision, cfg.PPD.Version)
+	if decision.Action != PPDActionDelegate || decision.ClassifierVersion != cfg.PPD.Version || decision.Specialist != "ppd-planner" {
+		t.Errorf("bundled policy decision = %+v, want delegate with version %q", decision, cfg.PPD.Version)
 	}
 }
 

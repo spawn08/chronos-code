@@ -71,7 +71,7 @@ func newModelPicker(m *appModel) *picker {
 // paletteCommands lists every slash command documented in helpText, in the
 // same order, for Ctrl+/'s fuzzy-filtered palette.
 var paletteCommands = []string{
-	"/agents", "/agent", "/model", "/login", "/logout", "/whoami",
+	"/agents", "/agent", "/model", "/think", "/login", "/logout", "/whoami",
 	"/context", "/usage", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace",
 	"/skills", "/mcp", "/subagent", "/copy", "/mouse", "/clear", "/perf", "/help", "/quit",
 }

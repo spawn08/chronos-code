@@ -183,9 +183,10 @@ func writeCompletedPPDFixture(t *testing.T) (string, string, string, string) {
 		for _, arm := range ppdArms {
 			for _, repeat := range ppdRepeats {
 				tokens, calls := 90, 9
-				if arm == "ARM-A" {
+				switch arm {
+				case "ARM-A":
 					tokens, calls = 100, 10
-				} else if arm == "ARM-D" {
+				case "ARM-D":
 					tokens, calls = 80, 8
 				}
 				results.Runs = append(results.Runs, PPDCompletedRun{TaskID: task.ID, Arm: arm, Repeat: repeat, Status: "completed", Tokens: tokens, ModelCalls: calls, ToolCalls: 1, WallTimeMS: 100, VerifiedSuccessful: &verified})

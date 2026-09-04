@@ -14,8 +14,8 @@ func StreamResponse(ch <-chan *model.ChatResponse, w io.Writer) (model.Usage, er
 		if resp.Err != nil {
 			return usage, resp.Err
 		}
-		if resp.Usage.PromptTokens > 0 {
-			usage = resp.Usage
+		if resp.Usage.PromptTokens > 0 || resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 {
+			usage.Merge(resp.Usage)
 		}
 		if resp.Usage.CompletionTokens > usage.CompletionTokens {
 			usage.CompletionTokens = resp.Usage.CompletionTokens
@@ -48,10 +48,9 @@ func PrintResponse(resp *model.ChatResponse, w io.Writer) {
 }
 
 func PrintUsage(usage model.Usage, w io.Writer) {
-	if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
-		fmt.Fprintf(w, "\033[2m[tokens: %d prompt + %d completion = %d total]\033[0m\n",
-			usage.PromptTokens, usage.CompletionTokens,
-			usage.PromptTokens+usage.CompletionTokens)
+	if usage.PromptTokens > 0 || usage.CompletionTokens > 0 || usage.CacheReadTokens > 0 || usage.CacheCreationTokens > 0 {
+		fmt.Fprintf(w, "\033[2m[tokens: %d input + %d cache read + %d cache write + %d completion]\033[0m\n",
+			usage.UncachedPromptTokens(), usage.CacheReadTokens, usage.CacheCreationTokens, usage.CompletionTokens)
 	}
 }
 

@@ -569,14 +569,13 @@ func (h budgetHook) After(ctx context.Context, evt *hooks.Event) error {
 		return nil
 	}
 	delete(evt.Metadata, budgetReservationMetadataKey)
-	var inputTokens, outputTokens int
+	var usage model.Usage
 	if evt.Error == nil {
 		if resp, ok := evt.Output.(*model.ChatResponse); ok && resp != nil {
-			inputTokens = resp.Usage.PromptTokens
-			outputTokens = resp.Usage.CompletionTokens
+			usage = resp.Usage
 		}
 	}
-	return reservation.tracker.Reconcile(reservation.id, inputTokens, outputTokens)
+	return reservation.tracker.ReconcileUsage(reservation.id, usage)
 }
 
 // setupSessions establishes a persistent session id per agent (PRD P2-001).
@@ -2049,6 +2048,87 @@ func (o *Orchestrator) switchModel(ctx context.Context, agentID, provider, model
 		return fmt.Errorf("build provider for %s/%s: %w", provider, modelID, err)
 	}
 	a.Model = p
+	return nil
+}
+
+func thinkingBudgetForEffort(effort string) int {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low":
+		return 1024
+	case "high":
+		return 10000
+	default:
+		return 4096
+	}
+}
+
+func nativeThinkingUnsupported(a *agent.Agent) bool {
+	if a == nil || a.Model == nil {
+		return false
+	}
+	switch strings.ToLower(a.Model.Name()) {
+	case "gemini", "google":
+		return a.Tools != nil && len(a.Tools.List()) > 0
+	default:
+		return false
+	}
+}
+
+// ThinkingLevel reports the active agent's native thinking effort
+// ("off", "low", "medium", or "high").
+func (o *Orchestrator) ThinkingLevel() string {
+	o.routingMu.Lock()
+	defer o.routingMu.Unlock()
+	a := o.ActiveAgent()
+	if a == nil || !a.ReasoningConfig.Enabled {
+		return "off"
+	}
+	effort := strings.ToLower(strings.TrimSpace(a.ReasoningConfig.Effort))
+	switch effort {
+	case "low", "medium", "high":
+		return effort
+	default:
+		return "medium"
+	}
+}
+
+// SetThinking enables or disables provider-native thinking on every loaded
+// agent. level is off, low, medium, or high. Gemini agents that have tools
+// are skipped because Chronos cannot yet preserve their signed thought
+// blocks across tool rounds.
+func (o *Orchestrator) SetThinking(level string) error {
+	o.routingMu.Lock()
+	defer o.routingMu.Unlock()
+	level = strings.ToLower(strings.TrimSpace(level))
+	var cfg model.ReasoningConfig
+	switch level {
+	case "off", "none", "false", "0":
+		level = "off"
+	case "low", "medium", "high":
+		cfg = model.ReasoningConfig{
+			Enabled:      true,
+			Effort:       level,
+			BudgetTokens: thinkingBudgetForEffort(level),
+			Summary:      true,
+		}
+	default:
+		return fmt.Errorf("thinking level %q is invalid (want off, low, medium, or high)", level)
+	}
+
+	skipped := 0
+	for _, a := range o.agents {
+		if a == nil {
+			continue
+		}
+		if cfg.Enabled && nativeThinkingUnsupported(a) {
+			skipped++
+			continue
+		}
+		a.ReasoningConfig = cfg
+	}
+	if cfg.Enabled && skipped > 0 && skipped == len(o.agents) {
+		return fmt.Errorf("native thinking with tools is not supported for the loaded gemini agents")
+	}
 	return nil
 }
 

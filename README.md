@@ -214,6 +214,20 @@ obligations without current supporting evidence. The switch does not invent or
 implicitly run checks; obligations and evidence must come from the execution
 runtime.
 
+Native model thinking is off by default. Enable it in YAML or at runtime:
+
+```yaml
+defaults:
+  reasoning:
+    strategy: cot
+    native: true          # send provider thinking (Anthropic extended thinking, OpenAI reasoning effort)
+    effort: medium        # low, medium, or high
+    budget_tokens: 4096   # Anthropic/Gemini budget; inferred from effort if omitted
+    summary: true         # stream thinking summaries in the TUI
+```
+
+In the TUI, `/think off|low|medium|high` changes the level for the current session. `/model` lists models; Tab after `/model ` autocompletes authorized provider/model IDs.
+
 ### Capability Status
 
 | Capability | Status |
@@ -221,7 +235,7 @@ runtime.
 | Go code graph, SQLite sessions, deterministic memory recall | Default |
 | Tree-sitter graph support | Optional `treesitter` build |
 | PostgreSQL storage | Optional `postgres` build |
-| PPD complexity policy and specialist | Experimental; `shadow` by default |
+| PPD complexity policy and specialist | Live (`enabled`); qualifying work delegates to `ppd-planner` |
 | Verification enforcement | Optional configuration; `report` by default |
 | Learning suggestions | Default with human review; automatic distillation disabled |
 | Vector recall and branchable sessions | Roadmap |
@@ -275,10 +289,11 @@ It contains no usage, outcome, or verification measurements, and invalid runs
 are excluded from successful-task efficacy denominators. It does not support a
 PPD quality, efficiency, or rollout claim.
 
-PPD routing therefore defaults to observational `shadow` mode in
-`.chronos-code/routing.yaml`; qualifying requests are recorded as decisions and
-are not delegated to the PPD specialist. Do not change the mode to `enabled`
-until reproducible paired real-model runs provide valid evidence.
+PPD routing defaults to live `enabled` mode in embedded `routing.yaml`.
+Qualifying requests (high-risk or high-complexity work, explicit PPD, resume,
+or breadth past the file/package/call thresholds) are delegated to
+`ppd-planner`. Set `ppd.mode` to `shadow` to record decisions without
+invoking the specialist, or `disabled` to skip the policy.
 
 Use `chronos-code eval ppd --validate-only` to validate the registered matrix.
 This does not validate efficacy. Use `chronos-code eval ppd --report` to require

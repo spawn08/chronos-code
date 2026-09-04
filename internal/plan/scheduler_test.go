@@ -3,7 +3,6 @@ package plan
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 )
@@ -146,7 +145,7 @@ func claimAndStart(t *testing.T, ctx context.Context, scheduler *Scheduler, p Pl
 		t.Fatal(err)
 	}
 	if claimed.ID != NodeID(id) {
-		t.Fatal(fmt.Sprintf("claimed node = %q, want %q", claimed.ID, id))
+		t.Fatalf("claimed node = %q, want %q", claimed.ID, id)
 	}
 	if err := scheduler.Start(ctx, p, NodeID(id), LeaseID("lease-"+id)); err != nil {
 		t.Fatal(err)

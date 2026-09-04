@@ -77,11 +77,12 @@ model_routing:
         provider: "anthropic"
         model: "claude-opus-4-8"
 
-# Persistent-plan decomposition is initially observational. Qualifying work is
-# recorded as a shadow decision until experiment evidence permits delegation.
+# Persistent-plan decomposition is live. Qualifying work is delegated to the
+# PPD specialist. Set mode to "shadow" to observe without invoking it, or
+# "disabled" to skip the policy.
 ppd:
   version: "v1"
-  mode: "shadow"
+  mode: "enabled"
   specialist: "ppd-planner"
   max_planner_calls: 1
   thresholds:

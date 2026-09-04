@@ -45,6 +45,8 @@ type ModelPrice struct {
 type SessionCost struct {
 	InputTokens          int64
 	OutputTokens         int64
+	CacheReadTokens      int64
+	CacheCreationTokens  int64
 	SpentMicrodollars    Microdollars
 	ReservedMicrodollars Microdollars
 }
@@ -150,8 +152,14 @@ func (t *Tracker) Reserve(sessionID, modelID string, estimatedInputTokens, maxOu
 // and output usage. Passing zero usage releases a reservation for a failed
 // call. Actual spend is recorded even when it exceeds the original estimate.
 func (t *Tracker) Reconcile(id ReservationID, inputTokens, outputTokens int) error {
-	if inputTokens < 0 || outputTokens < 0 {
-		return fmt.Errorf("token counts must be non-negative: input %d, output %d", inputTokens, outputTokens)
+	return t.ReconcileUsage(id, model.Usage{PromptTokens: inputTokens, CompletionTokens: outputTokens})
+}
+
+// ReconcileUsage replaces an outstanding reservation with the call's actual
+// usage, applying cache-read (10%) and cache-write (125%) input pricing.
+func (t *Tracker) ReconcileUsage(id ReservationID, usage model.Usage) error {
+	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.CacheReadTokens < 0 || usage.CacheCreationTokens < 0 {
+		return fmt.Errorf("token counts must be non-negative: %+v", usage)
 	}
 
 	t.mu.Lock()
@@ -160,15 +168,17 @@ func (t *Tracker) Reconcile(id ReservationID, inputTokens, outputTokens int) err
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrUnknownReservation, id)
 	}
-	actual, err := reserved.price.cost(inputTokens, outputTokens)
+	actual, err := reserved.price.costWithCache(usage)
 	if err != nil {
 		return err
 	}
 	current := t.costs[reserved.sessionID]
 	current.ReservedMicrodollars -= reserved.cost
 	current.SpentMicrodollars += actual
-	current.InputTokens += int64(inputTokens)
-	current.OutputTokens += int64(outputTokens)
+	current.InputTokens += int64(usage.UncachedPromptTokens())
+	current.OutputTokens += int64(usage.CompletionTokens)
+	current.CacheReadTokens += int64(usage.CacheReadTokens)
+	current.CacheCreationTokens += int64(usage.CacheCreationTokens)
 	t.costs[reserved.sessionID] = current
 	delete(t.reservations, id)
 	return nil
@@ -204,6 +214,29 @@ func (p ModelPrice) cost(inputTokens, outputTokens int) (Microdollars, error) {
 		return 0, errors.New("model cost overflows microdollars")
 	}
 	return Microdollars(inputCost + outputCost), nil
+}
+
+func (p ModelPrice) costWithCache(usage model.Usage) (Microdollars, error) {
+	uncached := usage.UncachedPromptTokens()
+	base, err := p.cost(uncached, usage.CompletionTokens)
+	if err != nil {
+		return 0, err
+	}
+	write := int64(usage.CacheCreationTokens)
+	read := int64(usage.CacheReadTokens)
+	inRate := int64(p.InputMicrodollarsPerToken)
+	if write > 0 && inRate > math.MaxInt64/write/5 {
+		return 0, errors.New("model cost overflows microdollars")
+	}
+	writeCost := write * inRate * 5 / 4
+	readCost := int64(0)
+	if read > 0 {
+		readCost = read * inRate / 10
+	}
+	if writeCost > math.MaxInt64-int64(base) || readCost > math.MaxInt64-int64(base)-writeCost {
+		return 0, errors.New("model cost overflows microdollars")
+	}
+	return base + Microdollars(writeCost+readCost), nil
 }
 
 func exceedsCap(spent, reserved, requested, cap Microdollars) bool {
@@ -261,7 +294,7 @@ func (t *Tracker) After(ctx context.Context, evt *hooks.Event) error {
 	if t.used == nil {
 		t.used = make(map[string]int)
 	}
-	t.used[sessionID] += resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+	t.used[sessionID] += resp.Usage.PromptWindowTokens() + resp.Usage.CompletionTokens
 	t.mu.Unlock()
 	return nil
 }
