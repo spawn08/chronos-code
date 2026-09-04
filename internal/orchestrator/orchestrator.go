@@ -2192,11 +2192,10 @@ func (o *Orchestrator) DetectedExternalLogins() []ExternalLogin {
 
 // AuthorizedProviders returns the subset of candidates that currently
 // resolve to a non-empty credential (env var, chronos-code's own login, or
-// an external CLI reuse) via auth.Resolve. It makes no network calls —
-// just local env/keychain/file checks — so it's cheap to call on every
-// /model invocation, e.g. to decide which of modelinfo's static entries
-// are actually worth showing rather than dumping the whole catalog
-// regardless of whether any of it is usable.
+// an external CLI reuse) via auth.Resolve. It makes no network calls.
+// Keychain lookups are memoized by auth.Store for the process lifetime
+// (invalidated on login/logout), so repeating this for the TUI status bar
+// or /model completions stays cheap after the first scan.
 func (o *Orchestrator) AuthorizedProviders(ctx context.Context, candidates []string) []string {
 	store := auth.NewStore()
 	var out []string
