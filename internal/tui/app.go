@@ -26,6 +26,7 @@ import (
 	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/engine/tool"
 
+	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/memory"
@@ -65,9 +66,11 @@ type pendingApproval struct {
 // responsive to key events (including the approval modal) while a response
 // streams in.
 type streamStartedMsg struct {
-	turnID uint64
-	ctx    context.Context
-	ch     <-chan *model.ChatResponse
+	turnID        uint64
+	ctx           context.Context
+	ch            <-chan *model.ChatResponse
+	contextReport orchestrator.ContextReport
+	memoryIntent  *memory.IntentResult
 }
 
 type streamDeltaMsg struct {
@@ -109,9 +112,11 @@ type turnItem struct {
 
 // chatDoneMsg carries the result of a non-streaming orch.Chat call.
 type chatDoneMsg struct {
-	turnID uint64
-	resp   *model.ChatResponse
-	err    error
+	turnID        uint64
+	resp          *model.ChatResponse
+	contextReport orchestrator.ContextReport
+	memoryIntent  *memory.IntentResult
+	err           error
 }
 
 type subagentDoneMsg struct {
@@ -249,21 +254,24 @@ type appModel struct {
 	// line is computed), so /context and the status bar's context-usage
 	// segment have something to show between turns, not just immediately
 	// after one completes.
-	lastKnownUsage  model.Usage
-	turnCostStart   budget.SessionCost
-	lastTurnCost    budget.SessionCost
-	sending         bool
-	turnID          uint64
-	turnCtx         context.Context
-	turnCancel      context.CancelFunc
-	turnInterrupted bool
-	renderScheduled bool
-	activityCh      <-chan chronosstream.Event
-	stopActivity    func()
+	lastKnownUsage    model.Usage
+	lastContextReport *orchestrator.ContextReport
+	lastMemoryIntent  *memory.IntentResult
+	turnCostStart     budget.SessionCost
+	lastTurnCost      budget.SessionCost
+	sending           bool
+	turnID            uint64
+	turnCtx           context.Context
+	turnCancel        context.CancelFunc
+	turnInterrupted   bool
+	renderScheduled   bool
+	activityCh        <-chan chronosstream.Event
+	stopActivity      func()
 
 	statusMsg    string
 	perf         frameTiming
 	followOutput bool
+	mouseCapture bool
 	bottomView   string
 	bottomModal  bool
 
@@ -305,6 +313,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		history:        NewHistory(),
 		clipboardRead:  clipboard.ReadAll,
 		clipboardWrite: clipboard.WriteAll,
+		mouseCapture:   true,
 		workDir:        wd,
 		followOutput:   true,
 	}
@@ -338,21 +347,6 @@ func installApprovalHandlers(installer approvalHandlerInstaller, handler tool.Ap
 	installer.SetApprovalHandler(handler)
 }
 
-// autoRemember best-effort extracts a standing instruction/correction from
-// the user's message (PRD P2-002's heuristic auto-extraction) and saves it to
-// the orchestrator's memory store. Errors and a disabled/nil memory store are
-// both silently ignored — this is a background convenience, never something
-// that should interrupt the conversation.
-func autoRemember(orch *orchestrator.Orchestrator, message string) {
-	store := orch.MemoryStore()
-	if store == nil {
-		return
-	}
-	if category, content, ok := memory.ExtractFromMessage(message); ok {
-		_, _ = store.Add(category, content)
-	}
-}
-
 func (m *appModel) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, m.input.Focus())
 }
@@ -381,6 +375,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
+	case tea.MouseWheelMsg:
+		if !m.ready || !m.mouseCapture {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		m.followOutput = m.viewport.AtBottom()
+		return m, cmd
+
 	case tea.PasteMsg:
 		if m.approval != nil || m.wizard != nil || m.picker != nil || m.searching {
 			return m, nil
@@ -406,6 +409,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.turnID != m.turnID {
 			return m, nil
 		}
+		m.captureExecutionMetadata(msg.contextReport, msg.memoryIntent)
 		return m, listenStream(msg.ctx, msg.turnID, msg.ch)
 
 	case streamDeltaMsg:
@@ -432,6 +436,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.turnID != m.turnID {
 			return m, nil
 		}
+		m.captureExecutionMetadata(msg.contextReport, msg.memoryIntent)
 		if msg.resp != nil {
 			if m.activityCh == nil {
 				for _, tc := range msg.resp.ToolCalls {
@@ -814,7 +819,6 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	}
 
 	m.history.Add(displayLine)
-	autoRemember(m.orch, line)
 	m.appendUserTurn(displayLine)
 	m.refreshPrompt()
 
@@ -957,15 +961,39 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 				VerificationMode: orch.VerificationMode(),
 			})
 			if err != nil {
-				return chatDoneMsg{turnID: turnID, err: err}
+				return chatDoneMsg{turnID: turnID, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, err: err}
 			}
-			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream}
+			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent}
 		}
 		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
 			Message: message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
 		})
-		return chatDoneMsg{turnID: turnID, resp: result.Response, err: err}
+		return chatDoneMsg{turnID: turnID, resp: result.Response, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, err: err}
 	}
+}
+
+func (m *appModel) captureExecutionMetadata(report orchestrator.ContextReport, intent *memory.IntentResult) {
+	if len(report.Sources) == 0 {
+		return
+	}
+	report.Sources = append([]orchestrator.ContextSourceReport(nil), report.Sources...)
+	m.lastContextReport = &report
+	if intent == nil {
+		m.lastMemoryIntent = nil
+	} else {
+		copied := *intent
+		m.lastMemoryIntent = &copied
+	}
+	line := RenderContextSummary(report, intent)
+	if idx, ok := m.activityIndex["context-report"]; ok && idx < len(m.activeTurnItems) {
+		m.activeTurnItems[idx].content = line
+		return
+	}
+	m.appendTurnActivity(line)
+	if m.activityIndex == nil {
+		m.activityIndex = make(map[string]int)
+	}
+	m.activityIndex["context-report"] = len(m.activeTurnItems) - 1
 }
 
 // StartExecution starts one TUI turn through the common execution boundary.
@@ -1012,6 +1040,15 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	}
 	resp := msg.resp
 	if resp.Err != nil {
+		classified := apierror.Classify(resp.Err)
+		if apierror.IsCompactable(classified) && !m.budgetRetried && m.activeRequest != "" {
+			m.appendTurnActivity(styleDim.Render("  ↻ " + classified.Message))
+			if compactErr := m.orch.CompactActiveSession(m.ctx); compactErr == nil {
+				m.budgetRetried = true
+				m.refreshViewport()
+				return m, m.sendCmd(m.turnCtx, m.turnID, m.activeRequest)
+			}
+		}
 		return m, m.finalizeTurn(resp.Err)
 	}
 	if resp.Usage.PromptTokens > 0 {
@@ -1143,6 +1180,21 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		if toolName == "spawn_subagent" && m.pendingSubagents > 0 {
 			m.pendingSubagents--
 		}
+	case chronosstream.EventCustom:
+		eventType, _ := data["type"].(string)
+		if eventType == "api_retry" {
+			message, _ := data["message"].(string)
+			key := "api_retry/" + agentID
+			line := styleDim.Render("  ↻ " + message)
+			if idx, ok := m.activityIndex[key]; ok && idx < len(m.activeTurnItems) {
+				m.activeTurnItems[idx].content = line
+			} else {
+				m.appendTurnActivity(line)
+				m.activityIndex[key] = len(m.activeTurnItems) - 1
+			}
+		} else {
+			changed = false
+		}
 	default:
 		changed = false
 	}
@@ -1271,6 +1323,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.trimmedBlocks = 0
 		m.invalidateRenderCache()
 		m.lastKnownUsage = model.Usage{}
+		m.lastContextReport = nil
+		m.lastMemoryIntent = nil
 		m.lastTurnCost = budget.SessionCost{}
 		m.lastModelCalls = 0
 		m.lastSubagents = 0
@@ -1345,6 +1399,13 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	case "/workspace":
 		if ws := m.orch.Workspace(); ws != nil {
 			m.appendSystem(ws.Banner())
+		}
+	case "/mouse":
+		m.mouseCapture = !m.mouseCapture
+		if m.mouseCapture {
+			m.statusMsg = "mouse scrolling enabled · shift+drag selects text"
+		} else {
+			m.statusMsg = "mouse scrolling disabled · drag selects text"
 		}
 	default:
 		m.appendError(fmt.Errorf("unknown command: %s (try /help)", cmd))
@@ -1592,9 +1653,8 @@ func (m *appModel) handleWhoamiCommand(arg string) {
 	m.appendSystem(strings.TrimRight(b.String(), "\n"))
 }
 
-// handleContextCommand implements /context: active model, its known
-// context window (if any), the most recent turn's token usage, and the
-// session-wide budget line.
+// handleContextCommand implements /context: model and usage details followed
+// by the latest metadata-only context composition report.
 func (m *appModel) handleContextCommand() {
 	provider, modelID := m.orch.ActiveModelInfo()
 	var b strings.Builder
@@ -1607,6 +1667,12 @@ func (m *appModel) handleContextCommand() {
 	fmt.Fprintln(&b, m.usageSummary())
 	if status := m.orch.BudgetStatusLine(); status != "" {
 		fmt.Fprintln(&b, status)
+	}
+	if m.lastContextReport == nil {
+		b.WriteString("context sources: no context report yet\n")
+	} else {
+		b.WriteString(RenderContextReport(*m.lastContextReport, m.lastMemoryIntent, m.viewport.Width()))
+		b.WriteByte('\n')
 	}
 	m.appendSystem(strings.TrimRight(b.String(), "\n"))
 }
@@ -1741,7 +1807,33 @@ func (m *appModel) appendSystem(s string) {
 }
 
 func (m *appModel) appendError(err error) {
-	m.appendBlock(wrapText(styleError.Render("error: ")+err.Error(), m.viewport.Width()))
+	m.appendBlock(wrapText(styleError.Render(classifyErrorMessage(err)), m.viewport.Width()))
+}
+
+// classifyErrorMessage returns a user-friendly error message. If the error is
+// already classified (from the orchestrator retry layer), it uses that message.
+// Otherwise it classifies and returns a friendly message.
+func classifyErrorMessage(err error) string {
+	var classified *apierror.Classified
+	if errors.As(err, &classified) {
+		return classified.Message
+	}
+	if c := apierror.Classify(err); c != nil {
+		return c.Message
+	}
+	return "error: " + err.Error()
+}
+
+// classifyStatusMessage returns a short status bar label for a failed request.
+func classifyStatusMessage(err error) string {
+	var classified *apierror.Classified
+	if errors.As(err, &classified) {
+		return classified.Category.String()
+	}
+	if c := apierror.Classify(err); c != nil && c.Category != apierror.CategoryUnknown {
+		return c.Category.String()
+	}
+	return "request failed"
 }
 
 func (m *appModel) appendBlock(block string) {
@@ -1808,7 +1900,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 			b.WriteString(m.renderTurnItems())
 			b.WriteString("\n\n")
 		}
-		message := "error: " + err.Error()
+		message := classifyErrorMessage(err)
 		if budgetExhausted {
 			message += "\n\nThis session has reached its cumulative token limit. Use /clear to start a fresh session."
 		}
@@ -1849,7 +1941,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		if budgetExhausted {
 			m.statusMsg = "budget exhausted │ /clear to continue"
 		} else {
-			m.statusMsg = "request failed · " + m.usageStatus()
+			m.statusMsg = classifyStatusMessage(err) + " · " + m.usageStatus()
 		}
 	} else {
 		m.statusMsg = m.usageStatus()
@@ -2047,11 +2139,14 @@ func (m *appModel) View() tea.View {
 		return tea.View{AltScreen: true}
 	}
 
-	return tea.View{
+	view := tea.View{
 		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), m.bottomView, m.renderStatusBar()),
 		AltScreen: true,
-		MouseMode: tea.MouseModeCellMotion,
 	}
+	if m.mouseCapture {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
+	return view
 }
 
 func (m *appModel) renderCommandCompletions(completions []string) string {

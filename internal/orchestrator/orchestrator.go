@@ -25,6 +25,7 @@ import (
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 
 	"github.com/spawn08/chronos-code/internal/activation"
+	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/attention"
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
@@ -128,13 +129,14 @@ type ExecutionRequest struct {
 // ExecutionResult carries the common identity and either a blocking response
 // or a streaming response channel, according to the request mode.
 type ExecutionResult struct {
-	AgentID      string
-	SessionID    string
-	TaskID       string
-	PPDDecision  *router.PPDDecision
-	MemoryIntent *memory.IntentResult
-	Response     *model.ChatResponse
-	Stream       <-chan *model.ChatResponse
+	AgentID       string
+	SessionID     string
+	TaskID        string
+	PPDDecision   *router.PPDDecision
+	MemoryIntent  *memory.IntentResult
+	ContextReport ContextReport
+	Response      *model.ChatResponse
+	Stream        <-chan *model.ChatResponse
 }
 
 type taskIDKey struct{}
@@ -220,7 +222,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 	setupTracing(store, agents)
 
-	projectDir, _, discoverErr := config.Discover()
+	projectDir, userDir, discoverErr := config.Discover()
 	if discoverErr != nil {
 		fmt.Printf("warning: discover project config dir: %v (falling back to embedded defaults)\n", discoverErr)
 	}
@@ -251,9 +253,11 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	rt, routingConfig := setupRouter(cfg, projectDir)
 
-	grCfg := setupGuardrails(cfg, projectDir, agents)
-
-	policy := setupSecurity(cfg, projectDir, root, store, agents)
+	policy, err := setupSecurity(projectDir, userDir, root, store, agents)
+	if err != nil {
+		return nil, fmt.Errorf("configure security: %w", err)
+	}
+	grCfg := setupGuardrails(cfg, projectDir, agents, policy.SecretPatterns)
 
 	maxTokens, _ := grCfg.TokenBudget()
 	tracker := budget.NewTracker(maxTokens, cfg.Tools.CompressionThresholdTokens)
@@ -640,15 +644,24 @@ func setupSessionSummaries(manager *session.Manager, agents map[string]*agent.Ag
 			}
 			query, _ := ctx.Value(messageKey{}).(string)
 			summaries, err := manager.RecallSummaries(ctx, agentID, storage.SessionFromContext(ctx), query, maxPriorSessionSummaries, maxPriorSessionSummaryBytes)
-			if err != nil || len(summaries) == 0 {
+			if err != nil {
+				contextSourceOmitted(ctx, ContextSourceSessionSummaries, ContextOmittedSourceError)
+				return messages
+			}
+			if len(summaries) == 0 {
+				contextSourceOmitted(ctx, ContextSourceSessionSummaries, ContextOmittedNotSelected)
 				return messages
 			}
 			var b strings.Builder
+			truncated := false
 			b.WriteString("Relevant context from prior sessions:")
 			for _, summary := range summaries {
 				fmt.Fprintf(&b, "\n- [session=%s source=%s updated=%s] %s", summary.SessionID, summary.Source, summary.UpdatedAt.UTC().Format(time.RFC3339), summary.Text)
+				truncated = truncated || summary.Truncated
 			}
-			return append(messages, model.Message{Role: model.RoleSystem, Content: b.String()})
+			content := b.String()
+			contextSourceSelected(ctx, ContextSourceSessionSummaries, len(summaries), len(content), truncated)
+			return append(messages, model.Message{Role: model.RoleSystem, Content: content})
 		}
 	}
 }
@@ -688,17 +701,21 @@ func installLSPTools(root string, files []string, agents map[string]*agent.Agent
 				messages = append(messages, prev(ctx)...)
 			}
 			message, _ := ctx.Value(messageKey{}).(string)
-			if pin := lspDiagnosticPin(ctx, root, files, message, diagnostics); pin != "" {
+			pin, count, reason, truncated := lspDiagnosticPin(ctx, root, files, message, diagnostics)
+			if pin != "" {
+				contextSourceSelected(ctx, ContextSourceDiagnostics, count, len(pin), truncated)
 				messages = append(messages, model.Message{Role: model.RoleSystem, Content: pin})
+			} else {
+				contextSourceOmitted(ctx, ContextSourceDiagnostics, reason)
 			}
 			return messages
 		}
 	}
 }
 
-func lspDiagnosticPin(ctx context.Context, root string, files []string, message string, diagnostics *tool.Definition) string {
+func lspDiagnosticPin(ctx context.Context, root string, files []string, message string, diagnostics *tool.Definition) (string, int, string, bool) {
 	if message == "" || diagnostics == nil || diagnostics.Handler == nil {
-		return ""
+		return "", 0, ContextOmittedNotSelected, false
 	}
 
 	type pinnedDiagnostic struct {
@@ -707,9 +724,11 @@ func lspDiagnosticPin(ctx context.Context, root string, files []string, message 
 	}
 	var pinned []pinnedDiagnostic
 	var errorsCount, warningsCount, total int
+	hadError := false
 	for _, file := range referencedWorkspaceFiles(root, files, message) {
 		result, err := diagnostics.Handler(ctx, map[string]any{"file": file})
 		if err != nil {
+			hadError = true
 			continue
 		}
 		output, ok := result.(map[string]any)
@@ -740,7 +759,10 @@ func lspDiagnosticPin(ctx context.Context, root string, files []string, message 
 		}
 	}
 	if total == 0 {
-		return ""
+		if hadError {
+			return "", 0, ContextOmittedSourceError, false
+		}
+		return "", 0, ContextOmittedNotSelected, false
 	}
 
 	var b strings.Builder
@@ -748,7 +770,7 @@ func lspDiagnosticPin(ctx context.Context, root string, files []string, message 
 	for _, diagnostic := range pinned {
 		fmt.Fprintf(&b, "\n- %s:%d:%d [%s] %s", diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.severity, diagnostic.message)
 	}
-	return b.String()
+	return b.String(), len(pinned), "", total > len(pinned)
 }
 
 func referencedWorkspaceFiles(root string, files []string, message string) []string {
@@ -855,14 +877,30 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 			tenantStore := store.ForContext(ctx)
 			if msg, ok := ctx.Value(messageKey{}).(string); ok && msg != "" {
 				scored, err := tenantStore.Recall(msg, 5)
-				if err == nil && len(scored) > 0 {
-					return append(messages, model.Message{Role: model.RoleSystem, Content: formatScoredMemories(scored)})
+				if err != nil {
+					contextSourceOmitted(ctx, ContextSourceMemory, ContextOmittedSourceError)
+					return messages
+				}
+				if len(scored) > 0 {
+					content := formatScoredMemories(scored)
+					truncated := false
+					for _, item := range scored {
+						truncated = truncated || len(item.Record.Content) > 120
+					}
+					contextSourceSelected(ctx, ContextSourceMemory, len(scored), len(content), truncated)
+					return append(messages, model.Message{Role: model.RoleSystem, Content: content})
 				}
 			}
 			block, err := tenantStore.ContextBlock(5)
-			if err != nil || block == "" {
+			if err != nil {
+				contextSourceOmitted(ctx, ContextSourceMemory, ContextOmittedSourceError)
 				return messages
 			}
+			if block == "" {
+				contextSourceOmitted(ctx, ContextSourceMemory, ContextOmittedNotSelected)
+				return messages
+			}
+			contextSourceSelected(ctx, ContextSourceMemory, strings.Count(block, "\n- "), len(block), len(block) >= 800)
 			return append(messages, model.Message{Role: model.RoleSystem, Content: block})
 		}
 	}
@@ -910,10 +948,17 @@ func setupLearnedPatternPins(store *learning.Store, repoPath, sourceRevision str
 			}
 			trigger, _ := ctx.Value(messageKey{}).(string)
 			pattern, err := store.SelectPattern(repoPath, trigger, sourceRevision)
-			if err != nil || pattern == nil {
+			if err != nil {
+				contextSourceOmitted(ctx, ContextSourceLearnedPattern, ContextOmittedSourceError)
 				return messages
 			}
-			return append(messages, model.Message{Role: model.RoleSystem, Content: learning.RenderPattern(pattern)})
+			if pattern == nil {
+				contextSourceOmitted(ctx, ContextSourceLearnedPattern, ContextOmittedNotSelected)
+				return messages
+			}
+			content := learning.RenderPattern(pattern)
+			contextSourceSelected(ctx, ContextSourceLearnedPattern, 1, len(content), len(content) >= 1000)
+			return append(messages, model.Message{Role: model.RoleSystem, Content: content})
 		}
 	}
 }
@@ -973,7 +1018,10 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 				msgs = append(msgs, prev(ctx)...)
 			}
 			if text := get(); text != "" {
+				contextSourceSelected(ctx, ContextSourceProjectDocs, 1, len(text), strings.Contains(text, "[project instructions truncated:"))
 				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: text})
+			} else {
+				contextSourceOmitted(ctx, ContextSourceProjectDocs, ContextOmittedNotSelected)
 			}
 			return msgs
 		}
@@ -1077,15 +1125,22 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 			}
 			msg, _ := ctx.Value(messageKey{}).(string)
 			if msg == "" {
+				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
 				return msgs
 			}
 			if selected, _ := ctx.Value(explicitSkillKey{}).(*skills.Skill); selected != nil {
-				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: skills.Render([]*skills.Skill{selected})})
+				content := skills.Render([]*skills.Skill{selected})
+				contextSourceSelected(ctx, ContextSourceSkills, 1, len(content), false)
+				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: content})
 				return msgs
 			}
 			query := history.query(ctx, msg)
-			if rendered := skills.Render(skills.Select(query, catalog, skills.DefaultTopK, modelID)); rendered != "" {
+			selected := skills.Select(query, catalog, skills.DefaultTopK, modelID)
+			if rendered := skills.Render(selected); rendered != "" {
+				contextSourceSelected(ctx, ContextSourceSkills, len(selected), len(rendered), false)
 				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: rendered})
+			} else {
+				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
 			}
 			return msgs
 		}
@@ -1145,7 +1200,7 @@ func setupRouter(cfg *config.Config, projectDir string) (*router.Router, *router
 // every Chat/ChatWithSession call. Returns the parsed config (never nil; a
 // zero-value *guardrail.Config on failure) so callers can still read its
 // TokenBudget for the budget tracker.
-func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*agent.Agent) *guardrail.Config {
+func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*agent.Agent, secretPatterns []string) *guardrail.Config {
 	data, err := readOverridableFile(projectDir, "guardrails/default.yaml", "guardrails/default.yaml")
 	if err != nil {
 		fmt.Printf("warning: load guardrails config: %v\n", err)
@@ -1157,15 +1212,7 @@ func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*a
 		return &guardrail.Config{}
 	}
 
-	secretsData, err := readOverridableFile(projectDir, "security.yaml", "security.yaml")
-	var extraSecretPatterns []string
-	if err == nil {
-		if policy, perr := security.LoadPolicy(secretsData); perr == nil {
-			extraSecretPatterns = policy.SecretPatterns
-		}
-	}
-
-	rules, err := guardrail.BuildRules(grCfg, extraSecretPatterns)
+	rules, err := guardrail.BuildRules(grCfg, secretPatterns)
 	if err != nil {
 		fmt.Printf("warning: build guardrail rules: %v\n", err)
 		return grCfg
@@ -1181,27 +1228,43 @@ func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*a
 	return grCfg
 }
 
-// setupSecurity loads security.yaml (project override at
-// <projectDir>/security.yaml, falling back to the embedded default) and
-// attaches a security.Guard to every agent's hook chain (PRD P2-004), which
-// blocks disallowed file paths and shell commands before they execute (see
-// security.Guard.Before, wired via chronos's hooks.EventToolCallBefore).
-func setupSecurity(cfg *config.Config, projectDir, root string, store storage.Storage, agents map[string]*agent.Agent) *security.Policy {
-	data, err := readOverridableFile(projectDir, "security.yaml", "security.yaml")
+// setupSecurity resolves the embedded security floor with optional user and
+// project overlays, then attaches the effective guard to every agent. Invalid
+// or weakening overlays fail startup rather than dropping to an empty policy.
+func setupSecurity(projectDir, userDir, root string, store storage.Storage, agents map[string]*agent.Agent) (*security.Policy, error) {
+	floor, err := defaults.ReadFile("security.yaml")
 	if err != nil {
-		fmt.Printf("warning: load security.yaml: %v\n", err)
-		return &security.Policy{}
+		return nil, fmt.Errorf("read embedded security floor: %w", err)
 	}
-	policy, err := security.LoadPolicy(data)
+	overlays := make([]security.Overlay, 0, 2)
+	for _, candidate := range []struct {
+		source string
+		dir    string
+	}{
+		{source: "user", dir: userDir},
+		{source: "project", dir: projectDir},
+	} {
+		if candidate.dir == "" {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(candidate.dir, "security.yaml"))
+		if os.IsNotExist(readErr) {
+			continue
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("read %s security overlay: %w", candidate.source, readErr)
+		}
+		overlays = append(overlays, security.Overlay{Source: candidate.source, Data: data})
+	}
+	policy, err := security.ResolvePolicy(floor, overlays...)
 	if err != nil {
-		fmt.Printf("warning: parse security.yaml: %v\n", err)
-		return &security.Policy{}
+		return nil, err
 	}
 	guard := security.NewGuard(policy, root, store)
 	for _, a := range agents {
 		a.Hooks = append(a.Hooks, guard)
 	}
-	return policy
+	return policy, nil
 }
 
 // readOverridableFile prefers <projectDir>/<overridePath> when projectDir is
@@ -1328,14 +1391,25 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		ctx = context.WithValue(ctx, executionPolicyContextKey{}, request.PolicyContext)
 	}
 	result := ExecutionResult{AgentID: agentID, SessionID: sessionID, TaskID: taskID, PPDDecision: ppdDecision}
+	collector := newContextReportCollector()
+	ctx = withContextReportCollector(ctx, collector)
+	result.ContextReport = collector.report()
 	if hasIntent {
 		result.MemoryIntent, err = o.applyMemoryIntent(ctx, intent)
 		if err != nil {
+			contextSourceOmitted(ctx, ContextSourceMemory, ContextOmittedSourceError)
+			result.ContextReport = collector.report()
 			return result, err
+		}
+		if result.MemoryIntent.Applied {
+			contextSourceSelected(ctx, ContextSourceMemory, 1, 0, false)
+		} else {
+			contextSourceOmitted(ctx, ContextSourceMemory, result.MemoryIntent.Reason)
 		}
 	}
 	ctx, message, err := o.preparePrompt(ctx, request.Message, agentID, sessionID)
 	if err != nil {
+		result.ContextReport = collector.report()
 		return result, err
 	}
 	if hasIntent && intent.Action == memory.IntentRecallPast && result.MemoryIntent.Applied {
@@ -1344,25 +1418,22 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	// Predictive context is part of preparation, not a blocking-only feature.
 	if o.graphStore != nil && o.actBuf != nil {
 		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
+			contextSourceSelected(ctx, ContextSourceGraphPrediction, strings.Count(preloaded, "\n"), len(preloaded), false)
 			message += "\n\n" + preloaded
+		} else {
+			contextSourceOmitted(ctx, ContextSourceGraphPrediction, ContextOmittedNotSelected)
 		}
 	}
 	if request.Mode == ExecutionStreaming {
-		if sessionID != "" && a.Storage != nil {
-			result.Stream, err = a.ChatStreamWithSession(ctx, sessionID, message)
-		} else {
-			result.Stream, err = a.ChatStream(ctx, message)
-		}
+		result.Stream, err = o.executeStreamWithRecovery(ctx, a, sessionID, agentID, message)
 		if err == nil {
 			result.Stream = assessStream(ctx, result.Stream, request)
 		}
+		result.ContextReport = collector.report()
 		return result, err
 	}
-	if sessionID != "" && a.Storage != nil {
-		result.Response, err = a.ChatWithSession(ctx, sessionID, message)
-	} else {
-		result.Response, err = a.Chat(ctx, message)
-	}
+	result.Response, err = o.executeBlockingWithRecovery(ctx, a, sessionID, agentID, message)
+	result.ContextReport = collector.report()
 	if err != nil {
 		return result, err
 	}
@@ -1371,6 +1442,139 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		return result, fmt.Errorf("verification does not support successful completion")
 	}
 	return result, nil
+}
+
+const (
+	maxAPIRetries         = 2
+	maxCompactRetries     = 1
+)
+
+func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.Agent, sessionID, agentID, message string) (<-chan *model.ChatResponse, error) {
+	chatStream := func() (<-chan *model.ChatResponse, error) {
+		if sessionID != "" && a.Storage != nil {
+			return a.ChatStreamWithSession(ctx, sessionID, message)
+		}
+		return a.ChatStream(ctx, message)
+	}
+
+	stream, err := chatStream()
+	if err == nil {
+		return stream, nil
+	}
+
+	classified := apierror.Classify(err)
+
+	if apierror.IsCompactable(classified) {
+		o.publishRetryEvent(ctx, agentID, classified.Message)
+		if compactErr := o.CompactActiveSession(ctx); compactErr == nil {
+			stream, err = chatStream()
+			if err == nil {
+				return stream, nil
+			}
+			classified = apierror.Classify(err)
+		}
+	}
+
+	if classified.Retryable {
+		for attempt := 1; attempt <= maxAPIRetries; attempt++ {
+			delay := classified.RetryAfter
+			if delay <= 0 {
+				delay = time.Duration(attempt) * 5 * time.Second
+			}
+			o.publishRetryEvent(ctx, agentID, fmt.Sprintf("%s (retry %d/%d in %s)", classified.Message, attempt, maxAPIRetries, delay.Round(time.Second)))
+			if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+				return nil, err
+			}
+			stream, err = chatStream()
+			if err == nil {
+				return stream, nil
+			}
+			classified = apierror.Classify(err)
+			if !classified.Retryable {
+				break
+			}
+		}
+	}
+
+	return nil, classified
+}
+
+func (o *Orchestrator) executeBlockingWithRecovery(ctx context.Context, a *agent.Agent, sessionID, agentID, message string) (*model.ChatResponse, error) {
+	chat := func() (*model.ChatResponse, error) {
+		if sessionID != "" && a.Storage != nil {
+			return a.ChatWithSession(ctx, sessionID, message)
+		}
+		return a.Chat(ctx, message)
+	}
+
+	resp, err := chat()
+	if err == nil {
+		return resp, nil
+	}
+
+	classified := apierror.Classify(err)
+
+	if apierror.IsCompactable(classified) {
+		o.publishRetryEvent(ctx, agentID, classified.Message)
+		if compactErr := o.CompactActiveSession(ctx); compactErr == nil {
+			resp, err = chat()
+			if err == nil {
+				return resp, nil
+			}
+			classified = apierror.Classify(err)
+		}
+	}
+
+	if classified.Retryable {
+		for attempt := 1; attempt <= maxAPIRetries; attempt++ {
+			delay := classified.RetryAfter
+			if delay <= 0 {
+				delay = time.Duration(attempt) * 5 * time.Second
+			}
+			o.publishRetryEvent(ctx, agentID, fmt.Sprintf("%s (retry %d/%d in %s)", classified.Message, attempt, maxAPIRetries, delay.Round(time.Second)))
+			if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+				return nil, err
+			}
+			resp, err = chat()
+			if err == nil {
+				return resp, nil
+			}
+			classified = apierror.Classify(err)
+			if !classified.Retryable {
+				break
+			}
+		}
+	}
+
+	return nil, classified
+}
+
+func (o *Orchestrator) publishRetryEvent(ctx context.Context, agentID, message string) {
+	if o.broker == nil {
+		return
+	}
+	o.broker.PublishTopic(o.CurrentSessionID(), chronosstream.Event{
+		Type: chronosstream.EventCustom,
+		Data: map[string]any{
+			"agent":   agentID,
+			"type":    "api_retry",
+			"message": message,
+		},
+	})
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func (o *Orchestrator) applyMemoryIntent(ctx context.Context, intent memory.Intent) (*memory.IntentResult, error) {
@@ -1478,6 +1682,7 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message, agentID, sess
 	for _, hook := range o.cfg.Hooks.UserPromptSubmit {
 		result, err := o.hookRunner.Run(ctx, hook, vars)
 		if err != nil {
+			contextSourceOmitted(ctx, ContextSourceUserHook, ContextOmittedSourceError)
 			return ctx, message, fmt.Errorf("user-prompt hook %q: %w", hook.Name, err)
 		}
 		if text := strings.Join(result.Stdout.Lines, "\n"); text != "" {
@@ -1486,7 +1691,10 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message, agentID, sess
 	}
 	contextBlock := security.Summarize(security.CapturedOutput{Lines: output}, userHookPromptContextTokens)
 	if contextBlock != "" {
+		contextSourceSelected(ctx, ContextSourceUserHook, len(output), len(contextBlock), len(strings.Join(output, "\n")) > len(contextBlock))
 		message += "\n\n<user_hook_context>\n" + contextBlock + "\n</user_hook_context>"
+	} else {
+		contextSourceOmitted(ctx, ContextSourceUserHook, ContextOmittedNotSelected)
 	}
 	return ctx, message, nil
 }

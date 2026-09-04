@@ -2,6 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/activation"
+	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/graph"
 	"github.com/spawn08/chronos-code/internal/router"
@@ -145,7 +149,8 @@ func TestExecutePreparesPredictiveContextForBothModes(t *testing.T) {
 		actBuf:     activation.NewBuffer(1),
 	}
 
-	if _, err := orch.Execute(ctx, ExecutionRequest{Message: "fix BuildAgent"}); err != nil {
+	blockingResult, err := orch.Execute(ctx, ExecutionRequest{Message: "fix BuildAgent"})
+	if err != nil {
 		t.Fatalf("blocking Execute() error = %v", err)
 	}
 	result, err := orch.Execute(ctx, ExecutionRequest{Message: "fix BuildAgent", Mode: ExecutionStreaming})
@@ -159,6 +164,13 @@ func TestExecutePreparesPredictiveContextForBothModes(t *testing.T) {
 	streaming := userContent(provider.request(1))
 	if blocking != streaming || !contains(blocking, "[Pre-loaded context]") {
 		t.Fatalf("prepared prompts = (%q, %q), want equivalent predictive context", blocking, streaming)
+	}
+	if !reflect.DeepEqual(blockingResult.ContextReport, result.ContextReport) {
+		t.Fatalf("blocking context report %#v differs from streaming %#v", blockingResult.ContextReport, result.ContextReport)
+	}
+	graphSource := contextSource(result.ContextReport, ContextSourceGraphPrediction)
+	if graphSource.SelectedCount == 0 || graphSource.Bytes == 0 || graphSource.OmissionReason != "" {
+		t.Fatalf("graph context report = %#v", graphSource)
 	}
 }
 
@@ -380,3 +392,133 @@ func contains(text, substring string) bool {
 	}
 	return false
 }
+
+// failNProvider fails the first N calls with the given error, then succeeds.
+type failNProvider struct {
+	mu       sync.Mutex
+	failsLeft int
+	failErr  error
+}
+
+func (p *failNProvider) Chat(_ context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failsLeft > 0 {
+		p.failsLeft--
+		return nil, p.failErr
+	}
+	return &model.ChatResponse{Role: model.RoleAssistant, Content: "recovered"}, nil
+}
+
+func (p *failNProvider) StreamChat(_ context.Context, _ *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failsLeft > 0 {
+		p.failsLeft--
+		return nil, p.failErr
+	}
+	ch := make(chan *model.ChatResponse, 1)
+	ch <- &model.ChatResponse{Role: model.RoleAssistant, Content: "recovered"}
+	close(ch)
+	return ch, nil
+}
+
+func (p *failNProvider) Name() string  { return "test" }
+func (p *failNProvider) Model() string { return "test-model" }
+
+func TestExecuteRetriesTransientErrors(t *testing.T) {
+	apiErr := &model.APIError{StatusCode: 429, Status: "429 Too Many Requests"}
+	provider := &failNProvider{failsLeft: 1, failErr: fmt.Errorf("anthropic chat: %w", apiErr)}
+	a := newExecutionTestAgent("coder", provider)
+	orch := &Orchestrator{
+		agents:         map[string]*agent.Agent{"coder": a},
+		active:         "coder",
+		routingState:   make(map[string]router.Classification),
+		modelOverrides: make(map[string]bool),
+	}
+
+	result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "hello"})
+	if err != nil {
+		t.Fatalf("Execute() should have retried and succeeded, got error: %v", err)
+	}
+	if result.Response == nil || result.Response.Content != "recovered" {
+		t.Fatalf("Execute() response = %v, want recovered", result.Response)
+	}
+}
+
+// Note: streaming model errors flow through the channel (resp.Err), not as
+// direct return values from ChatStream. The agent SDK only returns errors
+// directly for pre-flight failures (no model, guardrails, session setup).
+// Streaming model error recovery is handled at the TUI layer.
+
+func TestExecuteReturnsClassifiedErrorWhenRetriesExhausted(t *testing.T) {
+	apiErr := &model.APIError{StatusCode: 529, Status: "529 Overloaded"}
+	provider := &failNProvider{failsLeft: 100, failErr: fmt.Errorf("anthropic chat: %w", apiErr)}
+	a := newExecutionTestAgent("coder", provider)
+	orch := &Orchestrator{
+		agents:         map[string]*agent.Agent{"coder": a},
+		active:         "coder",
+		routingState:   make(map[string]router.Classification),
+		modelOverrides: make(map[string]bool),
+	}
+
+	_, err := orch.Execute(context.Background(), ExecutionRequest{Message: "hello"})
+	if err == nil {
+		t.Fatal("Execute() should have returned an error after exhausting retries")
+	}
+	var classified *apierror.Classified
+	if !errors.As(err, &classified) {
+		t.Fatalf("Execute() error should be *apierror.Classified, got %T: %v", err, err)
+	}
+	if classified.Category != apierror.CategoryOverloaded {
+		t.Errorf("classified.Category = %v, want %v", classified.Category, apierror.CategoryOverloaded)
+	}
+}
+
+func TestExecuteDoesNotRetryTerminalErrors(t *testing.T) {
+	apiErr := &model.APIError{StatusCode: 401, Status: "401 Unauthorized"}
+	callCount := 0
+	provider := &failNProvider{failsLeft: 100, failErr: fmt.Errorf("anthropic chat: %w", apiErr)}
+	// Wrap to count calls
+	countingProvider := &countingProviderWrapper{inner: provider, count: &callCount}
+	a := newExecutionTestAgent("coder", countingProvider)
+	orch := &Orchestrator{
+		agents:         map[string]*agent.Agent{"coder": a},
+		active:         "coder",
+		routingState:   make(map[string]router.Classification),
+		modelOverrides: make(map[string]bool),
+	}
+
+	_, err := orch.Execute(context.Background(), ExecutionRequest{Message: "hello"})
+	if err == nil {
+		t.Fatal("Execute() should have returned an auth error")
+	}
+	var classified *apierror.Classified
+	if !errors.As(err, &classified) {
+		t.Fatalf("Execute() error should be *apierror.Classified, got %T", err)
+	}
+	if classified.Category != apierror.CategoryAuth {
+		t.Errorf("classified.Category = %v, want %v", classified.Category, apierror.CategoryAuth)
+	}
+	if callCount != 1 {
+		t.Errorf("terminal errors should not be retried, got %d calls", callCount)
+	}
+}
+
+type countingProviderWrapper struct {
+	inner model.Provider
+	count *int
+}
+
+func (w *countingProviderWrapper) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
+	*w.count++
+	return w.inner.Chat(ctx, req)
+}
+
+func (w *countingProviderWrapper) StreamChat(ctx context.Context, req *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	*w.count++
+	return w.inner.StreamChat(ctx, req)
+}
+
+func (w *countingProviderWrapper) Name() string  { return w.inner.Name() }
+func (w *countingProviderWrapper) Model() string { return w.inner.Model() }

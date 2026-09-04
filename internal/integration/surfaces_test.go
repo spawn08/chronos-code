@@ -192,8 +192,8 @@ func TestSurfacesTrustFailuresFailClosed(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "untrusted model endpoint") {
-				t.Fatalf("%s trust error = %v", surface, err)
+			if err == nil || !strings.Contains(err.Error(), "Access denied") || strings.Contains(err.Error(), "untrusted model endpoint") {
+				t.Fatalf("%s trust error = %v, want sanitized access denial", surface, err)
 			}
 		})
 	}
@@ -274,6 +274,20 @@ func assertAdapterUsesExecute(t *testing.T, result orchestrator.ExecutionResult)
 	t.Helper()
 	if result.AgentID == "" || result.TaskID == "" || result.SessionID == "" {
 		t.Fatalf("adapter did not return common Execute identity: %#v", result)
+	}
+	wantKinds := []orchestrator.ContextSourceKind{
+		orchestrator.ContextSourceSessionSummaries, orchestrator.ContextSourceMemory,
+		orchestrator.ContextSourceLearnedPattern, orchestrator.ContextSourceProjectDocs,
+		orchestrator.ContextSourceSkills, orchestrator.ContextSourceDiagnostics,
+		orchestrator.ContextSourceGraphPrediction, orchestrator.ContextSourceUserHook,
+	}
+	if len(result.ContextReport.Sources) != len(wantKinds) {
+		t.Fatalf("context report sources = %d, want %d", len(result.ContextReport.Sources), len(wantKinds))
+	}
+	for i, kind := range wantKinds {
+		if result.ContextReport.Sources[i].Kind != kind {
+			t.Fatalf("context report source %d = %q, want %q", i, result.ContextReport.Sources[i].Kind, kind)
+		}
 	}
 }
 

@@ -61,3 +61,11 @@ secrets:
     - "ghp_[a-zA-Z0-9]{36}"
     - "sk-[a-zA-Z0-9]{48}"
     - "-----BEGIN.*PRIVATE KEY-----"
+
+mcp:
+  denied_servers: []
+  trusted_servers:
+    - "filesystem"
+    - "memory"
+  default_permission: "require_approval"
+  max_connections: 5

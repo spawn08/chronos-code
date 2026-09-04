@@ -17,6 +17,7 @@ import (
 	"github.com/spawn08/chronos/sdk/agent"
 
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
@@ -370,10 +371,40 @@ func TestStreamDeltaDoesNotDuplicateCumulativeFrame(t *testing.T) {
 
 func TestViewEnablesMouseWheelEvents(t *testing.T) {
 	m := newTestAppModel(t)
+	m.mouseCapture = true
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
 		t.Errorf("View().MouseMode = %v, want MouseModeCellMotion", got)
+	}
+}
+
+func TestMouseWheelScrollsTranscriptWhenCaptureEnabled(t *testing.T) {
+	m := newTestAppModel(t)
+	m.mouseCapture = true
+	m.followOutput = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{strings.Repeat("line\n", 80)}
+	m.refreshViewport()
+	m.viewport.GotoBottom()
+	before := m.viewport.YOffset()
+
+	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if got := m.viewport.YOffset(); got >= before {
+		t.Fatalf("mouse wheel did not scroll up: before=%d after=%d", before, got)
+	}
+	if m.followOutput {
+		t.Fatal("mouse wheel did not detach live-output following")
+	}
+}
+
+func TestMouseCommandTogglesSelectionMode(t *testing.T) {
+	m := newTestAppModel(t)
+	m.mouseCapture = true
+	m.input.SetValue("/mouse")
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.mouseCapture || m.View().MouseMode != tea.MouseModeNone || !strings.Contains(m.statusMsg, "drag selects") {
+		t.Fatalf("mouse selection mode = capture:%t mode:%v status:%q", m.mouseCapture, m.View().MouseMode, m.statusMsg)
 	}
 }
 
@@ -601,6 +632,117 @@ func TestOrdinaryPromptKeepsPrimaryAgentActive(t *testing.T) {
 	}
 	if got := m.orch.ActiveID(); got != m.orch.PrimaryID() {
 		t.Errorf("ordinary prompt switched active agent to %q; primary is %q", got, m.orch.PrimaryID())
+	}
+}
+
+func TestContextCommandBeforeFirstTurnReportsNoContext(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	m.handleContextCommand()
+
+	got := strings.Join(m.blocks, "\n")
+	if !strings.Contains(got, "no context report yet") {
+		t.Fatalf("pre-turn /context output = %q", got)
+	}
+}
+
+func TestExecutionMetadataHasBlockingStreamingParity(t *testing.T) {
+	report := testContextReport()
+	intent := &memory.IntentResult{Action: memory.IntentRemember, Category: memory.CategoryProject, Applied: true}
+
+	blocking := newTestAppModel(t)
+	blocking.turnID = 1
+	blocking.sending = true
+	_, _ = blocking.Update(chatDoneMsg{turnID: 1, resp: &model.ChatResponse{Content: "done"}, contextReport: report, memoryIntent: intent})
+
+	streaming := newTestAppModel(t)
+	streaming.turnID = 1
+	streaming.sending = true
+	streamCh := make(chan *model.ChatResponse)
+	_, cmd := streaming.Update(streamStartedMsg{turnID: 1, ctx: context.Background(), ch: streamCh, contextReport: report, memoryIntent: intent})
+	if cmd == nil {
+		t.Fatal("stream startup did not begin listening")
+	}
+	streaming.appendTurnText("done")
+	streaming.finalizeTurn(nil)
+
+	want := RenderContextSummary(report, intent)
+	for name, app := range map[string]*appModel{"blocking": blocking, "streaming": streaming} {
+		got := app.renderTranscript()
+		if strings.Count(got, "context ·") != 1 || !strings.Contains(got, want) || !strings.Contains(got, "memory remember project · applied") {
+			t.Fatalf("%s turn metadata = %q", name, got)
+		}
+		if app.lastContextReport == nil || app.lastContextReport.TotalBytes != report.TotalBytes || app.lastMemoryIntent == nil || !app.lastMemoryIntent.Applied {
+			t.Fatalf("%s stored metadata = report:%+v intent:%+v", name, app.lastContextReport, app.lastMemoryIntent)
+		}
+	}
+}
+
+func TestStreamMetadataDoesNotBypassRenderRateLimit(t *testing.T) {
+	m := newTestAppModel(t)
+	m.turnID = 1
+	m.sending = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	before := m.viewport.View()
+
+	_, cmd := m.Update(streamStartedMsg{turnID: 1, ctx: context.Background(), ch: make(chan *model.ChatResponse), contextReport: testContextReport()})
+
+	if cmd == nil || m.renderScheduled || m.viewport.View() != before {
+		t.Fatalf("stream metadata changed render scheduling: cmd nil=%t scheduled=%t", cmd == nil, m.renderScheduled)
+	}
+}
+
+func TestContextCommandFitsTerminalAndShowsEverySource(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{80, 24}, {40, 12}} {
+		t.Run(fmt.Sprintf("%dx%d", size.width, size.height), func(t *testing.T) {
+			m := newTestAppModel(t)
+			_, _ = m.Update(tea.WindowSizeMsg{Width: size.width, Height: size.height})
+			viewportHeight := m.viewport.Height()
+			m.captureExecutionMetadata(testContextReport(), nil)
+			m.handleContextCommand()
+			m.refreshViewport()
+
+			output := strings.Join(m.blocks, "\n")
+			facts := strings.Join(strings.Fields(output), " ")
+			for _, want := range []string{
+				"[session_summaries]", "[memory]", "[learned_pattern]", "[project_docs]",
+				"[skills]", "[diagnostics]", "[graph_prediction]", "[user_hook]",
+				"selected 1", "bytes 120 B", "budget 105.5 KiB", "omitted: not selected", "memory intent: none",
+			} {
+				if !strings.Contains(facts, want) {
+					t.Errorf("/context output missing %q: %q", want, output)
+				}
+			}
+			if m.viewport.Height() != viewportHeight {
+				t.Fatalf("/context changed permanent layout: viewport %d -> %d", viewportHeight, m.viewport.Height())
+			}
+			view := m.View().Content
+			for i, line := range strings.Split(view, "\n") {
+				if got := lipgloss.Width(line); got > size.width {
+					t.Fatalf("line %d width = %d, terminal width = %d: %q", i, got, size.width, line)
+				}
+			}
+			if got := lipgloss.Height(view); got > size.height {
+				t.Fatalf("view height = %d, terminal height = %d", got, size.height)
+			}
+		})
+	}
+}
+
+func testContextReport() orchestrator.ContextReport {
+	return orchestrator.ContextReport{
+		Sources: []orchestrator.ContextSourceReport{
+			{Kind: orchestrator.ContextSourceSessionSummaries, ID: "session-summaries", Title: "Prior session summaries", BudgetBytes: 8000, OmissionReason: orchestrator.ContextOmittedNotSelected},
+			{Kind: orchestrator.ContextSourceMemory, ID: "memory", Title: "Memory intent and recall", SelectedCount: 1, Bytes: 120, BudgetBytes: 800},
+			{Kind: orchestrator.ContextSourceLearnedPattern, ID: "learned-pattern", Title: "Learned pattern", BudgetBytes: 1000, OmissionReason: orchestrator.ContextOmittedNotSelected},
+			{Kind: orchestrator.ContextSourceProjectDocs, ID: "project-docs", Title: "Project instructions", BudgetBytes: 64000, OmissionReason: orchestrator.ContextOmittedNotConfigured},
+			{Kind: orchestrator.ContextSourceSkills, ID: "skills", Title: "Selected skills", BudgetBytes: 32000, OmissionReason: orchestrator.ContextOmittedNotSelected},
+			{Kind: orchestrator.ContextSourceDiagnostics, ID: "diagnostics", Title: "LSP diagnostics", BudgetBytes: 400, OmissionReason: orchestrator.ContextOmittedNotSelected},
+			{Kind: orchestrator.ContextSourceGraphPrediction, ID: "graph-prediction", Title: "Graph prediction", OmissionReason: orchestrator.ContextOmittedDisabled},
+			{Kind: orchestrator.ContextSourceUserHook, ID: "user-hook", Title: "User prompt hooks", BudgetBytes: 1800, OmissionReason: orchestrator.ContextOmittedNotConfigured},
+		},
+		TotalCount: 1, TotalBytes: 120, BudgetBytes: 108000,
 	}
 }
 
