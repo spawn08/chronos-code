@@ -88,6 +88,8 @@ func Execute() error {
 		return runTeam()
 	case "plan":
 		return runPlan()
+	case "skills":
+		return runSkills()
 	case "serve":
 		return runServe()
 	case "version":
@@ -279,6 +281,8 @@ Usage:
   chronos-code team list                                   List configured teams
   chronos-code team run <team_id> <message>                Run a team on a task
   chronos-code plan <operation> --db <path> ...             Inspect or operate a durable plan database
+  chronos-code skills list                                  List discovered skills (project + user + bundled)
+  chronos-code skills show <name>                           Show a skill's metadata and body
   chronos-code serve [--listen :8430] [--auth api_key]     Start HTTP server for team deployment
   chronos-code version            Print version information
   chronos-code help               Show this help

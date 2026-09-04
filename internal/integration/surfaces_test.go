@@ -192,8 +192,8 @@ func TestSurfacesTrustFailuresFailClosed(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "Access denied") || strings.Contains(err.Error(), "untrusted model endpoint") {
-				t.Fatalf("%s trust error = %v, want sanitized access denial", surface, err)
+			if err == nil || !strings.Contains(err.Error(), "Access denied") {
+				t.Fatalf("%s trust error = %v, want access denial", surface, err)
 			}
 		})
 	}

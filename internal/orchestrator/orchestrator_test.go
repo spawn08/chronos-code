@@ -13,6 +13,7 @@ import (
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/mcp"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
@@ -24,6 +25,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/learning"
+	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
@@ -1564,6 +1566,73 @@ func userContent(req *model.ChatRequest) string {
 		}
 	}
 	return ""
+}
+
+type orchestratorMCPClient struct {
+	closed int
+	calls  int
+}
+
+func (*orchestratorMCPClient) Connect(context.Context) error { return nil }
+func (*orchestratorMCPClient) ListTools(context.Context) ([]mcp.ToolInfo, error) {
+	return []mcp.ToolInfo{{Name: "read"}}, nil
+}
+func (c *orchestratorMCPClient) CallTool(context.Context, string, map[string]any) (any, error) {
+	c.calls++
+	return "ok", nil
+}
+func (c *orchestratorMCPClient) Close() error { c.closed++; return nil }
+
+func TestSetupMCPRuntimesOwnsIndependentClientsAndYoloStillRequiresApproval(t *testing.T) {
+	agents := map[string]*agent.Agent{
+		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
+		"reviewer": {ID: "reviewer", Tools: tool.NewRegistry()},
+	}
+	policy := &security.Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: security.MCPRequireApproval}
+	var clients []*orchestratorMCPClient
+	runtimes := setupMCPRuntimes(context.Background(), agents, []mcp.ServerConfig{{
+		Name: "filesystem", Transport: mcp.TransportStdio, Command: "server",
+	}}, policy, time.Second, func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) {
+		client := &orchestratorMCPClient{}
+		clients = append(clients, client)
+		return client, nil
+	})
+	if len(runtimes) != 2 || len(clients) != 2 || clients[0] == clients[1] {
+		t.Fatalf("runtimes=%d clients=%#v, want independent clients", len(runtimes), clients)
+	}
+	normalizeToolPermissions(agents)
+	orch := &Orchestrator{
+		agents: agents, mcpRuntimes: runtimes,
+		permissionChecker: security.NewPermissionChecker(policy, "/workspace"),
+	}
+	approvals := 0
+	orch.SetApprovalHandler(func(context.Context, string, map[string]any) (bool, error) {
+		approvals++
+		return true, nil
+	})
+	if err := orch.SetPermissionMode("auto_approve"); err != nil {
+		t.Fatalf("SetPermissionMode() error = %v", err)
+	}
+	name := mcpdiscover.ToolName("filesystem", "read")
+	for _, a := range agents {
+		if _, err := a.Tools.Execute(context.Background(), name, nil); err != nil {
+			t.Fatalf("Execute(%s) error = %v", a.ID, err)
+		}
+	}
+	if approvals != 2 {
+		t.Fatalf("approval calls = %d, want 2 under yolo", approvals)
+	}
+	if err := orch.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := orch.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	for i, client := range clients {
+		if client.closed != 1 || client.calls != 1 {
+			t.Errorf("client %d closed=%d calls=%d, want 1/1", i, client.closed, client.calls)
+		}
+	}
 }
 
 func TestSetupSecurityUsesFloorWhenOverlaysAreMissing(t *testing.T) {

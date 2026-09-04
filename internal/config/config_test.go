@@ -42,6 +42,21 @@ func TestEmbeddedDefaultsUseReportVerification(t *testing.T) {
 	}
 }
 
+func TestAdaptiveConsumerRollbackControlsDefaultToEnabledAndDecodeFalse(t *testing.T) {
+	defaults := Config{}
+	if !defaults.Session.RecallPriorSummariesEnabled() || !defaults.Session.ContextReportEnabled() || !defaults.Learning.PatternInjectionEnabled() || !defaults.MCP.DiscoveryEnabled() {
+		t.Fatal("adaptive consumers must default to enabled")
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal([]byte("session:\n  recall_prior_summaries: false\n  context_report: false\nlearning:\n  pattern_injection: false\nmcp:\n  discovery_enabled: false\n"), &cfg); err != nil {
+		t.Fatalf("decode rollback controls: %v", err)
+	}
+	if cfg.Session.RecallPriorSummariesEnabled() || cfg.Session.ContextReportEnabled() || cfg.Learning.PatternInjectionEnabled() || cfg.MCP.DiscoveryEnabled() {
+		t.Fatalf("rollback controls did not disable consumers: %#v", cfg)
+	}
+}
+
 func TestVerificationModeValidation(t *testing.T) {
 	for _, mode := range []verification.Mode{verification.ModeReport, verification.ModeEnforce} {
 		t.Run(string(mode), func(t *testing.T) {

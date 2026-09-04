@@ -54,6 +54,53 @@ Build with `go build -tags lsp ./...` to include the `lsp_diagnostics`, `lsp_hov
 
 Language servers are discovered and started lazily on the first tool or referenced-file diagnostics request. A missing server is non-fatal: the corresponding request is skipped or reports that no server is available, and Chronos Code continues without LSP diagnostics. Builds without the `lsp` tag retain the same fallback behavior and register no LSP tools.
 
+## Adaptive Context, MCP, And Safety
+
+Explicit memory intents use `remember <category>: <fact>`, `forget: <mem_ID>`,
+or `recall-past: <query>`. Incidental uses of words such as `remember`,
+`always`, and `never` do not persist memory. `/context` shows source names,
+counts, budgets, and safe omission reasons; it never displays memory bodies,
+prior-session text, hidden prompts, tool arguments, environment values, or
+credentials.
+
+`/copy` and `Ctrl+Y` copy the last assistant response to the host clipboard
+without changing its UTF-8 bytes. `Ctrl+V` uses the same native clipboard
+adapter. Use `/mouse` to toggle terminal mouse capture for ordinary drag
+selection; keyboard scrolling remains available in either mode.
+
+Manage the project `.mcp.json` with `chronos-code mcp add`, `list`, `test`,
+and `remove`. Only stdio and HTTPS SSE servers are accepted. Credential-like
+arguments and query values must use `${ENV_VAR}` references; list and test
+output redacts them. At startup, denied, untrusted, malformed, or unavailable
+servers do not block healthy servers or chat. MCP tools are namespaced,
+require approval by default, and are closed during cleanup.
+
+The embedded security floor cannot be weakened by project policy or `--yolo`.
+Unknown models run only without a USD cap; a positive cap fails closed before a
+provider call when pricing is unavailable.
+
+### Rollback
+
+The following YAML switches disable optional consumers independently while
+preserving sessions, memories, learned patterns, and `.mcp.json` data:
+
+```yaml
+session:
+  recall_prior_summaries: false
+  context_report: false
+learning:
+  pattern_injection: false
+mcp:
+  discovery_enabled: false
+```
+
+Restart Chronos Code after changing these values. `memory.enabled: false`
+disables explicit memory persistence and recall. The embedded security floor
+remains active during every rollback. Restore a previous `.mcp.json` from its
+same-directory atomic-write backup if a mutation must be reversed. Disabling
+the clipboard adapter must not report a successful copy; `/mouse` can disable
+capture without removing keyboard scrolling.
+
 ## Architecture
 
 ```
