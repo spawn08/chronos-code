@@ -148,17 +148,41 @@ func fileMentionCandidates(needle string, files []string) []string {
 	if len(files) == 0 {
 		return nil
 	}
+	if needle == "" {
+		limit := maxCommandCompletions
+		if limit > len(files) {
+			limit = len(files)
+		}
+		out := make([]string, limit)
+		for i := 0; i < limit; i++ {
+			out[i] = "@" + filepath.ToSlash(files[i])
+		}
+		return out
+	}
 	needle = strings.ToLower(needle)
 	type match struct {
 		path  string
 		score int
 	}
-	var matches []match
+	matches := make([]match, 0, maxCommandCompletions*4)
+	prefixHits := 0
 	for _, file := range files {
 		path := filepath.ToSlash(file)
-		score := fileMentionScore(path, needle)
-		if score >= 0 {
-			matches = append(matches, match{path: path, score: score})
+		lower := strings.ToLower(path)
+		base := strings.ToLower(filepath.Base(path))
+		score := filePrefixScore(base, lower, needle)
+		if score < 0 {
+			if prefixHits >= maxCommandCompletions {
+				continue
+			}
+			score = fuzzyCommandScore(lower, needle)
+			if score < 0 {
+				continue
+			}
+		}
+		matches = append(matches, match{path: path, score: score})
+		if score <= 1 {
+			prefixHits++
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -187,13 +211,20 @@ func fileMentionScore(path, needle string) int {
 	}
 	lower := strings.ToLower(path)
 	base := strings.ToLower(filepath.Base(path))
+	if score := filePrefixScore(base, lower, needle); score >= 0 {
+		return score
+	}
+	return fuzzyCommandScore(lower, needle)
+}
+
+func filePrefixScore(base, lower, needle string) int {
 	if base == needle || lower == needle {
 		return 0
 	}
 	if strings.HasPrefix(base, needle) || strings.HasPrefix(lower, needle) {
 		return 1
 	}
-	return fuzzyCommandScore(lower, needle)
+	return -1
 }
 
 func (m *appModel) inputCompletions() []string {
@@ -250,7 +281,7 @@ func (m *appModel) computeInputCompletions(value string) []string {
 func (m *appModel) modelCompletionValues() []string {
 	list := modelinfo.All()
 	if m.orch != nil {
-		authorized := m.orch.AuthorizedProviders(m.ctx, distinctProviders(list))
+		authorized := m.authorizedProviderNames()
 		if len(authorized) > 0 {
 			list = filterByProviders(list, authorized)
 		}

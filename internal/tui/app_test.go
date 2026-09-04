@@ -1757,3 +1757,39 @@ func TestUsageSummaryShowsCacheHits(t *testing.T) {
 		t.Errorf("usageStatus() = %q, want cache hits", status)
 	}
 }
+
+func TestLastNLinesKeepsTheTail(t *testing.T) {
+	got := lastNLines("a\nb\nc\nd", 3)
+	want := []string{"b", "c", "d"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lastNLines = %q, want %q", got, want)
+	}
+	got = lastNLines("a\nb\nc\n", 3)
+	want = []string{"b", "c", ""}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lastNLines trailing newline = %q, want %q", got, want)
+	}
+	if got := lastNLines("", 10); got != nil {
+		t.Fatalf("empty lastNLines = %q, want nil", got)
+	}
+}
+
+func TestSignedInUsesCachedAuthIdentity(t *testing.T) {
+	m := newTestAppModel(t)
+	_ = m.signedIn()
+	if m.authCheckedAt.IsZero() {
+		t.Fatal("signedIn did not record auth identity")
+	}
+	m.authSignedIn = true
+	m.authModelID = "cached-model"
+	if !m.signedIn() {
+		t.Fatal("cached signed-in identity was ignored")
+	}
+	if m.sessionIdentitySegment() != "cached-model" {
+		t.Fatalf("sessionIdentitySegment = %q, want cached-model", m.sessionIdentitySegment())
+	}
+	m.invalidateAuthIdentity()
+	if !m.authCheckedAt.IsZero() || m.authCatalog != nil {
+		t.Fatal("invalidateAuthIdentity did not clear cache")
+	}
+}

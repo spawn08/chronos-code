@@ -51,7 +51,7 @@ func newAgentPicker(m *appModel) *picker {
 // picker to the static list (rather than handleModelCommand's live-fetch
 // path) keeps opening it instant rather than blocking on a network call.
 func newModelPicker(m *appModel) *picker {
-	authorized := m.orch.AuthorizedProviders(m.ctx, distinctProviders(modelinfo.All()))
+	authorized := m.authorizedProviderNames()
 	list := filterByProviders(modelinfo.All(), authorized)
 	var items []wizardItem
 	for _, i := range list {
