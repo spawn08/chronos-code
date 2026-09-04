@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
@@ -8,13 +9,41 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos/storage"
 )
+
+type tenantContextKey struct{}
+
+// TenantIDFromContext returns the tenant authenticated for this request.
+// Tenant IDs are only added by authentication middleware, never from headers
+// or request parameters.
+func TenantIDFromContext(ctx context.Context) (string, bool) {
+	tenantID, ok := ctx.Value(tenantContextKey{}).(string)
+	return tenantID, ok && tenantID != ""
+}
+
+// tenantMiddleware scopes authenticated requests to their validated tenant.
+func tenantMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/ready" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		tenantID, ok := TenantIDFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error":"tenant identity is missing"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(storage.WithTenant(r.Context(), tenantID)))
+	})
+}
 
 // authMiddleware returns middleware that enforces API-key authentication.
 // When authType is "none", all requests pass through. When authType is
 // "api_key", requests must include an Authorization: Bearer <key> header
-// matching apiKey. Health and ready probes are always exempt.
-func authMiddleware(authType, apiKey string) func(http.Handler) http.Handler {
+// matching apiKey. tenantID is bound to a successfully validated API key.
+// Health and ready probes are always exempt.
+func authMiddleware(authType, apiKey, tenantID string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if authType == "none" || r.URL.Path == "/health" || r.URL.Path == "/ready" {
@@ -31,7 +60,11 @@ func authMiddleware(authType, apiKey string) func(http.Handler) http.Handler {
 				http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r)
+			if strings.TrimSpace(tenantID) == "" {
+				http.Error(w, `{"error":"tenant is not configured"}`, http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantContextKey{}, tenantID)))
 		})
 	}
 }
@@ -80,12 +113,16 @@ func oidcAuthMiddleware(validator *auth.OIDCValidator) func(http.Handler) http.H
 				return
 			}
 			token := strings.TrimPrefix(header, "Bearer ")
-			_, err := validator.Validate(token)
+			claims, err := validator.Validate(token)
 			if err != nil {
 				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r)
+			if strings.TrimSpace(claims.TenantID) == "" {
+				http.Error(w, `{"error":"OIDC token is missing tenant identity"}`, http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantContextKey{}, claims.TenantID)))
 		})
 	}
 }

@@ -7,15 +7,15 @@ Chronos Code provides a configuration-driven experience for defining, composing,
 ## Features
 
 - **YAML-first configuration** — agents, skills, guardrails, security policies, and MCP servers defined entirely in YAML
-- **Code graph indexing** — tree-sitter AST-based code graph for token-efficient context loading
+- **Code graph indexing** — Go AST-based indexing by default; optional tree-sitter support requires the `treesitter` build tag
 - **Tiered model routing** — cheap models for search/explanation, frontier models for reasoning/coding
 - **Self-learning loop** — analyzes execution traces and generates improved agent/skill YAML (not fine-tuning)
 - **Full MCP support** — connect to external tool servers via stdio or SSE
-- **Built-in agents** — coder, planner, reviewer, debugger, researcher, architect, explainer
+- **Built-in agents** — coder, planner, PPD planner, reviewer, debugger, researcher, architect, explainer
 - **Guardrail presets** — injection detection, secret scanning, PII filtering, cost caps
-- **Dual-mode deployment** — interactive CLI (SQLite) or multi-tenant HTTP server (PostgreSQL)
-- **Session management** — resumable, branchable, inspectable conversation sessions
-- **Persistent memory** — project-scoped memory stored as inspectable YAML files with optional vector recall
+- **Dual-mode deployment** — interactive CLI and authenticated HTTP server; SQLite is the default storage and PostgreSQL requires the `postgres` build tag
+- **Session management** — resumable and inspectable conversation sessions
+- **Persistent memory** — project- and tenant-scoped local memory with deterministic text recall
 - **Embedded defaults** — zero-config first run; `chronos-code init` exports editable YAML
 
 ## Quick Start
@@ -123,10 +123,34 @@ All configuration lives in `.chronos-code/` at the project root:
 
 Config precedence (highest to lowest):
 1. CLI flags
-2. Environment variables (`CHRONOS_CODE_*`)
+2. Supported provider/server environment variables
 3. `.chronos-code/config.yaml` (project)
 4. `~/.chronos-code/config.yaml` (user global)
 5. Embedded defaults
+
+Verification defaults to report-only mode and is shared by CLI, TUI, and HTTP:
+
+```yaml
+verification:
+  mode: report # report or enforce
+```
+
+`enforce` blocks a successful completion when the runtime has verification
+obligations without current supporting evidence. The switch does not invent or
+implicitly run checks; obligations and evidence must come from the execution
+runtime.
+
+### Capability Status
+
+| Capability | Status |
+|---|---|
+| Go code graph, SQLite sessions, deterministic memory recall | Default |
+| Tree-sitter graph support | Optional `treesitter` build |
+| PostgreSQL storage | Optional `postgres` build |
+| PPD complexity policy and specialist | Experimental; `shadow` by default |
+| Verification enforcement | Optional configuration; `report` by default |
+| Learning suggestions | Default with human review; automatic distillation disabled |
+| Vector recall and branchable sessions | Roadmap |
 
 ## Default Agents
 
@@ -158,6 +182,35 @@ make tidy         # go mod tidy
 make clean        # remove build artifacts
 make install      # install to $GOPATH/bin
 ```
+
+### Token Efficiency Eval
+
+`make eval` runs the deterministic, offline fixture-replay suite and compares
+its paired totals with `benchmark/eval/baseline.json`. The gate fails on
+contract failures, malformed or stale baseline totals, or an optimized-token
+regression greater than 10%.
+
+The checked-in `benchmark/eval/report.md` is a synthetic fixture-replay result,
+not a valid comparison with Chronos Code or an external baseline tool. A
+performance claim requires paired model runs against both tools on the same
+tasks, model, corpus revision, and success gate.
+
+`benchmark/ppd/results.json` records the registered four-arm, three-repeat PPD
+matrix, but its status is `invalid`: no real model was configured or invoked.
+It contains no usage, outcome, or verification measurements, and invalid runs
+are excluded from successful-task efficacy denominators. It does not support a
+PPD quality, efficiency, or rollout claim.
+
+PPD routing therefore defaults to observational `shadow` mode in
+`.chronos-code/routing.yaml`; qualifying requests are recorded as decisions and
+are not delegated to the PPD specialist. Do not change the mode to `enabled`
+until reproducible paired real-model runs provide valid evidence.
+
+Use `chronos-code eval ppd --validate-only` to validate the registered matrix.
+This does not validate efficacy. Use `chronos-code eval ppd --report` to require
+completed real-model evidence, a current baseline manifest, and the registered
+success/token/model-call thresholds; it fails closed for the checked-in invalid
+placeholder.
 
 ## License
 

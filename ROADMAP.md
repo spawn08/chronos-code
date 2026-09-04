@@ -17,6 +17,68 @@ If any capability listed below as "missing" is actually implemented, tell me and
 
 ---
 
+## 0.1 Current evidence and PPD rollout control
+
+This roadmap is a product-direction document, not evidence that every listed
+capability is generally available. The current evidence constrains PPD rollout
+as follows:
+
+- `benchmark/ppd/results.json` is `invalid`. No real model was configured or
+  invoked, so the registered four-arm, three-repeat matrix has no synthetic
+  usage, outcome, or verification measurements. Invalid runs are excluded from
+  paired successful-task efficacy denominators. No PPD quality, token, or
+  delegation claim may be drawn from it.
+- `benchmark/eval/report.md` is a synthetic fixture replay. Its deterministic
+  local-tool token totals are useful for the offline contract gate only; they
+  are not a paired Chronos Code versus external-tool model benchmark.
+- The bundled PPD policy is `shadow` mode. A qualifying request returns an
+  observable shadow decision without invoking the PPD specialist. `enabled` delegates and
+  must remain a future rollout stage until valid paired model evidence exists.
+- Self-learning is enabled by the default configuration, but automatic
+  distillation is disabled. Distillation is explicit, uses aggregated
+  session-scoped statistics rather than raw tool input/output, and produces
+  pending suggestions for human `learn accept` or `learn reject` review.
+
+### Controlled rollout and rollback
+
+1. Initialize the project with `chronos-code init`. Keep
+   `.chronos-code/routing.yaml` at `ppd.mode: shadow`; inspect its version,
+   specialist, call limit, and thresholds before collecting observations.
+2. Use `make eval` only as the deterministic fixture-replay contract gate. Do
+   not report its token-savings percentage as a model-performance result.
+3. Before any PPD delegation trial, require a valid paired real-model report:
+   same task corpus and revision, model revision and temperature, permissions,
+   context limit, timeout, graph warm state, baseline, repeats, and a
+   successful-task denominator. Until then, do not set `ppd.mode: enabled`.
+4. If a plan database is in use, back it up and check it before migration:
+   `chronos-code plan backup --db <path> --backup <backup-path>` followed by
+   `chronos-code plan verify-db --db <path>`. Run
+   `chronos-code plan migrate --db <path>`, then repeat `verify-db`. The plan
+   store rejects an unsupported newer schema or incompatible migration.
+5. Keep learning suggestions pending for review. To suspend learning for a
+   rollout, set `learning.enabled: false` in `.chronos-code/config.yaml` before
+   starting the process; re-enable it only after reviewing the pending output.
+6. Preserve the default security policy unless a reviewed project-specific
+   requirement justifies a change. Review `.chronos-code/security.yaml` path
+   restrictions, allowed shell commands, denied patterns, and secret patterns
+   before rollout. Security hooks block disallowed paths and commands before
+   execution.
+7. Roll back a delegation trial by returning `ppd.mode` to `shadow` (or
+   `disabled`) and restarting the process. Roll back learning by setting
+   `learning.enabled: false`. Restore a plan database only with the recorded
+   backup using `chronos-code plan restore --db <path> --source <backup-path>
+   --backup <pre-restore-backup-path> --yes`, then run `verify-db` again. Keep
+   benchmark reports as historical evidence; do not rewrite them to imply a
+   successful trial.
+
+The user-facing `verification.mode` setting supports `report` and `enforce` and
+defaults to `report`. Enforcement applies to supplied or runtime-derived
+obligations; it does not synthesize successful evidence. Do not enable it
+operationally until the relevant workload emits complete obligations and the
+report-only disagreement rate is acceptable.
+
+---
+
 ## 1. Product thesis
 
 Coding agents in 2026 have converged on the same feature set (agent loop, tool calls, MCP, subagents, plan mode, permissions). What actually differentiates them is:

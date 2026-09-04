@@ -14,8 +14,6 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/spawn08/chronos/storage"
 )
 
@@ -37,14 +35,13 @@ func NewSessionID() string {
 // delete/export) on top of a storage.Storage backend.
 type Manager struct {
 	store storage.Storage
-	dsn   string
 }
 
-// NewManager creates a Manager backed by store for all Storage-interface
-// operations, and dsn (the sqlite file path used by store) for the raw-SQL
-// operations that the Storage interface does not expose (e.g. Delete).
-func NewManager(store storage.Storage, dsn string) *Manager {
-	return &Manager{store: store, dsn: dsn}
+// NewManager creates a Manager backed by store. The dsn parameter is retained
+// for source compatibility; session deletion is performed by the storage
+// backend so it remains tenant-scoped.
+func NewManager(store storage.Storage, _ string) *Manager {
+	return &Manager{store: store}
 }
 
 // Ensure guarantees a session with the given sessionID exists and belongs to
@@ -109,42 +106,17 @@ func (m *Manager) Touch(ctx context.Context, sessionID string, status string) er
 	return m.store.UpdateSession(ctx, sess)
 }
 
-// sessionScopedTables lists the tables (besides sessions itself) that key
-// rows by a session_id column, per the sqlite adapter's migration schema
-// (storage/adapters/sqlite/sqlite.go: schema, schemaTenant). All of events,
-// checkpoints, traces, audit_logs, and memory have a session_id column.
-var sessionScopedTables = []string{"events", "checkpoints", "traces", "audit_logs", "memory"}
-
 // Delete permanently removes a session and all of its associated rows
-// (events, checkpoints, traces, audit logs, and session-scoped memory
-// records). Since storage.Storage exposes no delete-session method, Delete
-// opens its own raw *sql.DB connection to m.dsn (the same sqlite file the
-// Manager's Storage was constructed against) and runs the deletes in a
-// single transaction. Deleting rows that don't exist is not an error.
+// (events, checkpoints, traces, audit logs, session-scoped memory, and files).
+// The optional SessionDeleter capability keeps deletion in the backend that
+// owns tenant isolation. Deleting rows that don't exist is not an error.
 func (m *Manager) Delete(ctx context.Context, sessionID string) error {
-	db, err := sql.Open("sqlite", m.dsn)
-	if err != nil {
-		return fmt.Errorf("open dsn %q: %w", m.dsn, err)
+	deleter, ok := m.store.(storage.SessionDeleter)
+	if !ok {
+		return fmt.Errorf("storage backend does not support session deletion")
 	}
-	defer db.Close()
-
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, table := range sessionScopedTables {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE session_id=?`, table), sessionID); err != nil {
-			return fmt.Errorf("delete from %s: %w", table, err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id=?`, sessionID); err != nil {
-		return fmt.Errorf("delete from sessions: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	if err := deleter.DeleteSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("delete session %q: %w", sessionID, err)
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos/sdk/agent"
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,55 @@ func TestEmbeddedDefaultsStartFreshSession(t *testing.T) {
 	}
 	if cfg.Session.AutoResume {
 		t.Fatal("embedded session.auto_resume = true, want false for a clean default startup")
+	}
+	foundPPDPlanner := false
+	for _, configured := range cfg.Agents {
+		if configured.ID == "ppd-planner" {
+			foundPPDPlanner = configured.System != "" && len(configured.Tools) > 0
+		}
+	}
+	if !foundPPDPlanner {
+		t.Fatal("embedded defaults do not include a configured ppd-planner")
+	}
+}
+
+func TestEmbeddedDefaultsUseReportVerification(t *testing.T) {
+	cfg, err := loadEmbeddedDefaults()
+	if err != nil {
+		t.Fatalf("loadEmbeddedDefaults() error = %v", err)
+	}
+	if cfg.Verification.Mode != verification.ModeReport {
+		t.Fatalf("verification.mode = %q, want %q", cfg.Verification.Mode, verification.ModeReport)
+	}
+}
+
+func TestVerificationModeValidation(t *testing.T) {
+	for _, mode := range []verification.Mode{verification.ModeReport, verification.ModeEnforce} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := mustConfig(t, "verification:\n  mode: "+string(mode)+"\n")
+			if cfg.Verification.Mode != mode {
+				t.Fatalf("verification.mode = %q, want %q", cfg.Verification.Mode, mode)
+			}
+		})
+	}
+
+	var cfg Config
+	err := yaml.Unmarshal([]byte("verification:\n  mode: ignore\n"), &cfg)
+	if err == nil || !strings.Contains(err.Error(), "verification.mode") || !strings.Contains(err.Error(), "report") || !strings.Contains(err.Error(), "enforce") {
+		t.Fatalf("unmarshal error = %v, want verification.mode report|enforce validation", err)
+	}
+}
+
+func TestLoadFromDirRejectsInvalidVerificationMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("verification:\n  mode: ignore\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadFromDir(dir)
+	if err == nil || !strings.Contains(err.Error(), "verification.mode") {
+		t.Fatalf("loadFromDir() error = %v, want invalid verification mode", err)
 	}
 }
 
@@ -195,6 +245,116 @@ func TestMergeProviders_EmptyOverlayKeepsBase(t *testing.T) {
 	if got := merged["anthropic"].BaseURL; got != "https://old.example.com" {
 		t.Errorf("anthropic BaseURL = %q, want base preserved when overlay is empty", got)
 	}
+}
+
+func TestMergeConfigOverlaysTypedFieldsIncludingFalseAndZero(t *testing.T) {
+	base := mustConfig(t, `
+router:
+  enabled: true
+  budget_tokens: 100
+  model:
+    provider: anthropic
+    model: sonnet
+security:
+  denied_paths: [vendor]
+memory:
+  enabled: true
+  auto_extract: true
+session:
+  auto_resume: true
+  max_history_turns: 50
+workspace:
+  index_on_start: true
+tools:
+  compression_threshold_tokens: 500
+learning:
+  enabled: true
+  min_sessions_before_distill: 3
+verification:
+  mode: report
+server:
+  enabled: true
+  max_concurrent: 10
+`)
+	setConfigSource(base, "embedded")
+	overlay := mustConfig(t, `
+router:
+  enabled: false
+  budget_tokens: 0
+  model:
+    model: haiku
+security:
+  denied_paths: []
+memory:
+  enabled: false
+  auto_extract: false
+session:
+  auto_resume: false
+  max_history_turns: 0
+workspace:
+  index_on_start: false
+tools:
+  compression_threshold_tokens: 0
+learning:
+  enabled: false
+  min_sessions_before_distill: 0
+verification:
+  mode: enforce
+server:
+  enabled: false
+  max_concurrent: 0
+`)
+
+	mergeConfig(base, overlay, "project")
+
+	if base.Router.Enabled || base.Router.BudgetTokens != 0 || base.Router.Model.Provider != "anthropic" || base.Router.Model.Model != "haiku" {
+		t.Errorf("Router = %+v, want false/zero overlay with inherited provider", base.Router)
+	}
+	if len(base.Security.DeniedPaths) != 0 || base.Memory.Enabled || base.Memory.AutoExtract || base.Session.AutoResume || base.Session.MaxHistoryTurns != 0 || *base.Workspace.IndexOnStart || base.Tools.CompressionThresholdTokens != 0 || base.Learning.Enabled || base.Learning.MinSessionsBeforeDistill != 0 || base.Server.Enabled || base.Server.MaxConcurrent != 0 {
+		t.Errorf("typed overlay did not preserve explicit false, zero, or empty values: %+v", base)
+	}
+	if base.Verification.Mode != verification.ModeEnforce {
+		t.Errorf("Verification.Mode = %q, want %q", base.Verification.Mode, verification.ModeEnforce)
+	}
+	if got := base.sources["router.enabled"]; got != "project" {
+		t.Errorf("source router.enabled = %q, want project", got)
+	}
+	if got := base.sources["router.model.provider"]; got != "embedded" {
+		t.Errorf("source router.model.provider = %q, want embedded", got)
+	}
+}
+
+func TestEffectiveConfigRedactsCredentialsAndReportsSources(t *testing.T) {
+	cfg := mustConfig(t, `
+server:
+  api_key: top-secret
+  listen: 127.0.0.1:8080
+`)
+	setConfigSource(cfg, "cli")
+
+	effective, err := cfg.EffectiveConfig()
+	if err != nil {
+		t.Fatalf("EffectiveConfig() error = %v", err)
+	}
+	server := effective.Values["server"].(map[string]any)
+	if got := server["api_key"]; got != "[REDACTED]" {
+		t.Errorf("redacted api_key = %#v, want [REDACTED]", got)
+	}
+	if got := server["listen"]; got != "127.0.0.1:8080" {
+		t.Errorf("listen = %#v, want unredacted value", got)
+	}
+	if got := effective.Sources["server.api_key"]; got != "cli" {
+		t.Errorf("source server.api_key = %q, want cli", got)
+	}
+}
+
+func mustConfig(t *testing.T, body string) *Config {
+	t.Helper()
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(body), &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	return &cfg
 }
 
 func TestLoadLearnedAgents(t *testing.T) {

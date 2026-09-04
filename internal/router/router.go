@@ -61,6 +61,7 @@ type Config struct {
 	Router        routerSection `yaml:"router"`
 	IntentRouting []IntentRoute `yaml:"intent_routing"`
 	ModelRouting  ModelRouting  `yaml:"model_routing"`
+	PPD           PPDConfig     `yaml:"ppd"`
 }
 
 // Parse decodes raw YAML bytes (e.g. loaded via internal/defaults.ReadFile)

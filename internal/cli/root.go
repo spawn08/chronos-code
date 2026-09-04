@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -81,6 +82,8 @@ func Execute() error {
 		return runEval()
 	case "team":
 		return runTeam()
+	case "plan":
+		return runPlan()
 	case "serve":
 		return runServe()
 	case "version":
@@ -261,8 +264,11 @@ Usage:
   chronos-code learn accept <id>                         Apply a suggestion (agent or pattern)
   chronos-code learn reject <id>                          Discard a suggestion
   chronos-code eval run [--update-baseline] [--md <path>]  Run the token-efficiency eval suite
+  chronos-code eval ppd --validate-only                    Validate the PPD benchmark registration
+  chronos-code eval ppd --report [--baseline <path>]       Report and gate completed PPD evidence
   chronos-code team list                                   List configured teams
   chronos-code team run <team_id> <message>                Run a team on a task
+  chronos-code plan <operation> --db <path> ...             Inspect or operate a durable plan database
   chronos-code serve [--listen :8430] [--auth api_key]     Start HTTP server for team deployment
   chronos-code version            Print version information
   chronos-code help               Show this help
@@ -342,7 +348,6 @@ func runHeadless() error {
 	}
 	defer orch.Close()
 
-	ctx := context.Background()
 	if strings.HasPrefix(message, "@") {
 		parts := strings.SplitN(message[1:], " ", 2)
 		if len(parts) == 2 {
@@ -353,25 +358,35 @@ func runHeadless() error {
 		}
 	}
 
+	request := orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode()}
 	if streamMode {
-		ch, err := orch.ChatStream(ctx, message)
-		if err != nil {
-			return err
-		}
-		usage, err := tui.StreamResponse(ch, os.Stdout)
-		if err != nil {
-			return err
-		}
-		tui.PrintUsage(usage, os.Stderr)
-		return nil
+		request.Mode = orchestrator.ExecutionStreaming
 	}
+	_, err = RunExecution(context.Background(), orch, request, os.Stdout, os.Stderr)
+	return err
+}
 
-	resp, err := orch.Chat(ctx, message)
+// RunExecution executes and renders one headless CLI request. It is kept
+// separate from argument/config handling so the adapter can be exercised with
+// a deterministic orchestrator.
+func RunExecution(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, stdout, stderr io.Writer) (orchestrator.ExecutionResult, error) {
+	result, err := orch.Execute(ctx, request)
 	if err != nil {
-		return err
+		return result, err
 	}
-	tui.PrintResponse(resp, os.Stdout)
-	return nil
+	if request.Mode == orchestrator.ExecutionStreaming {
+		usage, streamErr := tui.StreamResponse(result.Stream, stdout)
+		if streamErr != nil {
+			return result, streamErr
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		tui.PrintUsage(usage, stderr)
+		return result, nil
+	}
+	tui.PrintResponse(result.Response, stdout)
+	return result, nil
 }
 
 func runConfig() error {

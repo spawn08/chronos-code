@@ -1,0 +1,17 @@
+{
+  "tenant_id": "delegation-tenant",
+  "repository_id": "delegation-repository",
+  "simple": {
+    "task_id": "simple-task",
+    "file_count": 1,
+    "package_count": 1,
+    "estimated_calls": 1
+  },
+  "complex": {
+    "task_id": "complex-task",
+    "file_count": 4,
+    "package_count": 2,
+    "estimated_calls": 5,
+    "nodes": ["discover", "implement"]
+  }
+}

@@ -230,6 +230,138 @@ func TestIndexFile_ScopedToPackage(t *testing.T) {
 	}
 }
 
+func TestIndexFile_RemovesStaleCallEdge(t *testing.T) {
+	root := newTinyModule(t)
+	aPath := filepath.Join(root, "a.go")
+	if err := os.WriteFile(aPath, []byte("package tiny\n\nfunc A() { B() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	ix := NewIndexer(store, root)
+	if _, err := ix.IndexAll(ctx); err != nil {
+		t.Fatalf("IndexAll: %v", err)
+	}
+	if err := os.WriteFile(aPath, []byte("package tiny\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.IndexFile(ctx, aPath); err != nil {
+		t.Fatalf("IndexFile: %v", err)
+	}
+	callers, err := store.CallersOf(ctx, "B")
+	if err != nil {
+		t.Fatalf("CallersOf: %v", err)
+	}
+	if len(callers) != 0 {
+		t.Fatalf("CallersOf(B) = %v, want no stale callers", callers)
+	}
+}
+
+func TestIndexAll_DeletesFileAndItsEdges(t *testing.T) {
+	root := newTinyModule(t)
+	aPath := filepath.Join(root, "a.go")
+	if err := os.WriteFile(aPath, []byte("package tiny\n\nfunc A() { B() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	ix := NewIndexer(store, root)
+	if _, err := ix.IndexAll(ctx); err != nil {
+		t.Fatalf("IndexAll: %v", err)
+	}
+	if err := os.Remove(aPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.IndexAll(ctx); err != nil {
+		t.Fatalf("IndexAll after delete: %v", err)
+	}
+	if symbols, err := store.SymbolsInFile(ctx, aPath); err != nil || len(symbols) != 0 {
+		t.Fatalf("SymbolsInFile(deleted) = %v, %v; want empty", symbols, err)
+	}
+	if callers, err := store.CallersOf(ctx, "B"); err != nil || len(callers) != 0 {
+		t.Fatalf("CallersOf(B) after delete = %v, %v; want empty", callers, err)
+	}
+}
+
+func TestIndexAll_ReindexDoesNotDuplicateEdges(t *testing.T) {
+	root := newTinyModule(t)
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package tiny\n\nfunc A() { B() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	ix := NewIndexer(store, root)
+	if _, err := ix.IndexAll(ctx); err != nil {
+		t.Fatalf("first IndexAll: %v", err)
+	}
+	first, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("first Stats: %v", err)
+	}
+	if _, err := ix.IndexAll(ctx); err != nil {
+		t.Fatalf("second IndexAll: %v", err)
+	}
+	second, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("second Stats: %v", err)
+	}
+	if second.Edges != first.Edges {
+		t.Fatalf("edge count after unchanged reindex = %d, want %d", second.Edges, first.Edges)
+	}
+}
+
+func TestIndexFile_PreservesDuplicateCallerNameEdges(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module duplicate\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, pkg := range []string{"one", "two"} {
+		dir := filepath.Join(root, pkg)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package "+pkg+"\n\nfunc Caller() { Target() }\nfunc Target() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	ix := NewIndexer(store, root)
+	if _, err := ix.IndexAll(ctx); err != nil {
+		t.Fatalf("IndexAll: %v", err)
+	}
+	onePath := filepath.Join(root, "one", "main.go")
+	if err := os.WriteFile(onePath, []byte("package one\n\nfunc Caller() {}\nfunc Target() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ix.IndexFile(ctx, onePath); err != nil {
+		t.Fatalf("IndexFile: %v", err)
+	}
+	var edges int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges WHERE kind = ? AND from_name = ? AND to_name = ?`, string(EdgeCall), "Caller", "Target").Scan(&edges); err != nil {
+		t.Fatalf("count duplicate caller edges: %v", err)
+	}
+	if edges != 1 {
+		t.Fatalf("Caller -> Target edge count = %d, want 1 from the unchanged package", edges)
+	}
+}
+
 // newTinyModule writes a minimal two-file Go module to a temp dir and
 // returns its root, for fast functional tests that don't need a real repo.
 func newTinyModule(t *testing.T) string {

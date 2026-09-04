@@ -1,32 +1,72 @@
 package auth
 
 import (
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
 
-func buildTestJWT(claims map[string]any) string {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+var (
+	testSigningKeyOnce sync.Once
+	testSigningKey     *rsa.PrivateKey
+)
+
+func signingKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	testSigningKeyOnce.Do(func() {
+		var err error
+		testSigningKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate signing key: %v", err)
+		}
+	})
+	return testSigningKey
+}
+
+func buildTestJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test-key","typ":"JWT"}`))
 	payload, _ := json.Marshal(claims)
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
-	sig := base64.RawURLEncoding.EncodeToString([]byte("fakesig"))
+	hash := sha256.Sum256([]byte(header + "." + payloadB64))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, signingKey(t), crypto.SHA256, hash[:])
+	if err != nil {
+		t.Fatalf("sign test JWT: %v", err)
+	}
+	sig := base64.RawURLEncoding.EncodeToString(signature)
 	return header + "." + payloadB64 + "." + sig
 }
 
+func newTestOIDCValidator(t *testing.T, cfg OIDCConfig) *OIDCValidator {
+	t.Helper()
+	v, err := NewOIDCValidator(cfg)
+	if err != nil {
+		t.Fatalf("NewOIDCValidator: %v", err)
+	}
+	key := signingKey(t)
+	v.jwks = &jwksCache{keys: map[string]*rsa.PublicKey{"test-key": &key.PublicKey}, fetchedAt: time.Now(), ttl: time.Hour}
+	return v
+}
+
 func TestParseJWTClaims(t *testing.T) {
-	token := buildTestJWT(map[string]any{
-		"sub":    "user-123",
-		"email":  "dev@corp.com",
-		"name":   "Dev User",
-		"iss":    "https://login.corp.com",
-		"aud":    "chronos-code",
-		"exp":    float64(time.Now().Add(time.Hour).Unix()),
-		"iat":    float64(time.Now().Unix()),
-		"scope":  "openid profile email",
-		"groups": []string{"engineering", "platform"},
+	token := buildTestJWT(t, map[string]any{
+		"sub":       "user-123",
+		"tenant_id": "tenant-123",
+		"email":     "dev@corp.com",
+		"name":      "Dev User",
+		"iss":       "https://login.corp.com",
+		"aud":       "chronos-code",
+		"exp":       float64(time.Now().Add(time.Hour).Unix()),
+		"iat":       float64(time.Now().Unix()),
+		"scope":     "openid profile email",
+		"groups":    []string{"engineering", "platform"},
 	})
 
 	claims, err := parseJWTClaims(token)
@@ -35,6 +75,9 @@ func TestParseJWTClaims(t *testing.T) {
 	}
 	if claims.Subject != "user-123" {
 		t.Errorf("subject = %q, want user-123", claims.Subject)
+	}
+	if claims.TenantID != "tenant-123" {
+		t.Errorf("tenant ID = %q, want tenant-123", claims.TenantID)
 	}
 	if claims.Email != "dev@corp.com" {
 		t.Errorf("email = %q, want dev@corp.com", claims.Email)
@@ -54,7 +97,7 @@ func TestParseJWTClaims(t *testing.T) {
 }
 
 func TestParseJWTClaims_AudienceArray(t *testing.T) {
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub": "u1",
 		"iss": "https://idp.example.com",
 		"aud": []string{"chronos-code", "other-app"},
@@ -84,15 +127,12 @@ func TestParseJWTClaims_TwoSegments(t *testing.T) {
 }
 
 func TestOIDCValidator_ValidToken(t *testing.T) {
-	v, err := NewOIDCValidator(OIDCConfig{
+	v := newTestOIDCValidator(t, OIDCConfig{
 		Issuer:   "https://login.corp.com",
 		ClientID: "chronos-code",
 	})
-	if err != nil {
-		t.Fatalf("NewOIDCValidator: %v", err)
-	}
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "user-1",
 		"iss":   "https://login.corp.com",
 		"aud":   "chronos-code",
@@ -110,12 +150,12 @@ func TestOIDCValidator_ValidToken(t *testing.T) {
 }
 
 func TestOIDCValidator_ExpiredToken(t *testing.T) {
-	v, _ := NewOIDCValidator(OIDCConfig{
+	v := newTestOIDCValidator(t, OIDCConfig{
 		Issuer:   "https://login.corp.com",
 		ClientID: "chronos-code",
 	})
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "user-1",
 		"iss":   "https://login.corp.com",
 		"aud":   "chronos-code",
@@ -133,12 +173,12 @@ func TestOIDCValidator_ExpiredToken(t *testing.T) {
 }
 
 func TestOIDCValidator_WrongIssuer(t *testing.T) {
-	v, _ := NewOIDCValidator(OIDCConfig{
+	v := newTestOIDCValidator(t, OIDCConfig{
 		Issuer:   "https://login.corp.com",
 		ClientID: "chronos-code",
 	})
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "user-1",
 		"iss":   "https://evil.com",
 		"aud":   "chronos-code",
@@ -156,12 +196,12 @@ func TestOIDCValidator_WrongIssuer(t *testing.T) {
 }
 
 func TestOIDCValidator_WrongAudience(t *testing.T) {
-	v, _ := NewOIDCValidator(OIDCConfig{
+	v := newTestOIDCValidator(t, OIDCConfig{
 		Issuer:   "https://login.corp.com",
 		ClientID: "chronos-code",
 	})
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "user-1",
 		"iss":   "https://login.corp.com",
 		"aud":   "other-app",
@@ -179,13 +219,13 @@ func TestOIDCValidator_WrongAudience(t *testing.T) {
 }
 
 func TestOIDCValidator_MissingScope(t *testing.T) {
-	v, _ := NewOIDCValidator(OIDCConfig{
+	v := newTestOIDCValidator(t, OIDCConfig{
 		Issuer:         "https://login.corp.com",
 		ClientID:       "chronos-code",
 		RequiredScopes: []string{"openid", "admin"},
 	})
 
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "user-1",
 		"iss":   "https://login.corp.com",
 		"aud":   "chronos-code",
@@ -331,7 +371,7 @@ func containsSubstr(s, sub string) bool {
 }
 
 func TestScopeArray(t *testing.T) {
-	token := buildTestJWT(map[string]any{
+	token := buildTestJWT(t, map[string]any{
 		"sub":   "u1",
 		"iss":   "https://login.corp.com",
 		"aud":   "chronos-code",
@@ -339,7 +379,7 @@ func TestScopeArray(t *testing.T) {
 		"scope": []string{"openid", "profile"},
 	})
 
-	v, _ := NewOIDCValidator(OIDCConfig{
+	v := newTestOIDCValidator(t, OIDCConfig{
 		Issuer:   "https://login.corp.com",
 		ClientID: "chronos-code",
 	})

@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
@@ -66,6 +67,9 @@ type Edge struct {
 // multi-writer locking.
 type Store struct {
 	db *sql.DB
+
+	mu              sync.RWMutex
+	currentFilePath string
 }
 
 // OpenStore opens (creating if needed) the graph database at path.
@@ -114,7 +118,8 @@ func (s *Store) migrate() error {
 			id        INTEGER PRIMARY KEY AUTOINCREMENT,
 			kind      TEXT NOT NULL,
 			from_name TEXT NOT NULL,
-			to_name   TEXT NOT NULL
+			to_name   TEXT NOT NULL,
+			source_file TEXT NOT NULL DEFAULT ''
 		);
 		CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(kind, from_name);
 		CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_name);
@@ -137,8 +142,42 @@ func (s *Store) migrate() error {
 	if err := s.addContentHashColumn(); err != nil {
 		return err
 	}
+	if err := s.addEdgeSourceFileColumn(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity ON edges(kind, from_name, to_name, source_file)`); err != nil {
+		return fmt.Errorf("create edge identity index: %w", err)
+	}
 	if _, err := s.db.Exec(`INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')`); err != nil {
 		return fmt.Errorf("rebuild symbols fts: %w", err)
+	}
+	return nil
+}
+
+// addEdgeSourceFileColumn adds edges.source_file for graph databases created
+// before edges were associated with the file that produced them.
+func (s *Store) addEdgeSourceFileColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(edges)`)
+	if err != nil {
+		return fmt.Errorf("inspect edges schema: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan edges schema: %w", err)
+		}
+		if name == "source_file" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect edges schema: %w", err)
+	}
+	if _, err := s.db.Exec(`ALTER TABLE edges ADD COLUMN source_file TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add edge source_file column: %w", err)
 	}
 	return nil
 }
@@ -188,16 +227,30 @@ func (s *Store) Reset(ctx context.Context) error {
 	return nil
 }
 
-// ClearFile removes all symbols and file/package metadata previously recorded
-// for path, so an incremental reindex can re-insert fresh data without
-// leaving stale rows behind. Edges are name-keyed and self-heal on the next
-// full index; incremental updates leave them in place since a moved/renamed
-// symbol still resolves by name for callers elsewhere in the repo.
+// ClearFile removes all graph facts previously recorded for path, so an
+// incremental reindex can re-insert fresh data without stale relationships.
 func (s *Store) ClearFile(ctx context.Context, path string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM symbols WHERE file = ?`, path)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("begin clear file %s: %w", path, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM edges
+		WHERE source_file = ?
+		   OR (source_file = '' AND from_name IN (SELECT name FROM symbols WHERE file = ?))
+	`, path, path); err != nil {
+		return fmt.Errorf("clear file %s edges: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbols WHERE file = ?`, path); err != nil {
+		return fmt.Errorf("clear file %s symbols: %w", path, err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("clear file %s: %w", path, err)
 	}
+	s.mu.Lock()
+	s.currentFilePath = path
+	s.mu.Unlock()
 	return nil
 }
 
@@ -217,10 +270,25 @@ func (s *Store) UpsertFile(ctx context.Context, path, pkg string, mtime int64) e
 // and its symbols — used to prune files that were removed from disk since
 // the last IndexAll pass now that IndexAll no longer wipes the store first.
 func (s *Store) RemoveFile(ctx context.Context, path string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM symbols WHERE file = ?`, path); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin remove file %s: %w", path, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM edges
+		WHERE source_file = ?
+		   OR (source_file = '' AND from_name IN (SELECT name FROM symbols WHERE file = ?))
+	`, path, path); err != nil {
+		return fmt.Errorf("remove file %s edges: %w", path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbols WHERE file = ?`, path); err != nil {
 		return fmt.Errorf("remove file %s symbols: %w", path, err)
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path); err != nil {
+		return fmt.Errorf("remove file %s: %w", path, err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("remove file %s: %w", path, err)
 	}
 	return nil
@@ -243,7 +311,8 @@ func (s *Store) RemovePackage(ctx context.Context, name string) error {
 func (s *Store) PruneStaleEdges(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM edges
-		WHERE from_name NOT IN (SELECT name FROM symbols)
+		WHERE (source_file != '' AND source_file NOT IN (SELECT path FROM files))
+		   OR from_name NOT IN (SELECT name FROM symbols)
 		   OR to_name NOT IN (SELECT name FROM symbols)
 	`)
 	if err != nil {
@@ -324,13 +393,32 @@ func (s *Store) InsertSymbol(ctx context.Context, sym Symbol) error {
 	return nil
 }
 
-// InsertEdge records a directed relationship, deduplicating identical rows.
+// InsertEdge records a directed relationship, associating it with the file
+// currently being indexed so a later incremental refresh can remove it.
 func (s *Store) InsertEdge(ctx context.Context, e Edge) error {
+	s.mu.RLock()
+	sourceFile := s.currentFilePath
+	s.mu.RUnlock()
+	if sourceFile != "" && e.Kind == EdgeImplements {
+		var owner string
+		err := s.db.QueryRowContext(ctx, `
+			SELECT s.file
+			FROM symbols s
+			JOIN files f ON f.path = ?
+			WHERE s.name = ? AND s.package = f.package
+			LIMIT 1
+		`, sourceFile, e.FromName).Scan(&owner)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("find edge owner %s->%s: %w", e.FromName, e.ToName, err)
+		}
+		if err == nil {
+			sourceFile = owner
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO edges (kind, from_name, to_name)
-		SELECT ?, ?, ?
-		WHERE NOT EXISTS (SELECT 1 FROM edges WHERE kind = ? AND from_name = ? AND to_name = ?)
-	`, string(e.Kind), e.FromName, e.ToName, string(e.Kind), e.FromName, e.ToName)
+		INSERT OR IGNORE INTO edges (kind, from_name, to_name, source_file)
+		VALUES (?, ?, ?, ?)
+	`, string(e.Kind), e.FromName, e.ToName, sourceFile)
 	if err != nil {
 		return fmt.Errorf("insert edge %s->%s: %w", e.FromName, e.ToName, err)
 	}

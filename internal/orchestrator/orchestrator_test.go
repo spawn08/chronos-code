@@ -23,6 +23,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/learning"
+	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/session"
@@ -319,6 +320,65 @@ func TestBudgetRejectsBeforeProviderInvocation(t *testing.T) {
 	}
 	if got := orch.SessionCost(); got != (budget.SessionCost{}) {
 		t.Fatalf("SessionCost() = %+v, want no spend or reservation", got)
+	}
+}
+
+func TestCompactActiveSession_NoActiveAgent(t *testing.T) {
+	orch := &Orchestrator{agents: map[string]*agent.Agent{}, active: "missing"}
+	if err := orch.CompactActiveSession(context.Background()); err == nil {
+		t.Fatal("expected error for missing active agent")
+	}
+}
+
+func TestCompactActiveSession_PropagatesAgentError(t *testing.T) {
+	// newBudgetTestOrchestrator's agent has no Storage, so the underlying
+	// agent.CompactSession call itself errors; CompactActiveSession must
+	// surface that rather than silently succeeding.
+	orch := newBudgetTestOrchestrator(&budgetTestProvider{modelID: "claude-haiku-4-5"})
+	err := orch.CompactActiveSession(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "compact session") {
+		t.Fatalf("CompactActiveSession() error = %v, want a wrapped compact session error", err)
+	}
+}
+
+func TestCompactActiveSession_ResetsBudgetOnSuccess(t *testing.T) {
+	store := storagememory.New()
+	provider := &subagentTestProvider{name: "p", modelID: "test-model", response: "ok"}
+	a, err := agent.New("coder", "Coder").WithModel(provider).WithStorage(store).Build()
+	if err != nil {
+		t.Fatalf("agent.New().Build() error = %v", err)
+	}
+
+	tracker := budget.NewTracker(1000, 500)
+	orch := &Orchestrator{
+		agents:   map[string]*agent.Agent{"coder": a},
+		active:   "coder",
+		sessions: map[string]string{"coder": "session-1"},
+		budget:   tracker,
+	}
+
+	// Simulate prior usage accumulated against this session, so resetting
+	// it afterward is actually observable.
+	if err := tracker.After(context.Background(), &hooks.Event{
+		Type:   hooks.EventModelCallAfter,
+		Name:   "session-1",
+		Output: &model.ChatResponse{Usage: model.Usage{PromptTokens: 100}},
+	}); err != nil {
+		t.Fatalf("seed tracker usage: %v", err)
+	}
+	if got := tracker.Used("session-1"); got != 100 {
+		t.Fatalf("Used(session-1) before compaction = %d, want 100", got)
+	}
+
+	// The session has no persisted events, so agent.CompactSession is a
+	// no-op success (nothing to summarize) — this test is about
+	// CompactActiveSession's own budget-reset wiring, not the SDK's
+	// summarization logic (covered separately in the chronos repo).
+	if err := orch.CompactActiveSession(context.Background()); err != nil {
+		t.Fatalf("CompactActiveSession() error = %v", err)
+	}
+	if got := tracker.Used("session-1"); got != 0 {
+		t.Fatalf("Used(session-1) after compaction = %d, want 0", got)
 	}
 }
 
@@ -704,6 +764,39 @@ func TestSkillContextParityPreservesExistingPins(t *testing.T) {
 	joined := strings.Join(blockingPins, "\n")
 	if !strings.Contains(joined, "existing pin") || !strings.Contains(joined, "parity skill body") {
 		t.Fatalf("pins = %q, want existing pin and selected current-message skill", joined)
+	}
+}
+
+func TestMemoryPromptPinsUseCurrentContextTenant(t *testing.T) {
+	t.Chdir(t.TempDir())
+	a := &agent.Agent{ID: "coder"}
+	store := setupMemory(&config.Config{Memory: config.MemoryConfig{Enabled: true}}, map[string]*agent.Agent{"coder": a})
+	tenantAContext := storage.WithTenant(context.Background(), "tenant-a")
+	tenantBContext := storage.WithTenant(context.Background(), "tenant-b")
+	if _, err := store.ForContext(tenantAContext).Add(memory.CategoryProject, "shared query tenant A pin"); err != nil {
+		t.Fatalf("tenant A Add: %v", err)
+	}
+	if _, err := store.ForContext(tenantBContext).Add(memory.CategoryProject, "shared query tenant B pin"); err != nil {
+		t.Fatalf("tenant B Add: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		ctx     context.Context
+		want    string
+		notWant string
+	}{
+		{name: "tenant A recall", ctx: context.WithValue(tenantAContext, messageKey{}, "shared query"), want: "tenant A pin", notWant: "tenant B pin"},
+		{name: "tenant B recall", ctx: context.WithValue(tenantBContext, messageKey{}, "shared query"), want: "tenant B pin", notWant: "tenant A pin"},
+		{name: "tenant A recent", ctx: tenantAContext, want: "tenant A pin", notWant: "tenant B pin"},
+		{name: "tenant B recent", ctx: tenantBContext, want: "tenant B pin", notWant: "tenant A pin"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pins := strings.Join(messageContents(a.ContextPinsFn(tt.ctx)), "\n")
+			if !strings.Contains(pins, tt.want) || strings.Contains(pins, tt.notWant) {
+				t.Fatalf("pins = %q, want %q and no %q", pins, tt.want, tt.notWant)
+			}
+		})
 	}
 }
 

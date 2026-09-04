@@ -26,8 +26,14 @@ const DefaultThresholdTokens = 500
 const ReadStoredResultTool = "read_stored_result"
 
 const (
-	defaultStoredResultChunkBytes = 8 << 10
-	maxStoredResultChunkBytes     = 16 << 10
+	// These were 8KiB/16KiB, which meant reassembling one moderately large
+	// stored result (e.g. ~80KB) cost 5+ separate read_stored_result calls —
+	// each its own model round trip that resends the whole growing
+	// transcript, the single biggest driver of cumulative token-budget
+	// exhaustion observed in practice. Raised so the common case fits in
+	// one or two calls instead.
+	defaultStoredResultChunkBytes = 64 << 10
+	maxStoredResultChunkBytes     = 256 << 10
 )
 
 // Wrap wraps every handler currently registered on a so results exceeding
@@ -98,7 +104,7 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 			"properties": map[string]any{
 				"key":       map[string]any{"type": "string", "description": "The storage_key returned alongside a compressed tool result"},
 				"offset":    map[string]any{"type": "integer", "description": "Byte offset to start reading from (default 0)"},
-				"max_bytes": map[string]any{"type": "integer", "description": "Maximum bytes to return (default 8192, capped at 16384)"},
+				"max_bytes": map[string]any{"type": "integer", "description": fmt.Sprintf("Maximum bytes to return (default %d, capped at %d)", defaultStoredResultChunkBytes, maxStoredResultChunkBytes)},
 			},
 			"required": []string{"key"},
 		},

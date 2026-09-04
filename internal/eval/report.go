@@ -79,6 +79,7 @@ func (s Summary) RenderMarkdown() string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# Chronos Code — Token Efficiency Eval Suite\n\n")
+	fmt.Fprintf(&b, "> **Synthetic fixture replay:** These results measure deterministic local tool fixtures, not paired Chronos Code and external baseline-tool model runs. They are not a valid external performance benchmark.\n\n")
 	fmt.Fprintf(&b, "%d tasks, %d failed contract checks.\n\n", len(s.Results), len(s.FailedTasks))
 	fmt.Fprintf(&b, "- **Aggregate savings**: %.1f%% (%d baseline tokens -> %d optimized tokens)\n", s.SavingsRatio()*100, s.TotalBaseline, s.TotalOptimized)
 	fmt.Fprintf(&b, "- **System prompt size**: %d tokens (target <%d)\n", s.SystemPromptTokens, systemPromptTokenBudget)

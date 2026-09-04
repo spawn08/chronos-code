@@ -54,6 +54,18 @@ model_routing:
         provider: "anthropic"
         model: "claude-opus-4-8"
 
+# Persistent-plan decomposition is initially observational. Qualifying work is
+# recorded as a shadow decision until experiment evidence permits delegation.
+ppd:
+  version: "v1"
+  mode: "shadow"
+  specialist: "ppd-planner"
+  max_planner_calls: 1
+  thresholds:
+    min_files: 3
+    min_packages: 2
+    min_estimated_calls: 5
+
 # Intent → Agent mapping
 intent_routing:
 

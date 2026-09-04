@@ -270,6 +270,9 @@ func TestManagerDelete(t *testing.T) {
 	if err := store.AppendEvent(ctx, evt); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
 	}
+	if err := store.PutFile(ctx, "sess_delete", "note.txt", []byte("delete me")); err != nil {
+		t.Fatalf("PutFile: %v", err)
+	}
 
 	if err := m.Delete(ctx, "sess_delete"); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -286,9 +289,59 @@ func TestManagerDelete(t *testing.T) {
 	if len(events) != 0 {
 		t.Fatalf("ListEvents after Delete = %+v, want empty", events)
 	}
+	if _, err := store.GetFile(ctx, "sess_delete", "note.txt"); err == nil {
+		t.Fatal("GetFile after Delete: expected error, got nil")
+	}
 
 	// Deleting again (rows already gone) must not error.
 	if err := m.Delete(ctx, "sess_delete"); err != nil {
 		t.Fatalf("Delete (idempotent): %v", err)
+	}
+}
+
+func TestManagerDeleteTenantScoped(t *testing.T) {
+	store := newTestStore(t)
+	m := NewManager(store, ":memory:")
+	ctxA := storage.WithTenant(context.Background(), "tenant-a")
+	ctxB := storage.WithTenant(context.Background(), "tenant-b")
+	const sessionID = "sess_shared"
+
+	for _, ctx := range []context.Context{ctxA, ctxB} {
+		if err := store.CreateSession(ctx, &storage.Session{
+			ID: sessionID, AgentID: "agent-1", Status: "running", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+	if err := store.AppendEvent(ctxA, &storage.Event{ID: "event-a", SessionID: sessionID, SeqNum: 1, Type: "test", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent tenant A: %v", err)
+	}
+	if err := store.AppendEvent(ctxB, &storage.Event{ID: "event-b", SessionID: sessionID, SeqNum: 1, Type: "test", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent tenant B: %v", err)
+	}
+	if err := store.PutFile(ctxA, sessionID, "note.txt", []byte("tenant A")); err != nil {
+		t.Fatalf("PutFile tenant A: %v", err)
+	}
+	if err := store.PutFile(ctxB, sessionID, "note.txt", []byte("tenant B")); err != nil {
+		t.Fatalf("PutFile tenant B: %v", err)
+	}
+
+	if err := m.Delete(ctxA, sessionID); err != nil {
+		t.Fatalf("Delete tenant A: %v", err)
+	}
+	if _, err := store.GetSession(ctxA, sessionID); err == nil {
+		t.Fatal("GetSession tenant A after Delete: expected error, got nil")
+	}
+	if events, err := store.ListEvents(ctxA, sessionID, 0); err != nil || len(events) != 0 {
+		t.Fatalf("ListEvents tenant A after Delete = %v, %v; want empty, nil", events, err)
+	}
+	if _, err := store.GetSession(ctxB, sessionID); err != nil {
+		t.Fatalf("GetSession tenant B after tenant A delete: %v", err)
+	}
+	if events, err := store.ListEvents(ctxB, sessionID, 0); err != nil || len(events) != 1 || events[0].ID != "event-b" {
+		t.Fatalf("ListEvents tenant B after tenant A delete = %v, %v", events, err)
+	}
+	if content, err := store.GetFile(ctxB, sessionID, "note.txt"); err != nil || string(content) != "tenant B" {
+		t.Fatalf("GetFile tenant B after tenant A delete = %q, %v", content, err)
 	}
 }

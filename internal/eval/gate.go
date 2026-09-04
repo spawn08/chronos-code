@@ -51,22 +51,25 @@ func SaveBaseline(path string, s Summary) error {
 	return nil
 }
 
-// CheckRegression fails the gate when either (a) any task's efficiency
-// contract broke (FailedTasks non-empty — a functional regression, worse
-// than a token regression since it means the savings machinery silently
-// stopped firing), or (b) current's optimized token total increased by more
-// than MaxRegressionPercent versus stored. A nil stored baseline (no
-// snapshot yet) always passes — the caller is expected to seed one via
-// SaveBaseline in that case.
+// CheckRegression fails the gate when either (a) the stored paired totals are
+// invalid or stale, (b) any task's efficiency contract broke (FailedTasks
+// non-empty — a functional regression, worse than a token regression since it
+// means the savings machinery silently stopped firing), or (c) current's
+// optimized token total increased by more than MaxRegressionPercent versus
+// stored. A nil stored baseline (no snapshot yet) always passes — the caller
+// is expected to seed one via SaveBaseline in that case.
 func CheckRegression(current Summary, stored *Baseline) error {
-	if len(current.FailedTasks) > 0 {
-		return fmt.Errorf("eval gate: %d task(s) failed their efficiency contract: %v", len(current.FailedTasks), current.FailedTasks)
-	}
 	if stored == nil {
 		return nil
 	}
-	if stored.TotalOptimized == 0 {
-		return nil
+	if stored.TotalBaseline <= 0 || stored.TotalOptimized <= 0 {
+		return fmt.Errorf("eval gate: invalid baseline totals (%d baseline, %d optimized)", stored.TotalBaseline, stored.TotalOptimized)
+	}
+	if current.TotalBaseline > 0 && current.TotalBaseline != stored.TotalBaseline {
+		return fmt.Errorf("eval gate: stale baseline total (%d -> %d); refresh the baseline", stored.TotalBaseline, current.TotalBaseline)
+	}
+	if len(current.FailedTasks) > 0 {
+		return fmt.Errorf("eval gate: %d task(s) failed their efficiency contract: %v", len(current.FailedTasks), current.FailedTasks)
 	}
 	delta := float64(current.TotalOptimized-stored.TotalOptimized) / float64(stored.TotalOptimized) * 100
 	if delta > MaxRegressionPercent {

@@ -1,0 +1,75 @@
+version: v1
+decision_rule:
+  primary_metric: tokens_per_accepted_task
+  co_primary_metric: model_calls_per_accepted_task
+  success_metric: verified_success_rate
+  required_cohorts: [cross_package, forced_resume]
+  min_token_reduction_percent: 15
+  min_call_reduction_percent: 10
+  max_success_regression_pp: 5
+metrics:
+  - id: tokens_per_accepted_task
+  - id: model_calls_per_accepted_task
+  - id: verified_success_rate
+  - id: tool_calls
+  - id: wall_time
+  - id: missed_obligation_count
+cohorts:
+  - id: simple
+  - id: medium
+  - id: cross_package
+  - id: forced_resume
+controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+repeats: 3
+arms:
+  - id: ARM-A
+    description: current runtime with graph, skills, compression, and session compaction
+  - id: ARM-B
+    description: durable plan and bounded active-node context, no planner subagent
+  - id: ARM-C
+    description: one planner subagent response, no durable plan or context reconstruction
+  - id: ARM-D
+    description: full SQLite-backed PPD with conditional specialist and durable scheduler
+hypotheses:
+  - id: H-001
+    statement: Phase-selected tool schemas reduce total successful-task input tokens.
+    metric: tokens_per_accepted_task
+    cohorts: [simple, medium, cross_package, forced_resume]
+    controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+    ablation: full registry vs selected registry
+    guardrail: verified success and missing-capability retries
+  - id: H-002
+    statement: Persisted active-node context reduces restart/reorientation tokens.
+    metric: tokens_per_accepted_task
+    cohorts: [forced_resume]
+    controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+    ablation: ARM-A vs ARM-B on forced restart
+    guardrail: stale-context and success rate
+  - id: H-003
+    statement: Durable DAGs reduce repeated planning and tool operations on long tasks.
+    metric: model_calls_per_accepted_task
+    cohorts: [cross_package, forced_resume]
+    controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+    ablation: no-plan vs durable-plan without subagent
+    guardrail: model/tool calls and wall time
+  - id: H-004
+    statement: Specialist delegation improves complex-task success enough to offset child tokens.
+    metric: verified_success_rate
+    cohorts: [cross_package, forced_resume]
+    controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+    ablation: ARM-B, ARM-C, ARM-D
+    guardrail: total subtree usage and simple-task bypass
+  - id: H-005
+    statement: Verification raises raw tokens but lowers tokens per accepted task.
+    metric: tokens_per_accepted_task
+    cohorts: [medium, cross_package, forced_resume]
+    controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+    ablation: report-only vs enforce
+    guardrail: accepted success requires fresh executable verification evidence; stale completion claims are rejected
+  - id: H-006
+    statement: Bounded plan context survives compaction without losing obligations.
+    metric: missed_obligation_count
+    cohorts: [forced_resume]
+    controls: [model_version, temperature, repository_revision, graph_warm_state, permissions, context_limit, timeout]
+    ablation: forced compaction/restart
+    guardrail: missed obligation count, superseded lease rejection, and rehearsed backup/restore evidence preservation

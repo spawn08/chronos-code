@@ -1,9 +1,11 @@
 # Chronos Code — Token Efficiency Eval Suite
 
+> **Synthetic fixture replay:** These results measure deterministic local tool fixtures, not paired Chronos Code and external baseline-tool model runs. They are not a valid external performance benchmark.
+
 27 tasks, 0 failed contract checks.
 
 - **Aggregate savings**: 75.6% (130860 baseline tokens -> 31995 optimized tokens)
-- **System prompt size**: 687 tokens (target <800)
+- **System prompt size**: 755 tokens (target <800)
 - **Routed to a T1 (cheap-model) agent**: 0/27 tasks
 
 | Task | Category | Difficulty | Baseline | Optimized | Savings | Route | Status |
