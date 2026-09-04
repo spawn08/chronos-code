@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/zalando/go-keyring"
 )
@@ -61,6 +62,67 @@ func (realKeyringBackend) Delete(service, user string) error {
 	return err
 }
 
+type keyringCacheEntry struct {
+	value string
+	err   error
+}
+
+// cachedKeyring memoizes Get results in process memory. macOS Keychain
+// (and the other OS backends go-keyring uses) is a synchronous IPC call —
+// tens of milliseconds per Get, more if the keychain is busy — so a TUI
+// that resolves credentials on every frame will feel frozen. Hits and
+// ErrNotFound misses are cached; unexpected errors are not, so a
+// transient keychain failure can be retried. Save/Delete write through
+// and drop the stale entry.
+type cachedKeyring struct {
+	inner keyringBackend
+	mu    sync.Mutex
+	items map[string]keyringCacheEntry
+}
+
+func newCachedKeyring(inner keyringBackend) *cachedKeyring {
+	return &cachedKeyring{inner: inner, items: make(map[string]keyringCacheEntry)}
+}
+
+func cacheKey(service, user string) string { return service + "\x00" + user }
+
+func (c *cachedKeyring) Get(service, user string) (string, error) {
+	key := cacheKey(service, user)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.items[key]; ok {
+		return entry.value, entry.err
+	}
+	value, err := c.inner.Get(service, user)
+	if err == nil || errors.Is(err, ErrNotFound) {
+		c.items[key] = keyringCacheEntry{value: value, err: err}
+	}
+	return value, err
+}
+
+func (c *cachedKeyring) Set(service, user, pass string) error {
+	if err := c.inner.Set(service, user, pass); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.items[cacheKey(service, user)] = keyringCacheEntry{value: pass}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *cachedKeyring) Delete(service, user string) error {
+	err := c.inner.Delete(service, user)
+	c.mu.Lock()
+	delete(c.items, cacheKey(service, user))
+	c.mu.Unlock()
+	return err
+}
+
+var (
+	defaultStore     *Store
+	defaultStoreOnce sync.Once
+)
+
 // Store persists Credential values in an OS keychain, keyed by provider
 // name. Because go-keyring (and OS keychains generally) has no
 // cross-backend "list all entries for a service" API, Store also maintains
@@ -71,16 +133,24 @@ type Store struct {
 	indexPath string
 }
 
-// NewStore builds a Store backed by the real OS keychain, with its provider
-// index file at ~/.chronos-code/auth/providers.json. If the user's home
-// directory cannot be determined, it falls back to "." rather than
-// panicking.
+// NewStore returns the process-wide OS-keychain store, with its provider
+// index at ~/.chronos-code/auth/providers.json. The same Store is reused
+// for the process lifetime so keychain Gets stay cached across TUI frames
+// and orchestrator calls. Tests that need isolation should use
+// NewStoreWithBackend. If the user's home directory cannot be determined,
+// the index falls back to "." rather than panicking.
 func NewStore() *Store {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return NewStoreWithBackend(realKeyringBackend{}, filepath.Join(home, ".chronos-code", "auth", "providers.json"))
+	defaultStoreOnce.Do(func() {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "."
+		}
+		defaultStore = NewStoreWithBackend(
+			newCachedKeyring(realKeyringBackend{}),
+			filepath.Join(home, ".chronos-code", "auth", "providers.json"),
+		)
+	})
+	return defaultStore
 }
 
 // NewStoreWithBackend builds a Store with an explicit keyringBackend and

@@ -88,6 +88,63 @@ func TestStoreDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCachedKeyringGetHitsBackendOnce(t *testing.T) {
+	inner := newFakeKeyringBackend()
+	counter := &countingKeyring{inner: inner}
+	store := NewStoreWithBackend(newCachedKeyring(counter), filepath.Join(t.TempDir(), "providers.json"))
+
+	if _, err := store.Load("missing"); err != ErrNotFound {
+		t.Fatalf("first miss = %v, want ErrNotFound", err)
+	}
+	if _, err := store.Load("missing"); err != ErrNotFound {
+		t.Fatalf("cached miss = %v, want ErrNotFound", err)
+	}
+	if counter.gets != 1 {
+		t.Fatalf("miss Get count = %d, want 1", counter.gets)
+	}
+
+	if err := store.Save("acme", Credential{Provider: "acme", Method: MethodAPIKey, APIKey: "k"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := store.Load("acme"); err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+	if _, err := store.Load("acme"); err != nil {
+		t.Fatalf("second Load after Save: %v", err)
+	}
+	if counter.gets != 1 {
+		t.Fatalf("Get count after write-through Save = %d, want 1 (still only the miss)", counter.gets)
+	}
+
+	if err := store.Delete("acme"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := store.Load("acme"); err != ErrNotFound {
+		t.Fatalf("Load after Delete = %v, want ErrNotFound", err)
+	}
+	if counter.gets != 2 {
+		t.Fatalf("Get count after Delete = %d, want 2", counter.gets)
+	}
+}
+
+type countingKeyring struct {
+	inner keyringBackend
+	gets  int
+}
+
+func (c *countingKeyring) Set(service, user, pass string) error {
+	return c.inner.Set(service, user, pass)
+}
+
+func (c *countingKeyring) Get(service, user string) (string, error) {
+	c.gets++
+	return c.inner.Get(service, user)
+}
+
+func (c *countingKeyring) Delete(service, user string) error {
+	return c.inner.Delete(service, user)
+}
+
 func TestStoreDeleteNeverSavedIsNoop(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Delete("never-saved"); err != nil {
