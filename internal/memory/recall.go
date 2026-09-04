@@ -33,9 +33,11 @@ func (s *Store) Recall(query string, maxResults int) ([]ScoredRecord, error) {
 
 	queryLower := strings.ToLower(strings.TrimSpace(query))
 	if queryLower == "" {
-		out := make([]ScoredRecord, len(all))
-		for i, r := range all {
-			out[i] = ScoredRecord{Record: r, Score: 1.0}
+		var out []ScoredRecord
+		for _, r := range all {
+			if r.Validated && !r.Invalidated {
+				out = append(out, ScoredRecord{Record: r, Score: 1.0})
+			}
 		}
 		if maxResults > 0 && len(out) > maxResults {
 			out = out[:maxResults]
@@ -51,6 +53,9 @@ func (s *Store) Recall(query string, maxResults int) ([]ScoredRecord, error) {
 
 	var scored []ScoredRecord
 	for _, rec := range all {
+		if !rec.Validated || rec.Invalidated {
+			continue
+		}
 		score := scoreRecord(queryLower, queryTF, len(queryTokens), rec)
 		if score >= minScore {
 			scored = append(scored, ScoredRecord{Record: rec, Score: score})

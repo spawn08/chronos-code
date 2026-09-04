@@ -16,6 +16,7 @@ type keyMap struct {
 	ModelPicker    key.Binding
 	CommandPalette key.Binding
 	CopyLast       key.Binding
+	Paste          key.Binding
 }
 
 var keys = keyMap{
@@ -28,6 +29,7 @@ var keys = keyMap{
 	ModelPicker:    key.NewBinding(key.WithKeys("ctrl+m"), key.WithHelp("ctrl+m", "model picker")),
 	CommandPalette: key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "command palette")),
 	CopyLast:       key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "copy last response")),
+	Paste:          key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste from clipboard")),
 }
 
 const helpText = `Commands:
@@ -65,12 +67,13 @@ Keys:
   ctrl+r             Search message history
   ctrl+y             Copy the last assistant response
   tab                Complete the selected slash command
+  mouse wheel        Scroll conversation history
   pgup / pgdown      Scroll conversation history
   ctrl+up / ctrl+down Scroll half a page
   ctrl+home / ctrl+end Jump to top / resume live output
-  mouse wheel        Scroll conversation history
-  shift+drag         Select visible terminal text for native copy
-  cmd+v, ctrl+v      Paste text; multiline paste stays in the composer
+  shift+drag         Select text using the terminal while mouse scrolling is active
+  cmd+c               Copy selected text with the terminal
+  cmd+v, ctrl+v      Native clipboard paste; multiline stays in the composer
   permission: y       Allow this call once
   permission: a       Always allow this tool in the current session
   permission: A       Allow all policy-approved tools in the current session

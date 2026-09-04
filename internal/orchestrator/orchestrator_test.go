@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,14 @@ type closeTrackingStorage struct {
 	mu     sync.Mutex
 	closes int
 	err    error
+}
+
+type failingSummaryStorage struct {
+	storage.Storage
+}
+
+func (s failingSummaryStorage) ListSessions(context.Context, string, int, int) ([]*storage.Session, error) {
+	return nil, errors.New("history unavailable")
 }
 
 type closeTrackingLSP struct {
@@ -791,6 +800,69 @@ func TestSkillContextParityPreservesExistingPins(t *testing.T) {
 	}
 }
 
+func TestSessionSummaryContextBlockingStreamingParity(t *testing.T) {
+	store := storagememory.New()
+	ctx := storage.WithTenant(context.Background(), "tenant-a")
+	now := time.Now().Add(-time.Hour)
+	if err := store.CreateSession(ctx, &storage.Session{ID: "prior", AgentID: "coder", Status: "completed", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatalf("CreateSession(prior) error = %v", err)
+	}
+	if err := store.AppendEvent(ctx, &storage.Event{ID: "prior-summary", SessionID: "prior", SeqNum: 1, Type: "chat_summary", Payload: map[string]any{"summary": "fix the parser carefully"}, CreatedAt: now}); err != nil {
+		t.Fatalf("AppendEvent(prior) error = %v", err)
+	}
+	if err := store.CreateSession(ctx, &storage.Session{ID: "active", AgentID: "coder", Status: "running", CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatalf("CreateSession(active) error = %v", err)
+	}
+	if err := store.AppendEvent(ctx, &storage.Event{ID: "active-summary", SessionID: "active", SeqNum: 1, Type: "chat_summary", Payload: map[string]any{"summary": "active session secret"}, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent(active) error = %v", err)
+	}
+
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{ID: "coder", Model: provider, Storage: store, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine(), ContextPinsFn: func(context.Context) []model.Message {
+		return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+	}}
+	setupSessionSummaries(session.NewManager(store, ""), map[string]*agent.Agent{"coder": a})
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", sessions: map[string]string{"coder": "active"}}
+
+	if _, err := orch.Execute(ctx, ExecutionRequest{Message: "fix parser", SessionID: "active"}); err != nil {
+		t.Fatalf("blocking Execute() error = %v", err)
+	}
+	streamed, err := orch.Execute(ctx, ExecutionRequest{Message: "fix parser", SessionID: "active", Mode: ExecutionStreaming})
+	if err != nil {
+		t.Fatalf("streaming Execute() error = %v", err)
+	}
+	for range streamed.Stream {
+	}
+
+	blocking := strings.Join(systemContents(provider.request(0)), "\n")
+	streaming := strings.Join(systemContents(provider.request(1)), "\n")
+	if blocking != streaming {
+		t.Fatalf("blocking pins %q differ from streaming pins %q", blocking, streaming)
+	}
+	if !strings.Contains(blocking, "existing pin") || !strings.Contains(blocking, "session=prior") || !strings.Contains(blocking, "fix the parser carefully") {
+		t.Fatalf("summary pins = %q, want existing and prior-session pins", blocking)
+	}
+	for _, message := range provider.request(0).Messages {
+		if strings.HasPrefix(message.Content, "Relevant context from prior sessions:") && strings.Contains(message.Content, "active session secret") {
+			t.Fatalf("prior-session pin contains active session: %q", message.Content)
+		}
+	}
+}
+
+func TestSessionSummaryContextOmitsUnavailableHistory(t *testing.T) {
+	base := storagememory.New()
+	a := &agent.Agent{ID: "coder", ContextPinsFn: func(context.Context) []model.Message {
+		return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+	}}
+	setupSessionSummaries(session.NewManager(failingSummaryStorage{Storage: base}, ""), map[string]*agent.Agent{"coder": a})
+
+	ctx := storage.WithSession(context.WithValue(context.Background(), messageKey{}, "query"), "active")
+	got := strings.Join(messageContents(a.ContextPinsFn(ctx)), "\n")
+	if got != "existing pin" {
+		t.Fatalf("pins = %q, want unavailable history omitted without replacing existing pins", got)
+	}
+}
+
 func TestMemoryPromptPinsUseCurrentContextTenant(t *testing.T) {
 	t.Chdir(t.TempDir())
 	a := &agent.Agent{ID: "coder"}
@@ -821,6 +893,295 @@ func TestMemoryPromptPinsUseCurrentContextTenant(t *testing.T) {
 				t.Fatalf("pins = %q, want %q and no %q", pins, tt.want, tt.notWant)
 			}
 		})
+	}
+}
+
+func TestExecuteMemoryIntentBlockingStreamingParity(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		t.Run(map[ExecutionMode]string{ExecutionBlocking: "blocking", ExecutionStreaming: "streaming"}[mode], func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			provider := &skillContextTestProvider{}
+			a := &agent.Agent{ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+			cfg := &config.Config{Memory: config.MemoryConfig{Enabled: true, AutoExtract: true}}
+			store := setupMemory(cfg, map[string]*agent.Agent{"coder": a})
+			orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", cfg: cfg, memory: store}
+			ctx := storage.WithTenant(context.Background(), "tenant-a")
+			const message = "remember project: run make test before release"
+
+			result, err := orch.Execute(ctx, ExecutionRequest{Message: message, Mode: mode})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if mode == ExecutionStreaming {
+				for range result.Stream {
+				}
+			}
+			if result.MemoryIntent == nil || !result.MemoryIntent.Applied || result.MemoryIntent.Action != memory.IntentRemember || result.MemoryIntent.Category != memory.CategoryProject || result.MemoryIntent.RecordID == "" {
+				t.Fatalf("MemoryIntent = %+v", result.MemoryIntent)
+			}
+			records, err := store.ForContext(ctx).List(memory.CategoryProject)
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(records) != 1 || records[0].Content != "run make test before release" || !records[0].Validated || records[0].Source == "" || records[0].Repository == "" || records[0].Revision == "" || records[0].Fingerprint == "" {
+				t.Fatalf("records = %+v, want one exact provenance-bearing payload", records)
+			}
+			if got := userContent(provider.request(0)); got != message {
+				t.Fatalf("model message = %q, want original %q", got, message)
+			}
+			if pins := strings.Join(systemContents(provider.request(0)), "\n"); !strings.Contains(pins, "run make test before release") {
+				t.Fatalf("same-turn memory pin = %q, want saved payload", pins)
+			}
+		})
+	}
+}
+
+func TestExecuteMemoryIntentUsesTenantForForget(t *testing.T) {
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	cfg := &config.Config{Memory: config.MemoryConfig{Enabled: true, AutoExtract: true}}
+	store := memory.NewStore(t.TempDir())
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", cfg: cfg, memory: store}
+	tenantA := storage.WithTenant(context.Background(), "tenant-a")
+	tenantB := storage.WithTenant(context.Background(), "tenant-b")
+	record, err := store.ForContext(tenantA).Add(memory.CategoryUser, "tenant A preference")
+	if err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+	message := "forget: " + record.ID
+
+	result, err := orch.Execute(tenantB, ExecutionRequest{Message: message})
+	if err == nil || !strings.Contains(err.Error(), record.ID) || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("cross-tenant forget error = %v", err)
+	}
+	if result.MemoryIntent == nil || result.MemoryIntent.Applied {
+		t.Fatalf("failed forget result = %+v", result.MemoryIntent)
+	}
+	if records, listErr := store.ForContext(tenantA).List(""); listErr != nil || len(records) != 1 {
+		t.Fatalf("tenant A records after cross-tenant forget = %+v, %v", records, listErr)
+	}
+
+	result, err = orch.Execute(tenantA, ExecutionRequest{Message: message, Mode: ExecutionStreaming})
+	if err != nil {
+		t.Fatalf("tenant A forget: %v", err)
+	}
+	for range result.Stream {
+	}
+	if result.MemoryIntent == nil || !result.MemoryIntent.Applied {
+		t.Fatalf("successful forget result = %+v", result.MemoryIntent)
+	}
+	if records, listErr := store.ForContext(tenantA).List(""); listErr != nil || len(records) != 0 {
+		t.Fatalf("tenant A records after forget = %+v, %v", records, listErr)
+	}
+}
+
+func TestExecuteRecallPastUsesExplicitQueryWithoutMutatingMessage(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	cfg := &config.Config{Memory: config.MemoryConfig{Enabled: true, AutoExtract: true}}
+	store := setupMemory(cfg, map[string]*agent.Agent{"coder": a})
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", cfg: cfg, memory: store}
+	if _, err := store.Add(memory.CategoryProject, "parser decisions use anchored commands"); err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+	const message = "recall-past: parser decisions"
+
+	result, err := orch.Execute(context.Background(), ExecutionRequest{Message: message})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.MemoryIntent == nil || !result.MemoryIntent.Applied || result.MemoryIntent.Action != memory.IntentRecallPast {
+		t.Fatalf("MemoryIntent = %+v", result.MemoryIntent)
+	}
+	if got := userContent(provider.request(0)); got != message {
+		t.Fatalf("model message = %q, want original %q", got, message)
+	}
+	if pins := strings.Join(systemContents(provider.request(0)), "\n"); !strings.Contains(pins, "parser decisions use anchored commands") {
+		t.Fatalf("recall-past pins = %q", pins)
+	}
+}
+
+func TestExecuteMemoryIntentHonorsAutoExtractAndIgnoresIncidentalProse(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		autoExtract bool
+		message     string
+		wantResult  bool
+		wantReason  string
+	}{
+		{name: "disabled explicit intent", message: "remember: use tabs", wantResult: true, wantReason: "auto_extract_disabled"},
+		{name: "incidental always", autoExtract: true, message: "What do you always run before release?"},
+		{name: "incidental remember question", autoExtract: true, message: "Can you remember what happened yesterday?"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &skillContextTestProvider{}
+			a := &agent.Agent{ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+			cfg := &config.Config{Memory: config.MemoryConfig{Enabled: true, AutoExtract: tt.autoExtract}}
+			store := memory.NewStore(t.TempDir())
+			orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", cfg: cfg, memory: store}
+
+			result, err := orch.Execute(context.Background(), ExecutionRequest{Message: tt.message})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if (result.MemoryIntent != nil) != tt.wantResult {
+				t.Fatalf("MemoryIntent = %+v, want present %t", result.MemoryIntent, tt.wantResult)
+			}
+			if result.MemoryIntent != nil && (result.MemoryIntent.Applied || result.MemoryIntent.Reason != tt.wantReason) {
+				t.Fatalf("MemoryIntent = %+v, want disabled reason %q", result.MemoryIntent, tt.wantReason)
+			}
+			if records, listErr := store.List(""); listErr != nil || len(records) != 0 {
+				t.Fatalf("records = %+v, %v; want no write", records, listErr)
+			}
+		})
+	}
+}
+
+func TestExecuteMemoryPersistenceErrorIsActionable(t *testing.T) {
+	root := t.TempDir()
+	blockingPath := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockingPath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	cfg := &config.Config{Memory: config.MemoryConfig{Enabled: true, AutoExtract: true}}
+	orch := &Orchestrator{
+		agents: map[string]*agent.Agent{"coder": a}, active: "coder", cfg: cfg,
+		memory: memory.NewStore(filepath.Join(blockingPath, "memory")),
+	}
+
+	result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "remember: exact payload"})
+	if err == nil || !strings.Contains(err.Error(), "apply remember intent") || !strings.Contains(err.Error(), "memory: read feedback") || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Execute() error = %v, want actionable persistence error", err)
+	}
+	if result.MemoryIntent == nil || result.MemoryIntent.Action != memory.IntentRemember || result.MemoryIntent.Applied {
+		t.Fatalf("MemoryIntent = %+v", result.MemoryIntent)
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider called %d times after failed persistence", len(provider.requests))
+	}
+}
+
+func TestLearnedPatternContextBlockingStreamingParity(t *testing.T) {
+	provider := &skillContextTestProvider{}
+	a := &agent.Agent{
+		ID: "coder", Model: provider, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine(),
+		ContextPinsFn: func(context.Context) []model.Message {
+			return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+		},
+	}
+	store := learning.NewStore(t.TempDir())
+	// This hash is generated by approval callers from the same normalized
+	// trigger; derive it through a candidate extraction to avoid fuzzy matching.
+	candidate := learning.ClusterCandidates([]learning.SessionSegment{
+		learnedTestSegment("/repo", "fix parser"),
+		learnedTestSegment("/repo", "FIX-parser!"),
+		learnedTestSegment("/repo", "fix parser"),
+	}, learning.MinimumCandidateCount)[0]
+	approved, err := store.ApprovePattern(candidate, "revision", learning.ReplayEvidence{
+		VerifiedOutcomes: learning.MinimumCandidateCount, QualityPassed: true, PolicyPassed: true,
+	}, learning.MinimumCandidateCount)
+	if err != nil {
+		t.Fatalf("ApprovePattern() error = %v", err)
+	}
+	setupLearnedPatternPins(store, "/repo", "revision", map[string]*agent.Agent{"coder": a})
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", sessions: map[string]string{"coder": "session-1"}}
+
+	if _, err := orch.Chat(context.Background(), "FIX parser!"); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	stream, err := orch.ChatStream(context.Background(), "FIX parser!")
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	for range stream {
+	}
+	blocking := strings.Join(systemContents(provider.request(0)), "\n")
+	streaming := strings.Join(systemContents(provider.request(1)), "\n")
+	if blocking != streaming || !strings.Contains(blocking, "existing pin") || !strings.Contains(blocking, "Pattern version "+fmt.Sprint(approved.Version)) || !strings.Contains(blocking, "advisory only") {
+		t.Fatalf("blocking pins %q, streaming pins %q; want equivalent composed advisory", blocking, streaming)
+	}
+}
+
+func TestLearnedPatternContextOmitsStaleNonmatchingAndMalformedStore(t *testing.T) {
+	for _, tt := range []struct {
+		name, repo, trigger, revision string
+		malformed, missing            bool
+	}{
+		{name: "stale revision", repo: "/repo", trigger: "fix parser", revision: "other"},
+		{name: "other repository", repo: "/other", trigger: "fix parser", revision: "revision"},
+		{name: "other trigger", repo: "/repo", trigger: "fix lexer", revision: "revision"},
+		{name: "missing optional store", repo: "/repo", trigger: "fix parser", revision: "revision", missing: true},
+		{name: "malformed optional store", repo: "/repo", trigger: "fix parser", revision: "revision", malformed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := learning.NewStore(dir)
+			if tt.malformed {
+				if err := os.WriteFile(filepath.Join(dir, "pattern-versions.yaml"), []byte("patterns: ["), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if !tt.missing {
+				candidate := learning.ClusterCandidates([]learning.SessionSegment{
+					learnedTestSegment("/repo", "fix parser"), learnedTestSegment("/repo", "fix parser"), learnedTestSegment("/repo", "fix parser"),
+				}, learning.MinimumCandidateCount)[0]
+				if _, err := store.ApprovePattern(candidate, "revision", learning.ReplayEvidence{VerifiedOutcomes: 3, QualityPassed: true, PolicyPassed: true}, 3); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a := &agent.Agent{ID: "coder", ContextPinsFn: func(context.Context) []model.Message {
+				return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+			}}
+			setupLearnedPatternPins(store, tt.repo, tt.revision, map[string]*agent.Agent{"coder": a})
+			ctx := context.WithValue(context.Background(), messageKey{}, tt.trigger)
+			if got := strings.Join(messageContents(a.ContextPinsFn(ctx)), "\n"); got != "existing pin" {
+				t.Fatalf("pins = %q, want optional learned pattern omitted", got)
+			}
+		})
+	}
+}
+
+func TestLearnedPatternAdvisoryDoesNotBypassApprovalOrSecurity(t *testing.T) {
+	orch := newPermissionTestOrchestrator(t, nil)
+	a := orch.agents["coder"]
+	store := learning.NewStore(t.TempDir())
+	candidate := learning.ClusterCandidates([]learning.SessionSegment{
+		learnedTestSegment("/repo", "deploy release"), learnedTestSegment("/repo", "deploy release"), learnedTestSegment("/repo", "deploy release"),
+	}, learning.MinimumCandidateCount)[0]
+	if _, err := store.ApprovePattern(candidate, "revision", learning.ReplayEvidence{VerifiedOutcomes: 3, QualityPassed: true, PolicyPassed: true}, 3); err != nil {
+		t.Fatal(err)
+	}
+	setupLearnedPatternPins(store, "/repo", "revision", map[string]*agent.Agent{"coder": a})
+	ctx := context.WithValue(context.Background(), messageKey{}, "deploy release")
+	if pins := strings.Join(messageContents(a.ContextPinsFn(ctx)), "\n"); !strings.Contains(pins, "does not authorize tools") {
+		t.Fatalf("learned advisory pin = %q", pins)
+	}
+
+	executions, approvals := 0, 0
+	registerApprovalTool(a.Tools, "shell", &executions)
+	orch.SetApprovalHandler(func(context.Context, string, map[string]any) (bool, error) {
+		approvals++
+		return false, nil
+	})
+	if _, err := a.Tools.Execute(ctx, "shell", map[string]any{"command": "git push origin main"}); err == nil {
+		t.Fatal("advisory pattern bypassed required approval")
+	}
+	if _, err := a.Tools.Execute(ctx, "shell", map[string]any{"command": "rm dangerous"}); err == nil {
+		t.Fatal("advisory pattern bypassed security denial")
+	}
+	if approvals != 1 || executions != 0 {
+		t.Fatalf("counts = approvals %d, executions %d; want 1, 0", approvals, executions)
+	}
+}
+
+func learnedTestSegment(repo, trigger string) learning.SessionSegment {
+	return learning.SessionSegment{
+		RepoPath: repo, Trigger: learning.Turn{Content: trigger},
+		Turns:     []learning.Turn{{Role: "assistant", Content: "inspect before editing"}},
+		ToolCalls: []learning.ToolCall{{Name: "file_read"}, {Name: "file_write"}},
+		Outcome:   &learning.Outcome{Kind: "accepted", Timestamp: time.Now()},
 	}
 }
 
