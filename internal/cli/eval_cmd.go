@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spawn08/chronos-code/internal/eval"
 )
@@ -12,11 +13,52 @@ import (
 // compares against (PRD P3-006).
 const defaultBaselinePath = "benchmark/eval/baseline.json"
 
+const (
+	defaultPPDTasksPath      = "benchmark/ppd/tasks.yaml"
+	defaultPPDHypothesesPath = "benchmark/ppd/hypotheses.yaml"
+	defaultPPDResultsPath    = "benchmark/ppd/results.json"
+	defaultPPDBaselinePath   = "benchmark/ppd/baseline.json"
+)
+
 // runEval implements `chronos-code eval run`. It needs no config, API key, or
 // storage backend — the suite is fully offline and deterministic (see
 // internal/eval's package doc) — so it deliberately does not go through
 // loadAndBuild.
 func runEval() error {
+	if len(os.Args) >= 3 && os.Args[2] == "ppd" {
+		if len(os.Args) >= 4 && os.Args[3] == "--report" {
+			rest := os.Args[4:]
+			if err := validatePPDReportFlags(rest); err != nil {
+				return err
+			}
+			report, err := eval.BuildPPDReport(
+				flagValue(rest, "tasks", defaultPPDTasksPath),
+				flagValue(rest, "hypotheses", defaultPPDHypothesesPath),
+				flagValue(rest, "results", defaultPPDResultsPath),
+				flagValue(rest, "baseline", defaultPPDBaselinePath),
+			)
+			if report != "" {
+				fmt.Print(report)
+			}
+			return err
+		}
+		if len(os.Args) != 4 || os.Args[3] != "--validate-only" {
+			return fmt.Errorf("usage: chronos-code eval ppd --validate-only | chronos-code eval ppd --report [--tasks <path>] [--hypotheses <path>] [--results <path>] [--baseline <path>]")
+		}
+		if err := eval.ValidatePPDBenchmark(defaultPPDTasksPath, defaultPPDResultsPath); err != nil {
+			return fmt.Errorf("validate PPD benchmark: %w", err)
+		}
+		status, reason, err := eval.PPDBenchmarkEvidenceStatus(defaultPPDResultsPath)
+		if err != nil {
+			return fmt.Errorf("read PPD evidence status: %w", err)
+		}
+		fmt.Printf("PPD benchmark registration is structurally valid; executed evidence status: %s", status)
+		if reason != "" {
+			fmt.Printf(" (%s)", reason)
+		}
+		fmt.Println()
+		return nil
+	}
 	if len(os.Args) < 3 || os.Args[2] != "run" {
 		return fmt.Errorf("usage: chronos-code eval run [--update-baseline] [--baseline <path>] [--md <path>]")
 	}
@@ -63,5 +105,23 @@ func runEval() error {
 		return err
 	}
 	fmt.Printf("\neval gate passed (baseline: %s)\n", baselinePath)
+	return nil
+}
+
+func validatePPDReportFlags(args []string) error {
+	allowed := map[string]bool{"--tasks": true, "--hypotheses": true, "--results": true, "--baseline": true}
+	for i := 0; i < len(args); i++ {
+		name := args[i]
+		if equal := strings.IndexByte(name, '='); equal >= 0 {
+			if !allowed[name[:equal]] || equal == len(name)-1 {
+				return fmt.Errorf("invalid PPD report flag %q", name)
+			}
+			continue
+		}
+		if !allowed[name] || i+1 == len(args) || strings.HasPrefix(args[i+1], "--") {
+			return fmt.Errorf("invalid PPD report flag %q", name)
+		}
+		i++
+	}
 	return nil
 }

@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	macOSSandboxHelper = "sandbox-exec"
-	linuxSandboxHelper = "bwrap"
+	macOSSandboxHelper    = "sandbox-exec"
+	linuxSandboxHelper    = "bwrap"
+	defaultSandboxTimeout = 2 * time.Minute
 )
 
 // OSSandbox executes commands using the host's mandatory OS sandbox helper.
@@ -92,6 +93,9 @@ func canonicalWorkspace(workspace string) (string, error) {
 
 // Execute implements sandbox.Sandbox.
 func (s *OSSandbox) Execute(ctx context.Context, command string, args []string, timeout time.Duration) (*chronossandbox.Result, error) {
+	if timeout <= 0 {
+		timeout = defaultSandboxTimeout
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

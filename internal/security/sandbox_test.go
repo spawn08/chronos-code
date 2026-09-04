@@ -171,6 +171,56 @@ func TestSandboxCancellation(t *testing.T) {
 	}
 }
 
+func TestSandboxDefaultTimeoutForNonPositiveValues(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "sandbox-exec")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	sb := &OSSandbox{
+		workspace: t.TempDir(),
+		helper:    script,
+		platform:  "darwin",
+	}
+
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		result, err := sb.Execute(context.Background(), "true", nil, timeout)
+		if err != nil {
+			t.Fatalf("Execute(timeout=%v): %v", timeout, err)
+		}
+		if result.ExitCode != 0 {
+			t.Fatalf("Execute(timeout=%v) exit = %d, stderr = %q", timeout, result.ExitCode, result.Stderr)
+		}
+	}
+}
+
+func TestSandboxTimeout(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "sandbox-exec")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	sb := &OSSandbox{
+		workspace: t.TempDir(),
+		helper:    script,
+		platform:  "darwin",
+	}
+
+	started := time.Now()
+	_, err := sb.Execute(context.Background(), "true", nil, 50*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Execute error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timeout took %v", elapsed)
+	}
+}
+
+func TestSandboxCommandRequired(t *testing.T) {
+	sb := &OSSandbox{workspace: t.TempDir(), platform: "darwin"}
+	if _, err := sb.commandArgs("", nil); err == nil {
+		t.Fatal("commandArgs accepted an empty command")
+	}
+}
+
 func TestSandboxClose(t *testing.T) {
 	if err := (&OSSandbox{}).Close(); err != nil {
 		t.Fatalf("Close: %v", err)

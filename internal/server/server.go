@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
@@ -19,6 +20,7 @@ type ServerConfig struct {
 	Listen          string // address to listen on, e.g. ":8430"
 	AuthType        string // "api_key", "oidc", or "none"
 	APIKey          string // required when AuthType is "api_key"
+	TenantID        string // required when AuthType is "api_key"
 	OIDCIssuer      string // required when AuthType is "oidc"
 	OIDCClientID    string // required when AuthType is "oidc"
 	CORSOrigins     string // comma-separated allowed origins; "*" for all
@@ -29,11 +31,12 @@ type ServerConfig struct {
 
 // Server wraps an Orchestrator in an HTTP server with REST API endpoints.
 type Server struct {
-	orch    *orchestrator.Orchestrator
-	cfg     ServerConfig
-	srv     *http.Server
-	limiter *rateLimiter
-	router  *SessionRouter
+	orch      *orchestrator.Orchestrator
+	cfg       ServerConfig
+	srv       *http.Server
+	limiter   *rateLimiter
+	router    *SessionRouter
+	configErr error
 }
 
 // New creates a Server wired to orch. Call Start to begin serving.
@@ -68,25 +71,42 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	mux.HandleFunc("POST /v1/teams/{id}/run", s.handleRunTeam)
 
 	var handler http.Handler = mux
-	if s.limiter != nil {
-		handler = rateLimitMiddleware(s.limiter)(handler)
-	}
 	switch cfg.AuthType {
+	case "none":
+		handler = authMiddleware("none", "", "")(handler)
+	case "api_key":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			s.configErr = fmt.Errorf("API key is required when auth type is api_key")
+			break
+		}
+		if strings.TrimSpace(cfg.TenantID) == "" {
+			s.configErr = fmt.Errorf("tenant ID is required when auth type is api_key")
+			break
+		}
+		handler = authMiddleware(cfg.AuthType, cfg.APIKey, cfg.TenantID)(tenantMiddleware(handler))
 	case "oidc":
 		validator, err := auth.NewOIDCValidator(auth.OIDCConfig{
 			Issuer:   cfg.OIDCIssuer,
 			ClientID: cfg.OIDCClientID,
 		})
 		if err != nil {
-			fmt.Printf("warning: OIDC validator: %v (falling back to no auth)\n", err)
-			handler = authMiddleware("none", "")(handler)
+			s.configErr = fmt.Errorf("OIDC validator: %w", err)
 		} else {
-			handler = oidcAuthMiddleware(validator)(handler)
+			handler = oidcAuthMiddleware(validator)(tenantMiddleware(handler))
 		}
 	default:
-		handler = authMiddleware(cfg.AuthType, cfg.APIKey)(handler)
+		s.configErr = fmt.Errorf("unknown auth type %q", cfg.AuthType)
 	}
-	handler = corsMiddleware(cfg.CORSOrigins)(handler)
+	if s.configErr != nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, `{"error":"server authentication configuration is invalid"}`, http.StatusServiceUnavailable)
+		})
+	} else {
+		if s.limiter != nil {
+			handler = rateLimitMiddleware(s.limiter)(handler)
+		}
+		handler = corsMiddleware(cfg.CORSOrigins)(handler)
+	}
 
 	s.srv = &http.Server{
 		Addr:              cfg.Listen,
@@ -100,6 +120,9 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 // Start begins listening and serving. It blocks until the server shuts down
 // or encounters a fatal error.
 func (s *Server) Start() error {
+	if s.configErr != nil {
+		return fmt.Errorf("server: invalid configuration: %w", s.configErr)
+	}
 	fmt.Printf("chronos-code server listening on %s\n", s.cfg.Listen)
 	err := s.srv.ListenAndServe()
 	if err == http.ErrServerClosed {

@@ -30,6 +30,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/defaults"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/graph"
 	"github.com/spawn08/chronos-code/internal/guardrail"
 	"github.com/spawn08/chronos-code/internal/incctx"
@@ -45,6 +46,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/skills"
 	"github.com/spawn08/chronos-code/internal/teambuilder"
 	"github.com/spawn08/chronos-code/internal/toolcompress"
+	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos-code/internal/workspace"
 
 	"github.com/spawn08/chronos/sdk/team"
@@ -94,6 +96,59 @@ type SkillInfo struct {
 	Name        string
 	Description string
 	Source      string
+}
+
+type ExecutionMode uint8
+
+const (
+	ExecutionBlocking ExecutionMode = iota
+	ExecutionStreaming
+)
+
+// ExecutionRequest describes one orchestrated user task. RequestedAgent and
+// SessionID preserve explicit caller selections; otherwise the executor
+// chooses the route and that agent's current session.
+type ExecutionRequest struct {
+	Message        string
+	Mode           ExecutionMode
+	RequestedAgent string
+	SessionID      string
+	TaskID         string
+	// PPD supplies optional complexity and recursion metadata. Task kind and
+	// classifier-derived risk are always calculated from Message.
+	PPD           *router.PPDRequest
+	PolicyContext map[string]any
+	// VerificationMode applies policy to the supplied or runtime-derived
+	// obligations and events; execution does not collect evidence automatically.
+	VerificationMode        verification.Mode
+	VerificationObligations []verification.Obligation
+	VerificationEvents      []execution.Event
+}
+
+// ExecutionResult carries the common identity and either a blocking response
+// or a streaming response channel, according to the request mode.
+type ExecutionResult struct {
+	AgentID     string
+	SessionID   string
+	TaskID      string
+	PPDDecision *router.PPDDecision
+	Response    *model.ChatResponse
+	Stream      <-chan *model.ChatResponse
+}
+
+type taskIDKey struct{}
+type executionPolicyContextKey struct{}
+
+// TaskIDFromContext returns the task identity assigned by Execute.
+func TaskIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(taskIDKey{}).(string)
+	return id
+}
+
+// ExecutionPolicyContext returns the policy data assigned by Execute.
+func ExecutionPolicyContext(ctx context.Context) map[string]any {
+	policy, _ := ctx.Value(executionPolicyContextKey{}).(map[string]any)
+	return policy
 }
 
 const userHookPromptContextTokens = 1000
@@ -234,6 +289,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 			return attention.AdjustThreshold(base, w)
 		})
 		incctx.Wrap(a, root)
+		incctx.WrapGrep(a, root)
 		if graphStore != nil {
 			activation.Wrap(a, graphStore, actBuf)
 		}
@@ -753,13 +809,14 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 	store := memory.NewStore(dir)
 	for _, a := range agents {
 		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			tenantStore := store.ForContext(ctx)
 			if msg, ok := ctx.Value(messageKey{}).(string); ok && msg != "" {
-				scored, err := store.Recall(msg, 5)
+				scored, err := tenantStore.Recall(msg, 5)
 				if err == nil && len(scored) > 0 {
 					return []model.Message{{Role: model.RoleSystem, Content: formatScoredMemories(scored)}}
 				}
 			}
-			block, err := store.ContextBlock(5)
+			block, err := tenantStore.ContextBlock(5)
 			if err != nil || block == "" {
 				return nil
 			}
@@ -1143,53 +1200,148 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 	return graphStore, watcher
 }
 
-func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatResponse, error) {
-	a := o.ActiveAgent()
-	if a == nil {
-		return nil, fmt.Errorf("no active agent")
+// Execute prepares and runs one task through the selected agent. It is the
+// shared path for blocking and streaming execution.
+func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	if request.VerificationMode == "" {
+		request.VerificationMode = o.VerificationMode()
 	}
-	var err error
-	ctx, message, err = o.preparePrompt(ctx, message)
-	if err != nil {
-		return nil, err
-	}
-	// Predictive context loading (PRD P3-007): resolve symbol names from the
-	// user message in the code graph and pre-load L2 summaries so the model's
-	// first turn starts with relevant code context instead of spending extra
-	// turns reading files.
-	if o.graphStore != nil && o.actBuf != nil {
-		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
-			message = message + "\n\n" + preloaded
+	agentID := request.RequestedAgent
+	var ppdDecision *router.PPDDecision
+	if agentID == "" {
+		agentID, _ = o.Route(ctx, request.Message)
+		if o.routingConfig != nil {
+			ppdRequest := router.PPDRequest{}
+			if request.PPD != nil {
+				ppdRequest = *request.PPD
+			}
+			classification := router.ClassifyTask(request.Message)
+			ppdRequest.Kind = classification.Kind
+			ppdRequest.HighRisk = ppdRequest.HighRisk || classification.Complexity == router.ComplexityHigh
+			decision := router.NewPPDPolicy(o.routingConfig.PPD, nil).Decide(ppdRequest)
+			ppdDecision = &decision
+			if decision.Action == router.PPDActionDelegate {
+				agentID = decision.Specialist
+			}
 		}
 	}
-	sid := o.CurrentSessionID()
-	if sid == "" || a.Storage == nil {
-		return a.Chat(ctx, message)
+	a, ok := o.agents[agentID]
+	if !ok || a == nil {
+		if ppdDecision != nil && ppdDecision.Action == router.PPDActionDelegate {
+			return ExecutionResult{AgentID: agentID, PPDDecision: ppdDecision}, fmt.Errorf("PPD specialist %q not found", agentID)
+		}
+		return ExecutionResult{}, fmt.Errorf("agent %q not found", agentID)
 	}
-	return a.ChatWithSession(ctx, sid, message)
-}
-
-// ChatStream streams a response from the active agent, preserving the current
-// durable session when storage is configured.
-func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *model.ChatResponse, error) {
-	a := o.ActiveAgent()
-	if a == nil {
-		return nil, fmt.Errorf("no active agent")
+	sessionID := request.SessionID
+	if sessionID == "" {
+		sessionID = o.sessionID(agentID)
+	}
+	taskID := request.TaskID
+	if taskID == "" {
+		taskID = session.NewSessionID()
+	}
+	ctx = context.WithValue(ctx, taskIDKey{}, taskID)
+	if request.PolicyContext != nil {
+		ctx = context.WithValue(ctx, executionPolicyContextKey{}, request.PolicyContext)
 	}
 	var err error
-	ctx, message, err = o.preparePrompt(ctx, message)
+	ctx, message, err := o.preparePrompt(ctx, request.Message, agentID, sessionID)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	// Predictive context is part of preparation, not a blocking-only feature.
+	if o.graphStore != nil && o.actBuf != nil {
+		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
+			message += "\n\n" + preloaded
+		}
+	}
+	result := ExecutionResult{AgentID: agentID, SessionID: sessionID, TaskID: taskID, PPDDecision: ppdDecision}
+	if request.Mode == ExecutionStreaming {
+		if sessionID != "" && a.Storage != nil {
+			result.Stream, err = a.ChatStreamWithSession(ctx, sessionID, message)
+		} else {
+			result.Stream, err = a.ChatStream(ctx, message)
+		}
+		if err == nil {
+			result.Stream = assessStream(ctx, result.Stream, request)
+		}
+		return result, err
+	}
+	if sessionID != "" && a.Storage != nil {
+		result.Response, err = a.ChatWithSession(ctx, sessionID, message)
+	} else {
+		result.Response, err = a.Chat(ctx, message)
+	}
+	if err != nil {
+		return result, err
+	}
+	decision := verification.Assess(request.VerificationMode, true, request.VerificationObligations, request.VerificationEvents)
+	if !decision.Allowed {
+		return result, fmt.Errorf("verification does not support successful completion")
+	}
+	return result, nil
+}
+
+// VerificationMode returns the configured verification completion policy.
+func (o *Orchestrator) VerificationMode() verification.Mode {
+	if o.cfg == nil || o.cfg.Verification.Mode == "" {
+		return verification.ModeReport
+	}
+	return o.cfg.Verification.Mode
+}
+
+// assessStream preserves the streaming adapter while withholding successful
+// completion when its supplied verification evidence is insufficient.
+func assessStream(ctx context.Context, stream <-chan *model.ChatResponse, request ExecutionRequest) <-chan *model.ChatResponse {
+	assessed := make(chan *model.ChatResponse)
+	go func() {
+		defer close(assessed)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case response, ok := <-stream:
+				if !ok {
+					decision := verification.Assess(request.VerificationMode, true, request.VerificationObligations, request.VerificationEvents)
+					if !decision.Allowed {
+						select {
+						case assessed <- &model.ChatResponse{Err: fmt.Errorf("verification does not support successful completion")}:
+						case <-ctx.Done():
+						}
+					}
+					return
+				}
+				select {
+				case assessed <- response:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return assessed
+}
+
+// Chat preserves the blocking public API while delegating to Execute.
+func (o *Orchestrator) Chat(ctx context.Context, message string) (*model.ChatResponse, error) {
+	result, err := o.Execute(ctx, ExecutionRequest{Message: message})
 	if err != nil {
 		return nil, err
 	}
-	sid := o.CurrentSessionID()
-	if sid != "" && a.Storage != nil {
-		return a.ChatStreamWithSession(ctx, sid, message)
-	}
-	return a.ChatStream(ctx, message)
+	return result.Response, nil
 }
 
-func (o *Orchestrator) preparePrompt(ctx context.Context, message string) (context.Context, string, error) {
-	ctx = o.turnContext(ctx, message)
+// ChatStream preserves the streaming public API while delegating to Execute.
+func (o *Orchestrator) ChatStream(ctx context.Context, message string) (<-chan *model.ChatResponse, error) {
+	result, err := o.Execute(ctx, ExecutionRequest{Message: message, Mode: ExecutionStreaming})
+	if err != nil {
+		return nil, err
+	}
+	return result.Stream, nil
+}
+
+func (o *Orchestrator) preparePrompt(ctx context.Context, message, agentID, sessionID string) (context.Context, string, error) {
+	ctx = o.turnContextFor(ctx, message, agentID, sessionID)
 	if o.hookRunner == nil || o.cfg == nil || len(o.cfg.Hooks.UserPromptSubmit) == 0 {
 		return ctx, message, nil
 	}
@@ -1198,7 +1350,8 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message string) (conte
 	vars := map[string]any{
 		"user_message": message,
 		"session_id":   storage.SessionFromContext(ctx),
-		"agent_id":     o.active,
+		"agent_id":     agentID,
+		"task_id":      TaskIDFromContext(ctx),
 	}
 	for _, hook := range o.cfg.Hooks.UserPromptSubmit {
 		result, err := o.hookRunner.Run(ctx, hook, vars)
@@ -1219,14 +1372,18 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message string) (conte
 // turnContext gives every execution path the same per-turn inputs for dynamic
 // context pins and session-scoped runtime features.
 func (o *Orchestrator) turnContext(ctx context.Context, message string) context.Context {
+	return o.turnContextFor(ctx, message, o.active, o.CurrentSessionID())
+}
+
+func (o *Orchestrator) turnContextFor(ctx context.Context, message, agentID, sessionID string) context.Context {
 	ctx = context.WithValue(ctx, messageKey{}, message)
 	maxModelCalls := 0
 	if o.cfg != nil {
 		maxModelCalls = o.cfg.Session.MaxModelCallsPerTurn
 	}
-	ctx = withSubagentTurnState(ctx, maxModelCalls, o.active)
-	if sid := o.CurrentSessionID(); sid != "" {
-		ctx = storage.WithSession(ctx, sid)
+	ctx = withSubagentTurnState(ctx, maxModelCalls, agentID)
+	if sessionID != "" {
+		ctx = storage.WithSession(ctx, sessionID)
 	}
 	return ctx
 }
@@ -1664,9 +1821,13 @@ func (o *Orchestrator) SessionManager() *session.Manager {
 // CurrentSessionID returns the session id currently bound to the active
 // agent.
 func (o *Orchestrator) CurrentSessionID() string {
+	return o.sessionID(o.active)
+}
+
+func (o *Orchestrator) sessionID(agentID string) string {
 	o.sessionMu.RLock()
 	defer o.sessionMu.RUnlock()
-	return o.sessions[o.active]
+	return o.sessions[agentID]
 }
 
 // ResetSession starts a fresh conversation context for the active agent. The
@@ -1684,6 +1845,35 @@ func (o *Orchestrator) ResetSession(ctx context.Context) (string, error) {
 	o.sessions[agentID] = sessionID
 	o.sessionMu.Unlock()
 	return sessionID, nil
+}
+
+// CompactActiveSession recovers from a cumulative token-budget cap (PRD
+// P2-009) without discarding the active agent's conversation: it forces a
+// summarization pass over the current session's history (agent.Agent's
+// CompactSession, which — unlike ChatWithSession's inline compaction —
+// summarizes unconditionally rather than waiting for the conversation to
+// near the model's context window, since a budget cap is a cost concern
+// wholly unrelated to context size) and then clears the session's
+// accumulated usage in the budget tracker so it can keep making model calls
+// under the same session ID and history. Callers should fall back to
+// ResetSession if this returns an error.
+func (o *Orchestrator) CompactActiveSession(ctx context.Context) error {
+	agentID := o.active
+	a, ok := o.agents[agentID]
+	if !ok {
+		return fmt.Errorf("no active agent")
+	}
+	sessionID := o.CurrentSessionID()
+	if sessionID == "" {
+		return fmt.Errorf("no active session")
+	}
+	if err := a.CompactSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("compact session: %w", err)
+	}
+	if o.budget != nil {
+		o.budget.ResetSession(sessionID)
+	}
+	return nil
 }
 
 // MemoryStore returns the YAML-backed memory store (PRD P2-002), or nil if

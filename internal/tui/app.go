@@ -919,15 +919,24 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 	stream := m.stream
 	return func() tea.Msg {
 		if stream {
-			ch, err := orch.ChatStream(ctx, message)
+			result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
+				Message:          message,
+				Mode:             orchestrator.ExecutionStreaming,
+				VerificationMode: orch.VerificationMode(),
+			})
 			if err != nil {
 				return chatDoneMsg{turnID: turnID, err: err}
 			}
-			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: ch}
+			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream}
 		}
-		resp, err := orch.Chat(ctx, message)
-		return chatDoneMsg{turnID: turnID, resp: resp, err: err}
+		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode()})
+		return chatDoneMsg{turnID: turnID, resp: result.Response, err: err}
 	}
+}
+
+// StartExecution starts one TUI turn through the common execution boundary.
+func StartExecution(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest) (orchestrator.ExecutionResult, error) {
+	return orch.Execute(ctx, request)
 }
 
 func listenStream(ctx context.Context, turnID uint64, ch <-chan *model.ChatResponse) tea.Cmd {
@@ -1775,8 +1784,21 @@ func (m *appModel) retryInFreshSession() (tea.Cmd, error) {
 		m.stopActivity = nil
 		m.activityCh = nil
 	}
-	if _, err := m.orch.ResetSession(m.ctx); err != nil {
-		return nil, err
+
+	// Prefer compacting the existing session over discarding it: a budget
+	// cap is a cumulative-cost concern, not a context-window concern, so the
+	// conversation itself is usually still small and worth keeping. Only
+	// fall back to a brand-new, empty session if compaction itself fails
+	// (e.g. the summarizer call errors) — recovering with a clean slate
+	// beats getting stuck unable to recover at all.
+	activityLine := "  ↻ session budget reached · compacting history and resuming"
+	statusMsg := "session compacted after budget limit"
+	if compactErr := m.orch.CompactActiveSession(m.ctx); compactErr != nil {
+		if _, err := m.orch.ResetSession(m.ctx); err != nil {
+			return nil, err
+		}
+		activityLine = "  ↻ session budget reached · continuing in a fresh session"
+		statusMsg = "session renewed after budget limit"
 	}
 	m.turnCostStart = m.orch.SessionCost()
 	m.lastKnownUsage = model.Usage{}
@@ -1797,8 +1819,8 @@ func (m *appModel) retryInFreshSession() (tea.Cmd, error) {
 	m.pendingSubagents = 0
 	m.activityIndex = make(map[string]int)
 	m.activityArgs = make(map[string]any)
-	m.appendTurnActivity(styleDim.Render("  ↻ session budget reached · continuing in a fresh session"))
-	m.statusMsg = "session renewed after budget limit"
+	m.appendTurnActivity(styleDim.Render(activityLine))
+	m.statusMsg = statusMsg
 	turnID := m.turnID
 	turnCtx := m.turnCtx
 	var activityCmd tea.Cmd

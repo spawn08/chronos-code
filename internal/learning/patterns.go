@@ -15,6 +15,21 @@ import (
 // before a pattern can become a candidate.
 const MinimumCandidateCount = 3
 
+// ReplayEvidence is the aggregate result of replaying a candidate against
+// historical verified tasks. It intentionally contains no task content, tool
+// payloads, or prompts.
+type ReplayEvidence struct {
+	VerifiedOutcomes int64 `yaml:"verified_outcomes"`
+	QualityPassed    bool  `yaml:"quality_passed"`
+	PolicyPassed     bool  `yaml:"policy_passed"`
+}
+
+// Acceptable reports whether an offline replay has enough verified evidence
+// and did not regress either required hard gate.
+func (e ReplayEvidence) Acceptable(minimumVerifiedOutcomes int64) bool {
+	return minimumVerifiedOutcomes > 0 && e.VerifiedOutcomes >= minimumVerifiedOutcomes && e.QualityPassed && e.PolicyPassed
+}
+
 // SessionSegment is one user request and the ordered activity that follows it.
 type SessionSegment struct {
 	SessionID string

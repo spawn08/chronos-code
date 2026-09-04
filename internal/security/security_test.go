@@ -2,10 +2,13 @@ package security
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/hooks"
+
+	"github.com/spawn08/chronos-code/internal/defaults"
 )
 
 // defaultTestPolicy mirrors internal/defaults/security.yaml's flattened shape,
@@ -365,6 +368,69 @@ func TestGuard_ShellAuto_UnlistedCommandDenied(t *testing.T) {
 	}
 }
 
+func TestGuard_Shell_NeverAllowHardBlocksEvenForPlainShell(t *testing.T) {
+	// never_allow must block "shell" (not just "shell_auto") regardless of
+	// approval mode, since Guard.Before runs unconditionally before every
+	// tool call — this is what makes never_allow a real code-level deny
+	// rather than just a hint to the interactive TUI approval flow.
+	policy := defaultTestPolicy()
+	policy.neverAllow = compileTestPatterns(t, `^sed\s+-n\s`, `^grep\s+-[a-zA-Z]*r?n[a-zA-Z]*(\s|$)`)
+	g := NewGuard(policy, "/workspace", nil)
+
+	cases := []string{
+		`sed -n '340,430p' internal/tui/app.go`,
+		`grep -n "pattern" internal/tui/app.go`,
+		`grep -rn "pattern" internal/tui`,
+	}
+	for _, command := range cases {
+		evt := &hooks.Event{
+			Type:  hooks.EventToolCallBefore,
+			Name:  "shell",
+			Input: map[string]any{"command": command},
+		}
+		err := g.Before(context.Background(), evt)
+		if err == nil {
+			t.Errorf("expected %q to be denied by never_allow", command)
+			continue
+		}
+		if !strings.Contains(err.Error(), "file_read") || !strings.Contains(err.Error(), "file_grep") {
+			t.Errorf("error for %q = %v, want it to point at file_read/file_grep", command, err)
+		}
+	}
+}
+
+func TestGuard_Shell_NeverAllowDoesNotBlockPipelinedUses(t *testing.T) {
+	// Anchored at the start of the command, so grep/sed used as a filter
+	// stage in a pipeline (not a direct file/dir search) is unaffected.
+	policy := defaultTestPolicy()
+	policy.neverAllow = compileTestPatterns(t, `^sed\s+-n\s`, `^grep\s+-[a-zA-Z]*r?n[a-zA-Z]*(\s|$)`)
+	g := NewGuard(policy, "/workspace", nil)
+
+	cases := []string{
+		`go test ./... 2>&1 | grep -n FAIL`,
+		`git log --oneline | grep -i fix`,
+	}
+	for _, command := range cases {
+		evt := &hooks.Event{
+			Type:  hooks.EventToolCallBefore,
+			Name:  "shell",
+			Input: map[string]any{"command": command},
+		}
+		if err := g.Before(context.Background(), evt); err != nil {
+			t.Errorf("expected %q to be unaffected by never_allow, got: %v", command, err)
+		}
+	}
+}
+
+func compileTestPatterns(t *testing.T, patterns ...string) []*regexp.Regexp {
+	t.Helper()
+	compiled, err := compilePatterns("test", patterns)
+	if err != nil {
+		t.Fatalf("compilePatterns: %v", err)
+	}
+	return compiled
+}
+
 func TestGuard_Shell_DeniedPipeToShell(t *testing.T) {
 	// "curl | sh" as a literal substring pattern won't match a command that
 	// interposes a URL (e.g. "curl http://x | sh"), since the enforcement is a
@@ -438,6 +504,47 @@ func TestMatchesAnyGlob(t *testing.T) {
 	for _, c := range cases {
 		if got := matchesAnyGlob(patterns, c.path); got != c.want {
 			t.Errorf("matchesAnyGlob(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+// TestEmbeddedSecurityPolicy_LoadsAndBlocksShellFileReads guards the actual
+// shipped internal/defaults/security.yaml, not a hand-written fixture: it
+// must parse (regex patterns compile), and its never_allow rules must
+// really hard-block the sed/grep-as-file-reader shapes observed repeatedly
+// blowing through the token budget in practice, while leaving pipelined
+// uses and a normal build/test command alone.
+func TestEmbeddedSecurityPolicy_LoadsAndBlocksShellFileReads(t *testing.T) {
+	data, err := defaults.FS.ReadFile("security.yaml")
+	if err != nil {
+		t.Fatalf("read embedded security.yaml: %v", err)
+	}
+	policy, err := LoadPolicy(data)
+	if err != nil {
+		t.Fatalf("LoadPolicy(embedded security.yaml): %v", err)
+	}
+	g := NewGuard(policy, "/workspace", nil)
+
+	blocked := []string{
+		`sed -n '340,430p' internal/tui/app.go`,
+		`grep -n "pattern" internal/tui/app.go`,
+		`grep -rn "pattern" internal/tui`,
+	}
+	for _, command := range blocked {
+		evt := &hooks.Event{Type: hooks.EventToolCallBefore, Name: "shell", Input: map[string]any{"command": command}}
+		if err := g.Before(context.Background(), evt); err == nil {
+			t.Errorf("expected shipped policy to block %q", command)
+		}
+	}
+
+	allowed := []string{
+		"go test ./...",
+		"go test ./... 2>&1 | grep -n FAIL",
+	}
+	for _, command := range allowed {
+		evt := &hooks.Event{Type: hooks.EventToolCallBefore, Name: "shell", Input: map[string]any{"command": command}}
+		if err := g.Before(context.Background(), evt); err != nil {
+			t.Errorf("expected shipped policy to allow %q, got: %v", command, err)
 		}
 	}
 }

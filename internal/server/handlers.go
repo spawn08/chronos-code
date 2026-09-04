@@ -7,7 +7,9 @@ import (
 	"net/http"
 
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 	"github.com/spawn08/chronos-code/internal/session"
+	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/storage"
 )
 
@@ -59,44 +61,38 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID := req.AgentID
-	if agentID == "" {
-		agentID = s.orch.ActiveID()
-	}
-	a, ok := s.orch.GetAgent(agentID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("agent %q not found", agentID)})
-		return
+	if req.AgentID != "" {
+		if _, ok := s.orch.GetAgent(req.AgentID); !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("agent %q not found", req.AgentID)})
+			return
+		}
 	}
 
 	sid := req.SessionID
 	if sid == "" {
 		sid = session.NewSessionID()
 	}
-	mgr := s.orch.SessionManager()
-	if mgr != nil {
-		if err := mgr.Ensure(r.Context(), sid, agentID); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ensure session: " + err.Error()})
-			return
-		}
-	}
-	if s.router != nil {
-		s.router.Claim(sid)
-	}
-
-	resp, err := a.ChatWithSession(r.Context(), sid, req.Message)
+	result, err := ExecuteRequest(r.Context(), s.orch, orchestrator.ExecutionRequest{
+		Message:          req.Message,
+		RequestedAgent:   req.AgentID,
+		SessionID:        sid,
+		VerificationMode: s.orch.VerificationMode(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if s.router != nil {
+		s.router.Claim(result.SessionID)
+	}
 
 	writeJSON(w, http.StatusOK, chatResponse{
-		Content: resp.Content,
+		Content: result.Response.Content,
 		Usage: usagePayload{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
+			PromptTokens:     result.Response.Usage.PromptTokens,
+			CompletionTokens: result.Response.Usage.CompletionTokens,
 		},
-		SessionID: sid,
+		SessionID: result.SessionID,
 	})
 }
 
@@ -111,14 +107,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID := req.AgentID
-	if agentID == "" {
-		agentID = s.orch.ActiveID()
-	}
-	a, ok := s.orch.GetAgent(agentID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("agent %q not found", agentID)})
-		return
+	if req.AgentID != "" {
+		if _, ok := s.orch.GetAgent(req.AgentID); !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("agent %q not found", req.AgentID)})
+			return
+		}
 	}
 
 	sid := req.SessionID
@@ -126,21 +119,25 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		sid = session.NewSessionID()
 	}
 
-	ctx := r.Context()
-	if sid != "" {
-		ctx = storage.WithSession(ctx, sid)
-	}
-
-	ch, err := a.ChatStream(ctx, req.Message)
+	result, err := ExecuteRequest(r.Context(), s.orch, orchestrator.ExecutionRequest{
+		Message:          req.Message,
+		Mode:             orchestrator.ExecutionStreaming,
+		RequestedAgent:   req.AgentID,
+		SessionID:        sid,
+		VerificationMode: s.orch.VerificationMode(),
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if s.router != nil {
+		s.router.Claim(result.SessionID)
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Session-ID", sid)
+	w.Header().Set("X-Session-ID", result.SessionID)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -148,14 +145,38 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for resp := range ch {
+	WriteEventStream(r.Context(), w, flusher, result.Stream, result.SessionID)
+}
+
+// ExecuteRequest runs one HTTP adapter request through the common execution
+// boundary before the handler translates its result to the wire format.
+func ExecuteRequest(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest) (orchestrator.ExecutionResult, error) {
+	return orch.Execute(ctx, request)
+}
+
+// WriteEventStream translates a streaming execution result to the HTTP SSE
+// contract, including terminal errors and cancellation.
+func WriteEventStream(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, stream <-chan *model.ChatResponse, sessionID string) {
+	for resp := range stream {
+		if resp.Err != nil {
+			data, _ := json.Marshal(map[string]string{"error": resp.Err.Error(), "session_id": sessionID})
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+			flusher.Flush()
+			return
+		}
 		data, _ := json.Marshal(map[string]any{
 			"content":    resp.Content,
 			"delta":      resp.Delta,
-			"session_id": sid,
+			"session_id": sessionID,
 		})
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
+	}
+	if err := ctx.Err(); err != nil {
+		data, _ := json.Marshal(map[string]string{"error": err.Error(), "session_id": sessionID})
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
+		flusher.Flush()
+		return
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
@@ -219,6 +240,7 @@ func (s *Server) handleListMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "memory disabled"})
 		return
 	}
+	ms = ms.ForContext(r.Context())
 	cat := memory.Category(r.URL.Query().Get("category"))
 	records, err := ms.List(cat)
 	if err != nil {
@@ -239,6 +261,7 @@ func (s *Server) handleAddMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "memory disabled"})
 		return
 	}
+	ms = ms.ForContext(r.Context())
 	var req addMemoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
@@ -262,6 +285,7 @@ func (s *Server) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "memory disabled"})
 		return
 	}
+	ms = ms.ForContext(r.Context())
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "memory id is required"})
@@ -284,6 +308,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "memory disabled"})
 		return
 	}
+	ms = ms.ForContext(r.Context())
 	var req searchMemoryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})

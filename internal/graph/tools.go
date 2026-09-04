@@ -410,6 +410,11 @@ func l3Snippet(ctx context.Context, store *Store, root, target string) (any, err
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(root, path)
 	}
+	var err error
+	path, err = l3PathWithinRoot(root, path)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -426,6 +431,42 @@ func l3Snippet(ctx context.Context, store *Store, root, target string) (any, err
 	}
 	snippet := strings.Join(lines[startLine-1:endLine], "\n")
 	return map[string]any{"level": "L3", "found": true, "file": target, "start_line": startLine, "end_line": endLine, "content": snippet}, nil
+}
+
+// l3PathWithinRoot rejects lexical and symlink escapes before L3 reads source.
+func l3PathWithinRoot(root, path string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("multi_resolution_view: workspace root is required for L3")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("multi_resolution_view: resolve workspace root: %w", err)
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("multi_resolution_view: resolve L3 path: %w", err)
+	}
+	if !isPathWithin(rootAbs, pathAbs) {
+		return "", fmt.Errorf("multi_resolution_view: L3 target %q is outside the workspace root", path)
+	}
+
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("multi_resolution_view: resolve workspace root: %w", err)
+	}
+	pathReal, err := filepath.EvalSymlinks(pathAbs)
+	if err != nil {
+		return "", fmt.Errorf("multi_resolution_view: resolve L3 path: %w", err)
+	}
+	if !isPathWithin(rootReal, pathReal) {
+		return "", fmt.Errorf("multi_resolution_view: L3 target %q resolves outside the workspace root", path)
+	}
+	return pathReal, nil
+}
+
+func isPathWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))))
 }
 
 func symbolSummary(s Symbol) map[string]any {

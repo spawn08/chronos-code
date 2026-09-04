@@ -322,6 +322,223 @@ func TestWrapStartLineEndLineSkipsOutline(t *testing.T) {
 	}
 }
 
+func TestWrapSlicesContentToRequestedLineRange(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "lines.txt", "one\ntwo\nthree\nfour\nfive")
+
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileRead(a, dir, &counter)
+	Wrap(a, dir)
+
+	ctx := context.Background()
+	out, err := a.Tools.Execute(ctx, "file_read", map[string]any{
+		"path":       "lines.txt",
+		"start_line": 2,
+		"end_line":   3,
+	})
+	if err != nil {
+		t.Fatalf("execute file_read: %v", err)
+	}
+	res, ok := out.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %#v", out)
+	}
+	if res["content"] != "two\nthree" {
+		t.Errorf("content = %q, want %q", res["content"], "two\nthree")
+	}
+	if res["total_lines"] != 5 {
+		t.Errorf("total_lines = %v, want 5", res["total_lines"])
+	}
+}
+
+func TestWrapClampsOutOfRangeLines(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "lines.txt", "one\ntwo\nthree")
+
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileRead(a, dir, &counter)
+	Wrap(a, dir)
+
+	ctx := context.Background()
+	out, err := a.Tools.Execute(ctx, "file_read", map[string]any{
+		"path":       "lines.txt",
+		"start_line": 2,
+		"end_line":   999,
+	})
+	if err != nil {
+		t.Fatalf("execute file_read: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["content"] != "two\nthree" {
+		t.Errorf("content = %q, want %q", res["content"], "two\nthree")
+	}
+}
+
+func TestWrapDeclaresLineRangeParameters(t *testing.T) {
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileRead(a, t.TempDir(), &counter)
+	Wrap(a, t.TempDir())
+
+	def, ok := a.Tools.Get("file_read")
+	if !ok {
+		t.Fatal("expected file_read tool to exist")
+	}
+	props, ok := def.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %#v", def.Parameters)
+	}
+	if _, ok := props["start_line"]; !ok {
+		t.Error("expected start_line to be declared in Parameters")
+	}
+	if _, ok := props["end_line"]; !ok {
+		t.Error("expected end_line to be declared in Parameters")
+	}
+}
+
+// registerFakeFileGrep registers a stub file_grep tool matching the SDK
+// builtin's single-file, plain-substring contract, so tests can assert
+// whether WrapGrep delegated to it or handled the call itself.
+func registerFakeFileGrep(a *agent.Agent, root string, counter *atomic.Int64) {
+	a.Tools.Register(&tool.Definition{
+		Name:       "file_grep",
+		Permission: tool.PermAllow,
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+		Handler: func(_ context.Context, args map[string]any) (any, error) {
+			counter.Add(1)
+			p, _ := args["path"].(string)
+			pattern, _ := args["pattern"].(string)
+			resolved := p
+			if !filepath.IsAbs(p) {
+				resolved = filepath.Join(root, p)
+			}
+			data, err := os.ReadFile(resolved)
+			if err != nil {
+				return nil, err
+			}
+			var matches []map[string]any
+			for i, line := range strings.Split(string(data), "\n") {
+				if strings.Contains(line, pattern) {
+					matches = append(matches, map[string]any{"line_number": i + 1, "content": line})
+				}
+			}
+			return map[string]any{"path": resolved, "pattern": pattern, "matches": matches}, nil
+		},
+	})
+}
+
+func TestWrapGrepNoFileGrepTool(t *testing.T) {
+	a := newTestAgent(t)
+	WrapGrep(a, t.TempDir())
+	if _, ok := a.Tools.Get("file_grep"); ok {
+		t.Fatal("expected no file_grep tool to exist")
+	}
+}
+
+func TestWrapGrepSingleFileDelegatesToOrig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "test.txt", "foo\nbar\nbaz")
+
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileGrep(a, dir, &counter)
+	WrapGrep(a, dir)
+
+	ctx := context.Background()
+	out, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": "test.txt", "pattern": "bar"})
+	if err != nil {
+		t.Fatalf("execute file_grep: %v", err)
+	}
+	if counter.Load() != 1 {
+		t.Fatalf("expected orig called once for plain single-file search, got %d", counter.Load())
+	}
+	res := out.(map[string]any)
+	matches := res["matches"].([]map[string]any)
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matches))
+	}
+}
+
+func TestWrapGrepRecursiveSkipsVendor(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "vendor"), 0o755)
+	writeFile(t, dir, "a.txt", "target here")
+	writeFile(t, filepath.Join(dir, "sub"), "b.txt", "target there")
+	writeFile(t, filepath.Join(dir, "vendor"), "c.txt", "target ignored")
+
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileGrep(a, dir, &counter)
+	WrapGrep(a, dir)
+
+	ctx := context.Background()
+	out, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": ".", "pattern": "target"})
+	if err != nil {
+		t.Fatalf("execute file_grep: %v", err)
+	}
+	if counter.Load() != 0 {
+		t.Fatalf("expected recursive search NOT to delegate to orig, got %d calls", counter.Load())
+	}
+	res := out.(map[string]any)
+	if res["recursive"] != true {
+		t.Error("expected recursive = true")
+	}
+	matches := res["matches"].([]map[string]any)
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 matches (vendor skipped), got %d", len(matches))
+	}
+}
+
+func TestWrapGrepRegexAlternation(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "test.txt", "foo\nbar\nbaz")
+
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileGrep(a, dir, &counter)
+	WrapGrep(a, dir)
+
+	ctx := context.Background()
+	out, err := a.Tools.Execute(ctx, "file_grep", map[string]any{
+		"path":    "test.txt",
+		"pattern": "foo|baz",
+		"regex":   true,
+	})
+	if err != nil {
+		t.Fatalf("execute file_grep: %v", err)
+	}
+	if counter.Load() != 0 {
+		t.Fatalf("expected regex search NOT to delegate to the substring-only orig, got %d calls", counter.Load())
+	}
+	res := out.(map[string]any)
+	matches := res["matches"].([]map[string]any)
+	if len(matches) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(matches))
+	}
+}
+
+func TestWrapGrepDeclaresRegexParameter(t *testing.T) {
+	a := newTestAgent(t)
+	var counter atomic.Int64
+	registerFakeFileGrep(a, t.TempDir(), &counter)
+	WrapGrep(a, t.TempDir())
+
+	def, ok := a.Tools.Get("file_grep")
+	if !ok {
+		t.Fatal("expected file_grep tool to exist")
+	}
+	props := def.Parameters["properties"].(map[string]any)
+	if _, ok := props["regex"]; !ok {
+		t.Error("expected regex to be declared in Parameters")
+	}
+}
+
 func TestWrapOutlineOnlyFalseForcesFullContent(t *testing.T) {
 	dir := t.TempDir()
 	content := bigGoFixture()

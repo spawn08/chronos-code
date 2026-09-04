@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,6 +19,7 @@ import (
 // typically LearningConfig.OutputDir (default ".chronos-code/learned").
 type Store struct {
 	dir string
+	mu  sync.Mutex
 }
 
 // NewStore returns a Store rooted at dir. It does not create dir eagerly;
@@ -25,12 +28,14 @@ func NewStore(dir string) *Store {
 	return &Store{dir: dir}
 }
 
-func (s *Store) pendingDir() string          { return filepath.Join(s.dir, "pending") }
+func (s *Store) pendingDir() string           { return filepath.Join(s.dir, "pending") }
 func (s *Store) pendingPath(id string) string { return filepath.Join(s.pendingDir(), id+".yaml") }
 
 // Save writes sug to the pending directory (creating it if necessary),
 // keyed by sug.ID.
 func (s *Store) Save(sug *Suggestion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, err := yaml.Marshal(sug)
 	if err != nil {
 		return fmt.Errorf("learning: marshal suggestion: %w", err)
@@ -44,6 +49,8 @@ func (s *Store) Save(sug *Suggestion) error {
 // List returns all pending suggestions, sorted by CreatedAt ascending. A
 // missing pending directory (nothing suggested yet) is not an error.
 func (s *Store) List() ([]*Suggestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.pendingDir())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -68,6 +75,8 @@ func (s *Store) List() ([]*Suggestion, error) {
 
 // Get returns the pending suggestion with the given id.
 func (s *Store) Get(id string) (*Suggestion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.loadFile(s.pendingPath(id))
 }
 
@@ -85,6 +94,8 @@ func (s *Store) loadFile(path string) (*Suggestion, error) {
 
 // Reject permanently discards the pending suggestion with the given id.
 func (s *Store) Reject(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := os.Remove(s.pendingPath(id)); err != nil {
 		return fmt.Errorf("learning: reject %q: %w", id, err)
 	}
@@ -104,7 +115,9 @@ type patternsDoc struct {
 // dir/patterns.yaml instead. Either way, the pending file is removed after a
 // successful apply.
 func (s *Store) Accept(id string) error {
-	sug, err := s.Get(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sug, err := s.loadFile(s.pendingPath(id))
 	if err != nil {
 		return err
 	}
@@ -156,7 +169,9 @@ func (s *Store) appendPattern(sug *Suggestion) error {
 // (positive for positive feedback, negative for negative). Confidence is
 // clamped to [0.0, 1.0]. Returns the updated suggestion.
 func (s *Store) UpdateConfidence(id string, delta float64) (*Suggestion, error) {
-	sug, err := s.Get(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sug, err := s.loadFile(s.pendingPath(id))
 	if err != nil {
 		return nil, fmt.Errorf("learning: update confidence for %q: %w", id, err)
 	}
@@ -167,10 +182,158 @@ func (s *Store) UpdateConfidence(id string, delta float64) (*Suggestion, error) 
 	if sug.Confidence < 0.0 {
 		sug.Confidence = 0.0
 	}
-	if err := s.Save(sug); err != nil {
+	data, err := yaml.Marshal(sug)
+	if err != nil {
+		return nil, fmt.Errorf("learning: marshal suggestion: %w", err)
+	}
+	if err := writeFileAtomic(s.pendingDir(), s.pendingPath(sug.ID), data); err != nil {
 		return nil, err
 	}
 	return sug, nil
+}
+
+// PatternVersion is an approved, measured pattern version. The record stores
+// aggregate evidence only; it never stores replay task content or tool data.
+type PatternVersion struct {
+	Candidate      PatternCandidate `yaml:"candidate"`
+	SourceRevision string           `yaml:"source_revision"`
+	Version        int64            `yaml:"version"`
+	ApprovedAt     time.Time        `yaml:"approved_at"`
+	Current        bool             `yaml:"current"`
+	Replay         ReplayEvidence   `yaml:"replay"`
+}
+
+type patternVersionsDoc struct {
+	Patterns []PatternVersion `yaml:"patterns"`
+}
+
+func (s *Store) patternVersionsPath() string { return filepath.Join(s.dir, "pattern-versions.yaml") }
+
+// ApprovePattern activates candidate only when replay against verified
+// historical outcomes meets the configured evidence and hard-gate threshold.
+// A new version supersedes, but retains, the prior current version.
+func (s *Store) ApprovePattern(candidate PatternCandidate, sourceRevision string, replay ReplayEvidence, minimumVerifiedOutcomes int64) (*PatternVersion, error) {
+	if candidate.RepoPath == "" || candidate.TriggerHash == "" {
+		return nil, fmt.Errorf("learning: pattern candidate repository and trigger hash are required")
+	}
+	if sourceRevision == "" {
+		return nil, fmt.Errorf("learning: pattern source revision is required")
+	}
+	if candidate.SuccessCount < minimumVerifiedOutcomes || !replay.Acceptable(minimumVerifiedOutcomes) {
+		return nil, fmt.Errorf("learning: pattern candidate did not pass verified offline replay")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc, err := s.loadPatternVersions()
+	if err != nil {
+		return nil, err
+	}
+	var version int64 = 1
+	for i := range doc.Patterns {
+		pattern := &doc.Patterns[i]
+		if pattern.Candidate.RepoPath != candidate.RepoPath || pattern.Candidate.TriggerHash != candidate.TriggerHash {
+			continue
+		}
+		if pattern.Version >= version {
+			version = pattern.Version + 1
+		}
+		if pattern.Current {
+			pattern.Current = false
+		}
+	}
+	approved := PatternVersion{Candidate: candidate, SourceRevision: sourceRevision, Version: version, ApprovedAt: time.Now().UTC(), Current: true, Replay: replay}
+	doc.Patterns = append(doc.Patterns, approved)
+	if err := s.savePatternVersions(doc); err != nil {
+		return nil, err
+	}
+	return &approved, nil
+}
+
+// CurrentPattern retrieves the current approved version matching trigger and
+// repository revision. Stale versions are deliberately not returned.
+func (s *Store) CurrentPattern(repoPath, trigger, sourceRevision string) (*PatternVersion, error) {
+	if repoPath == "" || sourceRevision == "" {
+		return nil, nil
+	}
+	hash := triggerHash(NormalizeTrigger(trigger))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc, err := s.loadPatternVersions()
+	if err != nil {
+		return nil, err
+	}
+	for i := range doc.Patterns {
+		pattern := &doc.Patterns[i]
+		if pattern.Current && pattern.Candidate.RepoPath == repoPath && pattern.Candidate.TriggerHash == hash && pattern.SourceRevision == sourceRevision {
+			copy := *pattern
+			return &copy, nil
+		}
+	}
+	return nil, nil
+}
+
+// RollbackPattern restores the immediately preceding approved version for a
+// repository and trigger, retaining the rolled-back version for inspection.
+func (s *Store) RollbackPattern(repoPath, trigger string) (*PatternVersion, error) {
+	hash := triggerHash(NormalizeTrigger(trigger))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	doc, err := s.loadPatternVersions()
+	if err != nil {
+		return nil, err
+	}
+	current, previous := -1, -1
+	for i := range doc.Patterns {
+		pattern := doc.Patterns[i]
+		if pattern.Candidate.RepoPath != repoPath || pattern.Candidate.TriggerHash != hash {
+			continue
+		}
+		if pattern.Current {
+			current = i
+			continue
+		}
+		if previous == -1 || pattern.Version > doc.Patterns[previous].Version {
+			previous = i
+		}
+	}
+	if current == -1 || previous == -1 {
+		return nil, fmt.Errorf("learning: no previous approved pattern version to restore")
+	}
+	doc.Patterns[current].Current = false
+	doc.Patterns[previous].Current = true
+	if err := s.savePatternVersions(doc); err != nil {
+		return nil, err
+	}
+	rolledBack := doc.Patterns[previous]
+	return &rolledBack, nil
+}
+
+func (s *Store) loadPatternVersions() (patternVersionsDoc, error) {
+	path := s.patternVersionsPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return patternVersionsDoc{}, nil
+		}
+		return patternVersionsDoc{}, fmt.Errorf("learning: read pattern versions: %w", err)
+	}
+	var doc patternVersionsDoc
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return patternVersionsDoc{}, fmt.Errorf("learning: parse pattern versions: %w", err)
+	}
+	return doc, nil
+}
+
+func (s *Store) savePatternVersions(doc patternVersionsDoc) error {
+	data, err := yaml.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("learning: marshal pattern versions: %w", err)
+	}
+	if err := writeFileAtomic(s.dir, s.patternVersionsPath(), data); err != nil {
+		return fmt.Errorf("learning: save pattern versions: %w", err)
+	}
+	return nil
 }
 
 // writeFileAtomic marshals data to a temp file inside dir, then renames it

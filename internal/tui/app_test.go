@@ -811,7 +811,7 @@ func TestFinalizeTurn_BudgetErrorStopsQueuedRetries(t *testing.T) {
 	}
 }
 
-func TestFinalizeTurn_BudgetErrorRetriesOnceInFreshSession(t *testing.T) {
+func TestFinalizeTurn_BudgetErrorCompactsAndRetriesInSameSession(t *testing.T) {
 	m := newTestAppModel(t)
 	m.sending = true
 	m.activeRequest = "continue the task"
@@ -823,14 +823,19 @@ func TestFinalizeTurn_BudgetErrorRetriesOnceInFreshSession(t *testing.T) {
 	if cmd == nil || !m.sending || !m.budgetRetried {
 		t.Fatal("budget exhaustion did not schedule one retry")
 	}
-	if got := m.orch.CurrentSessionID(); got == "" || got == oldSession {
-		t.Fatalf("session was not renewed: old=%q new=%q", oldSession, got)
+	// Compaction (not a hard reset) is the default recovery path: the
+	// session's conversation history is what's worth keeping, since a
+	// budget cap is a cumulative-cost concern, not a context-window one.
+	// With nothing yet persisted to this synthetic session, CompactSession
+	// is a trivial no-op success, so the same session ID carries forward.
+	if got := m.orch.CurrentSessionID(); got != oldSession {
+		t.Fatalf("expected compaction to keep the same session: old=%q new=%q", oldSession, got)
 	}
 	if m.lastKnownUsage.PromptTokens != 0 {
-		t.Fatalf("session rollover retained usage: %+v", m.lastKnownUsage)
+		t.Fatalf("session recovery retained usage: %+v", m.lastKnownUsage)
 	}
-	if got := m.renderTranscript(); !strings.Contains(got, "continuing in a fresh session") {
-		t.Fatalf("automatic rollover is not visible in transcript: %q", got)
+	if got := m.renderTranscript(); !strings.Contains(got, "compacting history and resuming") {
+		t.Fatalf("automatic compaction is not visible in transcript: %q", got)
 	}
 	m.turnCancel()
 }

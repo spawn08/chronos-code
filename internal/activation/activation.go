@@ -7,6 +7,7 @@ package activation
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -20,10 +21,12 @@ const defaultMaxSize = 50
 
 // Entry holds pre-fetched data for a single symbol.
 type Entry struct {
-	Symbol  graph.Symbol
-	Callers []string
-	Callees []string
-	Tests   []string
+	Symbol     graph.Symbol
+	Repository string
+	Revision   string
+	Callers    []string
+	Callees    []string
+	Tests      []string
 }
 
 // Buffer is a concurrency-safe LRU cache of pre-fetched symbol neighbors.
@@ -53,6 +56,19 @@ func (b *Buffer) Get(name string) (*Entry, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e, ok := b.entries[name]
+	if !ok {
+		for key, candidate := range b.entries {
+			if candidate.Symbol.Name != name {
+				continue
+			}
+			if e != nil {
+				b.misses++
+				return nil, false
+			}
+			e, ok = candidate, true
+			name = key
+		}
+	}
 	if ok {
 		b.hits++
 		b.promote(name)
@@ -60,6 +76,34 @@ func (b *Buffer) Get(name string) (*Entry, bool) {
 		b.misses++
 	}
 	return e, ok
+}
+
+func (b *Buffer) entriesForName(ctx context.Context, store *graph.Store, name string) ([]*Entry, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	var entries []*Entry
+	for key, entry := range b.entries {
+		if entry.Symbol.Name != name || entry.Repository != repositoryKey(store) {
+			continue
+		}
+		if entry.Revision != "" {
+			revision, err := store.FileHash(ctx, entry.Symbol.File)
+			if err != nil || revision != entry.Revision {
+				delete(b.entries, key)
+				b.removeFromOrder(key)
+				continue
+			}
+		}
+		entries = append(entries, entry)
+		b.promote(key)
+	}
+	if len(entries) == 0 {
+		b.misses++
+		return nil, false
+	}
+	b.hits++
+	return entries, true
 }
 
 // Put inserts or updates an entry, evicting the least-recently-used entry
@@ -116,6 +160,24 @@ func (b *Buffer) promote(name string) {
 	b.order = append(b.order, name)
 }
 
+func (b *Buffer) removeFromOrder(name string) {
+	for i, n := range b.order {
+		if n == name {
+			b.order = append(b.order[:i], b.order[i+1:]...)
+			return
+		}
+	}
+}
+
+func repositoryKey(store *graph.Store) string {
+	return fmt.Sprintf("%p", store)
+}
+
+func entryKey(store *graph.Store, sym graph.Symbol, revision string) string {
+	return repositoryKey(store) + "\x00" + sym.Package + "\x00" + sym.Name + "\x00" +
+		string(sym.Kind) + "\x00" + sym.File + "\x00" + revision
+}
+
 // Prefetch loads a symbol and its immediate neighbors into the buffer. It
 // resolves the symbol in the graph store, queries its callers and callees,
 // identifies test functions among callers, and stores everything. Neighbors
@@ -126,7 +188,6 @@ func (b *Buffer) Prefetch(ctx context.Context, store *graph.Store, name string) 
 	if err != nil || len(syms) == 0 {
 		return
 	}
-	sym := syms[0]
 	callers, _ := store.CallersOf(ctx, name)
 	callees, _ := store.CalleesOf(ctx, name)
 
@@ -137,12 +198,20 @@ func (b *Buffer) Prefetch(ctx context.Context, store *graph.Store, name string) 
 		}
 	}
 
-	b.Put(name, &Entry{
-		Symbol:  sym,
-		Callers: callers,
-		Callees: callees,
-		Tests:   tests,
-	})
+	for _, sym := range syms {
+		revision, err := store.FileHash(ctx, sym.File)
+		if err != nil {
+			continue
+		}
+		b.Put(entryKey(store, sym, revision), &Entry{
+			Symbol:     sym,
+			Repository: repositoryKey(store),
+			Revision:   revision,
+			Callers:    callers,
+			Callees:    callees,
+			Tests:      tests,
+		})
+	}
 
 	neighbors := mergeUnique(callers, callees)
 	if len(neighbors) > 20 {
@@ -159,7 +228,17 @@ func (b *Buffer) Prefetch(ctx context.Context, store *graph.Store, name string) 
 		if err != nil || len(nSyms) == 0 {
 			continue
 		}
-		b.Put(n, &Entry{Symbol: nSyms[0]})
+		for _, sym := range nSyms {
+			revision, err := store.FileHash(ctx, sym.File)
+			if err != nil {
+				continue
+			}
+			b.Put(entryKey(store, sym, revision), &Entry{
+				Symbol:     sym,
+				Repository: repositoryKey(store),
+				Revision:   revision,
+			})
+		}
 	}
 }
 
@@ -178,7 +257,7 @@ func Wrap(a *agent.Agent, store *graph.Store, buf *Buffer) {
 		case "resolve_symbol":
 			wrapResolveSymbol(def, store, buf)
 		case "find_callers":
-			wrapFindCallers(def, buf)
+			wrapFindCallers(def, store, buf)
 		}
 	}
 }
@@ -188,13 +267,17 @@ func wrapGraphQuery(def *tool.Definition, store *graph.Store, buf *Buffer) {
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 		name, _ := args["name"].(string)
 
-		if entry, ok := buf.Get(name); ok && entry.Symbol.Name != "" {
+		if entries, ok := buf.entriesForName(ctx, store, name); ok {
+			summaries := make([]map[string]any, 0, len(entries))
+			for _, entry := range entries {
+				summaries = append(summaries, entrySummary(entry))
+			}
 			result := map[string]any{
 				"found":      true,
-				"symbols":    []map[string]any{entrySummary(entry)},
+				"symbols":    summaries,
 				"_activated": true,
 			}
-			if ns := neighborHints(entry); len(ns) > 0 {
+			if ns := neighborHints(entries[0]); len(ns) > 0 {
 				result["_neighbors"] = ns
 			}
 			go buf.Prefetch(context.Background(), store, name)
@@ -209,17 +292,13 @@ func wrapGraphQuery(def *tool.Definition, store *graph.Store, buf *Buffer) {
 		if name != "" {
 			go func() {
 				buf.Prefetch(context.Background(), store, name)
-				if e, ok := buf.Get(name); ok {
-					// Enrich if the caller re-reads the result
-					_ = e
-				}
 			}()
 		}
 
 		if m, ok := result.(map[string]any); ok {
 			if found, _ := m["found"].(bool); found {
-				if e, ok := buf.Get(name); ok {
-					if ns := neighborHints(e); len(ns) > 0 {
+				if entries, ok := buf.entriesForName(ctx, store, name); ok {
+					if ns := neighborHints(entries[0]); len(ns) > 0 {
 						m["_neighbors"] = ns
 					}
 				}
@@ -245,13 +324,14 @@ func wrapResolveSymbol(def *tool.Definition, store *graph.Store, buf *Buffer) {
 	}
 }
 
-func wrapFindCallers(def *tool.Definition, buf *Buffer) {
+func wrapFindCallers(def *tool.Definition, store *graph.Store, buf *Buffer) {
 	orig := def.Handler
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 		name, _ := args["name"].(string)
 		depth, _ := args["depth"].(float64)
 		if name != "" && (depth == 0 || depth == 1) {
-			if entry, ok := buf.Get(name); ok && len(entry.Callers) > 0 {
+			if entries, ok := buf.entriesForName(ctx, store, name); ok && len(entries) == 1 && len(entries[0].Callers) > 0 {
+				entry := entries[0]
 				level := map[string][]string{name: entry.Callers}
 				return map[string]any{
 					"name":             name,

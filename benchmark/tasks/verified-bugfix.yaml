@@ -1,0 +1,37 @@
+version: v1
+id: verified-bugfix-001
+kind: debug
+objective: fix the verified bug
+changed_paths:
+  - internal/example/bug.go
+verification:
+  command: go test ./internal/example
+  must_follow_last_write: true
+runtime_contracts:
+  - IC-001
+  - IC-002
+  - IC-003
+  - IC-004
+  - IC-005
+  - IC-006
+  - IC-007
+  - IC-008
+  - IC-009
+  - IC-010
+success_measures:
+  - {id: SM-01, status: covered, artifact: internal/eval/taskrunner_test.go, marker: TestTaskRunnerRecordsOutcomeAndArtifacts}
+  - {id: SM-02, status: covered, artifact: internal/eval/result_test.go, marker: TestTaskOutcomeUsageCountsUniqueCalls}
+  - {id: SM-03, status: covered, artifact: internal/integration/surfaces_test.go, marker: TestSurfaces}
+  - {id: SM-04, status: covered, artifact: internal/learning/telemetry_test.go, marker: TestTelemetryCorrelatesModelAndToolEvents}
+  - {id: SM-05, status: covered, artifact: internal/orchestrator/execution_test.go, marker: TestExecuteRejectsUnsupportedVerifiedCompletion}
+  - {id: SM-06, status: covered, artifact: internal/config/capabilities_test.go, marker: TestCapabilityManifestValidateRejectsMissingRequiredCapability}
+  - {id: SM-07, status: covered, artifact: internal/graph/merkle_test.go, marker: TestIndexAll_DeletesFileAndItsEdges}
+  - {id: SM-08, status: covered, artifact: internal/learning/learning_test.go, marker: TestStorePatternApprovalRetrievalAndRollback}
+  - {id: SM-09, status: covered, artifact: internal/mcpdiscover/defaults_test.go, marker: TestDefaultDocumentationProvider}
+  - {id: SM-10, status: covered, artifact: internal/integration/surfaces_test.go, marker: TestSurfacesTrustFailuresFailClosed}
+  - {id: SM-11, status: external, reason: paired provider benchmark has not been executed}
+  - {id: SM-12, status: covered, artifact: internal/plan/sqlstore_test.go, marker: TestSQLRoundTrip}
+  - {id: SM-13, status: covered, artifact: internal/integration/plan_recovery_test.go, marker: TestPlanRecovery}
+  - {id: SM-14, status: covered, artifact: internal/cli/plan_cmd_test.go, marker: TestPlanCommandInspectionJSON}
+  - {id: SM-15, status: covered, artifact: internal/integration/delegation_test.go, marker: TestDelegation}
+  - {id: SM-16, status: external, reason: four-arm provider ablation has not been executed}

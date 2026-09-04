@@ -216,8 +216,14 @@ func isUnderAnyRoot(root string, writablePaths []string, resolved string) bool {
 	return false
 }
 
-// checkShellArgs enforces the denied-pattern and allowed-command rules
-// against a "command" string argument, when present.
+// checkShellArgs enforces the denied-pattern, never_allow, and
+// allowed-command rules against a "command" string argument, when present.
+// Unlike neverAllow's other consumer (PermissionChecker.Check, which only
+// decides whether the interactive TUI should prompt a human), this runs
+// inside the Guard hook wired into every tool call regardless of approval
+// mode — so a never_allow rule is the only tier that reliably blocks a
+// command even when approvals are auto-accepted (yolo mode or unattended
+// runs), matching its documented "resolve to deny" intent.
 func (g *Guard) checkShellArgs(args map[string]any, requireAllowlisted bool) error {
 	command, ok := args["command"].(string)
 	if !ok || command == "" {
@@ -231,10 +237,25 @@ func (g *Guard) checkShellArgs(args map[string]any, requireAllowlisted bool) err
 		}
 	}
 
+	if pattern := firstMatchingRegex(g.policy.neverAllow, command); pattern != nil {
+		return fmt.Errorf("security: shell command denied (matches never_allow pattern %q); if this was reading or searching a file, use file_read (with start_line/end_line) or file_grep (with regex/recursive search) instead of shell", pattern.String())
+	}
+
 	if requireAllowlisted && !g.shellCommandAllowed(command) {
 		return fmt.Errorf("security: shell command %q is not in the allowed_commands list", firstShellCommand(command))
 	}
 
+	return nil
+}
+
+// firstMatchingRegex returns the first pattern in patterns matching value,
+// or nil if none match.
+func firstMatchingRegex(patterns []*regexp.Regexp, value string) *regexp.Regexp {
+	for _, pattern := range patterns {
+		if pattern.MatchString(value) {
+			return pattern
+		}
+	}
 	return nil
 }
 

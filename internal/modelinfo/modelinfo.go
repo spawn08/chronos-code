@@ -21,8 +21,14 @@ type Info struct {
 // figures are the vendor-documented maximums as of this package's last
 // update, not necessarily what every account tier/endpoint grants.
 var registry = []Info{
-	{Provider: "anthropic", Model: "claude-opus-4-7", ContextWindow: 200_000},
-	{Provider: "anthropic", Model: "claude-opus-4-8", ContextWindow: 200_000},
+	// Context windows here must match github.com/spawn08/chronos's own
+	// modelContextLimits table (engine/model/tokenizer.go) — that table is
+	// what actually governs compaction behavior, so a mismatch here means
+	// this package's /model picker is just lying about what a model gets.
+	{Provider: "anthropic", Model: "claude-fable-5", ContextWindow: 1_000_000},
+	{Provider: "anthropic", Model: "claude-opus-4-7", ContextWindow: 1_000_000},
+	{Provider: "anthropic", Model: "claude-opus-4-8", ContextWindow: 1_000_000},
+	{Provider: "anthropic", Model: "claude-sonnet-5", ContextWindow: 1_000_000},
 	{Provider: "anthropic", Model: "claude-sonnet-4-6", ContextWindow: 200_000},
 	{Provider: "anthropic", Model: "claude-sonnet-4-5", ContextWindow: 200_000},
 	{Provider: "anthropic", Model: "claude-haiku-4-5", ContextWindow: 200_000},
@@ -34,9 +40,14 @@ var registry = []Info{
 	{Provider: "openai", Model: "gpt-4o-mini", ContextWindow: 128_000},
 	{Provider: "openai", Model: "o3", ContextWindow: 200_000},
 
-	{Provider: "gemini", Model: "gemini-2.5-pro", ContextWindow: 1_000_000},
-	{Provider: "gemini", Model: "gemini-2.5-flash", ContextWindow: 1_000_000},
-	{Provider: "gemini", Model: "gemini-1.5-pro", ContextWindow: 2_000_000},
+	// gemini-2.5-* deliberately omitted: chronos's own compaction table
+	// (modelContextLimits) has no entry for it, so configuring it would
+	// silently fall back to an 8,192-token default context limit — these
+	// are the Gemini model IDs that table actually recognizes.
+	{Provider: "gemini", Model: "gemini-2.0-pro", ContextWindow: 1_048_576},
+	{Provider: "gemini", Model: "gemini-2.0-flash", ContextWindow: 1_048_576},
+	{Provider: "gemini", Model: "gemini-1.5-flash", ContextWindow: 1_048_576},
+	{Provider: "gemini", Model: "gemini-1.5-pro", ContextWindow: 2_097_152},
 
 	{Provider: "mistral", Model: "mistral-large-latest", ContextWindow: 128_000},
 	{Provider: "deepseek", Model: "deepseek-chat", ContextWindow: 64_000},

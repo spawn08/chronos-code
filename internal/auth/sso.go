@@ -20,6 +20,7 @@ type OIDCConfig struct {
 // Claims are the validated identity fields extracted from an OIDC JWT.
 type Claims struct {
 	Subject   string   `json:"sub"`
+	TenantID  string   `json:"tenant_id"`
 	Email     string   `json:"email"`
 	Name      string   `json:"name"`
 	Groups    []string `json:"groups"`
@@ -33,8 +34,7 @@ type Claims struct {
 // OIDCValidator validates OIDC JWT tokens for server-mode authentication.
 // It verifies: RS256 signature via JWKS (fetched and cached from the
 // issuer's .well-known/openid-configuration), issuer, audience, expiry,
-// and required scopes. If JWKS fetching fails (e.g., no network, issuer
-// unreachable), validation falls back to claim-only checks with a warning.
+// and required scopes.
 type OIDCValidator struct {
 	config OIDCConfig
 	mu     sync.RWMutex
@@ -75,7 +75,10 @@ func (v *OIDCValidator) Validate(tokenString string) (*Claims, error) {
 		return nil, fmt.Errorf("sso: audience mismatch: got %q, want %q", claims.Audience, v.config.ClientID)
 	}
 
-	if claims.ExpiresAt > 0 && time.Now().Unix() > claims.ExpiresAt {
+	if claims.ExpiresAt == 0 {
+		return nil, fmt.Errorf("sso: token expiry is required")
+	}
+	if time.Now().Unix() > claims.ExpiresAt {
 		return nil, fmt.Errorf("sso: token expired at %s", time.Unix(claims.ExpiresAt, 0).Format(time.RFC3339))
 	}
 
@@ -89,9 +92,7 @@ func (v *OIDCValidator) Validate(tokenString string) (*Claims, error) {
 }
 
 // verifySignature fetches JWKS from the issuer (caching for 1 hour) and
-// verifies the JWT's RS256 signature. If JWKS is unreachable, verification
-// is skipped (returns nil) — claim-level checks still apply. A failed fetch
-// is cached for 5 minutes to avoid repeated slow HTTP timeouts.
+// verifies the JWT's RS256 signature.
 func (v *OIDCValidator) verifySignature(tokenString string) error {
 	v.mu.RLock()
 	cache := v.jwks
@@ -100,10 +101,7 @@ func (v *OIDCValidator) verifySignature(tokenString string) error {
 	if cache == nil || cache.expired() {
 		newCache, err := fetchJWKS(v.config.Issuer)
 		if err != nil {
-			v.mu.Lock()
-			v.jwks = &jwksCache{fetchedAt: time.Now(), ttl: 5 * time.Minute}
-			v.mu.Unlock()
-			return nil
+			return fmt.Errorf("fetch JWKS: %w", err)
 		}
 		v.mu.Lock()
 		v.jwks = newCache
@@ -111,7 +109,7 @@ func (v *OIDCValidator) verifySignature(tokenString string) error {
 		v.mu.Unlock()
 	}
 	if len(cache.keys) == 0 {
-		return nil
+		return fmt.Errorf("JWKS contains no usable signing keys")
 	}
 
 	parts := strings.SplitN(tokenString, ".", 3)
@@ -132,7 +130,10 @@ func (v *OIDCValidator) verifySignature(tokenString string) error {
 	}
 
 	if header.ALG != "RS256" {
-		return nil
+		return fmt.Errorf("unsupported signing algorithm %q", header.ALG)
+	}
+	if header.KID == "" {
+		return fmt.Errorf("JWT header missing kid")
 	}
 
 	key, ok := cache.keys[header.KID]
@@ -165,6 +166,10 @@ func parseJWTClaims(tokenString string) (*Claims, error) {
 	var claims Claims
 
 	unmarshalString(raw, "sub", &claims.Subject)
+	unmarshalString(raw, "tenant_id", &claims.TenantID)
+	if claims.TenantID == "" {
+		unmarshalString(raw, "tid", &claims.TenantID)
+	}
 	unmarshalString(raw, "email", &claims.Email)
 	unmarshalString(raw, "name", &claims.Name)
 	unmarshalString(raw, "iss", &claims.Issuer)

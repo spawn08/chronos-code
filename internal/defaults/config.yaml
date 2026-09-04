@@ -24,6 +24,11 @@ session:
   auto_resume: false
   max_history_turns: 0
 
+# Applies report/enforce policy to supplied or runtime-derived obligations;
+# verification evidence is not collected automatically.
+verification:
+  mode: "report"
+
 defaults:
   model:
     provider: "anthropic"

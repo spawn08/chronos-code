@@ -1,0 +1,13 @@
+{
+  "tenant_id": "recovery-tenant",
+  "repository_id": "recovery-repository",
+  "task_id": "recovery-task",
+  "plan_id": "recovery-plan",
+  "generation": "one",
+  "nodes": ["effect", "finish"],
+  "context": [
+    {"id": "request", "content": "apply the durable change"},
+    {"id": "verification", "content": "run the focused recovery test"}
+  ],
+  "replan_generation": "two"
+}

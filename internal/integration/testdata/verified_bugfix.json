@@ -1,0 +1,12 @@
+{
+  "task_id": "verified-bugfix-001",
+  "message": "fix the verified bug",
+  "task_kind": "debug",
+  "changed_paths": [
+    "calculator.go"
+  ],
+  "test_command": "go test ./...",
+  "seed_dir": "verified_bugfix/workspace",
+  "solution_path": "verified_bugfix/solution/calculator.go",
+  "grader_dir": "verified_bugfix/grader"
+}

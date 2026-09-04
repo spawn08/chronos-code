@@ -47,7 +47,12 @@ func newTestAgent(t *testing.T) *agent.Agent {
 func TestWrapCompressesLargeResult(t *testing.T) {
 	a := newTestAgent(t)
 
-	big := strings.Repeat("x", 20_000) // well over the 500-token default threshold
+	// Word-like content with natural token boundaries, well over both the
+	// compression threshold and maxStoredResultChunkBytes. A single huge
+	// run of one repeated character instead would be a BPE tokenizer worst
+	// case (unbounded merge-pair growth with no boundaries to stop at) and
+	// makes CountString pathologically slow at this size.
+	big := strings.Repeat("hello world ", 25_000)
 	a.Tools.Register(&tool.Definition{
 		Name:       "big_tool",
 		Permission: tool.PermAllow,

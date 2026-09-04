@@ -1,0 +1,52 @@
+version: v1
+corpus_id: ppd-controlled-v1
+grader_access: inaccessible
+controls:
+  model_version: unset
+  temperature: 0
+  repository_revision: unexecuted
+  graph_warm_state: cold
+  permissions: deny
+  context_limit: 0
+  timeout: 0s
+tasks:
+  - {id: simple-01, cohort: simple, objective: "Add one pure helper", grader: inaccessible}
+  - {id: simple-02, cohort: simple, objective: "Correct one boundary condition", grader: inaccessible}
+  - {id: simple-03, cohort: simple, objective: "Add one input validation", grader: inaccessible}
+  - {id: simple-04, cohort: simple, objective: "Rename one exported symbol", grader: inaccessible}
+  - {id: simple-05, cohort: simple, objective: "Add one focused unit test", grader: inaccessible}
+  - {id: simple-06, cohort: simple, objective: "Correct one error message", grader: inaccessible}
+  - {id: simple-07, cohort: simple, objective: "Add one configuration default", grader: inaccessible}
+  - {id: simple-08, cohort: simple, objective: "Remove one unreachable branch", grader: inaccessible}
+  - {id: simple-09, cohort: simple, objective: "Fix one parser edge case", grader: inaccessible}
+  - {id: simple-10, cohort: simple, objective: "Document one public option", grader: inaccessible}
+  - {id: medium-01, cohort: medium, objective: "Add validated CLI flag handling", grader: inaccessible}
+  - {id: medium-02, cohort: medium, objective: "Implement one persisted setting", grader: inaccessible}
+  - {id: medium-03, cohort: medium, objective: "Add structured error propagation", grader: inaccessible}
+  - {id: medium-04, cohort: medium, objective: "Extend a configuration merge", grader: inaccessible}
+  - {id: medium-05, cohort: medium, objective: "Implement a bounded retry policy", grader: inaccessible}
+  - {id: medium-06, cohort: medium, objective: "Add one request validation path", grader: inaccessible}
+  - {id: medium-07, cohort: medium, objective: "Make one storage operation atomic", grader: inaccessible}
+  - {id: medium-08, cohort: medium, objective: "Add one deterministic renderer", grader: inaccessible}
+  - {id: medium-09, cohort: medium, objective: "Implement one policy check", grader: inaccessible}
+  - {id: medium-10, cohort: medium, objective: "Add one regression test fixture", grader: inaccessible}
+  - {id: cross-package-01, cohort: cross_package, objective: "Propagate task identity across routing and evaluation", grader: inaccessible}
+  - {id: cross-package-02, cohort: cross_package, objective: "Add configuration capability through CLI and orchestrator", grader: inaccessible}
+  - {id: cross-package-03, cohort: cross_package, objective: "Persist verification evidence across execution and reporting", grader: inaccessible}
+  - {id: cross-package-04, cohort: cross_package, objective: "Enforce a budget across model and tool calls", grader: inaccessible}
+  - {id: cross-package-05, cohort: cross_package, objective: "Add a security policy from config to sandbox", grader: inaccessible}
+  - {id: cross-package-06, cohort: cross_package, objective: "Expose durable plan state through CLI and server", grader: inaccessible}
+  - {id: cross-package-07, cohort: cross_package, objective: "Add telemetry attribution across parent and child calls", grader: inaccessible}
+  - {id: cross-package-08, cohort: cross_package, objective: "Propagate authentication state through server middleware", grader: inaccessible}
+  - {id: cross-package-09, cohort: cross_package, objective: "Synchronize graph revision checks with memory lookup", grader: inaccessible}
+  - {id: cross-package-10, cohort: cross_package, objective: "Add an end-to-end capability rejection path", grader: inaccessible}
+  - {id: forced-resume-01, cohort: forced_resume, objective: "Resume after context compaction without losing obligations", grader: inaccessible}
+  - {id: forced-resume-02, cohort: forced_resume, objective: "Resume after a failed verification attempt", grader: inaccessible}
+  - {id: forced-resume-03, cohort: forced_resume, objective: "Resume after lease expiration", grader: inaccessible}
+  - {id: forced-resume-04, cohort: forced_resume, objective: "Resume after denied approval", grader: inaccessible}
+  - {id: forced-resume-05, cohort: forced_resume, objective: "Resume after storage reconnect", grader: inaccessible}
+  - {id: forced-resume-06, cohort: forced_resume, objective: "Resume after model timeout", grader: inaccessible}
+  - {id: forced-resume-07, cohort: forced_resume, objective: "Resume after a planner handoff", grader: inaccessible}
+  - {id: forced-resume-08, cohort: forced_resume, objective: "Resume after dependency completion", grader: inaccessible}
+  - {id: forced-resume-09, cohort: forced_resume, objective: "Resume after a stale context rejection", grader: inaccessible}
+  - {id: forced-resume-10, cohort: forced_resume, objective: "Resume after a budget pause", grader: inaccessible}

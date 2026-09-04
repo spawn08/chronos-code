@@ -1,9 +1,14 @@
 package memory
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spawn08/chronos/storage"
 )
 
 func TestAddListRoundTrip(t *testing.T) {
@@ -22,6 +27,9 @@ func TestAddListRoundTrip(t *testing.T) {
 			if rec.Category != cat {
 				t.Fatalf("expected category %q, got %q", cat, rec.Category)
 			}
+			if !rec.Validated || rec.Repository == "" || rec.Source == "" || rec.Revision == "" || rec.Fingerprint == "" {
+				t.Fatalf("Add did not create provenance-bearing record: %+v", rec)
+			}
 
 			got, err := s.List(cat)
 			if err != nil {
@@ -34,6 +42,153 @@ func TestAddListRoundTrip(t *testing.T) {
 				t.Fatalf("round-trip mismatch: want %+v, got %+v", rec, got[0])
 			}
 		})
+	}
+}
+
+func TestForContextPartitionsTenantsAndPreservesDefault(t *testing.T) {
+	s := NewStore(t.TempDir())
+	defaultStore := s.ForContext(context.Background())
+	if defaultStore != s {
+		t.Fatal("default tenant did not preserve the local store")
+	}
+
+	tenantA := s.ForContext(storage.WithTenant(context.Background(), "tenant-a"))
+	tenantB := s.ForContext(storage.WithTenant(context.Background(), "tenant-b"))
+	if _, err := tenantA.Add(CategoryProject, "tenant A only"); err != nil {
+		t.Fatalf("tenant A Add: %v", err)
+	}
+	if _, err := tenantB.Add(CategoryProject, "tenant B only"); err != nil {
+		t.Fatalf("tenant B Add: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		store   *Store
+		content string
+	}{
+		{name: "default", store: defaultStore},
+		{name: "tenant-a", store: tenantA, content: "tenant A only"},
+		{name: "tenant-b", store: tenantB, content: "tenant B only"},
+	} {
+		records, err := tt.store.List(CategoryProject)
+		if err != nil {
+			t.Fatalf("%s List: %v", tt.name, err)
+		}
+		if tt.content == "" && len(records) != 0 {
+			t.Fatalf("default records = %+v, want empty", records)
+		}
+		if tt.content != "" && (len(records) != 1 || records[0].Content != tt.content) {
+			t.Fatalf("%s records = %+v, want only its memory", tt.name, records)
+		}
+	}
+
+	if strings.Contains(tenantA.dir, "tenant-a") || strings.Contains(tenantB.dir, "tenant-b") {
+		t.Fatalf("tenant directories expose raw tenant IDs: %q, %q", tenantA.dir, tenantB.dir)
+	}
+}
+
+func TestTenantCannotListRecallOrDeleteAnotherTenantMemory(t *testing.T) {
+	store := NewStore(t.TempDir())
+	tenantA := store.ForContext(storage.WithTenant(context.Background(), "tenant-a"))
+	tenantB := store.ForContext(storage.WithTenant(context.Background(), "tenant-b"))
+	now := time.Now()
+	const sharedID = "mem_shared"
+
+	if err := tenantA.save(CategoryProject, fileDoc{Records: []Record{{
+		ID: sharedID, Category: CategoryProject, Content: "shared query tenant A", Validated: true, CreatedAt: now,
+	}}}); err != nil {
+		t.Fatalf("seed tenant A: %v", err)
+	}
+	if err := tenantB.save(CategoryProject, fileDoc{Records: []Record{{
+		ID: sharedID, Category: CategoryProject, Content: "shared query tenant B", Validated: true, CreatedAt: now,
+	}}}); err != nil {
+		t.Fatalf("seed tenant B: %v", err)
+	}
+
+	records, err := tenantA.List("")
+	if err != nil {
+		t.Fatalf("tenant A List: %v", err)
+	}
+	if len(records) != 1 || records[0].Content != "shared query tenant A" {
+		t.Fatalf("tenant A List = %+v, want only tenant A memory", records)
+	}
+
+	recalled, err := tenantA.Recall("shared query", 10)
+	if err != nil {
+		t.Fatalf("tenant A Recall: %v", err)
+	}
+	if len(recalled) != 1 || recalled[0].Record.Content != "shared query tenant A" {
+		t.Fatalf("tenant A Recall = %+v, want only tenant A memory", recalled)
+	}
+
+	if err := tenantA.Forget(sharedID); err != nil {
+		t.Fatalf("tenant A Forget: %v", err)
+	}
+	records, err = tenantB.List("")
+	if err != nil {
+		t.Fatalf("tenant B List after tenant A delete: %v", err)
+	}
+	if len(records) != 1 || records[0].Content != "shared query tenant B" {
+		t.Fatalf("tenant B records after tenant A delete = %+v, want tenant B memory intact", records)
+	}
+}
+
+func TestListMigratesLegacyRecordWithoutContentLoss(t *testing.T) {
+	s := NewStore(t.TempDir())
+	legacy := "records:\n  - id: mem_legacy\n    category: project\n    content: keep this content\n    created_at: 2026-01-02T03:04:05Z\n"
+	if err := os.WriteFile(s.pathFor(CategoryProject), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy record: %v", err)
+	}
+
+	records, err := s.List(CategoryProject)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+	if records[0].ID != "mem_legacy" || records[0].Content != "keep this content" || records[0].Kind != "fact" {
+		t.Fatalf("legacy record was not migrated losslessly: %+v", records[0])
+	}
+	if records[0].Validated {
+		t.Fatalf("legacy record must remain unvalidated: %+v", records[0])
+	}
+}
+
+func TestContextBlockExcludesUnvalidatedAndInvalidatedRecords(t *testing.T) {
+	s := NewStore(t.TempDir())
+	now := time.Now()
+	if err := s.save(CategoryProject, fileDoc{Records: []Record{
+		{ID: "valid", Category: CategoryProject, Content: "current fact", Kind: "fact", Validated: true, CreatedAt: now},
+		{ID: "unvalidated", Category: CategoryProject, Content: "unchecked fact", Kind: "fact", CreatedAt: now},
+		{ID: "stale", Category: CategoryProject, Content: "stale fact", Kind: "fact", Validated: true, Invalidated: true, CreatedAt: now},
+	}}); err != nil {
+		t.Fatalf("save records: %v", err)
+	}
+
+	block, err := s.ContextBlock(10)
+	if err != nil {
+		t.Fatalf("ContextBlock: %v", err)
+	}
+	if !strings.Contains(block, "current fact") || strings.Contains(block, "unchecked fact") || strings.Contains(block, "stale fact") {
+		t.Fatalf("ContextBlock included unusable records: %q", block)
+	}
+}
+
+func TestContextBlockReturnsEmptyWhenNoUsableRecords(t *testing.T) {
+	s := NewStore(t.TempDir())
+	if err := s.save(CategoryProject, fileDoc{Records: []Record{
+		{ID: "unvalidated", Category: CategoryProject, Content: "unchecked", Kind: "fact", CreatedAt: time.Now()},
+	}}); err != nil {
+		t.Fatalf("save records: %v", err)
+	}
+
+	block, err := s.ContextBlock(10)
+	if err != nil {
+		t.Fatalf("ContextBlock: %v", err)
+	}
+	if block != "" {
+		t.Fatalf("ContextBlock = %q, want empty", block)
 	}
 }
 

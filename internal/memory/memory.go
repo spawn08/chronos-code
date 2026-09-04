@@ -8,7 +8,9 @@
 package memory
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spawn08/chronos/storage"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,14 +52,25 @@ func isValidCategory(c Category) bool {
 
 // Record is a single memory entry.
 type Record struct {
-	ID        string    `yaml:"id"`
-	Category  Category  `yaml:"category"`
-	Content   string    `yaml:"content"`
-	CreatedAt time.Time `yaml:"created_at"`
+	ID                    string    `yaml:"id"`
+	Category              Category  `yaml:"category"`
+	Content               string    `yaml:"content"`
+	Kind                  string    `yaml:"kind,omitempty"`
+	Repository            string    `yaml:"repository,omitempty"`
+	Source                string    `yaml:"source,omitempty"`
+	Revision              string    `yaml:"revision,omitempty"`
+	Fingerprint           string    `yaml:"fingerprint,omitempty"`
+	Confidence            float64   `yaml:"confidence,omitempty"`
+	Validated             bool      `yaml:"validated,omitempty"`
+	Invalidated           bool      `yaml:"invalidated,omitempty"`
+	InvalidationCondition string    `yaml:"invalidation_condition,omitempty"`
+	CreatedAt             time.Time `yaml:"created_at"`
+	UpdatedAt             time.Time `yaml:"updated_at,omitempty"`
 }
 
 // fileDoc is the on-disk shape of a single category's YAML file.
 type fileDoc struct {
+	Version int      `yaml:"version,omitempty"`
 	Records []Record `yaml:"records"`
 }
 
@@ -68,13 +82,27 @@ type fileDoc struct {
 // other's write.
 type Store struct {
 	dir string
-	mu  sync.Mutex
+	mu  *sync.Mutex
 }
 
 // NewStore returns a Store rooted at dir. It does not create dir eagerly;
 // the directory (and category files) are created lazily on first write.
 func NewStore(dir string) *Store {
-	return &Store{dir: dir}
+	return &Store{dir: dir, mu: &sync.Mutex{}}
+}
+
+// ForContext returns the memory partition for ctx's storage tenant. The
+// default storage tenant keeps the original local directory layout.
+func (s *Store) ForContext(ctx context.Context) *Store {
+	tenantID := storage.TenantFromContext(ctx)
+	if tenantID == storage.DefaultTenant {
+		return s
+	}
+	sum := sha256.Sum256([]byte(tenantID))
+	return &Store{
+		dir: filepath.Join(s.dir, "tenants", hex.EncodeToString(sum[:])),
+		mu:  s.mu,
+	}
 }
 
 func (s *Store) pathFor(category Category) string {
@@ -95,7 +123,20 @@ func (s *Store) load(category Category) (fileDoc, error) {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return doc, fmt.Errorf("memory: parse %s: %w", category, err)
 	}
+	for i := range doc.Records {
+		doc.Records[i] = migrateRecord(doc.Records[i])
+	}
 	return doc, nil
+}
+
+// migrateRecord makes v1 YAML records readable through the v2 schema without
+// altering their ID, category, content, or creation time. Legacy records stay
+// unvalidated, so callers cannot inject provenance-free knowledge by default.
+func migrateRecord(rec Record) Record {
+	if rec.Kind == "" {
+		rec.Kind = "fact"
+	}
+	return rec
 }
 
 // save writes doc for category atomically: marshal to a temp file in the
@@ -105,6 +146,7 @@ func (s *Store) save(category Category, doc fileDoc) error {
 		return fmt.Errorf("memory: create dir %s: %w", s.dir, err)
 	}
 
+	doc.Version = 2
 	data, err := yaml.Marshal(doc)
 	if err != nil {
 		return fmt.Errorf("memory: marshal %s: %w", category, err)
@@ -163,10 +205,19 @@ func (s *Store) Add(category Category, content string) (Record, error) {
 	}
 
 	rec := Record{
-		ID:        id,
-		Category:  category,
-		Content:   content,
-		CreatedAt: time.Now(),
+		ID:                    id,
+		Category:              category,
+		Content:               content,
+		Kind:                  "fact",
+		Repository:            filepath.Clean(s.dir),
+		Source:                "local",
+		Revision:              "current",
+		Fingerprint:           "current",
+		Confidence:            1,
+		Validated:             true,
+		InvalidationCondition: "source revision changes",
+		CreatedAt:             time.Now(),
+		UpdatedAt:             time.Now(),
 	}
 
 	doc, err := s.load(category)
@@ -292,8 +343,12 @@ func (s *Store) ContextBlock(maxRecords int) (string, error) {
 	var b strings.Builder
 	b.WriteString(header)
 	total := len(header)
+	added := false
 
 	for _, rec := range all {
+		if !rec.Validated || rec.Invalidated {
+			continue
+		}
 		content := rec.Content
 		if len(content) > contextBlockMaxContentLen {
 			content = content[:contextBlockMaxContentLen] + "..."
@@ -304,8 +359,12 @@ func (s *Store) ContextBlock(maxRecords int) (string, error) {
 		}
 		b.WriteString(line)
 		total += len(line)
+		added = true
 	}
 
+	if !added {
+		return "", nil
+	}
 	return b.String(), nil
 }
 

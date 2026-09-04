@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\n' \
+    'usage: ppd-db <plan-operation> [flags]' \
+    '' \
+    'Delegates to: chronos-code plan <plan-operation> [flags]' \
+    'Run chronos-code plan with no arguments for the available operations.'
+  exit 0
+fi
+
+if [[ -n "${CHRONOS_CODE_BIN:-}" ]]; then
+  binary="$CHRONOS_CODE_BIN"
+elif command -v chronos-code >/dev/null 2>&1; then
+  binary="$(command -v chronos-code)"
+elif [[ -x "$(dirname "$0")/../bin/chronos-code" ]]; then
+  binary="$(dirname "$0")/../bin/chronos-code"
+else
+  printf '%s\n' 'ppd-db: chronos-code binary not found; set CHRONOS_CODE_BIN or add chronos-code to PATH' >&2
+  exit 127
+fi
+
+exec "$binary" plan "$@"

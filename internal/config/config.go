@@ -2,9 +2,11 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -12,22 +14,108 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/spawn08/chronos-code/internal/defaults"
+	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos/sdk/agent"
 )
 
 type Config struct {
 	agent.FileConfig `yaml:",inline"`
 
-	Router    RouterConfig                `yaml:"router,omitempty"`
-	Security  SecurityConfig              `yaml:"security,omitempty"`
-	Memory    MemoryConfig                `yaml:"memory,omitempty"`
-	Session   SessionConfig               `yaml:"session,omitempty"`
-	Workspace WorkspaceConfig             `yaml:"workspace,omitempty"`
-	Tools     ToolsConfig                 `yaml:"tools,omitempty"`
-	Learning  LearningConfig              `yaml:"learning,omitempty"`
-	Server    ServerConfig                `yaml:"server,omitempty"`
-	Hooks     HooksConfig                 `yaml:"hooks,omitempty"`
-	Providers map[string]ProviderOverride `yaml:"providers,omitempty"`
+	Router       RouterConfig                `yaml:"router,omitempty"`
+	Security     SecurityConfig              `yaml:"security,omitempty"`
+	Memory       MemoryConfig                `yaml:"memory,omitempty"`
+	Session      SessionConfig               `yaml:"session,omitempty"`
+	Workspace    WorkspaceConfig             `yaml:"workspace,omitempty"`
+	Tools        ToolsConfig                 `yaml:"tools,omitempty"`
+	Learning     LearningConfig              `yaml:"learning,omitempty"`
+	Verification VerificationConfig          `yaml:"verification,omitempty"`
+	Server       ServerConfig                `yaml:"server,omitempty"`
+	Hooks        HooksConfig                 `yaml:"hooks,omitempty"`
+	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
+
+	set     map[string]struct{}
+	sources map[string]string
+}
+
+// EffectiveConfig is a safe representation of the resolved configuration.
+// Sources maps YAML paths to the layer that supplied their current value.
+type EffectiveConfig struct {
+	Values  map[string]any    `yaml:"values"`
+	Sources map[string]string `yaml:"sources"`
+}
+
+func (c *Config) UnmarshalYAML(node *yaml.Node) error {
+	type raw Config
+	var decoded raw
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*c = Config(decoded)
+	c.set = yamlPaths(node, "")
+	return nil
+}
+
+// EffectiveConfig returns the resolved configuration without credential values.
+func (c *Config) EffectiveConfig() (EffectiveConfig, error) {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return EffectiveConfig{}, fmt.Errorf("marshal effective config: %w", err)
+	}
+	values := make(map[string]any)
+	if err := yaml.Unmarshal(data, &values); err != nil {
+		return EffectiveConfig{}, fmt.Errorf("unmarshal effective config: %w", err)
+	}
+	redactValues(values)
+	sources := make(map[string]string, len(c.sources))
+	for path, source := range c.sources {
+		sources[path] = source
+	}
+	return EffectiveConfig{Values: values, Sources: sources}, nil
+}
+
+func yamlPaths(node *yaml.Node, prefix string) map[string]struct{} {
+	paths := make(map[string]struct{})
+	var visit func(*yaml.Node, string)
+	visit = func(n *yaml.Node, path string) {
+		if n.Kind != yaml.MappingNode {
+			return
+		}
+		for i := 0; i < len(n.Content); i += 2 {
+			key := n.Content[i].Value
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			paths[childPath] = struct{}{}
+			visit(n.Content[i+1], childPath)
+		}
+	}
+	visit(node, prefix)
+	return paths
+}
+
+func redactValues(value any) {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			if isCredentialKey(key) {
+				value[key] = "[REDACTED]"
+				continue
+			}
+			redactValues(child)
+		}
+	case []any:
+		for _, child := range value {
+			redactValues(child)
+		}
+	}
+}
+
+func isCredentialKey(key string) bool {
+	key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+	return strings.Contains(key, "password") || strings.Contains(key, "secret") ||
+		strings.Contains(key, "token") || strings.Contains(key, "credential") ||
+		key == "api_key" || key == "apikey"
 }
 
 const maxHookTimeoutMs = 300_000
@@ -140,6 +228,25 @@ type ToolsConfig struct {
 	CompressionThresholdTokens int `yaml:"compression_threshold_tokens,omitempty"`
 }
 
+// VerificationConfig controls whether supplied or runtime-derived obligations
+// are reported or enforced. It does not collect verification evidence.
+type VerificationConfig struct {
+	Mode verification.Mode `yaml:"mode,omitempty"`
+}
+
+func (c *VerificationConfig) UnmarshalYAML(node *yaml.Node) error {
+	type raw VerificationConfig
+	var decoded raw
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.Mode != "" && decoded.Mode != verification.ModeReport && decoded.Mode != verification.ModeEnforce {
+		return fmt.Errorf("verification.mode: must be %q or %q", verification.ModeReport, verification.ModeEnforce)
+	}
+	*c = VerificationConfig(decoded)
+	return nil
+}
+
 type RouterConfig struct {
 	Enabled      bool              `yaml:"enabled,omitempty"`
 	Model        agent.ModelConfig `yaml:"model,omitempty"`
@@ -201,9 +308,9 @@ func Load(configPath string) (*Config, error) {
 
 	if userDir != "" {
 		if overlay, err := loadFromDir(userDir); err == nil {
-			mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
-			mergeHooks(&base.Hooks, overlay.Hooks)
-			base.Providers = mergeProviders(base.Providers, overlay.Providers)
+			mergeConfig(base, overlay, "user")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("load user config: %w", err)
 		}
 		userAgents, err := loadAgentDir(filepath.Join(userDir, "agents"))
 		if err != nil {
@@ -214,9 +321,9 @@ func Load(configPath string) (*Config, error) {
 
 	if projectDir != "" {
 		if overlay, err := loadFromDir(projectDir); err == nil {
-			mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
-			mergeHooks(&base.Hooks, overlay.Hooks)
-			base.Providers = mergeProviders(base.Providers, overlay.Providers)
+			mergeConfig(base, overlay, "project")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("load project config: %w", err)
 		}
 		projectAgents, err := loadAgentDir(filepath.Join(projectDir, "agents"))
 		if err != nil {
@@ -233,9 +340,7 @@ func Load(configPath string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load config %s: %w", configPath, err)
 		}
-		mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
-		mergeHooks(&base.Hooks, overlay.Hooks)
-		base.Providers = mergeProviders(base.Providers, overlay.Providers)
+		mergeConfig(base, overlay, "cli")
 	}
 
 	injectSystemPrompts(base)
@@ -308,6 +413,16 @@ func loadEmbeddedDefaults() (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse embedded config: %w", err)
 	}
+	data, err = defaults.ReadFile("agents/ppd-planner.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("read embedded ppd-planner agent: %w", err)
+	}
+	var ppdPlanner agent.AgentConfig
+	if err := yaml.Unmarshal(data, &ppdPlanner); err != nil {
+		return nil, fmt.Errorf("parse embedded ppd-planner agent: %w", err)
+	}
+	cfg.Agents = mergeAgents(cfg.Agents, []agent.AgentConfig{ppdPlanner})
+	setConfigSource(&cfg, "embedded")
 	return &cfg, nil
 }
 
@@ -319,11 +434,15 @@ func loadFromDir(dir string) (*Config, error) {
 		filepath.Join(dir, "agents.yml"),
 	}
 	for _, path := range candidates {
-		if cfg, err := loadFromFile(path); err == nil {
+		cfg, err := loadFromFile(path)
+		if err == nil {
 			return cfg, nil
 		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 	}
-	return nil, fmt.Errorf("no config found in %s", dir)
+	return nil, fmt.Errorf("no config found in %s: %w", dir, os.ErrNotExist)
 }
 
 func loadFromFile(path string) (*Config, error) {
@@ -426,6 +545,74 @@ func mergeFileConfig(base, overlay *agent.FileConfig) {
 	}
 	if overlay.SkillsDir != "" {
 		base.SkillsDir = overlay.SkillsDir
+	}
+}
+
+func mergeConfig(base, overlay *Config, source string) {
+	mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+	mergeHooks(&base.Hooks, overlay.Hooks)
+	base.Providers = mergeProviders(base.Providers, overlay.Providers)
+	mergeTypedSection(&base.Router, overlay.Router, overlay.set, "router")
+	mergeTypedSection(&base.Security, overlay.Security, overlay.set, "security")
+	mergeTypedSection(&base.Memory, overlay.Memory, overlay.set, "memory")
+	mergeTypedSection(&base.Session, overlay.Session, overlay.set, "session")
+	mergeTypedSection(&base.Workspace, overlay.Workspace, overlay.set, "workspace")
+	mergeTypedSection(&base.Tools, overlay.Tools, overlay.set, "tools")
+	mergeTypedSection(&base.Learning, overlay.Learning, overlay.set, "learning")
+	mergeTypedSection(&base.Verification, overlay.Verification, overlay.set, "verification")
+	mergeTypedSection(&base.Server, overlay.Server, overlay.set, "server")
+	if base.sources == nil {
+		base.sources = make(map[string]string)
+	}
+	setConfigPaths(base.sources, overlay.set, source)
+}
+
+func setConfigSource(cfg *Config, source string) {
+	cfg.sources = make(map[string]string, len(cfg.set))
+	setConfigPaths(cfg.sources, cfg.set, source)
+}
+
+func setConfigPaths(sources map[string]string, set map[string]struct{}, source string) {
+	for path := range set {
+		isContainer := false
+		for child := range set {
+			if strings.HasPrefix(child, path+".") {
+				isContainer = true
+				break
+			}
+		}
+		if !isContainer {
+			sources[path] = source
+		}
+	}
+}
+
+// mergeTypedSection copies only YAML fields declared by the overlay. This
+// keeps false, zero, empty strings, and empty collections distinct from omit.
+func mergeTypedSection(base, overlay any, set map[string]struct{}, path string) {
+	mergeTypedValue(reflect.ValueOf(base).Elem(), reflect.ValueOf(overlay), set, path)
+}
+
+func mergeTypedValue(base, overlay reflect.Value, set map[string]struct{}, path string) {
+	for i := 0; i < base.NumField(); i++ {
+		field := base.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		fieldPath := path + "." + name
+		baseField := base.Field(i)
+		overlayField := overlay.Field(i)
+		if baseField.Kind() == reflect.Struct {
+			mergeTypedValue(baseField, overlayField, set, fieldPath)
+			continue
+		}
+		if _, ok := set[fieldPath]; ok {
+			baseField.Set(overlayField)
+		}
 	}
 }
 

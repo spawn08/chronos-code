@@ -321,6 +321,20 @@ func (t *Tracker) CompressionThreshold(sessionID string) int {
 	return val
 }
 
+// ResetSession clears sessionID's accounted token usage, letting it keep
+// making model calls under the same budget cap. It does not touch
+// sessionID's dollar-cost accounting (Cost/SessionCost) — that reflects
+// money actually spent and stays accurate regardless of this operational
+// governor being reset. Intended for a caller that has just compacted the
+// session's conversation history to recover from a budget cap (rather than
+// discarding the session outright) and wants the cap check in Before to
+// stop blocking further calls on it.
+func (t *Tracker) ResetSession(sessionID string) {
+	t.mu.Lock()
+	delete(t.used, sessionID)
+	t.mu.Unlock()
+}
+
 // Used returns the total tokens accounted so far for sessionID.
 func (t *Tracker) Used(sessionID string) int {
 	t.mu.Lock()
