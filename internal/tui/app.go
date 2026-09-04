@@ -1054,6 +1054,10 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	data, _ := msg.event.Data.(map[string]any)
+	if m.activityIndex == nil {
+		m.activityIndex = make(map[string]int)
+		m.activityArgs = make(map[string]any)
+	}
 	agentID, _ := data["agent"].(string)
 	callID, _ := data["id"].(string)
 	toolName, _ := data["tool"].(string)
@@ -1070,13 +1074,16 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	case chronosstream.EventModelCall:
 		m.turnModelCalls++
 		modelName, _ := data["model"].(string)
-		m.appendTurnActivity(RenderModelActivity(label, modelName))
+		key := "model/" + agentID
+		line := RenderModelActivityCount(label, modelName, m.turnModelCalls)
+		if idx, ok := m.activityIndex[key]; ok && idx < len(m.activeTurnItems) {
+			m.activeTurnItems[idx].content = line
+		} else {
+			m.appendTurnActivity(line)
+			m.activityIndex[key] = len(m.activeTurnItems) - 1
+		}
 	case chronosstream.EventToolCall:
 		line := RenderToolActivity(label, toolName, data["args"], false, data["error"])
-		if m.activityIndex == nil {
-			m.activityIndex = make(map[string]int)
-			m.activityArgs = make(map[string]any)
-		}
 		provisionalKey := "stream/" + callID
 		if idx, ok := m.activityIndex[provisionalKey]; toolName == "spawn_subagent" && callID != "" && ok {
 			m.activeTurnItems[idx].content = line
@@ -1579,8 +1586,15 @@ func (m *appModel) usageStatus() string {
 		input = int64(m.lastKnownUsage.PromptTokens)
 		output = int64(m.lastKnownUsage.CompletionTokens)
 	}
-	return fmt.Sprintf("last in %d │ out %d │ calls %d │ agents %d │ cost %s", input, output,
-		m.lastModelCalls, m.lastSubagents, m.formatCost(m.lastTurnCost.SpentMicrodollars))
+	status := fmt.Sprintf("in %s · out %s · %d calls", formatTokenCount64(input), formatTokenCount64(output), m.lastModelCalls)
+	if m.lastSubagents > 0 {
+		label := "subagents"
+		if m.lastSubagents == 1 {
+			label = "subagent"
+		}
+		status += fmt.Sprintf(" · %d %s", m.lastSubagents, label)
+	}
+	return status + " · " + m.formatCost(m.lastTurnCost.SpentMicrodollars)
 }
 
 func (m *appModel) formatCost(cost budget.Microdollars) string {
@@ -1614,6 +1628,10 @@ func formatBytes(n uint64) string {
 // for status bar / picker display; non-positive counts (the modelinfo
 // "unknown" sentinel) render as "unknown" rather than "0".
 func formatTokenCount(n int) string {
+	return formatTokenCount64(int64(n))
+}
+
+func formatTokenCount64(n int64) string {
 	switch {
 	case n <= 0:
 		return "unknown"
@@ -1788,7 +1806,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		if budgetExhausted {
 			m.statusMsg = "budget exhausted │ /clear to continue"
 		} else {
-			m.statusMsg = "request failed │ previous " + strings.TrimPrefix(m.usageStatus(), "last ")
+			m.statusMsg = "request failed · " + m.usageStatus()
 		}
 	} else {
 		m.statusMsg = m.usageStatus()

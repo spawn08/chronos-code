@@ -500,6 +500,9 @@ func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 	id, err := tracker.Reserve(storage.SessionFromContext(ctx), modelID,
 		model.NewTokenCounter(modelID).CountTokens(req.Messages), req.MaxTokens)
 	if err != nil {
+		if errors.Is(err, budget.ErrUnknownModel) && !tracker.HasUSDCap() {
+			return nil
+		}
 		return fmt.Errorf("reserve model cost: %w", err)
 	}
 	if evt.Metadata == nil {

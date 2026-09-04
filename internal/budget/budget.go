@@ -181,6 +181,14 @@ func (t *Tracker) Cost(sessionID string) SessionCost {
 	return t.costs[sessionID]
 }
 
+// HasUSDCap reports whether deterministic pricing is required to enforce a
+// configured monetary limit.
+func (t *Tracker) HasUSDCap() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.usdCap > 0
+}
+
 func (p ModelPrice) cost(inputTokens, outputTokens int) (Microdollars, error) {
 	if inputTokens < 0 || outputTokens < 0 {
 		return 0, fmt.Errorf("token counts must be non-negative: input %d, output %d", inputTokens, outputTokens)

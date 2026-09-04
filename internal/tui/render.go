@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -168,7 +169,7 @@ func RenderToolActivity(agent, name string, args any, done bool, eventErr any) s
 		state = "failed"
 		marker = "✗"
 	}
-	details := summarizeActivityValue(args)
+	details := summarizeToolArgs(name, args)
 	if eventErr != nil {
 		if failure := summarizeActivityValue(eventErr); failure != "" {
 			details = "error=" + failure
@@ -211,8 +212,59 @@ func RenderSubagentActivity(parent string, args any, done bool, eventErr any) st
 }
 
 func RenderModelActivity(agent, modelName string) string {
+	return RenderModelActivityCount(agent, modelName, 1)
+}
+
+func RenderModelActivityCount(agent, modelName string, calls int) string {
+	label := "1 call"
+	if calls != 1 {
+		label = fmt.Sprintf("%d calls", calls)
+	}
 	return fmt.Sprintf("  %s %s%s %s", styleTool.Render("•"), agent,
-		styleBold.Render("model"), styleDim.Render(modelName))
+		styleBold.Render("model"), styleDim.Render("· "+label+" · "+modelName))
+}
+
+func summarizeToolArgs(name string, value any) string {
+	args, ok := value.(map[string]any)
+	if !ok {
+		return summarizeActivityValue(value)
+	}
+	switch name {
+	case "file_read":
+		path, _ := args["path"].(string)
+		details := compactPath(path)
+		if line, ok := args["line"]; ok {
+			details += fmt.Sprintf(" :%v", line)
+		}
+		if start, ok := args["start_line"]; ok {
+			details += fmt.Sprintf(" :%v", start)
+		}
+		if end, ok := args["end_line"]; ok {
+			details += fmt.Sprintf("-%v", end)
+		}
+		return details
+	case "file_grep":
+		path, _ := args["path"].(string)
+		pattern, _ := args["regex"].(string)
+		if pattern == "" {
+			pattern, _ = args["pattern"].(string)
+		}
+		return SummarizeArgs(fmt.Sprintf("%s  /%s/", compactPath(path), pattern))
+	case "shell", "shell_auto":
+		command, _ := args["command"].(string)
+		return SummarizeArgs(command)
+	default:
+		return SummarizeArgs(FormatArgs(args))
+	}
+}
+
+func compactPath(path string) string {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	parts := strings.Split(clean, "/")
+	if len(parts) <= 3 {
+		return clean
+	}
+	return "…/" + strings.Join(parts[len(parts)-3:], "/")
 }
 
 func summarizeActivityValue(value any) string {
