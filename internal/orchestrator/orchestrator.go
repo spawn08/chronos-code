@@ -89,6 +89,7 @@ type Orchestrator struct {
 	learningStore      *learning.SQLStore
 	lspManager         interface{ Close() error }
 	broker             *chronosstream.Broker
+	mcpRuntimes        []*mcpdiscover.Runtime
 	closeOnce          sync.Once
 	closeErr           error
 }
@@ -179,6 +180,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 	var learningStore *learning.SQLStore
 	var languageServerManager *lsp.Manager
+	var mcpRuntimes []*mcpdiscover.Runtime
 	defer func() {
 		if err == nil {
 			return
@@ -192,6 +194,11 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		if languageServerManager != nil {
 			if closeErr := languageServerManager.Close(); closeErr != nil {
 				cleanupErrs = append(cleanupErrs, fmt.Errorf("close LSP manager after startup failure: %w", closeErr))
+			}
+		}
+		for _, runtime := range mcpRuntimes {
+			if closeErr := runtime.Close(); closeErr != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("close MCP runtime after startup failure: %w", closeErr))
 			}
 		}
 		if closeErr := store.Close(); closeErr != nil {
@@ -242,9 +249,13 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 	wsInfo := setupWorkspace(root, agents)
 
-	setupSessionSummaries(sessionMgr, agents)
+	if cfg.Session.RecallPriorSummariesEnabled() {
+		setupSessionSummaries(sessionMgr, agents)
+	}
 	memStore := setupMemory(cfg, agents)
-	setupLearnedPatterns(ctx, cfg, root, agents)
+	if cfg.Learning.PatternInjectionEnabled() {
+		setupLearnedPatterns(ctx, cfg, root, agents)
+	}
 
 	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
 
@@ -281,12 +292,18 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 			return nil, fmt.Errorf("configure user hooks: %w", err)
 		}
 	}
-	for _, a := range agents {
-		if err := a.ConnectMCP(ctx); err != nil {
-			fmt.Printf("warning: MCP connect for %s: %v\n", a.ID, err)
+	var discoveredServers []mcp.ServerConfig
+	if cfg.MCP.DiscoveryEnabled() {
+		discovered := mcpdiscover.Load(root)
+		if discovered.Err != nil {
+			fmt.Printf("warning: MCP discovery failed; configured servers remain available\n")
 		}
+		discoveredServers = discovered.Servers
+	}
+	mcpRuntimes = setupMCPRuntimes(ctx, agents, discoveredServers, policy, mcpdiscover.DefaultConnectTimeout, mcpdiscover.NewClient)
+	for _, a := range agents {
 		// Wrap tool handlers only after
-		// ConnectMCP so MCP-server tools are covered too, not just the
+		// MCP registration so server tools are covered too, not just the
 		// built-in/YAML-declared ones registered before this point.
 		wrapUserToolHooks(a, cfg.Hooks, hookRunner)
 		agentID := a.ID
@@ -295,6 +312,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 			w := attBudget.CurrentWeight(sessionOrAgentKey(ctx, agentID))
 			return attention.AdjustThreshold(base, w)
 		})
+		wrapToolResultCap(a)
 		incctx.Wrap(a, root)
 		incctx.WrapGrep(a, root)
 		if graphStore != nil {
@@ -304,7 +322,6 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	teams := setupTeams(cfg, agents)
 
-	discoverMCPServers(ctx, root, agents)
 	normalizeToolPermissions(agents)
 
 	active := "coder"
@@ -341,9 +358,14 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		learningStore:      learningStore,
 		lspManager:         languageServerManager,
 		broker:             broker,
+		mcpRuntimes:        mcpRuntimes,
 	}
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
+		// Context guard runs before budget: it trims messages that would exceed
+		// the model's context window, preventing 413/400 token-limit errors that
+		// the SDK's tool-calling loop doesn't guard against.
+		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List())))
 		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
 		// Keep the budget hook last: if it reserves, no later Before hook can
 		// abort the call and strand the reservation.
@@ -1393,12 +1415,12 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	result := ExecutionResult{AgentID: agentID, SessionID: sessionID, TaskID: taskID, PPDDecision: ppdDecision}
 	collector := newContextReportCollector()
 	ctx = withContextReportCollector(ctx, collector)
-	result.ContextReport = collector.report()
+	result.ContextReport = o.contextReport(collector)
 	if hasIntent {
 		result.MemoryIntent, err = o.applyMemoryIntent(ctx, intent)
 		if err != nil {
 			contextSourceOmitted(ctx, ContextSourceMemory, ContextOmittedSourceError)
-			result.ContextReport = collector.report()
+			result.ContextReport = o.contextReport(collector)
 			return result, err
 		}
 		if result.MemoryIntent.Applied {
@@ -1409,7 +1431,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	ctx, message, err := o.preparePrompt(ctx, request.Message, agentID, sessionID)
 	if err != nil {
-		result.ContextReport = collector.report()
+		result.ContextReport = o.contextReport(collector)
 		return result, err
 	}
 	if hasIntent && intent.Action == memory.IntentRecallPast && result.MemoryIntent.Applied {
@@ -1429,11 +1451,11 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		if err == nil {
 			result.Stream = assessStream(ctx, result.Stream, request)
 		}
-		result.ContextReport = collector.report()
+		result.ContextReport = o.contextReport(collector)
 		return result, err
 	}
 	result.Response, err = o.executeBlockingWithRecovery(ctx, a, sessionID, agentID, message)
-	result.ContextReport = collector.report()
+	result.ContextReport = o.contextReport(collector)
 	if err != nil {
 		return result, err
 	}
@@ -1444,9 +1466,16 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	return result, nil
 }
 
+func (o *Orchestrator) contextReport(collector *contextReportCollector) ContextReport {
+	if o.cfg != nil && !o.cfg.Session.ContextReportEnabled() {
+		return ContextReport{}
+	}
+	return collector.report()
+}
+
 const (
-	maxAPIRetries         = 2
-	maxCompactRetries     = 1
+	maxAPIRetries     = 2
+	maxCompactRetries = 1
 )
 
 func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.Agent, sessionID, agentID, message string) (<-chan *model.ChatResponse, error) {
@@ -2337,34 +2366,40 @@ func setupTeams(cfg *config.Config, agents map[string]*agent.Agent) map[string]*
 	return teams
 }
 
-// discoverMCPServers scans the workspace for MCP server configs from other
-// tools (Cursor, VS Code, Claude Code, package.json) and appends them to
-// each agent's MCP client list (PRD P4-002). Discovered servers default to
-// require_approval permission. Client creation errors are logged and skipped.
-func discoverMCPServers(_ context.Context, root string, agents map[string]*agent.Agent) {
-	discovered := mcpdiscover.Discover(root)
-	if len(discovered) == 0 {
-		return
+func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, discovered []mcp.ServerConfig, policy *security.Policy, timeout time.Duration, factory mcpdiscover.ClientFactory) []*mcpdiscover.Runtime {
+	agentIDs := make([]string, 0, len(agents))
+	for id := range agents {
+		agentIDs = append(agentIDs, id)
 	}
-	fmt.Printf("mcp: discovered %d server(s) from project config\n", len(discovered))
-	for _, sc := range discovered {
-		client, err := mcp.NewClient(sc)
-		if err != nil {
-			fmt.Printf("warning: mcp client for %q: %v\n", sc.Name, err)
-			continue
+	sort.Strings(agentIDs)
+	runtimes := make([]*mcpdiscover.Runtime, 0, len(agentIDs))
+	for _, id := range agentIDs {
+		a := agents[id]
+		configured := make([]mcp.ServerConfig, 0, len(a.MCPClients))
+		for _, client := range a.MCPClients {
+			configured = append(configured, client.Config())
+			_ = client.Close()
 		}
-		for _, a := range agents {
-			a.MCPClients = append(a.MCPClients, client)
+		a.MCPClients = nil
+		runtime := mcpdiscover.Start(ctx, configured, discovered, a.Tools, policy, timeout, factory)
+		runtimes = append(runtimes, runtime)
+		for _, status := range runtime.Statuses() {
+			if status.State != mcpdiscover.StateConnected {
+				fmt.Printf("warning: MCP server for %s: %s\n", a.ID, status.State)
+			}
 		}
 	}
+	return runtimes
 }
 
 func (o *Orchestrator) Close() error {
 	o.closeOnce.Do(func() {
-		for _, a := range o.agents {
-			a.CloseMCP()
-		}
 		var errs []error
+		for _, runtime := range o.mcpRuntimes {
+			if err := runtime.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close MCP runtime: %w", err))
+			}
+		}
 		if o.watcher != nil {
 			if err := o.watcher.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close graph watcher: %w", err))

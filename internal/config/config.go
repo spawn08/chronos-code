@@ -25,6 +25,7 @@ type Config struct {
 	Security     SecurityConfig              `yaml:"security,omitempty"`
 	Memory       MemoryConfig                `yaml:"memory,omitempty"`
 	Session      SessionConfig               `yaml:"session,omitempty"`
+	MCP          MCPConfig                   `yaml:"mcp,omitempty"`
 	Workspace    WorkspaceConfig             `yaml:"workspace,omitempty"`
 	Tools        ToolsConfig                 `yaml:"tools,omitempty"`
 	Learning     LearningConfig              `yaml:"learning,omitempty"`
@@ -266,9 +267,34 @@ type MemoryConfig struct {
 }
 
 type SessionConfig struct {
-	AutoResume           bool `yaml:"auto_resume,omitempty"`
-	MaxHistoryTurns      int  `yaml:"max_history_turns,omitempty"`
-	MaxModelCallsPerTurn int  `yaml:"max_model_calls_per_turn,omitempty"`
+	AutoResume           bool  `yaml:"auto_resume,omitempty"`
+	MaxHistoryTurns      int   `yaml:"max_history_turns,omitempty"`
+	MaxModelCallsPerTurn int   `yaml:"max_model_calls_per_turn,omitempty"`
+	RecallPriorSummaries *bool `yaml:"recall_prior_summaries,omitempty"`
+	ContextReport        *bool `yaml:"context_report,omitempty"`
+}
+
+// RecallPriorSummariesEnabled keeps cross-session context enabled unless an
+// operator explicitly turns it off for rollback.
+func (c SessionConfig) RecallPriorSummariesEnabled() bool {
+	return c.RecallPriorSummaries == nil || *c.RecallPriorSummaries
+}
+
+// ContextReportEnabled keeps transparent context metadata enabled unless an
+// operator explicitly turns it off for rollback.
+func (c SessionConfig) ContextReportEnabled() bool {
+	return c.ContextReport == nil || *c.ContextReport
+}
+
+type MCPConfig struct {
+	Discovery *bool `yaml:"discovery_enabled,omitempty"`
+}
+
+// DiscoveryEnabled keeps project MCP discovery enabled unless an operator
+// explicitly turns it off for rollback. Explicit agent MCP configuration is
+// unaffected.
+func (c MCPConfig) DiscoveryEnabled() bool {
+	return c.Discovery == nil || *c.Discovery
 }
 
 // LearningConfig controls the self-learning distillation loop (PRD G-009,
@@ -276,7 +302,8 @@ type SessionConfig struct {
 // learning.yaml (mirroring how router.yaml's model/prompt sit alongside this
 // config's leaner RouterConfig), loaded separately by internal/learning.
 type LearningConfig struct {
-	Enabled bool `yaml:"enabled,omitempty"`
+	Enabled          bool  `yaml:"enabled,omitempty"`
+	PatternInjection *bool `yaml:"pattern_injection,omitempty"`
 	// AutoDistill is reserved for a future automatic-trigger mode. Today,
 	// chronos-code only ever runs distillation from the explicit
 	// `chronos-code learn suggest` command — never silently in the
@@ -293,6 +320,12 @@ type LearningConfig struct {
 	// effect.
 	ReviewBeforeApply bool   `yaml:"review_before_apply,omitempty"`
 	OutputDir         string `yaml:"output_dir,omitempty"`
+}
+
+// PatternInjectionEnabled keeps approved learned-pattern context enabled
+// unless an operator explicitly turns it off for rollback.
+func (c LearningConfig) PatternInjectionEnabled() bool {
+	return c.PatternInjection == nil || *c.PatternInjection
 }
 
 func Load(configPath string) (*Config, error) {
