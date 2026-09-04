@@ -2103,7 +2103,6 @@ func (o *Orchestrator) SetThinking(level string) error {
 	var cfg model.ReasoningConfig
 	switch level {
 	case "off", "none", "false", "0":
-		level = "off"
 	case "low", "medium", "high":
 		cfg = model.ReasoningConfig{
 			Enabled:      true,
