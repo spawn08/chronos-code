@@ -84,6 +84,42 @@ func RenderMarkdownLite(s string, width int) string {
 	return strings.Join(out, "\n")
 }
 
+// extractFencedBlocks returns the body of each markdown ``` fence in s, in
+// order. Language tags are discarded. An unclosed fence at EOF is kept if it
+// has any content so a still-streaming reply can be copied.
+func extractFencedBlocks(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.Split(s, "\n")
+	var blocks []string
+	var body strings.Builder
+	inFence := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			if inFence {
+				blocks = append(blocks, strings.TrimSuffix(body.String(), "\n"))
+				body.Reset()
+				inFence = false
+			} else {
+				inFence = true
+			}
+			continue
+		}
+		if inFence {
+			body.WriteString(line)
+			body.WriteByte('\n')
+		}
+	}
+	if inFence {
+		if text := strings.TrimSuffix(body.String(), "\n"); text != "" {
+			blocks = append(blocks, text)
+		}
+	}
+	return blocks
+}
+
 // inlineStyle applies inline markdown (bold, italic, code) to a single line.
 // Order matters only in that ** is checked before _ so "**_x_**" nests
 // correctly; overlapping markers in adversarial input aren't guaranteed to

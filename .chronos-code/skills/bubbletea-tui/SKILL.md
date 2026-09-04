@@ -29,13 +29,16 @@ Commands are dispatched in `app.go`'s Update method. Available:
 - `/skills` — list discovered skill catalog
 - `/agents` — list registered agents
 - `/context` — show context sources, budgets, omission reasons
-- `/copy` / Ctrl+Y — clipboard
-- `/mouse` — toggle mouse capture for scrolling vs drag-select
-- `/clear`, `/perf`, `/help`, `/quit`
+- `/copy` / Ctrl+Y / Ctrl+Shift+C — clipboard (last response, or visible output)
+- `/copy visible`, `/copy all` — copy the on-screen pane or full transcript
+- `/copy code` / Ctrl+Shift+X — copy the last fenced code block
+- `/mouse` — toggle mouse-wheel scrolling; drag-select is the default
+- Ctrl+O — expand or collapse tool-call details
+- `/resume`, `/compact`, `/rewind`, `/plan`, `/learn` — session, undo, plan mode, learning review
 
 ## Mouse & Scrolling
-- Mouse capture starts ENABLED (wheel scrolls transcript)
-- `/mouse` toggles capture off for drag selection
+- Mouse capture starts DISABLED so terminal drag-select and Cmd+C work
+- `/mouse` enables wheel scrolling of the transcript (then use shift+drag to select)
 - Page Up/Down, Ctrl+Home/End always available
 
 ## Streaming Display

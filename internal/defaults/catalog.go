@@ -33,6 +33,7 @@ var catalog = map[string]Artifact{
 	"guardrails/default.yaml":    {Path: "guardrails/default.yaml", Activation: RuntimeActive, Rationale: "loaded into every agent guardrail engine"},
 	"skills/default-skills.yaml": {Path: "skills/default-skills.yaml", Activation: RuntimeActive, Rationale: "loaded into the bundled skill catalog"},
 	"agents/architect.yaml":      {Path: "agents/architect.yaml", Activation: RuntimeActive, Rationale: "supplies the default architect prompt"},
+	"agents/chronos-code.yaml":   {Path: "agents/chronos-code.yaml", Activation: RuntimeActive, Rationale: "supplies the primary Chronos Code prompt"},
 	"agents/coder.yaml":          {Path: "agents/coder.yaml", Activation: RuntimeActive, Rationale: "supplies the default coder prompt"},
 	"agents/debugger.yaml":       {Path: "agents/debugger.yaml", Activation: RuntimeActive, Rationale: "supplies the default debugger prompt"},
 	"agents/explainer.yaml":      {Path: "agents/explainer.yaml", Activation: RuntimeActive, Rationale: "supplies the default explainer prompt"},

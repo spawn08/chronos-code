@@ -34,6 +34,9 @@ func newAgentPicker(m *appModel) *picker {
 			hint = a.Name
 		}
 		label := id
+		if id == m.orch.PrimaryID() {
+			label += " (primary)"
+		}
 		if id == activeID {
 			label += " (active)"
 		}
@@ -69,7 +72,7 @@ func newModelPicker(m *appModel) *picker {
 // same order, for Ctrl+/'s fuzzy-filtered palette.
 var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/login", "/logout", "/whoami",
-	"/context", "/usage", "/stream", "/session", "/memory", "/budget", "/workspace",
+	"/context", "/usage", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace",
 	"/skills", "/mcp", "/subagent", "/copy", "/mouse", "/clear", "/perf", "/help", "/quit",
 }
 

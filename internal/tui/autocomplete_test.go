@@ -16,7 +16,7 @@ func TestCommandCompletions(t *testing.T) {
 		{name: "arguments", input: "/agent coder", want: nil},
 		{name: "prefix orders shortest first", input: "/ag", want: []string{"/agent", "/agents", "/usage", "/subagent"}},
 		{name: "exact first", input: "/agent", want: []string{"/agent", "/agents", "/subagent"}},
-		{name: "mcp command", input: "/mc", want: []string{"/mcp", "/mcp connect"}},
+		{name: "mcp command", input: "/mc", want: []string{"/mcp", "/mcp connect", "/compact"}},
 		{name: "fuzzy subsequence", input: "/mdl", want: []string{"/model"}},
 	}
 
@@ -59,6 +59,8 @@ func TestInputCompletionsIncludesFilesAndMCPServers(t *testing.T) {
 		{input: "@app.go", want: []string{"@internal/tui/app.go"}},
 		{input: "look at @README", want: []string{"@README.md"}},
 		{input: "/mcp connect g", want: []string{"/mcp connect github"}},
+		{input: "/copy v", want: []string{"/copy visible"}},
+		{input: "/copy c", want: []string{"/copy code"}},
 	}
 	for _, tt := range tests {
 		if got := inputCompletions(tt.input, nil, nil, nil, files, servers); !reflect.DeepEqual(got, tt.want) {

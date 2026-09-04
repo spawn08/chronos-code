@@ -323,6 +323,57 @@ func TestParseAndClassify(t *testing.T) {
 	})
 }
 
+func TestBundledCodeIntentStaysOnChronosCode(t *testing.T) {
+	data, err := defaults.ReadFile("routing.yaml")
+	if err != nil {
+		t.Fatalf("defaults.ReadFile(routing.yaml) error = %v", err)
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	var codeAgent string
+	for _, route := range cfg.IntentRouting {
+		if route.Intent == "code" {
+			codeAgent = route.Agent
+		}
+	}
+	if codeAgent != "chronos-code" {
+		t.Fatalf("bundled code intent agent = %q, want chronos-code", codeAgent)
+	}
+	r, err := New(cfg, "chronos-code")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, agent, matched := r.Classify("add a brand new CLI flag for output format")
+	if matched || agent != "chronos-code" {
+		t.Fatalf("Classify() = (%q, %v), want unmatched chronos-code", agent, matched)
+	}
+}
+
+func TestBundledImplementationPaths(t *testing.T) {
+	data, err := defaults.ReadFile("routing.yaml")
+	if err != nil {
+		t.Fatalf("defaults.ReadFile(routing.yaml) error = %v", err)
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	low := cfg.PathFor(ComplexityLow)
+	if low.MaxToolCalls != 4 || low.Plan != "skip" || low.Graph != "L2" {
+		t.Fatalf("low path = %+v", low)
+	}
+	medium := cfg.PathFor(ComplexityMedium)
+	if medium.MaxToolCalls != 12 || medium.Plan != "update_plan" {
+		t.Fatalf("medium path = %+v", medium)
+	}
+	high := cfg.PathFor(ComplexityHigh)
+	if high.MaxToolCalls != 24 || high.Plan != "ppd-or-update_plan" {
+		t.Fatalf("high path = %+v", high)
+	}
+}
+
 func TestBundledModelRouting(t *testing.T) {
 	data, err := defaults.ReadFile("routing.yaml")
 	if err != nil {

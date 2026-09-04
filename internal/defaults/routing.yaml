@@ -1,16 +1,19 @@
 # Chronos Code — Agent Routing Configuration
-# Routes user messages to the right agent based on intent classification.
+# Classifies intent so Chronos Code can pick a model and (when useful)
+# spawn a specialist. The conversation stays on the primary agent unless
+# the user @mentions / /agent switches, or PPD enabled-mode delegates.
 
 meta:
   version: "1.0.0"
-  description: "Intent-based message routing across chronos-code agents"
+  description: "Intent classification and model routing for the Chronos Code primary agent"
 
 # Router configuration
 router:
   description: |
-    The router is the first thing that runs on every user message. It
-    classifies intent and selects the cheapest agent that can handle it.
-    The router itself uses a T1 (cheap) model with a tight token budget.
+    The router runs on every user message. It classifies intent for model
+    selection and an advisory specialist hint. It does not replace Chronos
+    Code as the conversation partner. The router itself uses a T1 (cheap)
+    model with a tight token budget.
   model:
     provider: "anthropic"
     model: "claude-haiku-4-5"
@@ -27,6 +30,26 @@ router:
     - "search" = user wants to find something (file, function, pattern)
     - "architecture" = user asks about design, structure, patterns
     - "code" = everything else (implement, fix, refactor, add, change, write)
+
+# Complexity-gated implementation paths. Chronos Code follows these instead of
+# exploring ad hoc: cheaper graph first, fewer tool calls, learnings before
+# re-search, PPD only when the work is actually large.
+implementation_paths:
+  low:
+    max_tool_calls: 4
+    graph: "L2"
+    plan: "skip"
+    hint: "resolve_symbol/graph_query; ranged file_read only if L2 is not enough; one edit or a direct answer; skip spawn"
+  medium:
+    max_tool_calls: 12
+    graph: "L0-L2"
+    plan: "update_plan"
+    hint: "recall-past and learned patterns first; L0/L1 then L2; impact_analysis before edits; test_map after; spawn a specialist only for an isolated loop"
+  high:
+    max_tool_calls: 24
+    graph: "L0-L3"
+    plan: "ppd-or-update_plan"
+    hint: "L0 landscape; spawn ppd-planner for a durable DAG if multi-package; execute leaf-first; verify each node; remember architecture/decisions"
 
 # Task complexity and kind to model mapping. Undeclared cells fall back to
 # medium/edit so model selection is deterministic for every classification.
@@ -157,11 +180,11 @@ intent_routing:
     reason: "Design needs broad knowledge and careful judgment"
 
   - intent: "code"
-    agent: "coder"
+    agent: "chronos-code"
     tier: "T2"
     patterns:
       - "default — all other requests"
-    reason: "General coding tasks go to the primary agent"
+    reason: "General coding tasks stay with Chronos Code, which may spawn coder"
 
 # Explicit agent switch
 explicit_switch:
@@ -170,6 +193,7 @@ explicit_switch:
     Users can bypass the router and address a specific agent directly.
     The @ prefix routes to the named agent regardless of intent classification.
   examples:
+    - "@chronos-code implement the rest after the plan"
     - "@reviewer check my last commit for security issues"
     - "@planner break down this feature into tasks"
     - "@debugger why is TestBuildAgent failing with nil pointer"
@@ -264,7 +288,7 @@ cost_optimization:
     - rule: "If the task can be answered by a graph query alone, skip the LLM entirely"
     - rule: "Researchers and explainers use T1 models — don't waste frontier tokens on summarization"
     - rule: "Router misclassification penalty is low (worst case: user gets a slightly less capable agent that escalates)"
-    - rule: "When uncertain, classify as 'code' — the coder can handle anything, it's just more expensive"
+    - rule: "When uncertain, classify as 'code' — Chronos Code handles it and can spawn a specialist"
     - rule: "Pipeline routing adds latency — only trigger for tasks the router estimates need >5 turns"
 
   tier_costs:

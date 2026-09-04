@@ -223,6 +223,21 @@ func TestHandleKey_AltEnterDoesNotQueueWhenIdle(t *testing.T) {
 	}
 }
 
+func TestCtrlLOpensLoginWizard(t *testing.T) {
+	m := newTestAppModel(t)
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl})
+	if cmd != nil {
+		t.Fatal("login shortcut returned a command")
+	}
+	if m.wizard == nil {
+		t.Fatal("Ctrl+L did not open the login wizard")
+	}
+	view := m.wizard.View()
+	if !strings.Contains(view, "ChatGPT / Codex") || !strings.Contains(view, "API key") {
+		t.Fatalf("login wizard = %q, want Claude/Codex/API key options", view)
+	}
+}
+
 func TestHandleKey_V2PickerShortcuts(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -369,6 +384,18 @@ func TestStreamDeltaDoesNotDuplicateCumulativeFrame(t *testing.T) {
 	}
 }
 
+func TestViewLeavesMouseFreeForTerminalSelectionByDefault(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	if m.mouseCapture {
+		t.Fatal("mouse capture is on by default; drag-select cannot copy")
+	}
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("View().MouseMode = %v, want MouseModeNone", got)
+	}
+}
+
 func TestViewEnablesMouseWheelEvents(t *testing.T) {
 	m := newTestAppModel(t)
 	m.mouseCapture = true
@@ -398,9 +425,14 @@ func TestMouseWheelScrollsTranscriptWhenCaptureEnabled(t *testing.T) {
 	}
 }
 
-func TestMouseCommandTogglesSelectionMode(t *testing.T) {
+func TestMouseCommandTogglesWheelCapture(t *testing.T) {
 	m := newTestAppModel(t)
-	m.mouseCapture = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.input.SetValue("/mouse")
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.mouseCapture || m.View().MouseMode != tea.MouseModeCellMotion || !strings.Contains(m.statusMsg, "shift+drag") {
+		t.Fatalf("mouse wheel mode = capture:%t mode:%v status:%q", m.mouseCapture, m.View().MouseMode, m.statusMsg)
+	}
 	m.input.SetValue("/mouse")
 	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.mouseCapture || m.View().MouseMode != tea.MouseModeNone || !strings.Contains(m.statusMsg, "drag selects") {
@@ -409,7 +441,7 @@ func TestMouseCommandTogglesSelectionMode(t *testing.T) {
 }
 
 func TestHelpDocumentsMouseAndNativeTerminalClipboard(t *testing.T) {
-	for _, want := range []string{"mouse wheel", "pgup / pgdown", "shift+drag", "Native clipboard paste"} {
+	for _, want := range []string{"mouse wheel", "pgup / pgdown", "shift+drag", "drag", "ctrl+shift+c", "Native clipboard paste"} {
 		if !strings.Contains(helpText, want) {
 			t.Errorf("help text missing %q", want)
 		}
@@ -521,6 +553,13 @@ func TestCopyShortcutSuccessRoundTrip(t *testing.T) {
 	if written != want || m.statusMsg != "copied response" {
 		t.Fatalf("Ctrl+Y wrote %q with status %q", written, m.statusMsg)
 	}
+
+	written = ""
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl | tea.ModShift})
+	_, _ = m.Update(cmd())
+	if written != want || m.statusMsg != "copied response" {
+		t.Fatalf("Ctrl+Shift+C wrote %q with status %q", written, m.statusMsg)
+	}
 }
 
 func TestPasteShortcutRoundTripPreservesExactMultilineUnicode(t *testing.T) {
@@ -580,7 +619,12 @@ func TestClipboardShortcutsDoNotAccessClipboardWithOverlay(t *testing.T) {
 			m.clipboardRead = func() (string, error) { accesses++; return "clipboard", nil }
 			m.clipboardWrite = func(string) error { accesses++; return nil }
 
-			for _, msg := range []tea.KeyPressMsg{{Code: 'y', Mod: tea.ModCtrl}, {Code: 'v', Mod: tea.ModCtrl}} {
+			for _, msg := range []tea.KeyPressMsg{
+				{Code: 'y', Mod: tea.ModCtrl},
+				{Code: 'c', Mod: tea.ModCtrl | tea.ModShift},
+				{Code: 'x', Mod: tea.ModCtrl | tea.ModShift},
+				{Code: 'v', Mod: tea.ModCtrl},
+			} {
 				_, cmd := m.Update(msg)
 				if cmd != nil {
 					t.Fatal("clipboard shortcut returned a command while overlay was active")
@@ -621,6 +665,165 @@ func TestCopyWithNoAssistantResponseDoesNotAccessClipboard(t *testing.T) {
 	}
 }
 
+func TestCopyVisibleAndAllRoundTrip(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{"first visible line\n" + strings.Repeat("hidden line\n", 40) + "last transcript line"}
+	m.refreshViewport()
+	m.viewport.GotoTop()
+
+	var written string
+	m.clipboardWrite = func(content string) error {
+		written = content
+		return nil
+	}
+
+	m.input.SetValue("/copy visible")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("/copy visible returned no clipboard command")
+	}
+	_, _ = m.Update(cmd())
+	if !strings.Contains(written, "first visible line") {
+		t.Fatalf("visible copy missing on-screen text: %q", written)
+	}
+	if strings.Contains(written, "last transcript line") {
+		t.Fatalf("visible copy included scrolled-off text: %q", written)
+	}
+	if m.statusMsg != "copied visible output" {
+		t.Fatalf("visible copy status = %q", m.statusMsg)
+	}
+
+	m.input.SetValue("/copy all")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(cmd())
+	if !strings.Contains(written, "first visible line") || !strings.Contains(written, "last transcript line") {
+		t.Fatalf("transcript copy = %q", written)
+	}
+	if m.statusMsg != "copied transcript" {
+		t.Fatalf("all copy status = %q", m.statusMsg)
+	}
+}
+
+func TestCopyShortcutFallsBackToVisibleOutput(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{"visible agent output"}
+	m.refreshViewport()
+	var written string
+	m.clipboardWrite = func(content string) error {
+		written = content
+		return nil
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("copy shortcut returned no clipboard command")
+	}
+	_, _ = m.Update(cmd())
+	if !strings.Contains(written, "visible agent output") {
+		t.Fatalf("fallback copy = %q", written)
+	}
+	if m.statusMsg != "copied visible output" {
+		t.Fatalf("fallback copy status = %q", m.statusMsg)
+	}
+}
+
+func TestCopyCodeBlockRoundTrip(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastAssistantText = "see:\n```go\nfunc First() {}\n```\nand\n```\nsecond block\n```\n"
+	var written string
+	m.clipboardWrite = func(content string) error {
+		written = content
+		return nil
+	}
+
+	m.input.SetValue("/copy code")
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(cmd())
+	if written != "second block" || m.statusMsg != "copied code block" {
+		t.Fatalf("/copy code wrote %q status %q", written, m.statusMsg)
+	}
+
+	m.input.SetValue("/copy code 1")
+	_, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(cmd())
+	if written != "func First() {}" {
+		t.Fatalf("/copy code 1 wrote %q", written)
+	}
+
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl | tea.ModShift})
+	_, _ = m.Update(cmd())
+	if written != "second block" {
+		t.Fatalf("Ctrl+Shift+X wrote %q", written)
+	}
+}
+
+func TestToolCallsCollapseUntilExpanded(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.sending = true
+	m.appendTurnActivity(RenderToolActivity("", "file_read", map[string]any{"path": "first.go"}, true, nil))
+	m.appendTurnActivity(RenderToolActivity("", "file_read", map[string]any{"path": "second.go"}, true, nil))
+	m.appendTurnText("answer")
+
+	got := m.renderTranscript()
+	if !strings.Contains(got, "2 tool calls") || !strings.Contains(got, "ctrl+o expand") {
+		t.Fatalf("collapsed tools missing summary: %q", got)
+	}
+	if strings.Contains(got, "first.go") {
+		t.Fatalf("collapsed tools still showed the hidden call: %q", got)
+	}
+	if !strings.Contains(got, "second.go") {
+		t.Fatalf("collapsed tools hid the latest call: %q", got)
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	got = m.renderTranscript()
+	if !strings.Contains(got, "first.go") || !strings.Contains(got, "second.go") {
+		t.Fatalf("expanded tools missing details: %q", got)
+	}
+	if strings.Contains(got, "ctrl+o expand") {
+		t.Fatalf("expanded tools kept collapse chrome: %q", got)
+	}
+
+	m.finalizeTurn(nil)
+	got = m.renderTranscript()
+	if !strings.Contains(got, "first.go") {
+		t.Fatalf("expanded finalize lost tool details: %q", got)
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	got = m.renderTranscript()
+	if strings.Contains(got, "first.go") || !strings.Contains(got, "2 tool calls") {
+		t.Fatalf("collapsed last turn = %q", got)
+	}
+}
+
+func TestWelcomeIdentifiesChronosCode(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if !strings.Contains(m.renderHeaderBar(), "chronos-code") {
+		t.Fatalf("header = %q, want chronos-code", m.renderHeaderBar())
+	}
+	if !strings.Contains(m.input.Placeholder, "chronos-code") && !strings.Contains(m.input.Placeholder, "/login") {
+		t.Fatalf("placeholder = %q, want chronos-code or login hint", m.input.Placeholder)
+	}
+	if !strings.Contains(helpText, "Chronos Code (primary)") {
+		t.Fatal("help text missing Chronos Code identity")
+	}
+}
+
+func TestAgentCommandReportsPrimaryIdentity(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.input.SetValue("/agent")
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	transcript := strings.Join(m.blocks, "\n")
+	if !strings.Contains(transcript, "primary Chronos Code") {
+		t.Fatalf("/agent output = %q", transcript)
+	}
+}
+
 func TestOrdinaryPromptKeepsPrimaryAgentActive(t *testing.T) {
 	m := newTestAppModel(t)
 	m.input.SetValue("please review and explain this code")
@@ -644,6 +847,41 @@ func TestContextCommandBeforeFirstTurnReportsNoContext(t *testing.T) {
 	got := strings.Join(m.blocks, "\n")
 	if !strings.Contains(got, "no context report yet") {
 		t.Fatalf("pre-turn /context output = %q", got)
+	}
+	if !strings.Contains(got, "verify:") || !strings.Contains(got, "project instructions:") {
+		t.Fatalf("/context missing verification or project docs: %q", got)
+	}
+}
+
+func TestPlanResumeLearnCommands(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	m.input.SetValue("/plan on")
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !m.orch.PlanMode() {
+		t.Fatal("/plan on did not enable plan mode")
+	}
+
+	first := m.orch.CurrentSessionID()
+	if _, err := m.orch.ResetSession(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m.input.SetValue("/resume " + first)
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.orch.CurrentSessionID() != first {
+		t.Fatalf("resumed %q, want %q", m.orch.CurrentSessionID(), first)
+	}
+
+	m.input.SetValue("/learn")
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := strings.Join(m.blocks, "\n")
+	if !strings.Contains(got, "learning") {
+		t.Fatalf("/learn output = %q", got)
+	}
+	status := m.renderStatusBar()
+	if !strings.Contains(status, "plan") || !strings.Contains(status, string(m.orch.VerificationMode())) {
+		t.Fatalf("status bar missing plan/verify: %q", status)
 	}
 }
 
@@ -743,6 +981,21 @@ func testContextReport() orchestrator.ContextReport {
 			{Kind: orchestrator.ContextSourceUserHook, ID: "user-hook", Title: "User prompt hooks", BudgetBytes: 1800, OmissionReason: orchestrator.ContextOmittedNotConfigured},
 		},
 		TotalCount: 1, TotalBytes: 120, BudgetBytes: 108000,
+	}
+}
+
+func TestDefaultChromeShowsLoginWhenUnauthenticated(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	status := m.renderStatusBar()
+	if m.signedIn() {
+		t.Skip("environment already has provider credentials")
+	}
+	if !strings.Contains(status, "/login") {
+		t.Fatalf("unauthenticated status = %q, want /login", status)
+	}
+	if !strings.Contains(m.input.Placeholder, "/login") {
+		t.Fatalf("unauthenticated placeholder = %q", m.input.Placeholder)
 	}
 }
 
@@ -1361,8 +1614,8 @@ func TestUnsupportedKeyboardEnhancements_HasSlashModelFallback(t *testing.T) {
 	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "definitely-not-a-model") {
 		t.Errorf("slash fallback was not handled; transcript = %q", got)
 	}
-	if !strings.Contains(helpText, "use /model or ctrl+/ if terminal key enhancements are unavailable") {
-		t.Fatal("/help does not document the unsupported-terminal fallback")
+	if !strings.Contains(helpText, "ctrl+l") || !strings.Contains(helpText, "ctrl+m") {
+		t.Fatal("/help does not document login or model picker shortcuts")
 	}
 }
 

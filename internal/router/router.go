@@ -57,11 +57,23 @@ type ModelRouting struct {
 // Config is the subset of routing.yaml this package understands. The
 // explicit_switch, escalation, pipelines, and cost_optimization sections are
 // intentionally not modeled — yaml.Unmarshal drops unknown keys.
+// ImplementationPath is the bounded execution graph for a complexity band.
+type ImplementationPath struct {
+	MaxToolCalls int    `yaml:"max_tool_calls"`
+	Graph        string `yaml:"graph"`
+	Plan         string `yaml:"plan"`
+	Hint         string `yaml:"hint"`
+}
+
+// Config is the subset of routing.yaml this package understands. The
+// explicit_switch, escalation, pipelines, and cost_optimization sections are
+// intentionally not modeled — yaml.Unmarshal drops unknown keys.
 type Config struct {
-	Router        routerSection `yaml:"router"`
-	IntentRouting []IntentRoute `yaml:"intent_routing"`
-	ModelRouting  ModelRouting  `yaml:"model_routing"`
-	PPD           PPDConfig     `yaml:"ppd"`
+	Router              routerSection                     `yaml:"router"`
+	IntentRouting       []IntentRoute                     `yaml:"intent_routing"`
+	ModelRouting        ModelRouting                      `yaml:"model_routing"`
+	ImplementationPaths map[Complexity]ImplementationPath `yaml:"implementation_paths"`
+	PPD                 PPDConfig                         `yaml:"ppd"`
 }
 
 // Parse decodes raw YAML bytes (e.g. loaded via internal/defaults.ReadFile)
@@ -86,6 +98,53 @@ func (c *Config) ResolveModel(complexity Complexity, kind TaskKind) (ModelSpec, 
 	}
 	model, ok := c.ModelRouting.Models[ComplexityMedium][TaskKindEdit]
 	return model, ok
+}
+
+// DefaultPath is the built-in execution graph when routing YAML omits
+// implementation_paths for a complexity band.
+func DefaultPath(complexity Complexity) ImplementationPath {
+	switch complexity {
+	case ComplexityHigh:
+		return ImplementationPath{
+			MaxToolCalls: 24,
+			Graph:        "L0-L3",
+			Plan:         "ppd-or-update_plan",
+			Hint:         "L0 landscape; spawn ppd-planner if multi-package; leaf-first; verify each node; remember decisions",
+		}
+	case ComplexityMedium:
+		return ImplementationPath{
+			MaxToolCalls: 12,
+			Graph:        "L0-L2",
+			Plan:         "update_plan",
+			Hint:         "recall learnings; impact_analysis before edits; test_map after; spawn only for an isolated loop",
+		}
+	default:
+		return ImplementationPath{
+			MaxToolCalls: 4,
+			Graph:        "L2",
+			Plan:         "skip",
+			Hint:         "graph_query/resolve_symbol; ranged read if needed; one edit or answer; skip spawn",
+		}
+	}
+}
+
+// PathFor returns the configured path for complexity, falling back to DefaultPath.
+func (c *Config) PathFor(complexity Complexity) ImplementationPath {
+	if c != nil {
+		if path, ok := c.ImplementationPaths[complexity]; ok && path.Hint != "" {
+			if path.MaxToolCalls == 0 {
+				path.MaxToolCalls = DefaultPath(complexity).MaxToolCalls
+			}
+			if path.Graph == "" {
+				path.Graph = DefaultPath(complexity).Graph
+			}
+			if path.Plan == "" {
+				path.Plan = DefaultPath(complexity).Plan
+			}
+			return path
+		}
+	}
+	return DefaultPath(complexity)
 }
 
 // compiledRoute is an intent route with its patterns pre-compiled as

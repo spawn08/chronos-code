@@ -51,7 +51,7 @@ func runInit() error {
 	fmt.Printf("\nInitialized %s/ with:\n", dir)
 	fmt.Println("  config.yaml        — main config (model, storage, defaults)")
 	fmt.Println("  security.yaml      — security policy (path/shell restrictions)")
-	fmt.Println("  agents/            — 7 agent definitions with system prompts")
+	fmt.Println("  agents/            — Chronos Code primary plus specialist prompts")
 	fmt.Println("  skills/            — 11 default skills")
 	fmt.Println("  guardrails/        — guardrail presets")
 	fmt.Printf("\nRun 'chronos-code' to start the REPL.\n")
