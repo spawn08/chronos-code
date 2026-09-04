@@ -297,6 +297,21 @@ func (p *Policy) DecideMCPServer(name string) MCPDecision {
 	return MCPDecision{Permission: permission, Reason: "unrecognized server uses default security policy"}
 }
 
+// AllowMCPServerSession grants in-memory trust for name for this process.
+// Denied servers cannot be trusted, and the grant is not written to disk.
+func (p *Policy) AllowMCPServerSession(name string) error {
+	if p == nil {
+		return fmt.Errorf("security policy is not configured")
+	}
+	if contains(p.DeniedMCPServers, name) {
+		return fmt.Errorf("server denied by security policy")
+	}
+	if !contains(p.TrustedMCPServers, name) {
+		p.TrustedMCPServers = append(p.TrustedMCPServers, name)
+	}
+	return nil
+}
+
 func (p *Policy) compile() error {
 	var err error
 	if p.autoAllow, err = compilePatterns("shell.auto_allow", p.autoAllowPatterns); err != nil {

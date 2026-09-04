@@ -16,6 +16,7 @@ func TestCommandCompletions(t *testing.T) {
 		{name: "arguments", input: "/agent coder", want: nil},
 		{name: "prefix orders shortest first", input: "/ag", want: []string{"/agent", "/agents", "/usage", "/subagent"}},
 		{name: "exact first", input: "/agent", want: []string{"/agent", "/agents", "/subagent"}},
+		{name: "mcp command", input: "/mc", want: []string{"/mcp", "/mcp connect"}},
 		{name: "fuzzy subsequence", input: "/mdl", want: []string{"/model"}},
 	}
 
@@ -42,7 +43,25 @@ func TestInputCompletionsIncludesSkillsAndAgents(t *testing.T) {
 		{input: "/subagent res", want: []string{"/subagent researcher "}},
 	}
 	for _, tt := range tests {
-		if got := inputCompletions(tt.input, agents, subagents, skills); !reflect.DeepEqual(got, tt.want) {
+		if got := inputCompletions(tt.input, agents, subagents, skills, nil, nil); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("inputCompletions(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestInputCompletionsIncludesFilesAndMCPServers(t *testing.T) {
+	files := []string{"internal/tui/app.go", "internal/tui/mentions.go", "README.md"}
+	servers := []string{"filesystem", "github"}
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{input: "@app.go", want: []string{"@internal/tui/app.go"}},
+		{input: "look at @README", want: []string{"@README.md"}},
+		{input: "/mcp connect g", want: []string{"/mcp connect github"}},
+	}
+	for _, tt := range tests {
+		if got := inputCompletions(tt.input, nil, nil, nil, files, servers); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("inputCompletions(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}

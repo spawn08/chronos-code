@@ -89,7 +89,12 @@ type Orchestrator struct {
 	learningStore      *learning.SQLStore
 	lspManager         interface{ Close() error }
 	broker             *chronosstream.Broker
+	policy             *security.Policy
+	mcpFactory         mcpdiscover.ClientFactory
+	mcpTimeout         time.Duration
 	mcpRuntimes        []*mcpdiscover.Runtime
+	mcpMu              sync.Mutex
+	mcpClosed          bool
 	closeOnce          sync.Once
 	closeErr           error
 }
@@ -358,6 +363,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		learningStore:      learningStore,
 		lspManager:         languageServerManager,
 		broker:             broker,
+		policy:             policy,
+		mcpFactory:         mcpdiscover.NewClient,
+		mcpTimeout:         mcpdiscover.DefaultConnectTimeout,
 		mcpRuntimes:        mcpRuntimes,
 	}
 	orch.SetApprovalHandler(nil)
@@ -2109,6 +2117,174 @@ func (o *Orchestrator) ListSubagents() []string {
 	return result
 }
 
+func (o *Orchestrator) MCPStatuses() []mcpdiscover.ServerStatus {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+	byName := make(map[string]mcpdiscover.ServerStatus)
+	for _, runtime := range o.mcpRuntimes {
+		for _, status := range runtime.Statuses() {
+			byName[status.Name] = status
+		}
+	}
+	if o.workspace != nil && o.cfg != nil && o.cfg.MCP.DiscoveryEnabled() {
+		for _, cfg := range mcpdiscover.Load(o.workspace.Root).Servers {
+			if _, ok := byName[cfg.Name]; ok {
+				continue
+			}
+			byName[cfg.Name] = mcpdiscover.ServerStatus{Name: cfg.Name, State: mcpdiscover.StateApprovalRequired}
+		}
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]mcpdiscover.ServerStatus, 0, len(names))
+	for _, name := range names {
+		out = append(out, byName[name])
+	}
+	return out
+}
+
+func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover.ServerStatus, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP server name is required")
+	}
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+	if o.mcpClosed {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("orchestrator is closed")
+	}
+	cfg, ok := o.lookupMCPLocked(name)
+	if !ok {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP server %q is not configured", name)
+	}
+	if o.policy == nil {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("security policy is not configured")
+	}
+	if err := o.policy.AllowMCPServerSession(name); err != nil {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("connect MCP server %q: %w", name, err)
+	}
+	factory := o.mcpFactory
+	if factory == nil {
+		factory = mcpdiscover.NewClient
+	}
+	timeout := o.mcpTimeout
+	if timeout <= 0 {
+		timeout = mcpdiscover.DefaultConnectTimeout
+	}
+
+	agentIDs := make([]string, 0, len(o.agents))
+	for id := range o.agents {
+		agentIDs = append(agentIDs, id)
+	}
+	sort.Strings(agentIDs)
+	var last mcpdiscover.ServerStatus
+	for i, id := range agentIDs {
+		a := o.agents[id]
+		if a == nil {
+			continue
+		}
+		if i >= len(o.mcpRuntimes) || o.mcpRuntimes[i] == nil {
+			return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP runtime for agent %q is not available", id)
+		}
+		before := registeredToolNameSet(a)
+		o.mcpRuntimes[i].RememberServer(cfg)
+		last = o.mcpRuntimes[i].ConnectServer(ctx, cfg, a.Tools, o.policy, timeout, factory)
+		wrapLateTools(a, before, o)
+	}
+	if last.Name == "" {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP server %q is not configured", name)
+	}
+	if last.State != mcpdiscover.StateConnected {
+		return last, fmt.Errorf("MCP server %q: %s", name, last.State)
+	}
+	return last, nil
+}
+
+func (o *Orchestrator) lookupMCPLocked(name string) (mcp.ServerConfig, bool) {
+	for _, runtime := range o.mcpRuntimes {
+		if cfg, ok := runtime.Server(name); ok {
+			return cfg, true
+		}
+	}
+	if o.workspace == nil {
+		return mcp.ServerConfig{}, false
+	}
+	for _, cfg := range mcpdiscover.Load(o.workspace.Root).Servers {
+		if cfg.Name == name {
+			return cfg, true
+		}
+	}
+	return mcp.ServerConfig{}, false
+}
+
+func registeredToolNameSet(a *agent.Agent) map[string]struct{} {
+	names := make(map[string]struct{})
+	if a == nil || a.Tools == nil {
+		return names
+	}
+	for _, def := range a.Tools.List() {
+		names[def.Name] = struct{}{}
+	}
+	return names
+}
+
+func wrapLateTools(a *agent.Agent, before map[string]struct{}, o *Orchestrator) {
+	if a == nil || a.Tools == nil {
+		return
+	}
+	var pending []*tool.Definition
+	for _, def := range a.Tools.List() {
+		if _, existed := before[def.Name]; existed || def.Handler == nil {
+			continue
+		}
+		copied := *def
+		pending = append(pending, &copied)
+	}
+	for _, def := range pending {
+		orig := def.Handler
+		if o != nil && o.hookRunner != nil && o.cfg != nil {
+			toolName := def.Name
+			configured := o.cfg.Hooks
+			runner := o.hookRunner
+			hooked := orig
+			orig = func(ctx context.Context, args map[string]any) (any, error) {
+				vars := map[string]any{
+					"tool_name":  toolName,
+					"tool_args":  args,
+					"session_id": storage.SessionFromContext(ctx),
+					"agent_id":   a.ID,
+				}
+				for _, hook := range configured.PreToolCall {
+					if _, err := runner.Run(ctx, hook, vars); err != nil {
+						return nil, fmt.Errorf("pre-tool hook %q: %w", hook.Name, err)
+					}
+				}
+				result, handlerErr := hooked(ctx, args)
+				vars["tool_output"] = result
+				for _, hook := range configured.PostToolCall {
+					_, _ = runner.Run(ctx, hook, vars)
+				}
+				return result, handlerErr
+			}
+		}
+		wrapped := *def
+		if wrapped.Permission != tool.PermDeny {
+			wrapped.Permission = tool.PermRequireApproval
+		}
+		wrapped.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+			result, err := orig(ctx, args)
+			if err != nil || result == nil {
+				return result, err
+			}
+			return capResult(result), nil
+		}
+		a.Tools.Register(&wrapped)
+	}
+}
+
 func (o *Orchestrator) ListSkills() []SkillInfo {
 	result := make([]SkillInfo, len(o.skillCatalog))
 	for i, skill := range o.skillCatalog {
@@ -2394,8 +2570,12 @@ func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, disco
 
 func (o *Orchestrator) Close() error {
 	o.closeOnce.Do(func() {
+		o.mcpMu.Lock()
+		o.mcpClosed = true
+		runtimes := append([]*mcpdiscover.Runtime(nil), o.mcpRuntimes...)
+		o.mcpMu.Unlock()
 		var errs []error
-		for _, runtime := range o.mcpRuntimes {
+		for _, runtime := range runtimes {
 			if err := runtime.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close MCP runtime: %w", err))
 			}

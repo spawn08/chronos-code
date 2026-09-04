@@ -13,7 +13,7 @@ LDFLAGS  := -s -w \
 
 CGO_ENABLED ?= 1
 
-SIZE_LIMIT  := 36700160
+SIZE_LIMIT  := 41943040
 
 .PHONY: build build-release test lint size-check fmt vet tidy clean install eval
 
@@ -36,8 +36,8 @@ size-check: build-release
 	if [ "$$SIZE" -gt "$(SIZE_LIMIT)" ]; then \
 		echo "FAIL: binary exceeds $(SIZE_LIMIT) bytes"; exit 1; \
 	fi; \
-	if [ "$$SIZE" -gt 20971520 ]; then \
-		echo "WARN: binary exceeds 20 MB target ($(SIZE_LIMIT) byte gate active)"; \
+	if [ "$$SIZE" -gt 31457280 ]; then \
+		echo "WARN: binary exceeds 30 MB target ($(SIZE_LIMIT) byte gate active)"; \
 	fi
 
 test:

@@ -167,3 +167,29 @@ func TestStartConfiguredDefinitionWinsAndClientsAreIndependent(t *testing.T) {
 	_ = runtimeA.Close()
 	_ = runtimeB.Close()
 }
+
+func TestConnectServerApprovesPreviouslyPendingServer(t *testing.T) {
+	registry := tool.NewRegistry()
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	client := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "read"}}}
+	cfg := mcp.ServerConfig{Name: "filesystem", Transport: mcp.TransportStdio, Command: "server"}
+	runtime := Start(context.Background(), nil, []mcp.ServerConfig{cfg}, registry, policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
+		t.Fatal("untrusted server created a client")
+		return client, nil
+	})
+	if statuses := runtime.Statuses(); len(statuses) != 1 || statuses[0].State != StateApprovalRequired {
+		t.Fatalf("statuses = %#v", runtime.Statuses())
+	}
+	if err := policy.AllowMCPServerSession("filesystem"); err != nil {
+		t.Fatal(err)
+	}
+	status := runtime.ConnectServer(context.Background(), cfg, registry, policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
+		return client, nil
+	})
+	if status.State != StateConnected || status.Tools != 1 {
+		t.Fatalf("status = %#v", status)
+	}
+	if _, err := registry.Execute(context.Background(), ToolName("filesystem", "read"), nil); err == nil {
+		t.Fatal("MCP tool executed without approval")
+	}
+}

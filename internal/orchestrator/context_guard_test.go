@@ -126,6 +126,37 @@ func TestContextGuardDropsOrphanedToolResults(t *testing.T) {
 	}
 }
 
+func TestContextGuardKeepsUserTurnAfterToolLoopTrim(t *testing.T) {
+	guard := newContextGuardHook("gpt-4", 5) // 8192 limit
+	large := strings.Repeat("token ", 5000)
+	req := &model.ChatRequest{
+		Model: "gpt-4",
+		Messages: []model.Message{
+			{Role: model.RoleSystem, Content: "system"},
+			{Role: model.RoleUser, Content: "do the task"},
+			{Role: model.RoleAssistant, Content: "", ToolCalls: []model.ToolCall{{ID: "1", Name: "read", Arguments: "{}"}}},
+			{Role: model.RoleTool, Content: large, ToolCallID: "1"},
+			{Role: model.RoleAssistant, Content: "", ToolCalls: []model.ToolCall{{ID: "2", Name: "read", Arguments: "{}"}}},
+			{Role: model.RoleTool, Content: large, ToolCallID: "2"},
+		},
+	}
+	err := guard.Before(context.Background(), &hooks.Event{Type: hooks.EventModelCallBefore, Input: req})
+	if err != nil {
+		t.Fatalf("Before() error = %v", err)
+	}
+	if !hasUserOrAssistant(req.Messages, 0) {
+		t.Fatalf("trimmed request has no user/assistant message: %#v", rolesOf(req.Messages))
+	}
+}
+
+func rolesOf(messages []model.Message) []string {
+	roles := make([]string, len(messages))
+	for i, m := range messages {
+		roles[i] = m.Role
+	}
+	return roles
+}
+
 func TestContextGuardRejectsUntrimmableRequestOverSafeBudget(t *testing.T) {
 	guard := newContextGuardHook("gpt-4", 0) // 8192 raw-token limit, 15% output reserve.
 	req := &model.ChatRequest{

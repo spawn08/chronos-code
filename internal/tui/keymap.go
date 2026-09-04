@@ -45,6 +45,9 @@ const helpText = `Commands:
   /session           Show current session and recent history
   /memory            List remembered project/user/feedback notes
   /skills            List discovered skills and winning sources
+  /mcp               List discovered MCP servers and connection status
+  /mcp connect <name>
+                     Approve and connect a discovered MCP server for this session
   /<skill> <task>    Run a task with an explicitly selected skill
   /subagent <name> <task>
                      Run a registered subagent in an isolated context
@@ -57,7 +60,8 @@ const helpText = `Commands:
   /perf              Show frame timing stats (p50/p95/p99)
   /quit              Exit
 
-  @<agent> <msg>     Send message to specific agent
+  @<agent> <msg>     Send message to a specific agent
+  @<path>            Attach a workspace file to the message
   !<cmd>             Execute shell command
 
 Keys:
@@ -67,7 +71,7 @@ Keys:
   up / down          Select completion, otherwise recall message history
   ctrl+r             Search message history
   ctrl+y             Copy the last assistant response
-  tab                Complete the selected slash command
+  tab                Complete the selected slash command, agent, or @file
   mouse wheel        Scroll conversation history
   pgup / pgdown      Scroll conversation history
   ctrl+up / ctrl+down Scroll half a page

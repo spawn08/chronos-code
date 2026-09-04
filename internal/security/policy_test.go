@@ -214,3 +214,16 @@ func TestMCPDecisionsUseSafeReasons(t *testing.T) {
 		t.Fatalf("unknown server decision = %q, want require_approval", got)
 	}
 }
+
+func TestAllowMCPServerSessionCannotOverrideDeny(t *testing.T) {
+	policy := &Policy{DeniedMCPServers: []string{"denied"}, MCPDefaultPermission: MCPRequireApproval}
+	if err := policy.AllowMCPServerSession("denied"); err == nil {
+		t.Fatal("AllowMCPServerSession(denied) error = nil")
+	}
+	if err := policy.AllowMCPServerSession("filesystem"); err != nil {
+		t.Fatalf("AllowMCPServerSession(filesystem) error = %v", err)
+	}
+	if got := policy.DecideMCPServer("filesystem").Permission; got != MCPAllow {
+		t.Fatalf("session trust = %q, want allow", got)
+	}
+}

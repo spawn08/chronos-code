@@ -1635,6 +1635,40 @@ func TestSetupMCPRuntimesOwnsIndependentClientsAndYoloStillRequiresApproval(t *t
 	}
 }
 
+func TestConnectMCPApprovesDiscoveredServer(t *testing.T) {
+	agents := map[string]*agent.Agent{
+		"coder": {ID: "coder", Tools: tool.NewRegistry()},
+	}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	client := &orchestratorMCPClient{}
+	runtimes := setupMCPRuntimes(context.Background(), agents, []mcp.ServerConfig{{
+		Name: "filesystem", Transport: mcp.TransportStdio, Command: "server",
+	}}, policy, time.Second, func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) {
+		return client, nil
+	})
+	orch := &Orchestrator{
+		agents:            agents,
+		policy:            policy,
+		mcpRuntimes:       runtimes,
+		mcpFactory:        func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) { return client, nil },
+		permissionChecker: security.NewPermissionChecker(policy, "/workspace"),
+	}
+	if statuses := orch.MCPStatuses(); len(statuses) != 1 || statuses[0].State != mcpdiscover.StateApprovalRequired {
+		t.Fatalf("MCPStatuses() = %#v", statuses)
+	}
+	status, err := orch.ConnectMCP(context.Background(), "filesystem")
+	if err != nil {
+		t.Fatalf("ConnectMCP() error = %v", err)
+	}
+	if status.State != mcpdiscover.StateConnected || status.Tools != 1 {
+		t.Fatalf("ConnectMCP() status = %#v", status)
+	}
+	name := mcpdiscover.ToolName("filesystem", "read")
+	if _, err := agents["coder"].Tools.Execute(context.Background(), name, nil); err == nil {
+		t.Fatal("connected MCP tool executed without approval")
+	}
+}
+
 func TestSetupSecurityUsesFloorWhenOverlaysAreMissing(t *testing.T) {
 	agents := map[string]*agent.Agent{"coder": {ID: "coder"}}
 	policy, err := setupSecurity(t.TempDir(), t.TempDir(), "/workspace", nil, agents)
