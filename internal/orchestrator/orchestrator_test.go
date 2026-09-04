@@ -560,6 +560,30 @@ func TestBudgetFailedCallReleasesReservation(t *testing.T) {
 	}
 }
 
+func TestBudgetUnknownModelRequiresPriceOnlyWithUSDCap(t *testing.T) {
+	request := &model.ChatRequest{Model: "claude-sonnet-5", Messages: []model.Message{{Role: model.RoleUser, Content: "hello"}}}
+	for _, tt := range []struct {
+		name    string
+		cap     budget.Microdollars
+		wantErr bool
+	}{
+		{name: "unlimited", cap: 0},
+		{name: "capped", cap: 1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			orch := &Orchestrator{usdBudget: budget.NewTrackerWithUSDCap(0, 0, tt.cap)}
+			hook := budgetHook{tracker: budget.NewTracker(0, 0), orchestrator: orch, agentID: "coder"}
+			err := hook.Before(context.Background(), &hooks.Event{Type: hooks.EventModelCallBefore, Input: request})
+			if tt.wantErr && !errors.Is(err, budget.ErrUnknownModel) {
+				t.Fatalf("Before() error = %v, want ErrUnknownModel", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Before() error = %v, want unknown unpriced model allowed without a USD cap", err)
+			}
+		})
+	}
+}
+
 func (p *skillContextTestProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 	p.record(req)
 	return &model.ChatResponse{Role: model.RoleAssistant, Content: "ok"}, nil

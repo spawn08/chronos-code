@@ -85,6 +85,15 @@ func TestCostSessionIsolationAndUnknowns(t *testing.T) {
 	}
 }
 
+func TestTrackerHasUSDCap(t *testing.T) {
+	if NewTrackerWithUSDCap(0, 0, 0).HasUSDCap() {
+		t.Fatal("unlimited tracker reports a USD cap")
+	}
+	if !NewTrackerWithUSDCap(0, 0, 1).HasUSDCap() {
+		t.Fatal("capped tracker does not report its USD cap")
+	}
+}
+
 func TestConcurrentCostAccounting(t *testing.T) {
 	const calls = 100
 	tr := NewTrackerWithUSDCap(0, 500, 100_000)

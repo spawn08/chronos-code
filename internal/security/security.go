@@ -238,7 +238,7 @@ func (g *Guard) checkShellArgs(args map[string]any, requireAllowlisted bool) err
 	}
 
 	if pattern := firstMatchingRegex(g.policy.neverAllow, command); pattern != nil {
-		return fmt.Errorf("security: shell command denied (matches never_allow pattern %q); if this was reading or searching a file, use file_read (with start_line/end_line) or file_grep (with regex/recursive search) instead of shell", pattern.String())
+		return fmt.Errorf("security: shell command denied by policy; use file_read for file contents or file_grep for searches instead of shell")
 	}
 
 	if requireAllowlisted && !g.shellCommandAllowed(command) {

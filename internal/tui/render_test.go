@@ -121,7 +121,7 @@ func TestRenderToolActivityFormatsReadableArgumentsAndErrors(t *testing.T) {
 		"path": "/tmp/app.go",
 		"line": 20,
 	}, true, nil)
-	for _, want := range []string{"@coder", "file_read", "· done", "line=20", "path=/tmp/app.go"} {
+	for _, want := range []string{"@coder", "file_read", "· done", ":20", "/tmp/app.go"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("completed activity missing %q: %q", want, got)
 		}
@@ -133,6 +133,22 @@ func TestRenderToolActivityFormatsReadableArgumentsAndErrors(t *testing.T) {
 	failed := RenderToolActivity("", "shell", map[string]any{"command": "false"}, true, "exit status 1")
 	if !strings.Contains(failed, "· failed") || !strings.Contains(failed, "error=exit status 1") {
 		t.Errorf("failed activity does not expose its error: %q", failed)
+	}
+}
+
+func TestRenderToolActivityCompactsFilePaths(t *testing.T) {
+	got := RenderToolActivity("@reviewer ", "file_read", map[string]any{
+		"path": "/Users/person/projects/chronos-code/internal/tui/render.go", "start_line": 10, "end_line": 30,
+	}, true, nil)
+	if !strings.Contains(got, "…/internal/tui/render.go") || !strings.Contains(got, ":10-30") || strings.Contains(got, "/Users/person") {
+		t.Fatalf("compacted file activity = %q", got)
+	}
+}
+
+func TestRenderModelActivityCount(t *testing.T) {
+	got := RenderModelActivityCount("@reviewer ", "anthropic", 4)
+	if !strings.Contains(got, "@reviewer") || !strings.Contains(got, "4 calls") || !strings.Contains(got, "anthropic") {
+		t.Fatalf("model activity count = %q", got)
 	}
 }
 

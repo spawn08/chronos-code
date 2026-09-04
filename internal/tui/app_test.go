@@ -572,6 +572,23 @@ func TestActivityShowsAgentToolLifecycle(t *testing.T) {
 	}
 }
 
+func TestActivityCollapsesRepeatedModelCalls(t *testing.T) {
+	m := newTestAppModel(t)
+	m.turnID = 1
+	m.sending = true
+	ch := make(chan chronosstream.Event)
+	for i := 0; i < 3; i++ {
+		_, _ = m.handleActivity(activityMsg{turnID: 1, event: chronosstream.Event{
+			Type: chronosstream.EventModelCall,
+			Data: map[string]any{"agent": "reviewer", "model": "anthropic"},
+		}, ch: ch})
+	}
+	got := m.renderTranscript()
+	if strings.Count(got, "model") != 1 || !strings.Contains(got, "3 calls") {
+		t.Fatalf("model activity was not collapsed: %q", got)
+	}
+}
+
 func TestSubagentStreamPreviewIsUpdatedByActivityWithoutDuplication(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
