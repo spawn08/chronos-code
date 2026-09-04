@@ -14,18 +14,18 @@ type Category int
 
 const (
 	CategoryUnknown         Category = iota
-	CategoryOverloaded             // 529 or "overloaded" in body
-	CategoryRateLimited            // 429
-	CategoryRequestTooLarge        // 413 or "request_too_large"
-	CategoryContextLength          // 400 with context_length / token limit messages
-	CategoryAuth                   // 401, 403
-	CategoryNotFound               // 404
-	CategoryInvalidRequest         // 400 (generic)
-	CategoryServerError            // 500, 502, 503, 504
-	CategoryTimeout                // request timeout, 408
-	CategoryNetworkError           // connection refused, DNS, etc.
-	CategoryCircuitOpen            // circuit breaker tripped
-	CategoryContentFilter          // content policy / safety filter
+	CategoryOverloaded               // 529 or "overloaded" in body
+	CategoryRateLimited              // 429
+	CategoryRequestTooLarge          // 413 or "request_too_large"
+	CategoryContextLength            // 400 with context_length / token limit messages
+	CategoryAuth                     // 401, 403
+	CategoryNotFound                 // 404
+	CategoryInvalidRequest           // 400 (generic)
+	CategoryServerError              // 500, 502, 503, 504
+	CategoryTimeout                  // request timeout, 408
+	CategoryNetworkError             // connection refused, DNS, etc.
+	CategoryCircuitOpen              // circuit breaker tripped
+	CategoryContentFilter            // content policy / safety filter
 )
 
 func (c Category) String() string {
@@ -110,7 +110,7 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 		}
 
 	case apiErr.StatusCode == 429:
-		msg := "Rate limited by the API."
+		var msg string
 		if apiErr.RetryAfter > 0 {
 			msg = fmt.Sprintf("Rate limited by the API. Retrying in %s...", apiErr.RetryAfter.Round(time.Second))
 		} else {

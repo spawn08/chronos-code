@@ -28,8 +28,8 @@ type PPDThresholds struct {
 	MinEstimatedCalls int `yaml:"min_estimated_calls"`
 }
 
-// PPDConfig is the routing.yaml policy section. Shadow is the safe rollout
-// mode: it preserves a decision for evaluation without invoking the planner.
+// PPDConfig is the routing.yaml policy section. Enabled delegates qualifying
+// work to the specialist. Shadow preserves a decision without invoking it.
 type PPDConfig struct {
 	Version         string        `yaml:"version"`
 	Mode            PPDMode       `yaml:"mode"`
@@ -138,11 +138,12 @@ func (p *PPDPolicy) Decide(request PPDRequest) PPDDecision {
 	}
 
 	decision.Reason = reason
-	if p.config.Mode == PPDModeShadow {
+	switch p.config.Mode {
+	case PPDModeShadow:
 		decision.Action = PPDActionShadow
-	} else if p.config.Mode == PPDModeEnabled {
+	case PPDModeEnabled:
 		decision.Action = PPDActionDelegate
-	} else {
+	default:
 		decision.Reason = fmt.Sprintf("unsupported_mode:%s", p.config.Mode)
 	}
 	return p.withOracle(decision, request.OracleAction)

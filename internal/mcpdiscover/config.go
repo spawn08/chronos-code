@@ -313,7 +313,7 @@ func writeDocument(path string, doc, servers map[string]json.RawMessage, userSco
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(mode); err == nil {
+	if err = tmp.Chmod(mode); err == nil {
 		_, err = tmp.Write(data)
 	}
 	if err == nil {

@@ -303,3 +303,32 @@ func TestStatusLine(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcileUsageAppliesCacheReadDiscount(t *testing.T) {
+	tr := NewTrackerWithUSDCap(0, 500, 0)
+	id, err := tr.Reserve("s1", "claude-sonnet-4-6", 400, 2)
+	if err != nil {
+		t.Fatalf("Reserve() error = %v", err)
+	}
+	err = tr.ReconcileUsage(id, model.Usage{
+		PromptTokens:        400,
+		CompletionTokens:    2,
+		CacheReadTokens:     10000,
+		CacheCreationTokens: 80,
+	})
+	if err != nil {
+		t.Fatalf("ReconcileUsage() error = %v", err)
+	}
+	// uncached 400*3 + write 80*3*5/4 + read 10000*3/10 + out 2*15
+	// = 1200 + 300 + 3000 + 30 = 4530
+	want := SessionCost{
+		InputTokens:         400,
+		OutputTokens:        2,
+		CacheReadTokens:     10000,
+		CacheCreationTokens: 80,
+		SpentMicrodollars:   4530,
+	}
+	if got := tr.Cost("s1"); got != want {
+		t.Fatalf("Cost() = %+v, want %+v", got, want)
+	}
+}

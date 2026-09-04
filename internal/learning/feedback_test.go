@@ -107,9 +107,9 @@ func TestTracker_ApplyFeedback_MixedSignals(t *testing.T) {
 
 	tr := NewTracker()
 	tr.RegisterLearned("x", "learn_mixed")
-	tr.RecordFeedback("x", Signal{Kind: SignalPositive})    // +0.05
-	tr.RecordFeedback("x", Signal{Kind: SignalNegative})    // -0.10
-	tr.RecordFeedback("x", Signal{Kind: SignalCorrection})  // -0.15
+	tr.RecordFeedback("x", Signal{Kind: SignalPositive})   // +0.05
+	tr.RecordFeedback("x", Signal{Kind: SignalNegative})   // -0.10
+	tr.RecordFeedback("x", Signal{Kind: SignalCorrection}) // -0.15
 	// net delta = -0.20, so 0.5 - 0.20 = 0.30
 
 	n, err := tr.ApplyFeedback(store)

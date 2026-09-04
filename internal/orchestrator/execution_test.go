@@ -288,6 +288,20 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		}
 	})
 
+	t.Run("high complexity delegates", func(t *testing.T) {
+		coder := &executionTestProvider{name: "coder", modelID: "test"}
+		planner := &executionTestProvider{name: "planner", modelID: "test"}
+		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, planner)
+
+		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "refactor across multiple packages"})
+		if err != nil || result.AgentID != "ppd-planner" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate || result.PPDDecision.Reason != "high_risk" {
+			t.Fatalf("Execute() = %#v, %v; want live PPD delegation on high complexity", result, err)
+		}
+		if len(coder.requests) != 0 {
+			t.Fatalf("coder calls = %d, want 0", len(coder.requests))
+		}
+	})
+
 	t.Run("enabled delegation", func(t *testing.T) {
 		coder := &executionTestProvider{name: "coder", modelID: "test"}
 		planner := &executionTestProvider{name: "planner", modelID: "test"}

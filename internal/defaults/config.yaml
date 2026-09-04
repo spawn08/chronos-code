@@ -40,7 +40,9 @@ defaults:
   permission_mode: "prompt"
   reasoning:
     strategy: "cot"
+    native: false
     effort: "medium"
+    summary: false
   context:
     max_tokens: 128000
     summarize_threshold: 0.8

@@ -131,14 +131,14 @@ func defaultShellCommands(pt ProjectType) []string {
 
 func detectProjectType(dir string) ProjectType {
 	markers := map[string]ProjectType{
-		"go.mod":         ProjectGo,
-		"package.json":   ProjectNode,
-		"Cargo.toml":     ProjectRust,
-		"pyproject.toml": ProjectPython,
-		"setup.py":       ProjectPython,
+		"go.mod":           ProjectGo,
+		"package.json":     ProjectNode,
+		"Cargo.toml":       ProjectRust,
+		"pyproject.toml":   ProjectPython,
+		"setup.py":         ProjectPython,
 		"requirements.txt": ProjectPython,
-		"pom.xml":        ProjectJava,
-		"build.gradle":   ProjectJava,
+		"pom.xml":          ProjectJava,
+		"build.gradle":     ProjectJava,
 		"build.gradle.kts": ProjectJava,
 	}
 	for file, pt := range markers {

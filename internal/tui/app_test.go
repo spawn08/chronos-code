@@ -16,6 +16,7 @@ import (
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 
+	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
@@ -157,6 +158,53 @@ func TestRenderTurnItems_CachesMarkdownByWidth(t *testing.T) {
 	m.invalidateRenderCache()
 	if m.activeTurnItems[0].rendered != "" {
 		t.Fatal("width invalidation retained active markdown cache")
+	}
+}
+
+func TestLiveStreamDefersMarkdownUntilFinalize(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.sending = true
+	m.appendTurnText("use **bold** now")
+	if live := m.renderTurnItems(); !strings.Contains(live, "**bold**") {
+		t.Fatalf("live stream applied markdown early: %q", live)
+	}
+
+	m.sending = false
+	m.activeTurnItems[0].rendered = ""
+	settled := m.renderTurnItems()
+	if strings.Contains(settled, "**bold**") {
+		t.Fatalf("finalized turn kept markdown markers: %q", settled)
+	}
+	if !strings.Contains(settled, "bold") {
+		t.Fatalf("finalized turn lost text: %q", settled)
+	}
+}
+
+func TestAppendWrappedTextRewrapsOnlyTheLastLine(t *testing.T) {
+	const width = 20
+	base := "hello world this is a wrapping line of text"
+	existing := wrapText(base, width)
+	got := appendWrappedText(existing, " more", width)
+	want := wrapText(base+" more", width)
+	if got != want {
+		t.Fatalf("incremental wrap diverged:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestViewReusesTranscriptWhileTyping(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.appendBlock("stable history")
+	m.refreshViewport()
+	_ = m.View()
+	if !m.viewportViewValid {
+		t.Fatal("View did not cache the transcript pane")
+	}
+	m.input.SetValue("typing does not rebuild history")
+	m.resizeViewport()
+	if !m.viewportViewValid {
+		t.Fatal("composer input invalidated the transcript pane")
 	}
 }
 
@@ -304,6 +352,32 @@ func TestHandleModelCommand_InfersActiveProviderForUnknownLiveModel(t *testing.T
 	provider, modelID := m.orch.ActiveModelInfo()
 	if provider != "openai" || modelID != "new-live-model" {
 		t.Errorf("active model = %s/%s, want openai/new-live-model", provider, modelID)
+	}
+}
+
+func TestHandleThinkCommand(t *testing.T) {
+	m := newTestAppModel(t)
+	if got := m.orch.ThinkingLevel(); got != "off" {
+		t.Fatalf("default thinking = %q, want off", got)
+	}
+
+	m.handleThinkCommand("high")
+	if got := m.orch.ThinkingLevel(); got != "high" {
+		t.Fatalf("thinking after /think high = %q, want high", got)
+	}
+	if !m.orch.ActiveAgent().ReasoningConfig.Enabled || m.orch.ActiveAgent().ReasoningConfig.BudgetTokens != 10000 {
+		t.Fatalf("reasoning config = %#v", m.orch.ActiveAgent().ReasoningConfig)
+	}
+
+	m.handleThinkCommand("off")
+	if got := m.orch.ThinkingLevel(); got != "off" {
+		t.Fatalf("thinking after /think off = %q, want off", got)
+	}
+
+	m.handleThinkCommand("nope")
+	got := strings.Join(m.blocks, "\n")
+	if !strings.Contains(got, "invalid") {
+		t.Fatalf("invalid /think should report an error, got %q", got)
 	}
 }
 
@@ -1314,6 +1388,18 @@ func TestDynamicSubagentSlashInvocationAcceptsToolSchemaJSON(t *testing.T) {
 	m.turnCancel()
 }
 
+func TestHandleKey_TabCompletesModel(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("/model clau")
+	_, cmd := m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	if cmd != nil {
+		t.Fatal("Tab completion returned a command")
+	}
+	if got := m.input.Value(); !strings.Contains(got, "claude") {
+		t.Fatalf("completed input = %q, want a claude model", got)
+	}
+}
+
 func TestHandleKey_TabCompletesSlashCommand(t *testing.T) {
 	m := newTestAppModel(t)
 	m.input.SetValue("/ag")
@@ -1643,5 +1729,31 @@ func TestInstallApprovalHandlersDelegatesToCompositionOwner(t *testing.T) {
 	}
 	if !wantCalled {
 		t.Fatal("installApprovalHandlers did not pass through the TUI handler")
+	}
+}
+
+func TestUsageSummaryShowsCacheHits(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastTurnCost = budget.SessionCost{
+		InputTokens:         400,
+		OutputTokens:        20,
+		CacheReadTokens:     12000,
+		CacheCreationTokens: 80,
+		SpentMicrodollars:   100,
+	}
+	m.lastModelCalls = 3
+
+	summary := m.usageSummary()
+	for _, want := range []string{"cache read 12000", "cache write 80", "input 400", "output 20"} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("usageSummary() = %q, want substring %q", summary, want)
+		}
+	}
+	if strings.Contains(summary, "cache n/a") {
+		t.Errorf("usageSummary() still reports cache as n/a: %q", summary)
+	}
+	status := m.usageStatus()
+	if !strings.Contains(status, "cache") {
+		t.Errorf("usageStatus() = %q, want cache hits", status)
 	}
 }

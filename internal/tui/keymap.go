@@ -44,6 +44,7 @@ Commands:
   /agents            List all agents (* active, primary marked)
   /agent <id>        Switch to a specialist (or back to chronos-code)
   /model [name]      Show or switch the active model
+  /think [level]     Show or set native thinking (off|low|medium|high)
   /login [provider]  Sign in (Claude Code / Codex / API key / enterprise OAuth)
   /logout <provider> Remove provider authentication
   /whoami [provider] Show authentication status
@@ -92,7 +93,7 @@ Keys:
   ctrl+y, ctrl+shift+c Copy the last assistant response (visible output if none)
   ctrl+shift+x       Copy the last fenced code block from the reply
   ctrl+o             Expand or collapse tool-call details
-  tab                Complete the selected slash command, agent, or @file
+  tab                Complete the selected slash command, /model, agent, or @file
   mouse wheel        Scroll conversation history after /mouse
   pgup / pgdown      Scroll conversation history
   ctrl+up / ctrl+down Scroll half a page

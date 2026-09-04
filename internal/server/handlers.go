@@ -46,8 +46,10 @@ type chatResponse struct {
 }
 
 type usagePayload struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -89,8 +91,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, chatResponse{
 		Content: result.Response.Content,
 		Usage: usagePayload{
-			PromptTokens:     result.Response.Usage.PromptTokens,
-			CompletionTokens: result.Response.Usage.CompletionTokens,
+			PromptTokens:        result.Response.Usage.UncachedPromptTokens(),
+			CompletionTokens:    result.Response.Usage.CompletionTokens,
+			CacheReadTokens:     result.Response.Usage.CacheReadTokens,
+			CacheCreationTokens: result.Response.Usage.CacheCreationTokens,
 		},
 		SessionID: result.SessionID,
 	})

@@ -43,7 +43,7 @@ func TestInputCompletionsIncludesSkillsAndAgents(t *testing.T) {
 		{input: "/subagent res", want: []string{"/subagent researcher "}},
 	}
 	for _, tt := range tests {
-		if got := inputCompletions(tt.input, agents, subagents, skills, nil, nil); !reflect.DeepEqual(got, tt.want) {
+		if got := inputCompletions(tt.input, agents, subagents, skills, nil, nil, nil); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("inputCompletions(%q) = %v, want %v", tt.input, got, tt.want)
 		}
 	}
@@ -63,8 +63,39 @@ func TestInputCompletionsIncludesFilesAndMCPServers(t *testing.T) {
 		{input: "/copy c", want: []string{"/copy code"}},
 	}
 	for _, tt := range tests {
-		if got := inputCompletions(tt.input, nil, nil, nil, files, servers); !reflect.DeepEqual(got, tt.want) {
+		if got := inputCompletions(tt.input, nil, nil, nil, files, servers, nil); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("inputCompletions(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestInputCompletionsIncludesModelsAndThink(t *testing.T) {
+	models := []string{"anthropic claude-sonnet-4-6", "openai gpt-4o"}
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{input: "/model clau", want: []string{"/model anthropic claude-sonnet-4-6"}},
+		{input: "/model gpt", want: []string{"/model openai gpt-4o"}},
+		{input: "/think m", want: []string{"/think medium"}},
+		{input: "/think of", want: []string{"/think off"}},
+		{input: "/think hi", want: []string{"/think high"}},
+	}
+	for _, tt := range tests {
+		if got := inputCompletions(tt.input, nil, nil, nil, nil, nil, models); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("inputCompletions(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestAppInputCompletionsSkipCatalogForPlainText(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("please inspect the renderer")
+	if got := m.inputCompletions(); got != nil {
+		t.Fatalf("plain text completions = %v, want nil", got)
+	}
+	m.input.SetValue("/cop")
+	if got := m.inputCompletions(); len(got) == 0 {
+		t.Fatal("slash prefix produced no completions")
 	}
 }

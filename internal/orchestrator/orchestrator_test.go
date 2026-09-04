@@ -805,6 +805,29 @@ func TestEscalationProviderFailurePreservesExistingModelAndLevel(t *testing.T) {
 	}
 }
 
+func TestSetThinking(t *testing.T) {
+	a, err := agent.New("coder", "Coder").Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder"}
+	if got := orch.ThinkingLevel(); got != "off" {
+		t.Fatalf("ThinkingLevel() = %q, want off", got)
+	}
+	if err := orch.SetThinking("medium"); err != nil {
+		t.Fatalf("SetThinking(medium) error = %v", err)
+	}
+	if got := orch.ThinkingLevel(); got != "medium" {
+		t.Fatalf("ThinkingLevel() = %q, want medium", got)
+	}
+	if !a.ReasoningConfig.Enabled || a.ReasoningConfig.Effort != "medium" || a.ReasoningConfig.BudgetTokens != 4096 {
+		t.Fatalf("ReasoningConfig = %#v", a.ReasoningConfig)
+	}
+	if err := orch.SetThinking("banana"); err == nil {
+		t.Fatal("SetThinking(banana) succeeded")
+	}
+}
+
 func TestRouteRespectsExplicitModelOverride(t *testing.T) {
 	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
 		router.ComplexityLow:    {router.TaskKindEdit: {Provider: "routed", Model: "low"}},

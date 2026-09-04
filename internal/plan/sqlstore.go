@@ -608,7 +608,7 @@ func (s *SQLStore) Backup(ctx context.Context, request BackupRequest) (BackupRes
 	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, request.Path); err != nil {
 		return BackupResult{}, fmt.Errorf("backup plan store: %w", err)
 	}
-	return BackupResult{Path: request.Path}, nil
+	return BackupResult(request), nil
 }
 
 // Restore validates and snapshots source before backing up and replacing this store.

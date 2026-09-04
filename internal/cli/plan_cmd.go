@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,7 +24,7 @@ type planCommand struct {
 
 func runPlan() error {
 	if len(os.Args) < 3 {
-		return fmt.Errorf(planUsage)
+		return errors.New(planUsage)
 	}
 	operation := os.Args[2]
 	command, err := parsePlanCommand(os.Args[3:])

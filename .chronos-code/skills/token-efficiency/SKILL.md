@@ -45,7 +45,7 @@ Always use the cheapest tier that can answer the question:
 - `internal/router/classifier.go` — determines task complexity
 - `internal/router/router.go` — routes to appropriate model tier
 - `internal/router/t1.go` — T1 tier routing logic
-- `internal/router/ppd.go` — PPD (Plan-Prompt-Delegate) routing (shadow mode by default)
+- `internal/router/ppd.go` — PPD (Plan-Prompt-Delegate) routing (`enabled` by default)
 
 ## Context Budget Allocation
 Each context source has a byte budget in `context_report.go`:

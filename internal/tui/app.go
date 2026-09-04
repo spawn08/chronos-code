@@ -298,6 +298,17 @@ type appModel struct {
 	searchIdx     int
 	completionIdx int
 
+	homeDir            string
+	completionCacheKey string
+	completionCache    []string
+	completionCached   bool
+	viewportViewCache  string
+	viewportViewValid  bool
+	headerCache        string
+	headerCacheWidth   int
+	headerCacheAgent   string
+	headerCacheDir     string
+
 	quitting bool
 }
 
@@ -313,6 +324,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	ta.Focus()
 
 	wd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
 
 	m := &appModel{
 		orch:           orch,
@@ -326,6 +338,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		clipboardWrite: clipboard.WriteAll,
 		mouseCapture:   false,
 		workDir:        wd,
+		homeDir:        home,
 		followOutput:   true,
 		statusMsg:      orch.StartupHints(ctx),
 	}
@@ -381,7 +394,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshPrompt()
 		m.resizeViewport()
-		m.viewport.SetContent(m.renderTranscript())
+		m.setViewportContent(m.renderTranscript())
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -394,6 +407,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.followOutput = m.viewport.AtBottom()
+		m.viewportViewValid = false
 		return m, cmd
 
 	case tea.PasteMsg:
@@ -535,6 +549,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.followOutput = m.viewport.AtBottom()
+		m.viewportViewValid = false
 		return m, cmd
 	}
 	if m.ready && msg.Mod.Contains(tea.ModCtrl) && (msg.Code == tea.KeyUp || msg.Code == tea.KeyDown) {
@@ -544,6 +559,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.viewport.HalfPageDown()
 		}
 		m.followOutput = m.viewport.AtBottom()
+		m.viewportViewValid = false
 		return m, nil
 	}
 	if m.ready && msg.Mod.Contains(tea.ModCtrl) && (msg.Code == tea.KeyHome || msg.Code == tea.KeyEnd) {
@@ -554,6 +570,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 			m.followOutput = true
 		}
+		m.viewportViewValid = false
 		return m, nil
 	}
 	if key.Matches(msg, keys.CopyLast) {
@@ -677,8 +694,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	completions := m.inputCompletions()
-	if m.completionIdx >= len(completions) {
+	if completions := m.inputCompletions(); m.completionIdx >= len(completions) {
 		m.completionIdx = 0
 	}
 	m.resizeViewport()
@@ -724,9 +740,15 @@ func (m *appModel) resizeViewport() {
 		if width < 1 {
 			width = 1
 		}
-		m.input.SetWidth(width)
+		if m.input.Width() != width {
+			m.input.SetWidth(width)
+		}
 		m.bottomView, m.bottomModal = m.renderBottom()
-		m.viewport.SetHeight(m.viewportHeight())
+		height := m.viewportHeight()
+		if m.viewport.Height() != height {
+			m.viewport.SetHeight(height)
+			m.viewportViewValid = false
+		}
 	}
 }
 
@@ -1086,11 +1108,8 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.finalizeTurn(resp.Err)
 	}
-	if resp.Usage.PromptTokens > 0 {
-		m.lastUsage = resp.Usage
-	}
-	if resp.Usage.CompletionTokens > m.lastUsage.CompletionTokens {
-		m.lastUsage.CompletionTokens = resp.Usage.CompletionTokens
+	if resp.Usage.PromptTokens > 0 || resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 || resp.Usage.CompletionTokens > 0 {
+		m.lastUsage.Merge(resp.Usage)
 	}
 	for _, tc := range resp.ToolCalls {
 		if tc.Name == "spawn_subagent" {
@@ -1122,6 +1141,9 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 			m.pendingSubagents = 0
 		}
 		m.appendTurnText(text)
+	}
+	if resp.Reasoning != "" {
+		m.appendThinking(resp.Reasoning)
 	}
 	cmds := []tea.Cmd{listenStream(msg.ctx, msg.turnID, msg.ch)}
 	if !m.renderScheduled {
@@ -1247,21 +1269,65 @@ func (m *appModel) appendTurnText(text string) {
 	}
 	m.activeAgentText.WriteString(text)
 	if n := len(m.activeTurnItems); n > 0 && m.activeTurnItems[n-1].kind == turnItemText {
-		m.activeTurnItems[n-1].content += text
-		m.activeTurnItems[n-1].rendered = ""
+		item := &m.activeTurnItems[n-1]
+		item.content += text
+		if item.rendered != "" {
+			item.rendered = appendWrappedText(item.rendered, text, item.renderedWidth)
+		}
 		return
 	}
 	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemText, content: text})
+}
+
+func (m *appModel) appendThinking(text string) {
+	if text == "" {
+		return
+	}
+	if m.activityIndex == nil {
+		m.activityIndex = make(map[string]int)
+	}
+	const key = "thinking"
+	if idx, ok := m.activityIndex[key]; ok && idx < len(m.activeTurnItems) {
+		item := &m.activeTurnItems[idx]
+		item.content += text
+		item.rendered = ""
+		return
+	}
+	m.appendTurnActivity(styleDim.Render("thinking: " + text))
+	m.activityIndex[key] = len(m.activeTurnItems) - 1
+}
+
+func appendWrappedText(existing, suffix string, width int) string {
+	if suffix == "" {
+		return existing
+	}
+	if width <= 0 {
+		return existing + suffix
+	}
+	lastNL := strings.LastIndexByte(existing, '\n')
+	prefix := ""
+	lastLine := existing
+	if lastNL >= 0 {
+		prefix = existing[:lastNL+1]
+		lastLine = existing[lastNL+1:]
+	}
+	return prefix + wrapText(lastLine+suffix, width)
 }
 
 func (m *appModel) appendTurnActivity(line string) {
 	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemActivity, content: line})
 }
 
+func (m *appModel) setViewportContent(s string) {
+	m.viewport.SetContent(s)
+	m.viewportViewValid = false
+}
+
 func (m *appModel) refreshViewport() {
-	m.viewport.SetContent(m.renderTranscript())
+	m.setViewportContent(m.renderTranscript())
 	if m.followOutput {
 		m.viewport.GotoBottom()
+		m.viewportViewValid = false
 	}
 }
 
@@ -1381,6 +1447,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		}
 	case "/model":
 		m.handleModelCommand(arg)
+	case "/think":
+		m.handleThinkCommand(arg)
 	case "/login":
 		if arg == "" {
 			m.wizard = newLoginWizard(m)
@@ -1444,7 +1512,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			break
 		}
 		copyCmd := m.copyClipboardCmd(content, okStatus)
-		m.viewport.SetContent(m.renderTranscript())
+		m.setViewportContent(m.renderTranscript())
 		m.viewport.GotoBottom()
 		return m, copyCmd
 	case "/perf":
@@ -1571,7 +1639,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	default:
 		m.appendError(fmt.Errorf("unknown command: %s (try /help)", cmd))
 	}
-	m.viewport.SetContent(m.renderTranscript())
+	m.setViewportContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 	return m, nil
 }
@@ -1667,6 +1735,7 @@ func (m *appModel) handleModelCommand(arg string) {
 		if info, ok := modelinfo.Lookup(provider, modelID); ok {
 			fmt.Fprintf(&b, "  (context window: %s tokens)", formatTokenCount(info.ContextWindow))
 		}
+		fmt.Fprintf(&b, "\nthinking: %s  (change with /think off|low|medium|high)", m.orch.ThinkingLevel())
 		b.WriteString("\n\n")
 
 		fetchCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
@@ -1720,6 +1789,18 @@ func (m *appModel) handleModelCommand(arg string) {
 		return
 	}
 	m.appendSystem(fmt.Sprintf("switched to %s / %s", provider, modelID))
+}
+
+func (m *appModel) handleThinkCommand(arg string) {
+	if arg == "" {
+		m.appendSystem(fmt.Sprintf("thinking: %s\nset with: /think off|low|medium|high", m.orch.ThinkingLevel()))
+		return
+	}
+	if err := m.orch.SetThinking(arg); err != nil {
+		m.appendError(err)
+		return
+	}
+	m.appendSystem(fmt.Sprintf("thinking: %s", m.orch.ThinkingLevel()))
 }
 
 // distinctProviders returns the unique provider names present in list, in
@@ -1829,7 +1910,7 @@ func listenOAuth(ch <-chan oauthEvent) tea.Cmd {
 func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
 	if msg.ev.url != "" {
 		m.appendSystem("open this URL to sign in:\n  " + msg.ev.url)
-		m.viewport.SetContent(m.renderTranscript())
+		m.setViewportContent(m.renderTranscript())
 		m.viewport.GotoBottom()
 		return m, listenOAuth(msg.ch)
 	}
@@ -1838,7 +1919,7 @@ func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
 	} else {
 		m.appendSystem("OAuth login complete")
 	}
-	m.viewport.SetContent(m.renderTranscript())
+	m.setViewportContent(m.renderTranscript())
 	if m.followOutput {
 		m.viewport.GotoBottom()
 	}
@@ -1943,24 +2024,21 @@ func (m *appModel) handleLearnCommand(arg string) {
 }
 
 func (m *appModel) usageSummary() string {
-	input, output := m.lastTurnCost.InputTokens, m.lastTurnCost.OutputTokens
-	if input == 0 && output == 0 {
-		input = int64(m.lastKnownUsage.PromptTokens)
-		output = int64(m.lastKnownUsage.CompletionTokens)
-	}
+	input, output, cacheRead, cacheWrite := m.turnUsageCounts()
 	session := m.orch.SessionCost()
-	return fmt.Sprintf("last turn: input %d │ output %d │ cache n/a │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ output %d │ cost %s",
-		input, output, m.formatCost(m.lastTurnCost.SpentMicrodollars), m.lastModelCalls, m.lastSubagents, session.InputTokens, session.OutputTokens,
+	return fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ output %d │ cost %s",
+		input, cacheRead, cacheWrite, output, m.formatCost(m.lastTurnCost.SpentMicrodollars), m.lastModelCalls, m.lastSubagents,
+		session.InputTokens, session.CacheReadTokens, session.OutputTokens,
 		m.formatCost(session.SpentMicrodollars))
 }
 
 func (m *appModel) usageStatus() string {
-	input, output := m.lastTurnCost.InputTokens, m.lastTurnCost.OutputTokens
-	if input == 0 && output == 0 {
-		input = int64(m.lastKnownUsage.PromptTokens)
-		output = int64(m.lastKnownUsage.CompletionTokens)
+	input, output, cacheRead, _ := m.turnUsageCounts()
+	status := fmt.Sprintf("in %s · out %s", formatTokenCount64(input), formatTokenCount64(output))
+	if cacheRead > 0 {
+		status += fmt.Sprintf(" · cache %s", formatTokenCount64(cacheRead))
 	}
-	status := fmt.Sprintf("in %s · out %s · %d calls", formatTokenCount64(input), formatTokenCount64(output), m.lastModelCalls)
+	status += fmt.Sprintf(" · %d calls", m.lastModelCalls)
 	if m.lastSubagents > 0 {
 		label := "subagents"
 		if m.lastSubagents == 1 {
@@ -1969,6 +2047,18 @@ func (m *appModel) usageStatus() string {
 		status += fmt.Sprintf(" · %d %s", m.lastSubagents, label)
 	}
 	return status + " · " + m.formatCost(m.lastTurnCost.SpentMicrodollars)
+}
+
+func (m *appModel) turnUsageCounts() (input, output, cacheRead, cacheWrite int64) {
+	input, output = m.lastTurnCost.InputTokens, m.lastTurnCost.OutputTokens
+	cacheRead, cacheWrite = m.lastTurnCost.CacheReadTokens, m.lastTurnCost.CacheCreationTokens
+	if input == 0 && output == 0 && cacheRead == 0 && cacheWrite == 0 {
+		input = int64(m.lastKnownUsage.UncachedPromptTokens())
+		output = int64(m.lastKnownUsage.CompletionTokens)
+		cacheRead = int64(m.lastKnownUsage.CacheReadTokens)
+		cacheWrite = int64(m.lastKnownUsage.CacheCreationTokens)
+	}
+	return input, output, cacheRead, cacheWrite
 }
 
 func (m *appModel) formatCost(cost budget.Microdollars) string {
@@ -2093,7 +2183,7 @@ func (m *appModel) appendUserTurn(line string) {
 	header := RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width())
 	body := wrapText(line, m.viewport.Width())
 	m.appendBlock(header + "\n" + body)
-	m.viewport.SetContent(m.renderTranscript())
+	m.setViewportContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 }
 
@@ -2184,6 +2274,11 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	}
 	m.settleTurnActivities(err)
 	m.sending = false
+	for i := range m.activeTurnItems {
+		if m.activeTurnItems[i].kind == turnItemText {
+			m.activeTurnItems[i].rendered = ""
+		}
+	}
 	if m.turnCancel != nil {
 		m.turnCancel()
 		m.turnCancel = nil
@@ -2203,19 +2298,20 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	if err == nil {
 		m.lastAssistantText = m.activeAgentText.String()
 	}
-	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 {
+	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 || m.lastUsage.CacheReadTokens > 0 || m.lastUsage.CacheCreationTokens > 0 {
 		m.lastKnownUsage = m.lastUsage
-		m.statusMsg = fmt.Sprintf("tokens: %d prompt + %d completion = %d total",
-			m.lastUsage.PromptTokens, m.lastUsage.CompletionTokens,
-			m.lastUsage.PromptTokens+m.lastUsage.CompletionTokens)
+		m.statusMsg = fmt.Sprintf("tokens: %d prompt + %d cache read + %d completion",
+			m.lastUsage.UncachedPromptTokens(), m.lastUsage.CacheReadTokens, m.lastUsage.CompletionTokens)
 	}
 	cost := m.orch.SessionCost()
 	turnCost := budget.SessionCost{
-		InputTokens:       cost.InputTokens - m.turnCostStart.InputTokens,
-		OutputTokens:      cost.OutputTokens - m.turnCostStart.OutputTokens,
-		SpentMicrodollars: cost.SpentMicrodollars - m.turnCostStart.SpentMicrodollars,
+		InputTokens:         cost.InputTokens - m.turnCostStart.InputTokens,
+		OutputTokens:        cost.OutputTokens - m.turnCostStart.OutputTokens,
+		CacheReadTokens:     cost.CacheReadTokens - m.turnCostStart.CacheReadTokens,
+		CacheCreationTokens: cost.CacheCreationTokens - m.turnCostStart.CacheCreationTokens,
+		SpentMicrodollars:   cost.SpentMicrodollars - m.turnCostStart.SpentMicrodollars,
 	}
-	if turnCost.InputTokens > 0 || turnCost.OutputTokens > 0 {
+	if turnCost.InputTokens > 0 || turnCost.OutputTokens > 0 || turnCost.CacheReadTokens > 0 || turnCost.CacheCreationTokens > 0 {
 		m.lastTurnCost = turnCost
 		m.lastModelCalls = m.turnModelCalls
 		m.lastSubagents = m.turnSubagents
@@ -2243,7 +2339,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.activeSkill = ""
 	m.budgetRetried = false
 	m.lastUsage = model.Usage{}
-	m.viewport.SetContent(m.renderTranscript())
+	m.setViewportContent(m.renderTranscript())
 	if m.followOutput {
 		m.viewport.GotoBottom()
 	}
@@ -2536,11 +2632,16 @@ func (m *appModel) renderOneItem(item *turnItem) string {
 	if item.kind == turnItemActivity {
 		return truncateToWidth(item.content, m.viewport.Width())
 	}
-	if item.rendered != "" && item.renderedWidth == m.viewport.Width() {
+	width := m.viewport.Width()
+	if item.rendered != "" && item.renderedWidth == width {
 		return item.rendered
 	}
-	item.rendered = RenderMarkdownLite(item.content, m.viewport.Width())
-	item.renderedWidth = m.viewport.Width()
+	if m.sending {
+		item.rendered = wrapText(item.content, width)
+	} else {
+		item.rendered = RenderMarkdownLite(item.content, width)
+	}
+	item.renderedWidth = width
 	return item.rendered
 }
 
@@ -2566,6 +2667,15 @@ func (m *appModel) invalidateRenderCache() {
 	}
 }
 
+func (m *appModel) transcriptView() string {
+	if m.viewportViewValid {
+		return m.viewportViewCache
+	}
+	m.viewportViewCache = m.viewport.View()
+	m.viewportViewValid = true
+	return m.viewportViewCache
+}
+
 func (m *appModel) View() tea.View {
 	defer m.perf.recordViewEnd()
 	if !m.ready {
@@ -2573,7 +2683,7 @@ func (m *appModel) View() tea.View {
 	}
 
 	view := tea.View{
-		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.viewport.View(), m.bottomView, m.renderStatusBar()),
+		Content:   lipgloss.JoinVertical(lipgloss.Left, m.renderHeaderBar(), m.transcriptView(), m.bottomView, m.renderStatusBar()),
 		AltScreen: true,
 	}
 	if m.mouseCapture {
@@ -2608,29 +2718,47 @@ func (m *appModel) renderHeaderBar() string {
 	if m.width <= 0 {
 		return ""
 	}
+	agentID := ""
+	if m.orch != nil {
+		agentID = m.orch.ActiveID()
+	}
+	if m.headerCache != "" && m.headerCacheWidth == m.width && m.headerCacheAgent == agentID && m.headerCacheDir == m.workDir {
+		return m.headerCache
+	}
 	left := " ◆ chronos-code "
-	if m.orch.ActiveID() != m.orch.PrimaryID() {
+	if m.orch != nil && m.orch.ActiveID() != m.orch.PrimaryID() {
 		left = " ◆ chronos-code · @" + m.orch.ActiveID() + " "
 	}
 	right := ""
 	if m.workDir != "" {
 		dir := m.workDir
-		if home, err := os.UserHomeDir(); err == nil {
-			if rel, err := filepath.Rel(home, dir); err == nil && !strings.HasPrefix(rel, "..") {
+		if m.homeDir != "" {
+			if rel, err := filepath.Rel(m.homeDir, dir); err == nil && !strings.HasPrefix(rel, "..") {
 				dir = "~/" + rel
 			}
 		}
 		right = " " + dir + " "
 	}
 	if lipgloss.Width(left) >= m.width {
-		return styleHeaderBar.Render(truncateToWidth(left, m.width))
+		out := styleHeaderBar.Render(truncateToWidth(left, m.width))
+		m.storeHeaderCache(agentID, out)
+		return out
 	}
 	right = truncateToWidth(right, m.width-lipgloss.Width(left))
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
 		gap = 0
 	}
-	return styleHeaderBar.Render(left + strings.Repeat(" ", gap) + right)
+	out := styleHeaderBar.Render(left + strings.Repeat(" ", gap) + right)
+	m.storeHeaderCache(agentID, out)
+	return out
+}
+
+func (m *appModel) storeHeaderCache(agentID, rendered string) {
+	m.headerCache = rendered
+	m.headerCacheWidth = m.width
+	m.headerCacheAgent = agentID
+	m.headerCacheDir = m.workDir
 }
 
 func (m *appModel) displayAgentName() string {
@@ -2732,6 +2860,9 @@ func (m *appModel) renderStatusBar() string {
 	if m.width >= 100 {
 		if m.orch.PlanMode() {
 			leftText += " │ plan"
+		}
+		if think := m.orch.ThinkingLevel(); think != "off" {
+			leftText += " │ think:" + think
 		}
 		leftText += " │ " + string(m.orch.VerificationMode())
 		if route := m.orch.LastRouteStatus(); route != "route:—" {
