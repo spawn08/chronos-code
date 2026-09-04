@@ -83,7 +83,11 @@ func (h *contextGuardHook) Before(_ context.Context, evt *hooks.Event) error {
 		return nil
 	}
 
-	// Trim oldest conversation messages until we fit.
+	// Trim oldest conversation messages until we fit. Always keep at least
+	// one user/assistant turn: Anthropic and Gemini strip system messages
+	// into a separate field, so a system-only request 400s with
+	// "it must contain at least one message" — which is exactly the failure
+	// seen after a tool-calling round when orphan tool-results wipe the tail.
 	trimmed := trimMessages(counter, req.Messages, protectedPrefix, effectiveLimit)
 	if tokens := counter.CountTokens(trimmed); tokens > effectiveLimit {
 		return fmt.Errorf("context guard: messages (%d tokens) exceed safe model budget (%d tokens after tool/output reserve) even after trimming; use /clear to start a fresh session",
@@ -118,16 +122,86 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 	base := counter.CountTokens(nil)
 	cost := func(m model.Message) int { return counter.CountTokens([]model.Message{m}) - base }
 
+	original := msgs
 	for total > limit && len(msgs) > protectedPrefix+1 {
 		total -= cost(msgs[protectedPrefix])
 		msgs = append(msgs[:protectedPrefix:protectedPrefix], msgs[protectedPrefix+1:]...)
-		// Drop orphaned tool results.
-		for len(msgs) > protectedPrefix && msgs[protectedPrefix].Role == model.RoleTool {
+		// Drop orphaned tool results, but never the last remaining
+		// conversation message — the inner loop used to wipe the whole
+		// tail after the assistant/tool-call turn was dropped.
+		for len(msgs) > protectedPrefix+1 && msgs[protectedPrefix].Role == model.RoleTool {
 			total -= cost(msgs[protectedPrefix])
 			msgs = append(msgs[:protectedPrefix:protectedPrefix], msgs[protectedPrefix+1:]...)
 		}
 	}
+	if !hasUserOrAssistant(msgs, protectedPrefix) {
+		msgs = restoreLastUserTurn(original, protectedPrefix)
+	}
+	if counter.CountTokens(msgs) > limit {
+		if collapsed := collapseToLastUser(original, protectedPrefix); len(collapsed) > 0 {
+			msgs = collapsed
+		}
+	}
 	return msgs
+}
+
+func hasUserOrAssistant(messages []model.Message, from int) bool {
+	for i := from; i < len(messages); i++ {
+		switch messages[i].Role {
+		case model.RoleUser, model.RoleAssistant:
+			return true
+		}
+	}
+	return false
+}
+
+// restoreLastUserTurn keeps the protected prefix plus the most recent user
+// message and everything after it (the in-flight tool-calling turn).
+func restoreLastUserTurn(messages []model.Message, protectedPrefix int) []model.Message {
+	if protectedPrefix < 0 {
+		protectedPrefix = 0
+	}
+	if protectedPrefix > len(messages) {
+		protectedPrefix = len(messages)
+	}
+	lastUser := -1
+	for i := len(messages) - 1; i >= protectedPrefix; i-- {
+		if messages[i].Role == model.RoleUser {
+			lastUser = i
+			break
+		}
+	}
+	out := make([]model.Message, 0, len(messages))
+	out = append(out, messages[:protectedPrefix]...)
+	if lastUser >= 0 {
+		return append(out, messages[lastUser:]...)
+	}
+	if protectedPrefix < len(messages) {
+		return append(out, messages[len(messages)-1])
+	}
+	return out
+}
+
+func collapseToLastUser(messages []model.Message, protectedPrefix int) []model.Message {
+	if protectedPrefix < 0 {
+		protectedPrefix = 0
+	}
+	if protectedPrefix > len(messages) {
+		protectedPrefix = len(messages)
+	}
+	lastUser := -1
+	for i := len(messages) - 1; i >= protectedPrefix; i-- {
+		if messages[i].Role == model.RoleUser {
+			lastUser = i
+			break
+		}
+	}
+	if lastUser < 0 {
+		return nil
+	}
+	out := make([]model.Message, 0, protectedPrefix+1)
+	out = append(out, messages[:protectedPrefix]...)
+	return append(out, messages[lastUser])
 }
 
 // maxToolResultBytes is the hard cap on any single tool result. Results

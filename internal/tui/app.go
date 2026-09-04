@@ -564,7 +564,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Code {
 		case tea.KeyTab:
-			m.input.SetValue(completions[m.completionIdx])
+			m.input.SetValue(applyCompletion(m.input.Value(), completions[m.completionIdx]))
 			m.input.CursorEnd()
 			m.completionIdx = 0
 			m.resizeViewport()
@@ -809,13 +809,16 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 		return m.handleShellEscape(line[1:])
 	case strings.HasPrefix(line, "@"):
 		parts := strings.SplitN(line[1:], " ", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && knownAgent(parts[0], m.orch.ListAgents()) {
 			if err := m.orch.SwitchAgent(parts[0]); err != nil {
 				m.appendError(err)
 				return m, nil
 			}
 			line = parts[1]
 		}
+	}
+	if root := m.workspaceRoot(); root != "" {
+		line = attachReferencedFiles(root, line, m.orch.ListAgents())
 	}
 
 	m.history.Add(displayLine)
@@ -1244,6 +1247,58 @@ func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
 	})
 }
 
+func (m *appModel) workspaceRoot() string {
+	if m.orch != nil {
+		if ws := m.orch.Workspace(); ws != nil && ws.Root != "" {
+			return ws.Root
+		}
+	}
+	return m.workDir
+}
+
+func (m *appModel) handleMCPCommand(arg string) {
+	fields := strings.Fields(arg)
+	if len(fields) == 0 {
+		m.appendSystem(m.mcpStatusText())
+		return
+	}
+	switch fields[0] {
+	case "connect":
+		if len(fields) != 2 {
+			m.appendError(fmt.Errorf("usage: /mcp connect <name>"))
+			return
+		}
+		status, err := m.orch.ConnectMCP(m.ctx, fields[1])
+		if err != nil {
+			m.appendError(err)
+			return
+		}
+		m.appendSystem(fmt.Sprintf("connected %s (%d tools)", status.Name, status.Tools))
+	default:
+		m.appendError(fmt.Errorf("unknown mcp command %q (try /mcp or /mcp connect <name>)", fields[0]))
+	}
+}
+
+func (m *appModel) mcpStatusText() string {
+	statuses := m.orch.MCPStatuses()
+	if len(statuses) == 0 {
+		return "no MCP servers discovered\nadd one with: chronos-code mcp add <name> --command <cmd>\nor place .mcp.json / .cursor/mcp.json in the project, then /mcp connect <name>"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "mcp servers (%d):\n", len(statuses))
+	for _, status := range statuses {
+		fmt.Fprintf(&b, "  %-24s %s", status.Name, status.State)
+		if status.Tools > 0 {
+			fmt.Fprintf(&b, "  tools=%d", status.Tools)
+		}
+		if status.State == "approval_required" {
+			fmt.Fprintf(&b, "  (/mcp connect %s)", status.Name)
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	parts := strings.SplitN(line, " ", 2)
 	cmd := strings.ToLower(parts[0])
@@ -1376,6 +1431,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			fmt.Fprintf(&b, "  %s  [%-8s] %s\n", rec.ID, rec.Category, rec.Content)
 		}
 		m.appendSystem(strings.TrimRight(b.String(), "\n"))
+	case "/mcp":
+		m.handleMCPCommand(arg)
 	case "/skills":
 		catalog := m.orch.ListSkills()
 		if len(catalog) == 0 {

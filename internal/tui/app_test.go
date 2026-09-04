@@ -1000,6 +1000,20 @@ func TestHandleSlashSkillsListsDiscoveredCatalog(t *testing.T) {
 	}
 }
 
+func TestHandleSlashMCPListsServersAndHelp(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("/mcp")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("/mcp returned a command")
+	}
+	output := strings.Join(m.blocks, "\n")
+	if !strings.Contains(output, "mcp") {
+		t.Errorf("/mcp output = %q, want MCP status or discovery help", output)
+	}
+}
+
 func TestSkillSlashInvocationStartsTurn(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})

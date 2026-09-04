@@ -1,20 +1,35 @@
 package tui
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
 const maxCommandCompletions = 5
 
+var mcpSubcommands = []string{"/mcp connect"}
+
 // inputCompletions returns fuzzy matches for commands, explicit skill
-// invocations, agent mentions, and agent-valued command arguments.
-func inputCompletions(input string, agents, subagents, skillNames []string) []string {
+// invocations, agent mentions, file mentions, and command arguments.
+func inputCompletions(input string, agents, subagents, skillNames, files, mcpServers []string) []string {
+	_, query := completionSpan(input)
+	if strings.HasPrefix(query, "@") {
+		return atCompletions(query, agents, files)
+	}
+
 	var candidates []string
 	switch {
-	case strings.HasPrefix(input, "@") && !strings.ContainsAny(input, " \t\n"):
-		for _, name := range agents {
-			candidates = append(candidates, "@"+name+" ")
+	case strings.HasPrefix(input, "/mcp connect") && (input == "/mcp connect" || strings.HasPrefix(input, "/mcp connect ")):
+		rest := strings.TrimSpace(strings.TrimPrefix(input, "/mcp connect"))
+		if strings.ContainsAny(rest, " \t\n") {
+			return nil
+		}
+		for _, name := range mcpServers {
+			candidates = append(candidates, "/mcp connect "+name)
+		}
+		if len(candidates) == 0 {
+			candidates = append(candidates, "/mcp connect")
 		}
 	case strings.HasPrefix(input, "/agent ") && !strings.ContainsAny(strings.TrimPrefix(input, "/agent "), " \t\n"):
 		for _, name := range agents {
@@ -26,22 +41,52 @@ func inputCompletions(input string, agents, subagents, skillNames []string) []st
 		}
 	case strings.HasPrefix(input, "/") && !strings.ContainsAny(input, " \t\n"):
 		candidates = append(candidates, paletteCommands...)
+		candidates = append(candidates, mcpSubcommands...)
 		for _, name := range skillNames {
 			candidates = append(candidates, "/"+name)
 		}
 	default:
 		return nil
 	}
+	return rankCompletions(candidates, strings.ToLower(input))
+}
 
+func atCompletions(query string, agents, files []string) []string {
+	needle := strings.TrimPrefix(query, "@")
+	var out []string
+	if !strings.ContainsAny(needle, "/.") {
+		var agentCandidates []string
+		for _, name := range agents {
+			agentCandidates = append(agentCandidates, "@"+name+" ")
+		}
+		out = append(out, rankCompletions(agentCandidates, strings.ToLower(query))...)
+	}
+	for _, file := range fileMentionCandidates(needle, files) {
+		duplicate := false
+		for _, existing := range out {
+			if existing == file {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, file)
+		}
+	}
+	if len(out) > maxCommandCompletions {
+		out = out[:maxCommandCompletions]
+	}
+	return out
+}
+
+func rankCompletions(candidates []string, needle string) []string {
 	type match struct {
 		command string
 		score   int
 	}
 	var matches []match
-	query := strings.ToLower(input)
 	for _, command := range candidates {
-		candidate := strings.ToLower(command)
-		score := fuzzyCommandScore(candidate, query)
+		score := fuzzyCommandScore(strings.ToLower(command), needle)
 		if score >= 0 {
 			matches = append(matches, match{command: command, score: score})
 		}
@@ -52,7 +97,6 @@ func inputCompletions(input string, agents, subagents, skillNames []string) []st
 		}
 		return len(matches[i].command) < len(matches[j].command)
 	})
-
 	limit := len(matches)
 	if limit > maxCommandCompletions {
 		limit = maxCommandCompletions
@@ -64,22 +108,82 @@ func inputCompletions(input string, agents, subagents, skillNames []string) []st
 	return result
 }
 
+func fileMentionCandidates(needle string, files []string) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	needle = strings.ToLower(needle)
+	type match struct {
+		path  string
+		score int
+	}
+	var matches []match
+	for _, file := range files {
+		path := filepath.ToSlash(file)
+		score := fileMentionScore(path, needle)
+		if score >= 0 {
+			matches = append(matches, match{path: path, score: score})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score < matches[j].score
+		}
+		if len(matches[i].path) != len(matches[j].path) {
+			return len(matches[i].path) < len(matches[j].path)
+		}
+		return matches[i].path < matches[j].path
+	})
+	limit := len(matches)
+	if limit > maxCommandCompletions {
+		limit = maxCommandCompletions
+	}
+	out := make([]string, limit)
+	for i := 0; i < limit; i++ {
+		out[i] = "@" + matches[i].path
+	}
+	return out
+}
+
+func fileMentionScore(path, needle string) int {
+	if needle == "" {
+		return 3
+	}
+	lower := strings.ToLower(path)
+	base := strings.ToLower(filepath.Base(path))
+	if base == needle || lower == needle {
+		return 0
+	}
+	if strings.HasPrefix(base, needle) || strings.HasPrefix(lower, needle) {
+		return 1
+	}
+	return fuzzyCommandScore(lower, needle)
+}
+
 func (m *appModel) inputCompletions() []string {
 	if m.orch == nil {
-		return inputCompletions(m.input.Value(), nil, nil, nil)
+		return inputCompletions(m.input.Value(), nil, nil, nil, nil, nil)
 	}
 	skillNames := make([]string, 0, len(m.orch.ListSkills()))
 	for _, skill := range m.orch.ListSkills() {
 		skillNames = append(skillNames, skill.Name)
 	}
-	return inputCompletions(m.input.Value(), m.orch.ListAgents(), m.orch.ListSubagents(), skillNames)
+	var files []string
+	if ws := m.orch.Workspace(); ws != nil {
+		files = ws.Files
+	}
+	var mcpServers []string
+	for _, status := range m.orch.MCPStatuses() {
+		mcpServers = append(mcpServers, status.Name)
+	}
+	return inputCompletions(m.input.Value(), m.orch.ListAgents(), m.orch.ListSubagents(), skillNames, files, mcpServers)
 }
 
 func commandCompletions(input string) []string {
 	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \t\n") {
 		return nil
 	}
-	return inputCompletions(input, nil, nil, nil)
+	return inputCompletions(input, nil, nil, nil, nil, nil)
 }
 
 func fuzzyCommandScore(candidate, query string) int {
