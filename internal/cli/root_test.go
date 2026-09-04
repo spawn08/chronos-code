@@ -1,14 +1,19 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spawn08/chronos-code/internal/budget"
+	"github.com/spawn08/chronos/engine/mcp"
 )
 
 func TestStripGlobalFlagsBudget(t *testing.T) {
@@ -261,6 +266,190 @@ func TestRunAgentsListsConfiguredAgents(t *testing.T) {
 	if !strings.Contains(string(output), "custom-worker") || !strings.Contains(string(output), "openai/test-model") {
 		t.Errorf("agents list output = %q", output)
 	}
+}
+
+func TestRunMCPCommandAddListRemoveAndUserScope(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	var output bytes.Buffer
+	unusedFactory := func(mcp.ServerConfig) (mcpTestClient, error) {
+		return nil, errors.New("unexpected client creation")
+	}
+
+	if err := runMCPCommand(context.Background(), []string{"add", "local", "--command", "npx", "--arg=-y", "--arg", "server"}, root, home, &output, unusedFactory); err != nil {
+		t.Fatalf("add stdio: %v", err)
+	}
+	if err := runMCPCommand(context.Background(), []string{"add", "remote", "--url", "https://mcp.example.test/events", "--scope", "user"}, root, home, &output, unusedFactory); err != nil {
+		t.Fatalf("add SSE: %v", err)
+	}
+	output.Reset()
+	if err := runMCPCommand(context.Background(), []string{"list"}, root, home, &output, unusedFactory); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, want := range []string{"local", "stdio", "npx -y server", "permission=require_approval", "status=configured"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("list output %q missing %q", output.String(), want)
+		}
+	}
+	output.Reset()
+	if err := runMCPCommand(context.Background(), []string{"list", "--scope=user"}, root, home, &output, unusedFactory); err != nil {
+		t.Fatalf("user list: %v", err)
+	}
+	if !strings.Contains(output.String(), "remote\tsse\thttps://mcp.example.test/events") {
+		t.Fatalf("user list output = %q", output.String())
+	}
+	if err := runMCPCommand(context.Background(), []string{"remove", "local"}, root, home, &output, unusedFactory); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+}
+
+func TestRunMCPCommandRejectsHTTPAndExpandedSecretsWithoutWriting(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	unusedFactory := func(mcp.ServerConfig) (mcpTestClient, error) { return nil, nil }
+	tests := [][]string{
+		{"add", "http", "--transport", "http", "--url", "https://example.test"},
+		{"add", "insecure", "--url", "http://example.test"},
+		{"add", "secret", "--command", "cmd", "--arg", "--token=plaintext"},
+	}
+	for _, args := range tests {
+		if err := runMCPCommand(context.Background(), args, root, home, io.Discard, unusedFactory); err == nil {
+			t.Fatalf("runMCPCommand(%v) error = nil", args)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid additions created config: %v", err)
+	}
+}
+
+func TestRunMCPCommandListRedactsCredentialValues(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	config := `{"mcpServers":{"local":{"command":"cmd","args":["--token","expanded-secret","--safe","visible"]},"remote":{"url":"https://example.test/mcp?api_key=expanded-query&region=west"}}}`
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := runMCPCommand(context.Background(), []string{"list"}, root, home, &output, func(mcp.ServerConfig) (mcpTestClient, error) { return nil, nil })
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(output.String(), "expanded-secret") || strings.Contains(output.String(), "expanded-query") {
+		t.Fatalf("list leaked secret: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "visible") || !strings.Contains(output.String(), "region=west") {
+		t.Fatalf("list over-redacted safe values: %q", output.String())
+	}
+}
+
+func TestRunMCPCommandTestConnectsListsAndCloses(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"local":{"command":"cmd"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeMCPTestClient{tools: []mcp.ToolInfo{{Name: "one"}, {Name: "two"}}}
+	var gotConfig mcp.ServerConfig
+	var output bytes.Buffer
+	err := runMCPCommand(context.Background(), []string{"test", "local", "--timeout", "1s"}, root, home, &output, func(cfg mcp.ServerConfig) (mcpTestClient, error) {
+		gotConfig = cfg
+		return fake, nil
+	})
+	if err != nil {
+		t.Fatalf("test: %v", err)
+	}
+	if !fake.connected || !fake.listed || !fake.closed {
+		t.Fatalf("lifecycle = connected:%t listed:%t closed:%t", fake.connected, fake.listed, fake.closed)
+	}
+	if gotConfig.Name != "local" || gotConfig.Transport != mcp.TransportStdio {
+		t.Fatalf("client config = %#v", gotConfig)
+	}
+	if got := output.String(); !strings.Contains(got, "status=ok") || !strings.Contains(got, "tools=2") || strings.Contains(got, "cmd") {
+		t.Fatalf("test output = %q", got)
+	}
+}
+
+func TestRunMCPCommandTestIsDeadlineBoundedAndClosesOnFailure(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"hang":{"command":"cmd","args":["--token","expanded-secret"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeMCPTestClient{connect: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	start := time.Now()
+	err := runMCPCommand(context.Background(), []string{"test", "hang", "--timeout=20ms"}, root, home, io.Discard, func(mcp.ServerConfig) (mcpTestClient, error) {
+		return fake, nil
+	})
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("test error = %v, want deadline exceeded", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("test exceeded deadline bound: %s", time.Since(start))
+	}
+	if !fake.closed {
+		t.Fatal("client was not closed after connect failure")
+	}
+	if strings.Contains(err.Error(), "expanded-secret") {
+		t.Fatalf("test error leaked secret: %v", err)
+	}
+}
+
+func TestPrintUsageDocumentsMCPCommands(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code"})
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		r.Close()
+	})
+	if err := printUsage(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"mcp add", "mcp list", "mcp remove", "mcp test", "Initialize, list tools, and close", "stdio and HTTPS SSE only", "HTTP transport is not supported", "${ENV_VAR} references"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("usage missing %q", want)
+		}
+	}
+}
+
+type fakeMCPTestClient struct {
+	connect   func(context.Context) error
+	tools     []mcp.ToolInfo
+	connected bool
+	listed    bool
+	closed    bool
+}
+
+func (f *fakeMCPTestClient) Connect(ctx context.Context) error {
+	f.connected = true
+	if f.connect != nil {
+		return f.connect(ctx)
+	}
+	return nil
+}
+
+func (f *fakeMCPTestClient) ListTools(context.Context) ([]mcp.ToolInfo, error) {
+	f.listed = true
+	return f.tools, nil
+}
+
+func (f *fakeMCPTestClient) Close() error {
+	f.closed = true
+	return nil
 }
 
 func resetGlobalFlags(t *testing.T, args []string) {

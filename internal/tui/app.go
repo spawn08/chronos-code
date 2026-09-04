@@ -20,6 +20,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 
 	"github.com/spawn08/chronos/engine/model"
 	chronosstream "github.com/spawn08/chronos/engine/stream"
@@ -122,6 +123,13 @@ type subagentDoneMsg struct {
 
 type shellDoneMsg struct{ err error }
 
+type clipboardWriteResultMsg struct{ err error }
+
+type clipboardReadResultMsg struct {
+	content string
+	err     error
+}
+
 const frameTimingSamples = 100
 
 type frameTiming struct {
@@ -202,10 +210,12 @@ type appModel struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	viewport viewport.Model
-	input    textarea.Model
-	spin     spinner.Model
-	history  *History
+	viewport       viewport.Model
+	input          textarea.Model
+	spin           spinner.Model
+	history        *History
+	clipboardRead  func() (string, error)
+	clipboardWrite func(string) error
 
 	width, height int
 	workDir       string
@@ -286,15 +296,17 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	wd, _ := os.Getwd()
 
 	m := &appModel{
-		orch:         orch,
-		stream:       stream,
-		ctx:          ctx,
-		cancel:       cancel,
-		input:        ta,
-		spin:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		history:      NewHistory(),
-		workDir:      wd,
-		followOutput: true,
+		orch:           orch,
+		stream:         stream,
+		ctx:            ctx,
+		cancel:         cancel,
+		input:          ta,
+		spin:           spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		history:        NewHistory(),
+		clipboardRead:  clipboard.ReadAll,
+		clipboardWrite: clipboard.WriteAll,
+		workDir:        wd,
+		followOutput:   true,
 	}
 
 	p := tea.NewProgram(m)
@@ -377,15 +389,6 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewport()
 		return m, nil
 
-	case tea.MouseWheelMsg:
-		if !m.ready {
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		m.followOutput = m.viewport.AtBottom()
-		return m, cmd
-
 	case spinner.TickMsg:
 		if !m.sending {
 			return m, nil
@@ -460,6 +463,24 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case clipboardWriteResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "copy failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = "copied response"
+		}
+		return m, nil
+
+	case clipboardReadResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "paste failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.input.InsertString(msg.content)
+		m.statusMsg = "pasted clipboard"
+		m.resizeViewport()
+		return m, nil
+
 	case oauthEventMsg:
 		return m.handleOAuthEvent(msg)
 	}
@@ -519,8 +540,18 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "nothing to copy"
 			return m, nil
 		}
-		m.statusMsg = "copy requested"
-		return m, tea.SetClipboard(m.lastAssistantText)
+		return m, m.copyClipboardCmd()
+	}
+	if key.Matches(msg, keys.Paste) {
+		m.statusMsg = "pasting"
+		read := m.clipboardRead
+		return m, func() tea.Msg {
+			if read == nil {
+				return clipboardReadResultMsg{err: fmt.Errorf("clipboard reader unavailable")}
+			}
+			content, err := read()
+			return clipboardReadResultMsg{content: content, err: err}
+		}
 	}
 	if completions := m.inputCompletions(); len(completions) > 0 {
 		if m.completionIdx >= len(completions) {
@@ -1249,13 +1280,13 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.followOutput = true
 	case "/copy":
 		if m.lastAssistantText == "" {
-			m.appendError(fmt.Errorf("no assistant response to copy"))
+			m.statusMsg = "nothing to copy"
 			break
 		}
-		m.statusMsg = "copy requested"
+		copyCmd := m.copyClipboardCmd()
 		m.viewport.SetContent(m.renderTranscript())
 		m.viewport.GotoBottom()
-		return m, tea.SetClipboard(m.lastAssistantText)
+		return m, copyCmd
 	case "/perf":
 		var stats runtime.MemStats
 		runtime.ReadMemStats(&stats)
@@ -1321,6 +1352,18 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 	return m, nil
+}
+
+func (m *appModel) copyClipboardCmd() tea.Cmd {
+	m.statusMsg = "copying"
+	write := m.clipboardWrite
+	content := m.lastAssistantText
+	return func() tea.Msg {
+		if write == nil {
+			return clipboardWriteResultMsg{err: fmt.Errorf("clipboard writer unavailable")}
+		}
+		return clipboardWriteResultMsg{err: write(content)}
+	}
 }
 
 // handleModelCommand implements /model. With no argument it shows the

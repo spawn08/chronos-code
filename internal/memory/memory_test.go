@@ -133,6 +133,28 @@ func TestTenantCannotListRecallOrDeleteAnotherTenantMemory(t *testing.T) {
 	}
 }
 
+func TestRecallExcludesUnvalidatedAndInvalidatedRecords(t *testing.T) {
+	s := NewStore(t.TempDir())
+	now := time.Now()
+	if err := s.save(CategoryProject, fileDoc{Records: []Record{
+		{ID: "valid", Category: CategoryProject, Content: "shared valid fact", Validated: true, CreatedAt: now},
+		{ID: "unvalidated", Category: CategoryProject, Content: "shared unchecked fact", CreatedAt: now},
+		{ID: "invalidated", Category: CategoryProject, Content: "shared stale fact", Validated: true, Invalidated: true, CreatedAt: now},
+	}}); err != nil {
+		t.Fatalf("save records: %v", err)
+	}
+
+	for _, query := range []string{"shared", ""} {
+		got, err := s.Recall(query, 10)
+		if err != nil {
+			t.Fatalf("Recall(%q): %v", query, err)
+		}
+		if len(got) != 1 || got[0].Record.ID != "valid" {
+			t.Fatalf("Recall(%q) = %+v, want only validated record", query, got)
+		}
+	}
+}
+
 func TestListMigratesLegacyRecordWithoutContentLoss(t *testing.T) {
 	s := NewStore(t.TempDir())
 	legacy := "records:\n  - id: mem_legacy\n    category: project\n    content: keep this content\n    created_at: 2026-01-02T03:04:05Z\n"
@@ -366,54 +388,11 @@ func TestContextBlockStressCapsLength(t *testing.T) {
 	}
 }
 
-func TestExtractFromMessage(t *testing.T) {
-	tests := []struct {
-		name         string
-		msg          string
-		wantCategory Category
-		wantExtract  bool
-	}{
-		{
-			name:         "triggering: remember",
-			msg:          "Please remember that I prefer tabs over spaces",
-			wantCategory: CategoryFeedback,
-			wantExtract:  true,
-		},
-		{
-			name:         "triggering: never",
-			msg:          "Never commit directly to main",
-			wantCategory: CategoryFeedback,
-			wantExtract:  true,
-		},
-		{
-			name:         "non-triggering",
-			msg:          "What does this function do?",
-			wantCategory: "",
-			wantExtract:  false,
-		},
-		{
-			name:         "empty string",
-			msg:          "",
-			wantCategory: "",
-			wantExtract:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cat, content, extracted := ExtractFromMessage(tt.msg)
-			if extracted != tt.wantExtract {
-				t.Fatalf("extracted = %v, want %v", extracted, tt.wantExtract)
-			}
-			if cat != tt.wantCategory {
-				t.Fatalf("category = %q, want %q", cat, tt.wantCategory)
-			}
-			if extracted && content != strings.TrimSpace(tt.msg) {
-				t.Fatalf("content = %q, want %q", content, strings.TrimSpace(tt.msg))
-			}
-			if !extracted && content != "" {
-				t.Fatalf("expected empty content when not extracted, got %q", content)
-			}
-		})
+func TestExtractFromMessageDoesNotDuplicateCommonIntentHandling(t *testing.T) {
+	for _, message := range []string{"remember: use tabs", "Never commit directly to main", "What does this function do?"} {
+		category, content, extracted := ExtractFromMessage(message)
+		if extracted || category != "" || content != "" {
+			t.Fatalf("ExtractFromMessage(%q) = (%q, %q, %t), want inert compatibility helper", message, category, content, extracted)
+		}
 	}
 }

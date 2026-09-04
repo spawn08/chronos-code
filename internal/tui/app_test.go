@@ -64,11 +64,13 @@ func newTestAppModel(t *testing.T) *appModel {
 
 	ta := newComposer()
 	return &appModel{
-		orch:    orch,
-		ctx:     context.Background(),
-		cancel:  func() {},
-		input:   ta,
-		history: NewHistory(),
+		orch:           orch,
+		ctx:            context.Background(),
+		cancel:         func() {},
+		input:          ta,
+		history:        NewHistory(),
+		clipboardRead:  func() (string, error) { return "", fmt.Errorf("unexpected clipboard read") },
+		clipboardWrite: func(string) error { return fmt.Errorf("unexpected clipboard write") },
 	}
 }
 
@@ -327,20 +329,6 @@ func TestStreamingDoesNotForceViewportToBottomAfterPageUp(t *testing.T) {
 	}
 }
 
-func TestMouseWheelDetachesViewportFromLiveOutput(t *testing.T) {
-	m := newTestAppModel(t)
-	m.followOutput = true
-	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
-	m.blocks = []string{strings.Repeat("line\n", 40)}
-	m.viewport.SetContent(m.renderTranscript())
-	m.viewport.GotoBottom()
-
-	_, _ = m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
-	if m.followOutput || m.viewport.AtBottom() {
-		t.Fatal("mouse wheel did not detach viewport from live output")
-	}
-}
-
 func TestStreamDeltaSchedulesBoundedRender(t *testing.T) {
 	m := newTestAppModel(t)
 	m.sending = true
@@ -389,6 +377,14 @@ func TestViewEnablesMouseWheelEvents(t *testing.T) {
 	}
 }
 
+func TestHelpDocumentsMouseAndNativeTerminalClipboard(t *testing.T) {
+	for _, want := range []string{"mouse wheel", "pgup / pgdown", "shift+drag", "Native clipboard paste"} {
+		if !strings.Contains(helpText, want) {
+			t.Errorf("help text missing %q", want)
+		}
+	}
+}
+
 func TestPasteInsertsMultilineComposerWithoutSubmitting(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -425,9 +421,15 @@ func TestTranscriptNavigationResumesFollowAtBottom(t *testing.T) {
 	}
 }
 
-func TestCopyReturnsClipboardCommandForLastAssistantResponse(t *testing.T) {
+func TestCopyCommandRoundTrip(t *testing.T) {
 	m := newTestAppModel(t)
-	m.lastAssistantText = "response to copy"
+	want := "first line\nUnicode: 世界\nlast line"
+	var written string
+	m.clipboardWrite = func(content string) error {
+		written = content
+		return nil
+	}
+	m.lastAssistantText = want
 	m.input.SetValue("/copy")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -435,19 +437,156 @@ func TestCopyReturnsClipboardCommandForLastAssistantResponse(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("/copy returned no clipboard command")
 	}
-	if m.statusMsg != "copy requested" {
-		t.Errorf("statusMsg = %q, want copy requested", m.statusMsg)
+	if m.statusMsg != "copying" {
+		t.Errorf("statusMsg = %q, want copying", m.statusMsg)
+	}
+	_, _ = m.Update(cmd())
+	if written != want {
+		t.Fatalf("clipboard write = %q, want exact multiline Unicode", written)
+	}
+	if m.statusMsg != "copied response" {
+		t.Errorf("statusMsg = %q, want copied response", m.statusMsg)
 	}
 }
 
-func TestCopyShortcutReturnsClipboardCommand(t *testing.T) {
+func TestCopyShortcutFailureRoundTrip(t *testing.T) {
 	m := newTestAppModel(t)
 	m.lastAssistantText = "response to copy"
+	m.clipboardWrite = func(string) error { return fmt.Errorf("host clipboard unavailable") }
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 
-	if cmd == nil || m.statusMsg != "copy requested" {
+	if cmd == nil || m.statusMsg != "copying" {
 		t.Fatalf("Ctrl+Y copy command = %v, status = %q", cmd != nil, m.statusMsg)
+	}
+	_, _ = m.Update(cmd())
+	if m.statusMsg != "copy failed: host clipboard unavailable" {
+		t.Fatalf("Ctrl+Y failure status = %q", m.statusMsg)
+	}
+}
+
+func TestCopyCommandFailureRoundTrip(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastAssistantText = "response to copy"
+	m.clipboardWrite = func(string) error { return fmt.Errorf("host clipboard unavailable") }
+	m.input.SetValue("/copy")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.Update(cmd())
+	if m.statusMsg != "copy failed: host clipboard unavailable" {
+		t.Fatalf("/copy failure status = %q", m.statusMsg)
+	}
+}
+
+func TestCopyShortcutSuccessRoundTrip(t *testing.T) {
+	m := newTestAppModel(t)
+	want := "response\n世界"
+	var written string
+	m.lastAssistantText = want
+	m.clipboardWrite = func(content string) error { written = content; return nil }
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	_, _ = m.Update(cmd())
+	if written != want || m.statusMsg != "copied response" {
+		t.Fatalf("Ctrl+Y wrote %q with status %q", written, m.statusMsg)
+	}
+}
+
+func TestPasteShortcutRoundTripPreservesExactMultilineUnicode(t *testing.T) {
+	m := newTestAppModel(t)
+	want := "first line\nUnicode: 世界\nlast line"
+	m.input.SetValue("prefix: ")
+	m.input.CursorEnd()
+	m.clipboardRead = func() (string, error) { return want, nil }
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	if cmd == nil || m.statusMsg != "pasting" {
+		t.Fatalf("Ctrl+V paste command = %v, status = %q", cmd != nil, m.statusMsg)
+	}
+	if got := m.input.Value(); got != "prefix: " {
+		t.Fatalf("composer mutated before clipboard result: %q", got)
+	}
+	_, _ = m.Update(cmd())
+	if got := m.input.Value(); got != "prefix: "+want {
+		t.Fatalf("pasted composer = %q, want exact multiline Unicode", got)
+	}
+	if m.statusMsg != "pasted clipboard" {
+		t.Fatalf("paste success status = %q", m.statusMsg)
+	}
+}
+
+func TestPasteShortcutFailureDoesNotMutateComposer(t *testing.T) {
+	m := newTestAppModel(t)
+	m.input.SetValue("unchanged 世界")
+	m.clipboardRead = func() (string, error) { return "ignored", fmt.Errorf("host clipboard unavailable") }
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
+	_, _ = m.Update(cmd())
+	if got := m.input.Value(); got != "unchanged 世界" {
+		t.Fatalf("failed paste mutated composer: %q", got)
+	}
+	if m.statusMsg != "paste failed: host clipboard unavailable" {
+		t.Fatalf("paste failure status = %q", m.statusMsg)
+	}
+}
+
+func TestClipboardShortcutsDoNotAccessClipboardWithOverlay(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*appModel)
+	}{
+		{name: "approval", setup: func(m *appModel) { m.approval = &pendingApproval{} }},
+		{name: "wizard", setup: func(m *appModel) { m.wizard = &loginWizard{} }},
+		{name: "picker", setup: func(m *appModel) { m.picker = &picker{} }},
+		{name: "search", setup: func(m *appModel) { m.searching = true }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestAppModel(t)
+			m.lastAssistantText = "response"
+			tt.setup(m)
+			accesses := 0
+			m.clipboardRead = func() (string, error) { accesses++; return "clipboard", nil }
+			m.clipboardWrite = func(string) error { accesses++; return nil }
+
+			for _, msg := range []tea.KeyPressMsg{{Code: 'y', Mod: tea.ModCtrl}, {Code: 'v', Mod: tea.ModCtrl}} {
+				_, cmd := m.Update(msg)
+				if cmd != nil {
+					t.Fatal("clipboard shortcut returned a command while overlay was active")
+				}
+			}
+			if accesses != 0 || m.input.Value() != "" {
+				t.Fatalf("overlay clipboard access = %d, composer = %q", accesses, m.input.Value())
+			}
+		})
+	}
+}
+
+func TestCopyWithNoAssistantResponseDoesNotAccessClipboard(t *testing.T) {
+	m := newTestAppModel(t)
+	accesses := 0
+	m.clipboardWrite = func(string) error { accesses++; return nil }
+
+	for _, submit := range []func() tea.Cmd{
+		func() tea.Cmd {
+			m.input.SetValue("/copy")
+			_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			return cmd
+		},
+		func() tea.Cmd {
+			_, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+			return cmd
+		},
+	} {
+		if cmd := submit(); cmd != nil {
+			t.Fatal("empty copy returned a clipboard command")
+		}
+	}
+	if accesses != 0 || m.input.Value() != "" {
+		t.Fatalf("empty copy access = %d, composer = %q", accesses, m.input.Value())
+	}
+	if m.statusMsg != "nothing to copy" {
+		t.Fatalf("empty copy status = %q", m.statusMsg)
 	}
 }
 

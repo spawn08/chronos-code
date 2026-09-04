@@ -128,12 +128,13 @@ type ExecutionRequest struct {
 // ExecutionResult carries the common identity and either a blocking response
 // or a streaming response channel, according to the request mode.
 type ExecutionResult struct {
-	AgentID     string
-	SessionID   string
-	TaskID      string
-	PPDDecision *router.PPDDecision
-	Response    *model.ChatResponse
-	Stream      <-chan *model.ChatResponse
+	AgentID      string
+	SessionID    string
+	TaskID       string
+	PPDDecision  *router.PPDDecision
+	MemoryIntent *memory.IntentResult
+	Response     *model.ChatResponse
+	Stream       <-chan *model.ChatResponse
 }
 
 type taskIDKey struct{}
@@ -239,7 +240,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 	wsInfo := setupWorkspace(root, agents)
 
+	setupSessionSummaries(sessionMgr, agents)
 	memStore := setupMemory(cfg, agents)
+	setupLearnedPatterns(ctx, cfg, root, agents)
 
 	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
 
@@ -618,6 +621,38 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 
 const maxPinnedLSPDiagnostics = 5
 
+const (
+	maxPriorSessionSummaries    = 3
+	maxPriorSessionSummaryBytes = 2000
+)
+
+func setupSessionSummaries(manager *session.Manager, agents map[string]*agent.Agent) {
+	if manager == nil {
+		return
+	}
+	for _, a := range agents {
+		prev := a.ContextPinsFn
+		agentID := a.ID
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var messages []model.Message
+			if prev != nil {
+				messages = append(messages, prev(ctx)...)
+			}
+			query, _ := ctx.Value(messageKey{}).(string)
+			summaries, err := manager.RecallSummaries(ctx, agentID, storage.SessionFromContext(ctx), query, maxPriorSessionSummaries, maxPriorSessionSummaryBytes)
+			if err != nil || len(summaries) == 0 {
+				return messages
+			}
+			var b strings.Builder
+			b.WriteString("Relevant context from prior sessions:")
+			for _, summary := range summaries {
+				fmt.Fprintf(&b, "\n- [session=%s source=%s updated=%s] %s", summary.SessionID, summary.Source, summary.UpdatedAt.UTC().Format(time.RFC3339), summary.Text)
+			}
+			return append(messages, model.Message{Role: model.RoleSystem, Content: b.String()})
+		}
+	}
+}
+
 // setupLSP registers the build-tag-dependent tools before runtime wrappers are
 // installed. The manager remains lazy, so missing server executables cannot
 // prevent startup.
@@ -811,19 +846,24 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 	dir := filepath.Join(config.ConfigDirName, "memory")
 	store := memory.NewStore(dir)
 	for _, a := range agents {
+		prev := a.ContextPinsFn
 		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var messages []model.Message
+			if prev != nil {
+				messages = append(messages, prev(ctx)...)
+			}
 			tenantStore := store.ForContext(ctx)
 			if msg, ok := ctx.Value(messageKey{}).(string); ok && msg != "" {
 				scored, err := tenantStore.Recall(msg, 5)
 				if err == nil && len(scored) > 0 {
-					return []model.Message{{Role: model.RoleSystem, Content: formatScoredMemories(scored)}}
+					return append(messages, model.Message{Role: model.RoleSystem, Content: formatScoredMemories(scored)})
 				}
 			}
 			block, err := tenantStore.ContextBlock(5)
 			if err != nil || block == "" {
-				return nil
+				return messages
 			}
-			return []model.Message{{Role: model.RoleSystem, Content: block}}
+			return append(messages, model.Message{Role: model.RoleSystem, Content: block})
 		}
 	}
 	return store
@@ -840,6 +880,42 @@ func formatScoredMemories(scored []memory.ScoredRecord) string {
 		fmt.Fprintf(&b, "\n- [%s] %s", sr.Record.Category, content)
 	}
 	return b.String()
+}
+
+func setupLearnedPatterns(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent) {
+	if !cfg.Learning.Enabled {
+		return
+	}
+	repoPath, sourceRevision, err := learning.RepositoryIdentity(ctx, root)
+	if err != nil {
+		return
+	}
+	outputDir := cfg.Learning.OutputDir
+	if outputDir == "" {
+		outputDir = filepath.Join(config.ConfigDirName, "learned")
+	}
+	if !filepath.IsAbs(outputDir) {
+		outputDir = filepath.Join(repoPath, outputDir)
+	}
+	setupLearnedPatternPins(learning.NewStore(outputDir), repoPath, sourceRevision, agents)
+}
+
+func setupLearnedPatternPins(store *learning.Store, repoPath, sourceRevision string, agents map[string]*agent.Agent) {
+	for _, a := range agents {
+		prev := a.ContextPinsFn
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var messages []model.Message
+			if prev != nil {
+				messages = append(messages, prev(ctx)...)
+			}
+			trigger, _ := ctx.Value(messageKey{}).(string)
+			pattern, err := store.SelectPattern(repoPath, trigger, sourceRevision)
+			if err != nil || pattern == nil {
+				return messages
+			}
+			return append(messages, model.Message{Role: model.RoleSystem, Content: learning.RenderPattern(pattern)})
+		}
+	}
 }
 
 // setupProjectDocs discovers AGENTS.md/CLAUDE.md/AGENT.md/.cursorrules/
@@ -1206,6 +1282,10 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 // Execute prepares and runs one task through the selected agent. It is the
 // shared path for blocking and streaming execution.
 func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	intent, hasIntent, err := memory.ParseIntent(request.Message)
+	if err != nil {
+		return ExecutionResult{}, fmt.Errorf("parse memory intent: %w", err)
+	}
 	if request.VerificationMode == "" {
 		request.VerificationMode = o.VerificationMode()
 	}
@@ -1247,10 +1327,19 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	if request.PolicyContext != nil {
 		ctx = context.WithValue(ctx, executionPolicyContextKey{}, request.PolicyContext)
 	}
-	var err error
+	result := ExecutionResult{AgentID: agentID, SessionID: sessionID, TaskID: taskID, PPDDecision: ppdDecision}
+	if hasIntent {
+		result.MemoryIntent, err = o.applyMemoryIntent(ctx, intent)
+		if err != nil {
+			return result, err
+		}
+	}
 	ctx, message, err := o.preparePrompt(ctx, request.Message, agentID, sessionID)
 	if err != nil {
-		return ExecutionResult{}, err
+		return result, err
+	}
+	if hasIntent && intent.Action == memory.IntentRecallPast && result.MemoryIntent.Applied {
+		ctx = context.WithValue(ctx, messageKey{}, intent.Payload)
 	}
 	// Predictive context is part of preparation, not a blocking-only feature.
 	if o.graphStore != nil && o.actBuf != nil {
@@ -1258,7 +1347,6 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			message += "\n\n" + preloaded
 		}
 	}
-	result := ExecutionResult{AgentID: agentID, SessionID: sessionID, TaskID: taskID, PPDDecision: ppdDecision}
 	if request.Mode == ExecutionStreaming {
 		if sessionID != "" && a.Storage != nil {
 			result.Stream, err = a.ChatStreamWithSession(ctx, sessionID, message)
@@ -1282,6 +1370,37 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	if !decision.Allowed {
 		return result, fmt.Errorf("verification does not support successful completion")
 	}
+	return result, nil
+}
+
+func (o *Orchestrator) applyMemoryIntent(ctx context.Context, intent memory.Intent) (*memory.IntentResult, error) {
+	result := &memory.IntentResult{Action: intent.Action, Category: intent.Category, RecordID: intent.RecordID}
+	if o.cfg == nil || !o.cfg.Memory.AutoExtract {
+		result.Reason = "auto_extract_disabled"
+		return result, nil
+	}
+	if o.memory == nil {
+		result.Reason = "memory_disabled"
+		return result, nil
+	}
+
+	tenantStore := o.memory.ForContext(ctx)
+	switch intent.Action {
+	case memory.IntentRemember:
+		record, err := tenantStore.Add(intent.Category, intent.Payload)
+		if err != nil {
+			return result, fmt.Errorf("apply remember intent: %w", err)
+		}
+		result.RecordID = record.ID
+	case memory.IntentForget:
+		if err := tenantStore.Forget(intent.RecordID); err != nil {
+			return result, fmt.Errorf("apply forget intent for %q: %w", intent.RecordID, err)
+		}
+	case memory.IntentRecallPast:
+	default:
+		return result, fmt.Errorf("apply memory intent: unsupported action %q", intent.Action)
+	}
+	result.Applied = true
 	return result, nil
 }
 

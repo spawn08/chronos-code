@@ -14,11 +14,13 @@ import (
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 	"github.com/spawn08/chronos-code/internal/server"
 	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos-code/internal/tui"
+	"github.com/spawn08/chronos/engine/mcp"
 	"github.com/spawn08/chronos/engine/model"
 )
 
@@ -76,6 +78,8 @@ func Execute() error {
 		return runSession()
 	case "memory":
 		return runMemory()
+	case "mcp":
+		return runMCP()
 	case "learn":
 		return runLearn()
 	case "eval":
@@ -258,6 +262,12 @@ Usage:
   chronos-code memory list [category]                   List remembered notes
   chronos-code memory search <query>                    Search remembered notes
   chronos-code memory forget <id>                        Remove a remembered note
+  chronos-code mcp add <name> --command <cmd> [--arg <arg> ...] [--scope project|user]
+  chronos-code mcp add <name> --url <https-url> [--scope project|user]
+  chronos-code mcp list [--scope project|user]           List canonical MCP servers with secrets redacted
+  chronos-code mcp remove <name> [--scope project|user]  Remove a canonical MCP server
+  chronos-code mcp test <name> [--timeout 10s] [--scope project|user]  Initialize, list tools, and close
+  MCP transports: stdio and HTTPS SSE only; HTTP transport is not supported. Credential values must remain ${ENV_VAR} references.
   chronos-code learn suggest [agent]                     Distill traced sessions into a reviewable suggestion
   chronos-code learn list                                List pending suggestions
   chronos-code learn show <id>                           Show a suggestion's full YAML and rationale
@@ -805,6 +815,224 @@ func runMemory() error {
 	default:
 		return fmt.Errorf("unknown memory command: %s", os.Args[2])
 	}
+}
+
+type mcpTestClient interface {
+	Connect(context.Context) error
+	ListTools(context.Context) ([]mcp.ToolInfo, error)
+	Close() error
+}
+
+func runMCP() error {
+	root, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve project directory: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve user home: %w", err)
+	}
+	return runMCPCommand(context.Background(), os.Args[2:], root, home, os.Stdout, func(cfg mcp.ServerConfig) (mcpTestClient, error) {
+		return mcp.NewClient(cfg)
+	})
+}
+
+func runMCPCommand(ctx context.Context, args []string, root, home string, stdout io.Writer, newClient func(mcp.ServerConfig) (mcpTestClient, error)) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: chronos-code mcp [add|list|remove|test]")
+	}
+	scope, rest, err := parseMCPValueFlag(args[1:], "scope", mcpdiscover.ScopeProject)
+	if err != nil {
+		return err
+	}
+	path, err := mcpdiscover.CanonicalPath(root, home, scope)
+	if err != nil {
+		return err
+	}
+	userScope := scope == mcpdiscover.ScopeUser
+
+	switch args[0] {
+	case "add":
+		server, err := parseMCPAdd(rest)
+		if err != nil {
+			return err
+		}
+		if err := mcpdiscover.AddManaged(path, server, userScope); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "added MCP server %q to %s scope\n", server.Name, scope)
+		return nil
+	case "list":
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: chronos-code mcp list [--scope project|user]")
+		}
+		servers, err := mcpdiscover.ListManaged(path)
+		if err != nil {
+			return err
+		}
+		if len(servers) == 0 {
+			fmt.Fprintf(stdout, "no MCP servers in %s scope\n", scope)
+			return nil
+		}
+		for _, server := range servers {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\tpermission=%s\tstatus=configured\n", server.Name, server.Transport, mcpdiscover.RedactedEndpoint(server), server.Permission)
+		}
+		return nil
+	case "remove":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: chronos-code mcp remove <name> [--scope project|user]")
+		}
+		if err := mcpdiscover.RemoveManaged(path, rest[0], userScope); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "removed MCP server %q from %s scope\n", rest[0], scope)
+		return nil
+	case "test":
+		timeoutText, remaining, err := parseMCPValueFlag(rest, "timeout", "10s")
+		if err != nil {
+			return err
+		}
+		if len(remaining) != 1 {
+			return fmt.Errorf("usage: chronos-code mcp test <name> [--timeout 10s] [--scope project|user]")
+		}
+		timeout, err := time.ParseDuration(timeoutText)
+		if err != nil || timeout <= 0 {
+			return fmt.Errorf("invalid MCP test timeout %q: must be a positive duration", timeoutText)
+		}
+		servers, err := mcpdiscover.ListManaged(path)
+		if err != nil {
+			return err
+		}
+		for _, server := range servers {
+			if server.Name == remaining[0] {
+				return testMCPServer(ctx, server, timeout, stdout, newClient)
+			}
+		}
+		return fmt.Errorf("MCP server %q does not exist", remaining[0])
+	default:
+		return fmt.Errorf("unknown mcp command: %s", args[0])
+	}
+}
+
+func parseMCPAdd(args []string) (mcpdiscover.ManagedServer, error) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "--") {
+		return mcpdiscover.ManagedServer{}, fmt.Errorf("usage: chronos-code mcp add <name> (--command <cmd> [--arg <arg> ...] | --url <https-url>) [--transport stdio|sse] [--scope project|user]")
+	}
+	server := mcpdiscover.ManagedServer{Name: args[0], Permission: "require_approval"}
+	for i := 1; i < len(args); i++ {
+		name, value, consumed, err := mcpFlag(args, i)
+		if err != nil {
+			return mcpdiscover.ManagedServer{}, err
+		}
+		i += consumed
+		switch name {
+		case "command":
+			if server.Command != "" {
+				return mcpdiscover.ManagedServer{}, fmt.Errorf("--command may be specified only once")
+			}
+			server.Command = value
+		case "arg":
+			server.Args = append(server.Args, value)
+		case "url":
+			if server.URL != "" {
+				return mcpdiscover.ManagedServer{}, fmt.Errorf("--url may be specified only once")
+			}
+			server.URL = value
+		case "transport":
+			if server.Transport != "" {
+				return mcpdiscover.ManagedServer{}, fmt.Errorf("--transport may be specified only once")
+			}
+			server.Transport = mcp.Transport(value)
+		default:
+			return mcpdiscover.ManagedServer{}, fmt.Errorf("unknown mcp add flag --%s", name)
+		}
+	}
+	if server.Transport == "" {
+		if server.URL != "" {
+			server.Transport = mcp.TransportSSE
+		} else {
+			server.Transport = mcp.TransportStdio
+		}
+	}
+	if err := mcpdiscover.ValidateManagedServer(server); err != nil {
+		return mcpdiscover.ManagedServer{}, err
+	}
+	return server, nil
+}
+
+func parseMCPValueFlag(args []string, target, defaultValue string) (string, []string, error) {
+	value := defaultValue
+	found := false
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg != "--"+target && !strings.HasPrefix(arg, "--"+target+"=") {
+			rest = append(rest, arg)
+			continue
+		}
+		if found {
+			return "", nil, fmt.Errorf("--%s may be specified only once", target)
+		}
+		found = true
+		if arg == "--"+target {
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				return "", nil, fmt.Errorf("--%s requires a value", target)
+			}
+			i++
+			value = args[i]
+		} else {
+			value = strings.TrimPrefix(arg, "--"+target+"=")
+			if value == "" {
+				return "", nil, fmt.Errorf("--%s requires a value", target)
+			}
+		}
+	}
+	return value, rest, nil
+}
+
+func mcpFlag(args []string, index int) (string, string, int, error) {
+	arg := args[index]
+	if !strings.HasPrefix(arg, "--") {
+		return "", "", 0, fmt.Errorf("unexpected mcp add argument %q", arg)
+	}
+	flag := strings.TrimPrefix(arg, "--")
+	if name, value, ok := strings.Cut(flag, "="); ok {
+		if value == "" {
+			return "", "", 0, fmt.Errorf("--%s requires a value", name)
+		}
+		return name, value, 0, nil
+	}
+	if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+		return "", "", 0, fmt.Errorf("--%s requires a value", flag)
+	}
+	return flag, args[index+1], 1, nil
+}
+
+func testMCPServer(ctx context.Context, server mcpdiscover.ManagedServer, timeout time.Duration, stdout io.Writer, newClient func(mcp.ServerConfig) (mcpTestClient, error)) error {
+	client, err := newClient(mcp.ServerConfig{
+		Name:       server.Name,
+		Transport:  server.Transport,
+		Command:    server.Command,
+		Args:       server.Args,
+		URL:        server.URL,
+		Permission: server.Permission,
+	})
+	if err != nil {
+		return fmt.Errorf("test MCP server %q: create client: %w", server.Name, err)
+	}
+	defer client.Close()
+
+	testCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := client.Connect(testCtx); err != nil {
+		return fmt.Errorf("test MCP server %q: initialize: %w", server.Name, err)
+	}
+	tools, err := client.ListTools(testCtx)
+	if err != nil {
+		return fmt.Errorf("test MCP server %q: list tools: %w", server.Name, err)
+	}
+	fmt.Fprintf(stdout, "%s\t%s\tpermission=%s\tstatus=ok\ttools=%d\n", server.Name, server.Transport, server.Permission, len(tools))
+	return nil
 }
 
 func runTeam() error {

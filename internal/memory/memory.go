@@ -368,33 +368,9 @@ func (s *Store) ContextBlock(maxRecords int) (string, error) {
 	return b.String(), nil
 }
 
-// Extraction trigger phrases. Matching is case-insensitive.
-var extractionTriggers = []string{
-	"remember",
-	"don't ",
-	"do not ",
-	"never ",
-	"always ",
-	"from now on",
-	"please note",
-	"for future reference",
-}
-
-// ExtractFromMessage is a deliberately simple, deterministic, zero-LLM-cost
-// heuristic that flags user messages likely to contain a standing
-// instruction or correction worth remembering. It is NOT a full LLM-based
-// extraction pipeline — it's a cheap first pass that a future LLM-based
-// distillation engine (PRD P3-002) can later replace or augment.
-//
-// If userMessage case-insensitively contains any known trigger substring,
-// it returns (CategoryFeedback, strings.TrimSpace(userMessage), true).
-// Otherwise it returns ("", "", false).
-func ExtractFromMessage(userMessage string) (category Category, content string, extracted bool) {
-	lower := strings.ToLower(userMessage)
-	for _, trigger := range extractionTriggers {
-		if strings.Contains(lower, trigger) {
-			return CategoryFeedback, strings.TrimSpace(userMessage), true
-		}
-	}
+// ExtractFromMessage is retained until the TUI-owned legacy call is removed.
+// Explicit intent is applied centrally by Orchestrator.Execute, so this helper
+// must not write a second copy or persist incidental trigger words.
+func ExtractFromMessage(string) (category Category, content string, extracted bool) {
 	return "", "", false
 }
