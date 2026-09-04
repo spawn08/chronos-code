@@ -157,6 +157,30 @@ type subagentTestProvider struct {
 	requests []*model.ChatRequest
 }
 
+type recoverableDenialProvider struct {
+	calls    int
+	requests []*model.ChatRequest
+}
+
+func (p *recoverableDenialProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
+	p.calls++
+	p.requests = append(p.requests, req)
+	if p.calls == 1 {
+		return &model.ChatResponse{
+			StopReason: model.StopReasonToolCall,
+			ToolCalls:  []model.ToolCall{{ID: "denied-1", Name: "file_read", Arguments: `{"path":".env"}`}},
+		}, nil
+	}
+	return &model.ChatResponse{Role: model.RoleAssistant, Content: "recovered", StopReason: model.StopReasonEnd}, nil
+}
+
+func (*recoverableDenialProvider) StreamChat(context.Context, *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	return nil, errors.New("unexpected streaming call")
+}
+
+func (*recoverableDenialProvider) Name() string  { return "recoverable-denial" }
+func (*recoverableDenialProvider) Model() string { return "test-model" }
+
 func (p *subagentTestProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 	p.mu.Lock()
 	p.requests = append(p.requests, req)
@@ -565,7 +589,7 @@ func TestBudgetFailedCallReleasesReservation(t *testing.T) {
 		t.Fatalf("SessionCost() = %+v, want released reservation and no spend", got)
 	}
 	if got := provider.callCount(); got != 1 {
-		t.Fatalf("provider calls = %d, want 1", got)
+		t.Fatalf("provider calls = %d, want 1 for a non-retryable provider error", got)
 	}
 }
 
@@ -824,7 +848,8 @@ func TestSessionSummaryContextBlockingStreamingParity(t *testing.T) {
 	setupSessionSummaries(session.NewManager(store, ""), map[string]*agent.Agent{"coder": a})
 	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", sessions: map[string]string{"coder": "active"}}
 
-	if _, err := orch.Execute(ctx, ExecutionRequest{Message: "fix parser", SessionID: "active"}); err != nil {
+	blockingResult, err := orch.Execute(ctx, ExecutionRequest{Message: "fix parser", SessionID: "active"})
+	if err != nil {
 		t.Fatalf("blocking Execute() error = %v", err)
 	}
 	streamed, err := orch.Execute(ctx, ExecutionRequest{Message: "fix parser", SessionID: "active", Mode: ExecutionStreaming})
@@ -841,6 +866,9 @@ func TestSessionSummaryContextBlockingStreamingParity(t *testing.T) {
 	}
 	if !strings.Contains(blocking, "existing pin") || !strings.Contains(blocking, "session=prior") || !strings.Contains(blocking, "fix the parser carefully") {
 		t.Fatalf("summary pins = %q, want existing and prior-session pins", blocking)
+	}
+	if got, want := contextSource(blockingResult.ContextReport, ContextSourceSessionSummaries), contextSource(streamed.ContextReport, ContextSourceSessionSummaries); got != want || got.SelectedCount != 1 || got.Bytes == 0 {
+		t.Fatalf("summary reports = (%#v, %#v), want equivalent selected metadata", got, want)
 	}
 	for _, message := range provider.request(0).Messages {
 		if strings.HasPrefix(message.Content, "Relevant context from prior sessions:") && strings.Contains(message.Content, "active session secret") {
@@ -931,6 +959,10 @@ func TestExecuteMemoryIntentBlockingStreamingParity(t *testing.T) {
 			}
 			if pins := strings.Join(systemContents(provider.request(0)), "\n"); !strings.Contains(pins, "run make test before release") {
 				t.Fatalf("same-turn memory pin = %q, want saved payload", pins)
+			}
+			memorySource := contextSource(result.ContextReport, ContextSourceMemory)
+			if memorySource.SelectedCount != 1 || memorySource.Bytes == 0 || memorySource.OmissionReason != "" {
+				t.Fatalf("memory context report = %#v", memorySource)
 			}
 		})
 	}
@@ -1532,6 +1564,106 @@ func userContent(req *model.ChatRequest) string {
 		}
 	}
 	return ""
+}
+
+func TestSetupSecurityUsesFloorWhenOverlaysAreMissing(t *testing.T) {
+	agents := map[string]*agent.Agent{"coder": {ID: "coder"}}
+	policy, err := setupSecurity(t.TempDir(), t.TempDir(), "/workspace", nil, agents)
+	if err != nil {
+		t.Fatalf("setupSecurity() error = %v", err)
+	}
+	if len(policy.DeniedPaths) == 0 || policy.MCPDefaultPermission != security.MCPRequireApproval {
+		t.Fatalf("setupSecurity() returned non-floor policy: %#v", policy)
+	}
+	if len(agents["coder"].Hooks) != 1 {
+		t.Fatalf("guard hooks = %d, want 1", len(agents["coder"].Hooks))
+	}
+}
+
+func TestSetupSecurityRejectsMalformedOrWeakeningOverlayBeforeInstallingGuard(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{"malformed", "shell: [", "parse policy yaml"},
+		{"weakening", "filesystem:\n  writable_paths: ['..']\n", "filesystem.writable_paths[0]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			projectDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(projectDir, "security.yaml"), []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			agents := map[string]*agent.Agent{"coder": {ID: "coder"}}
+			policy, err := setupSecurity(projectDir, t.TempDir(), "/workspace", nil, agents)
+			if err == nil || policy != nil {
+				t.Fatalf("setupSecurity() = %#v, %v; want nil policy and error", policy, err)
+			}
+			if !strings.Contains(err.Error(), "project security overlay") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("setupSecurity() error = %q, want source and %q", err, tc.want)
+			}
+			if len(agents["coder"].Hooks) != 0 {
+				t.Fatal("guard installed after invalid policy")
+			}
+		})
+	}
+}
+
+func TestSecurityFloorAppliesToYoloForEveryConfiguredAgent(t *testing.T) {
+	agents := map[string]*agent.Agent{
+		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
+		"reviewer": {ID: "reviewer", Tools: tool.NewRegistry()},
+	}
+	policy, err := setupSecurity(t.TempDir(), t.TempDir(), "/workspace", nil, agents)
+	if err != nil {
+		t.Fatalf("setupSecurity() error = %v", err)
+	}
+	executions := 0
+	for _, a := range agents {
+		registerPermissionTool(a.Tools, "shell", tool.PermAllow, &executions)
+	}
+	normalizeToolPermissions(agents)
+	orch := &Orchestrator{agents: agents, permissionChecker: security.NewPermissionChecker(policy, "/workspace")}
+	orch.SetApprovalHandler(func(context.Context, string, map[string]any) (bool, error) {
+		return true, nil
+	})
+	if err := orch.SetPermissionMode("auto_approve"); err != nil {
+		t.Fatalf("SetPermissionMode() error = %v", err)
+	}
+	for id, a := range agents {
+		if _, err := a.Tools.Execute(context.Background(), "shell", map[string]any{"command": "sudo true"}); err == nil {
+			t.Errorf("%s executed floor-denied command under yolo", id)
+		}
+	}
+	if executions != 0 {
+		t.Fatalf("floor-denied handler executions = %d, want 0", executions)
+	}
+}
+
+func TestSecurityGuardDenialIsRecoverableByAgent(t *testing.T) {
+	provider := &recoverableDenialProvider{}
+	a, err := agent.New("coder", "Coder").WithModel(provider).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executions := 0
+	registerPermissionTool(a.Tools, "file_read", tool.PermAllow, &executions)
+	agents := map[string]*agent.Agent{"coder": a}
+	if _, err := setupSecurity(t.TempDir(), t.TempDir(), "/workspace", nil, agents); err != nil {
+		t.Fatalf("setupSecurity() error = %v", err)
+	}
+	response, err := a.Chat(context.Background(), "read the environment")
+	if err != nil {
+		t.Fatalf("Chat() error = %v, want recoverable denial", err)
+	}
+	if response.Content != "recovered" || executions != 0 || len(provider.requests) != 2 {
+		t.Fatalf("recovery = content %q, executions %d, requests %d", response.Content, executions, len(provider.requests))
+	}
+	messages := provider.requests[1].Messages
+	if len(messages) == 0 || messages[len(messages)-1].Role != model.RoleTool || !strings.Contains(messages[len(messages)-1].Content, "denied by policy") {
+		t.Fatalf("follow-up messages = %#v, want recoverable policy-denial tool result", messages)
+	}
 }
 
 func newPermissionTestOrchestrator(t *testing.T, store storage.Storage) *Orchestrator {

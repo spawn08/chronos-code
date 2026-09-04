@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 // Note: lipgloss auto-detects color-profile support and disables styling
@@ -149,6 +152,56 @@ func TestRenderModelActivityCount(t *testing.T) {
 	got := RenderModelActivityCount("@reviewer ", "anthropic", 4)
 	if !strings.Contains(got, "@reviewer") || !strings.Contains(got, "4 calls") || !strings.Contains(got, "anthropic") {
 		t.Fatalf("model activity count = %q", got)
+	}
+}
+
+func TestRenderContextReportShowsSafeMetadata(t *testing.T) {
+	report := orchestrator.ContextReport{
+		Sources: []orchestrator.ContextSourceReport{
+			{Kind: orchestrator.ContextSourceSessionSummaries, ID: "session-summaries", Title: "Prior session summaries", SelectedCount: 2, Bytes: 1536, BudgetBytes: 8192, Truncated: true},
+			{Kind: orchestrator.ContextSourceDiagnostics, ID: "diagnostics", Title: "LSP diagnostics", BudgetBytes: 2048, OmissionReason: orchestrator.ContextOmittedSourceError},
+		},
+		TotalCount: 2, TotalBytes: 1536, BudgetBytes: 10240, Truncated: true,
+	}
+	intent := &memory.IntentResult{Action: memory.IntentRemember, Category: memory.CategoryProject, RecordID: "mem_sk-secret-body", Applied: true}
+
+	got := RenderContextReport(report, intent, 0)
+	for _, want := range []string{
+		"Prior session summaries", "[session_summaries]", "selected 2", "bytes 1.5 KiB", "budget 8.0 KiB",
+		"LSP diagnostics", "omitted: source error", "total: selected 2", "memory intent: remember project · applied",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("context report missing %q: %q", want, got)
+		}
+	}
+	for _, forbidden := range []string{"mem_sk-secret-body", "secret", "body"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("context report leaked %q: %q", forbidden, got)
+		}
+	}
+}
+
+func TestRenderContextMetadataFitsTerminalWidths(t *testing.T) {
+	report := orchestrator.ContextReport{
+		Sources: []orchestrator.ContextSourceReport{{
+			Kind: orchestrator.ContextSourceSessionSummaries, Title: "Prior session summaries",
+			SelectedCount: 3, Bytes: 2048, BudgetBytes: 8192, OmissionReason: orchestrator.ContextOmittedNotSelected,
+		}},
+		TotalCount: 3, TotalBytes: 2048, BudgetBytes: 8192,
+	}
+	intent := &memory.IntentResult{Action: memory.IntentRecallPast, Applied: false, Reason: "sk-secret-memory-body"}
+
+	for _, width := range []int{80, 40} {
+		for _, output := range []string{RenderContextReport(report, intent, width), truncateToWidth(RenderContextSummary(report, intent), width)} {
+			for i, line := range strings.Split(output, "\n") {
+				if got := lipgloss.Width(line); got > width {
+					t.Fatalf("width %d line %d rendered at %d: %q", width, i, got, line)
+				}
+			}
+			if strings.Contains(output, "sk-secret-memory-body") {
+				t.Fatalf("width %d output leaked intent reason: %q", width, output)
+			}
+		}
 	}
 }
 

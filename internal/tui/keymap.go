@@ -52,6 +52,7 @@ const helpText = `Commands:
   /budget            Show token budget status
   /workspace         Show detected workspace info
   /copy              Copy the last assistant response
+  /mouse             Toggle mouse scrolling vs ordinary drag selection
   /clear             Start a new session and clear the screen
   /perf              Show frame timing stats (p50/p95/p99)
   /quit              Exit

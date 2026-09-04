@@ -9,6 +9,9 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 var (
@@ -222,6 +225,84 @@ func RenderModelActivityCount(agent, modelName string, calls int) string {
 	}
 	return fmt.Sprintf("  %s %s%s %s", styleTool.Render("•"), agent,
 		styleBold.Render("model"), styleDim.Render("· "+label+" · "+modelName))
+}
+
+// RenderContextSummary returns one metadata-only activity row for a turn.
+func RenderContextSummary(report orchestrator.ContextReport, intent *memory.IntentResult) string {
+	selected := 0
+	for _, source := range report.Sources {
+		if source.SelectedCount > 0 {
+			selected++
+		}
+	}
+	line := fmt.Sprintf("  %s %s", styleTool.Render("•"), styleDim.Render(fmt.Sprintf(
+		"context · %d/%d sources · %s/%s", selected, len(report.Sources), formatContextBytes(report.TotalBytes), formatContextBytes(report.BudgetBytes))))
+	if report.Truncated {
+		line += styleDim.Render(" · truncated")
+	}
+	if intent != nil {
+		line += styleDim.Render(" · memory " + renderMemoryIntent(intent))
+	}
+	return line
+}
+
+// RenderContextReport renders only the stable metadata exposed by ContextReport.
+func RenderContextReport(report orchestrator.ContextReport, intent *memory.IntentResult, width int) string {
+	lines := []string{styleBold.Render("context sources:")}
+	for _, source := range report.Sources {
+		state := fmt.Sprintf("selected %d · bytes %s · budget %s", source.SelectedCount,
+			formatContextBytes(source.Bytes), formatContextBytes(source.BudgetBytes))
+		if source.OmissionReason != "" {
+			state += " · omitted: " + strings.ReplaceAll(source.OmissionReason, "_", " ")
+		}
+		if source.Truncated {
+			state += " · truncated"
+		}
+		line := fmt.Sprintf("  %s [%s] · %s", source.Title, source.Kind, state)
+		lines = append(lines, wrapText(line, width))
+	}
+	total := fmt.Sprintf("total: selected %d · bytes %s · budget %s", report.TotalCount,
+		formatContextBytes(report.TotalBytes), formatContextBytes(report.BudgetBytes))
+	if report.Truncated {
+		total += " · truncated"
+	}
+	lines = append(lines, wrapText(total, width), wrapText("memory intent: "+renderMemoryIntent(intent), width))
+	return strings.Join(lines, "\n")
+}
+
+func renderMemoryIntent(intent *memory.IntentResult) string {
+	if intent == nil {
+		return "none"
+	}
+	result := "not applied"
+	if intent.Applied {
+		result = "applied"
+	} else if reason := safeMemoryIntentReason(intent.Reason); reason != "" {
+		result += " (" + reason + ")"
+	}
+	detail := string(intent.Action)
+	if intent.Category != "" {
+		detail += " " + string(intent.Category)
+	}
+	return detail + " · " + result
+}
+
+func safeMemoryIntentReason(reason string) string {
+	switch reason {
+	case "auto_extract_disabled":
+		return "auto extract disabled"
+	case "memory_disabled":
+		return "memory disabled"
+	default:
+		return ""
+	}
+}
+
+func formatContextBytes(n int) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	return fmt.Sprintf("%.1f KiB", float64(n)/1024)
 }
 
 func summarizeToolArgs(name string, value any) string {

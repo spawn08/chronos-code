@@ -18,95 +18,7 @@ import (
 
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/storage"
-	"gopkg.in/yaml.v3"
 )
-
-// defaultMaxExecSeconds is applied when the shell.max_execution_time_sec
-// section is missing or zero.
-const defaultMaxExecSeconds = 300
-
-// Policy is the flattened, in-memory representation of the security policy
-// YAML (see internal/defaults/security.yaml for the on-disk shape).
-type Policy struct {
-	WritablePaths   []string
-	ReadablePaths   []string
-	DeniedPaths     []string
-	AllowedCommands []string
-	DeniedPatterns  []string
-	MaxExecSeconds  int
-	SecretPatterns  []string // carried through for reuse by another package
-	autoAllow       []*regexp.Regexp
-	confirm         []*regexp.Regexp
-	neverAllow      []*regexp.Regexp
-}
-
-// policyYAML mirrors the on-disk YAML shape.
-type policyYAML struct {
-	Version    string `yaml:"version"`
-	Filesystem struct {
-		WritablePaths []string `yaml:"writable_paths"`
-		ReadablePaths []string `yaml:"readable_paths"`
-		DeniedPaths   []string `yaml:"denied_paths"`
-	} `yaml:"filesystem"`
-	Shell struct {
-		AllowedCommands  []string `yaml:"allowed_commands"`
-		DeniedPatterns   []string `yaml:"denied_patterns"`
-		AutoAllow        []string `yaml:"auto_allow"`
-		Confirm          []string `yaml:"confirm"`
-		NeverAllow       []string `yaml:"never_allow"`
-		MaxExecutionSecs int      `yaml:"max_execution_time_sec"`
-	} `yaml:"shell"`
-	Secrets struct {
-		ScanOutput bool     `yaml:"scan_output"`
-		Patterns   []string `yaml:"patterns"`
-	} `yaml:"secrets"`
-}
-
-// LoadPolicy parses the security policy YAML and flattens it into a *Policy,
-// applying sane defaults for any missing section.
-func LoadPolicy(data []byte) (*Policy, error) {
-	var raw policyYAML
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("security: parse policy yaml: %w", err)
-	}
-
-	p := &Policy{
-		WritablePaths:   raw.Filesystem.WritablePaths,
-		ReadablePaths:   raw.Filesystem.ReadablePaths,
-		DeniedPaths:     raw.Filesystem.DeniedPaths,
-		AllowedCommands: raw.Shell.AllowedCommands,
-		DeniedPatterns:  raw.Shell.DeniedPatterns,
-		MaxExecSeconds:  raw.Shell.MaxExecutionSecs,
-		SecretPatterns:  raw.Secrets.Patterns,
-	}
-	if p.MaxExecSeconds <= 0 {
-		p.MaxExecSeconds = defaultMaxExecSeconds
-	}
-
-	var err error
-	if p.autoAllow, err = compilePatterns("shell.auto_allow", raw.Shell.AutoAllow); err != nil {
-		return nil, err
-	}
-	if p.confirm, err = compilePatterns("shell.confirm", raw.Shell.Confirm); err != nil {
-		return nil, err
-	}
-	if p.neverAllow, err = compilePatterns("shell.never_allow", raw.Shell.NeverAllow); err != nil {
-		return nil, err
-	}
-	return p, nil
-}
-
-func compilePatterns(field string, patterns []string) ([]*regexp.Regexp, error) {
-	compiled := make([]*regexp.Regexp, 0, len(patterns))
-	for i, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("security: invalid %s[%d] regex %q: %w", field, i, pattern, err)
-		}
-		compiled = append(compiled, re)
-	}
-	return compiled, nil
-}
 
 // Guard is a hooks.Hook that enforces Policy at tool-call time.
 type Guard struct {
@@ -183,9 +95,14 @@ func (g *Guard) checkFileArgs(toolName string, args map[string]any) error {
 		return fmt.Errorf("security: access to %q is denied by policy (matches a denied path pattern)", path)
 	}
 
-	if toolName == "file_write" && len(g.policy.WritablePaths) > 0 {
+	if toolName == "file_write" && g.policy.writablePathsConfigured() {
 		if !isUnderAnyRoot(g.root, g.policy.WritablePaths, resolved) {
 			return fmt.Errorf("security: write to %q is denied (outside all writable_paths)", path)
+		}
+	}
+	if toolName != "file_write" && g.policy.readablePathsConfigured() {
+		if !isUnderAnyRoot(g.root, g.policy.ReadablePaths, resolved) {
+			return fmt.Errorf("security: read from %q is denied (outside all readable_paths)", path)
 		}
 	}
 
@@ -260,7 +177,7 @@ func firstMatchingRegex(patterns []*regexp.Regexp, value string) *regexp.Regexp 
 }
 
 func (g *Guard) shellCommandAllowed(command string) bool {
-	if len(g.policy.AllowedCommands) == 0 {
+	if !g.policy.allowedCommandsSet && len(g.policy.AllowedCommands) == 0 {
 		return true
 	}
 	first := firstShellCommand(command)
