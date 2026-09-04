@@ -22,10 +22,7 @@ var (
 // Fix Issue 3: pre-allocated base styles instead of lipgloss.NewStyle() per call.
 // lipgloss.Style is a value type — calling .Width() / .MaxWidth() on these returns
 // a new copy without mutating the base, so sharing them across concurrent calls is safe.
-var (
-	wrapBaseStyle     = lipgloss.NewStyle()
-	truncateBaseStyle = lipgloss.NewStyle()
-)
+var truncateBaseStyle = lipgloss.NewStyle()
 
 // RenderMarkdownLite converts a small, deliberately restricted markdown
 // subset (headers, **bold**, _italic_, `inline code`, fenced code blocks,
@@ -96,6 +93,11 @@ func RenderMarkdownLite(s string, width int) string {
 //   - _text_   → match[1 : len-1]
 //   - `text`   → match[1 : len-1]
 func inlineStyle(s string) string {
+	var code []string
+	s = reInlineCode.ReplaceAllStringFunc(s, func(match string) string {
+		code = append(code, styleInlineCode.Render(match[1:len(match)-1]))
+		return fmt.Sprintf("\x00C%d\x00", len(code)-1)
+	})
 	s = reBold.ReplaceAllStringFunc(s, func(match string) string {
 		// match is "**inner**" — slice off the two leading/trailing asterisks
 		return styleBold.Render(match[2 : len(match)-2])
@@ -104,10 +106,9 @@ func inlineStyle(s string) string {
 		// match is "_inner_" — slice off the one leading/trailing underscore
 		return styleItalic.Render(match[1 : len(match)-1])
 	})
-	s = reInlineCode.ReplaceAllStringFunc(s, func(match string) string {
-		// match is "`inner`" — slice off the one leading/trailing backtick
-		return styleInlineCode.Render(match[1 : len(match)-1])
-	})
+	for i, rendered := range code {
+		s = strings.ReplaceAll(s, fmt.Sprintf("\x00C%d\x00", i), rendered)
+	}
 	return s
 }
 
@@ -121,7 +122,7 @@ func wrapText(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	return wrapBaseStyle.Width(width).Render(s)
+	return lipgloss.Wrap(s, width, " ")
 }
 
 // truncateToWidth clips s to width columns (ANSI-aware) instead of wrapping
@@ -154,6 +155,9 @@ func RenderToolCall(name, argSummary string) string {
 }
 
 func RenderToolActivity(agent, name string, args any, done bool, eventErr any) string {
+	if name == "spawn_subagent" {
+		return RenderSubagentActivity(agent, args, done, eventErr)
+	}
 	state := "running"
 	marker := "⎿"
 	if done {
@@ -175,6 +179,35 @@ func RenderToolActivity(agent, name string, args any, done bool, eventErr any) s
 	}
 	return fmt.Sprintf("  %s %s%s %s%s", styleTool.Render(marker), agent,
 		styleBold.Render(name), styleDim.Render("· "+state), styleDim.Render(details))
+}
+
+// RenderSubagentActivity keeps delegated work visible without exposing a raw
+// JSON argument blob. The task is intentionally concise so the activity line
+// remains readable on narrow terminals.
+func RenderSubagentActivity(parent string, args any, done bool, eventErr any) string {
+	values, _ := args.(map[string]any)
+	name, _ := values["agent"].(string)
+	if name == "" {
+		name, _ = values["name"].(string)
+	}
+	if name == "" {
+		name = "dynamic"
+	}
+	task, _ := values["task"].(string)
+	task = SummarizeArgs(task)
+	state, marker := "working", "◇"
+	if done {
+		state, marker = "completed", "✓"
+	}
+	if eventErr != nil {
+		state, marker = "failed", "✗"
+		task = summarizeActivityValue(eventErr)
+	}
+	if task != "" {
+		task = "  " + task
+	}
+	return fmt.Sprintf("  %s %s%s %s%s", styleTool.Render(marker), parent,
+		styleAgentName.Render("@"+name), styleDim.Render("· "+state), styleDim.Render(task))
 }
 
 func RenderModelActivity(agent, modelName string) string {
