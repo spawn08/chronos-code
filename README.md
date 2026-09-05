@@ -16,6 +16,7 @@ Chronos Code is a single Go binary that loads YAML agents, skills, and policies,
   - [Request path](#request-path)
   - [Package layout](#package-layout)
 - [Quick start](#quick-start)
+  - [Install](#install)
   - [Prerequisites](#prerequisites)
   - [Build](#build)
   - [Initialize a project](#initialize-a-project)
@@ -57,46 +58,7 @@ Chronos Code is a single Go binary that loads YAML agents, skills, and policies,
 
 The TUI and HTTP server are surfaces, not a second runtime. They do not talk to Chronos directly.
 
-```mermaid
-flowchart TB
-  subgraph surfaces [Surfaces]
-    MAIN["cmd/chronos-code"]
-    CLI["internal/cli"]
-    TUI["internal/tui"]
-    HTTP["internal/server"]
-    MAIN --> CLI
-    CLI --> TUI
-    CLI --> HTTP
-  end
-
-  ORCH["internal/orchestrator"]
-  CLI --> ORCH
-  TUI --> ORCH
-  HTTP --> ORCH
-
-  subgraph harness [Harness]
-    CFG["config + defaults YAML"]
-    RT["router: intent, model, path, PPD"]
-    WS["workspace + Go AST graph"]
-    SESS["sessions SQLite"]
-    MEM["memory YAML"]
-    SEC["security + guardrails + verification"]
-    SK["skills + MCP + optional LSP"]
-  end
-
-  ORCH --> CFG
-  ORCH --> RT
-  ORCH --> WS
-  ORCH --> SESS
-  ORCH --> MEM
-  ORCH --> SEC
-  ORCH --> SK
-
-  CHRONOS["Chronos SDK: agent, harness, tools, stream"]
-  ORCH --> CHRONOS
-  CHRONOS --> LLM["Model providers"]
-  CHRONOS --> TOOLS["File, shell, graph, MCP tools"]
-```
+![Chronos Code architecture](docs/assets/architecture.svg)
 
 ### Request path
 
@@ -140,6 +102,24 @@ flowchart TB
 Chronos itself (`github.com/spawn08/chronos`) is a **library**: agent SDK, harness, tool runtime, streaming, and storage adapters. Chronos Code does not reimplement that loop.
 
 ## Quick start
+
+### Install
+
+Prebuilt binaries are published on every [tagged release](https://github.com/spawn08/chronos-code/releases). Install the latest one:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.sh | bash
+```
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.ps1 | iex
+```
+
+Both scripts detect OS/arch, download the matching archive and `checksums-sha256.txt` from the release, verify the checksum, and install `chronos-code` to `~/.local/bin` (override with `INSTALL_DIR`/`$env:INSTALL_DIR`). Pin a specific version with `VERSION=v1.2.3` (`$env:VERSION` on Windows). Add the install directory to `PATH` if the script warns it isn't there yet.
+
+To build from source instead, see [Prerequisites](#prerequisites) and [Build](#build) below.
 
 ### Prerequisites
 
@@ -382,7 +362,7 @@ Chronos Code follows [semantic versioning](https://semver.org/) (`vMAJOR.MINOR.P
 chronos-code version
 ```
 
-A `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): tests, then linux/darwin/windows amd64 and arm64 archives with `sha256sum` manifests on a [GitHub Release](https://github.com/spawn08/chronos-code/releases).
+A `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): tests, then linux/darwin/windows amd64 and arm64 archives with `sha256sum` manifests on a [GitHub Release](https://github.com/spawn08/chronos-code/releases). [`scripts/install.sh`](scripts/install.sh) / [`scripts/install.ps1`](scripts/install.ps1) fetch, verify, and install those archives (see [Install](#install)).
 
 Every push and PR to `main` runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml): build, lint, `go test -race`, release-binary size gate, and the token-efficiency eval.
 
