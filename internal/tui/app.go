@@ -284,6 +284,11 @@ type appModel struct {
 	statusMsg    string
 	perf         frameTiming
 	followOutput bool
+	// mouseCapture defaults to true so the wheel scrolls the alt-screen
+	// transcript. Unshifted drag-select is impossible while this is on;
+	// copy uses shift+drag, Ctrl+Shift+C, and /copy. /mouse is an opt-out
+	// for unshifted terminal selection — do not default this to false to
+	// "fix copy", that regresses scrolling.
 	mouseCapture bool
 	bottomView   string
 	bottomModal  bool
@@ -344,7 +349,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		history:        NewHistory(),
 		clipboardRead:  clipboard.ReadAll,
 		clipboardWrite: clipboard.WriteAll,
-		mouseCapture:   false,
+		mouseCapture:   true,
 		workDir:        wd,
 		homeDir:        home,
 		followOutput:   true,
@@ -414,8 +419,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
-		m.followOutput = m.viewport.AtBottom()
-		m.viewportViewValid = false
+		m.afterViewportScroll()
 		return m, cmd
 
 	case tea.PasteMsg:
@@ -432,6 +436,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		// The spinner is only visible before the first turn item. Continuing
+		// the tick loop after that forces a full-frame View ~10Hz for no gain.
+		if !m.followOutput || len(m.activeTurnItems) > 0 {
+			return m, nil
+		}
 		return m, cmd
 
 	case approvalRequestMsg:
@@ -451,7 +460,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamRenderTickMsg:
 		m.renderScheduled = false
-		m.refreshViewport()
+		// A frozen viewport is required for drag-select / copy: replacing
+		// content every tick wipes the terminal selection.
+		if m.followOutput {
+			m.refreshViewport()
+		}
 		return m, nil
 
 	case activityMsg:
@@ -556,8 +569,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.ready && (msg.Code == tea.KeyPgUp || msg.Code == tea.KeyPgDown) {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
-		m.followOutput = m.viewport.AtBottom()
-		m.viewportViewValid = false
+		m.afterViewportScroll()
 		return m, cmd
 	}
 	if m.ready && msg.Mod.Contains(tea.ModCtrl) && (msg.Code == tea.KeyUp || msg.Code == tea.KeyDown) {
@@ -566,19 +578,18 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.viewport.HalfPageDown()
 		}
-		m.followOutput = m.viewport.AtBottom()
-		m.viewportViewValid = false
+		m.afterViewportScroll()
 		return m, nil
 	}
 	if m.ready && msg.Mod.Contains(tea.ModCtrl) && (msg.Code == tea.KeyHome || msg.Code == tea.KeyEnd) {
 		if msg.Code == tea.KeyHome {
 			m.viewport.GotoTop()
 			m.followOutput = false
+			m.viewportViewValid = false
 		} else {
-			m.viewport.GotoBottom()
 			m.followOutput = true
+			m.refreshViewport()
 		}
-		m.viewportViewValid = false
 		return m, nil
 	}
 	if key.Matches(msg, keys.CopyLast) {
@@ -1377,6 +1388,15 @@ func (m *appModel) refreshViewport() {
 	}
 }
 
+func (m *appModel) afterViewportScroll() {
+	wasFollowing := m.followOutput
+	m.followOutput = m.viewport.AtBottom()
+	m.viewportViewValid = false
+	if !wasFollowing && m.followOutput {
+		m.refreshViewport()
+	}
+}
+
 func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
 	cmdStr = strings.TrimSpace(cmdStr)
 	if cmdStr == "" {
@@ -1680,9 +1700,9 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	case "/mouse":
 		m.mouseCapture = !m.mouseCapture
 		if m.mouseCapture {
-			m.statusMsg = "mouse scrolling enabled · shift+drag selects text"
+			m.statusMsg = "mouse scrolling on · shift+drag or ctrl+shift+c to copy"
 		} else {
-			m.statusMsg = "mouse scrolling disabled · drag selects text"
+			m.statusMsg = "mouse scrolling off · drag selects text · pgup/pgdown still scroll"
 		}
 	default:
 		m.appendError(fmt.Errorf("unknown command: %s (try /help)", cmd))
@@ -2980,7 +3000,7 @@ func (m *appModel) renderStatusBar() string {
 
 	rightText := " drag-select copy │ ctrl+shift+c last │ ctrl+/ commands │ ctrl+c interrupt/quit "
 	if m.mouseCapture {
-		rightText = " shift+drag copy │ ctrl+shift+c last │ ctrl+/ commands │ ctrl+c interrupt/quit "
+		rightText = " wheel scroll │ shift+drag copy │ ctrl+shift+c last │ ctrl+/ commands "
 	}
 	if m.statusMsg != "" {
 		rightText = " " + m.statusMsg + " │" + rightText

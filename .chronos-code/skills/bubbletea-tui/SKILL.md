@@ -32,14 +32,21 @@ Commands are dispatched in `app.go`'s Update method. Available:
 - `/copy` / Ctrl+Y / Ctrl+Shift+C — clipboard (last response, or visible output)
 - `/copy visible`, `/copy all` — copy the on-screen pane or full transcript
 - `/copy code` / Ctrl+Shift+X — copy the last fenced code block
-- `/mouse` — toggle mouse-wheel scrolling; drag-select is the default
+- `/mouse` — opt out of wheel scrolling so unshifted drag-select works
 - Ctrl+O — expand or collapse tool-call details
 - `/resume`, `/compact`, `/rewind`, `/plan`, `/learn` — session, undo, plan mode, learning review
 
-## Mouse & Scrolling
-- Mouse capture starts DISABLED so terminal drag-select and Cmd+C work
-- `/mouse` enables wheel scrolling of the transcript (then use shift+drag to select)
-- Page Up/Down, Ctrl+Home/End always available
+## Mouse & Scrolling (do not flip this default)
+The transcript lives on the alt screen, so the terminal wheel does nothing
+unless Bubble Tea captures mouse events.
+
+- Default: `mouseCapture = true` (wheel scrolls). Copy = shift+drag, Cmd+C,
+  Ctrl+Shift+C, or `/copy`.
+- `/mouse` opts out for unshifted drag-select. Page Up/Down still scroll.
+- Never default `mouseCapture` to false to "fix copy" — that regresses scrolling.
+- Never enable `MouseModeAllMotion` — motion events make the TUI sluggish.
+- While `followOutput` is false, skip stream viewport repaints so selection
+  is not wiped. Ctrl+End resumes live output.
 
 ## Streaming Display
 - Agent responses stream token-by-token
