@@ -33,6 +33,7 @@ Commands are dispatched in `app.go`'s Update method. Available:
 - `/copy visible`, `/copy all` — copy the on-screen pane or full transcript
 - `/copy code` / Ctrl+Shift+X — copy the last fenced code block
 - `/mouse` — opt out of wheel scrolling so unshifted drag-select works
+- `!<cmd>` — run a local shell command in the workspace; stdout/stderr stay in the transcript
 - Ctrl+O — expand or collapse tool-call details
 - `/resume`, `/compact`, `/rewind`, `/plan`, `/learn` — session, undo, plan mode, learning review
 

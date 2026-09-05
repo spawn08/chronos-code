@@ -294,9 +294,19 @@ func (t *Tracker) After(ctx context.Context, evt *hooks.Event) error {
 	if t.used == nil {
 		t.used = make(map[string]int)
 	}
-	t.used[sessionID] += resp.Usage.PromptWindowTokens() + resp.Usage.CompletionTokens
+	t.used[sessionID] += billedSessionTokens(resp.Usage)
 	t.mu.Unlock()
 	return nil
+}
+
+// billedSessionTokens is incremental spend for the operational governor:
+// uncached prompt tokens, cache writes, and completion. Cache hits occupy
+// the model window and are billed at a discount (see ReconcileUsage), but
+// summing PromptWindowTokens() across rounds recounts the same cached prefix
+// on every tool-loop call and exhausts max_tokens_per_session far below
+// actual unique usage.
+func billedSessionTokens(u model.Usage) int {
+	return u.UncachedPromptTokens() + u.CacheCreationTokens + u.CompletionTokens
 }
 
 // Ratio returns the fraction of the token budget consumed by sessionID. It is

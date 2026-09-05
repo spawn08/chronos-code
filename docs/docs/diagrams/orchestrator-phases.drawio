@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2024-01-01T00:00:00.000Z" agent="draw.io" version="21.0.0" type="device">
+  <diagram id="orchestrator-phases" name="Orchestrator Phases">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ToolPhase States -->
+        <mxCell id="title" value="ToolPhase Lifecycle" style="text;html=1;fontSize=18;fontStyle=1;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="350" y="20" width="260" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="model_output" value="Model Output&#xa;(tool_calls[ ])" style="ellipse;fillColor=#f3e8ff;strokeColor=#7c3aed;fontColor=#3b0764;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="80" width="160" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pending" value="PENDING" style="rounded=1;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="460" y="190" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Guardrail intercept -->
+        <mxCell id="guardrail_check" value="Guardrail Check&#xa;(evalRules)" style="rhombus;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="1">
+          <mxGeometry x="435" y="290" width="170" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="executing" value="EXECUTING" style="rounded=1;fillColor=#dbeafe;strokeColor=#1d4ed8;fontColor=#1e3a8a;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="300" y="430" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="failed_guard" value="FAILED&#xa;(guardrail deny)" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="650" y="430" width="130" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Cap result -->
+        <mxCell id="cap_result" value="Cap Result&#xa;(≤ 100 KB)" style="rounded=1;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="1">
+          <mxGeometry x="300" y="540" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="failed_tool" value="FAILED&#xa;(tool error)" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="140" y="540" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="completed" value="COMPLETED" style="ellipse;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="290" y="650" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Post-tool -->
+        <mxCell id="aggr" value="Aggregate Results&#xa;→ tool result messages" style="rounded=1;fillColor=#dbeafe;strokeColor=#1d4ed8;fontColor=#1e3a8a;" vertex="1" parent="1">
+          <mxGeometry x="440" y="750" width="160" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cg_check" value="ContextGuard&#xa;Check" style="rounded=1;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="460" y="860" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="next_model" value="Next Model Call" style="ellipse;fillColor=#f3e8ff;strokeColor=#7c3aed;fontColor=#3b0764;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="330" y="970" width="140" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="reject_turn" value="Error: /clear required" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="650" y="860" width="160" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e0" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="model_output" target="pending" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="pending" target="guardrail_check" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="allow" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="guardrail_check" target="executing" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="deny" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="guardrail_check" target="failed_guard" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="result OK" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="executing" target="cap_result" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="error" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="executing" target="failed_tool" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="cap_result" target="completed" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="completed" target="aggr" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="failed_guard" target="aggr" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="failed_tool" target="aggr" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="aggr" target="cg_check" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" value="under limit" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="cg_check" target="next_model" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" value="over limit" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="cg_check" target="reject_turn" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="more tool calls" style="edgeStyle=orthogonalEdgeStyle;curved=1;" edge="1" source="next_model" target="pending" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="200" y="995" />
+              <mxPoint x="200" y="215" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

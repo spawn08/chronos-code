@@ -520,11 +520,11 @@ func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
 func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 	ctx = h.withFallbackSession(ctx)
 	if evt.Type == hooks.EventModelCallBefore {
+		h.recoverTokenBudget(ctx, evt)
 		if err := claimTurnModelCall(ctx); err != nil {
 			return err
 		}
-	}
-	if err := h.tracker.Before(ctx, evt); err != nil {
+	} else if err := h.tracker.Before(ctx, evt); err != nil {
 		return err
 	}
 	if evt.Type != hooks.EventModelCallBefore || h.orchestrator == nil {
@@ -554,6 +554,26 @@ func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 	}
 	evt.Metadata[budgetReservationMetadataKey] = budgetReservation{tracker: tracker, id: id}
 	return nil
+}
+
+// recoverTokenBudget clears a spent operational cap so the call can proceed.
+// The tracker still records usage; hitting the cap compact/resets rather than
+// aborting spawn_subagent and in-progress tool loops.
+func (h budgetHook) recoverTokenBudget(ctx context.Context, evt *hooks.Event) {
+	if h.tracker.Before(ctx, evt) == nil {
+		return
+	}
+	if h.orchestrator != nil {
+		_ = h.orchestrator.CompactActiveSession(ctx)
+	}
+	if h.tracker.Before(ctx, evt) == nil {
+		return
+	}
+	sessionID := storage.SessionFromContext(ctx)
+	if sessionID == "" {
+		sessionID = h.agentID
+	}
+	h.tracker.ResetSession(sessionID)
 }
 
 func (h budgetHook) After(ctx context.Context, evt *hooks.Event) error {
@@ -2531,15 +2551,10 @@ func (o *Orchestrator) ResetSession(ctx context.Context) (string, error) {
 }
 
 // CompactActiveSession recovers from a cumulative token-budget cap (PRD
-// P2-009) without discarding the active agent's conversation: it forces a
-// summarization pass over the current session's history (agent.Agent's
-// CompactSession, which — unlike ChatWithSession's inline compaction —
-// summarizes unconditionally rather than waiting for the conversation to
-// near the model's context window, since a budget cap is a cost concern
-// wholly unrelated to context size) and then clears the session's
-// accumulated usage in the budget tracker so it can keep making model calls
-// under the same session ID and history. Callers should fall back to
-// ResetSession if this returns an error.
+// P2-009) without discarding the active agent's conversation. The budget
+// tracker is reset before CompactSession so the summarizer model call is
+// not blocked by the cap we are recovering from, then reset again so the
+// summarizer's own usage does not immediately re-trip the cap.
 func (o *Orchestrator) CompactActiveSession(ctx context.Context) error {
 	agentID := o.active
 	a, ok := o.agents[agentID]
@@ -2549,6 +2564,12 @@ func (o *Orchestrator) CompactActiveSession(ctx context.Context) error {
 	sessionID := o.CurrentSessionID()
 	if sessionID == "" {
 		return fmt.Errorf("no active session")
+	}
+	// Reset before summarizing: CompactSession itself makes a model call,
+	// and the budget hook would otherwise abort that call with the same
+	// "token budget exceeded" error we are recovering from.
+	if o.budget != nil {
+		o.budget.ResetSession(sessionID)
 	}
 	if err := a.CompactSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("compact session: %w", err)

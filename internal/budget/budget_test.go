@@ -243,6 +243,43 @@ func TestSessionIsolation(t *testing.T) {
 	}
 }
 
+func TestAfterCountsBilledTokensNotCachedPromptWindow(t *testing.T) {
+	tr := NewTracker(1_500_000, 500)
+	ctx := storage.WithSession(context.Background(), "s1")
+	evt := &hooks.Event{
+		Type: hooks.EventModelCallAfter,
+		Output: &model.ChatResponse{Usage: model.Usage{
+			PromptTokens:        400,
+			CompletionTokens:    50,
+			CacheReadTokens:     10000,
+			CacheCreationTokens: 80,
+		}},
+	}
+	if err := tr.After(ctx, evt); err != nil {
+		t.Fatalf("After() error = %v", err)
+	}
+	// Uncached 400 + cache write 80 + completion 50. Cache hits must not
+	// count or a long cached tool loop exhausts the session cap.
+	if got := tr.Used("s1"); got != 530 {
+		t.Errorf("Used() = %d, want 530", got)
+	}
+
+	openaiStyle := &hooks.Event{
+		Type: hooks.EventModelCallAfter,
+		Output: &model.ChatResponse{Usage: model.Usage{
+			PromptTokens:     10400,
+			CompletionTokens: 20,
+			CacheReadTokens:  10000,
+		}},
+	}
+	if err := tr.After(ctx, openaiStyle); err != nil {
+		t.Fatalf("After() openai-style error = %v", err)
+	}
+	if got := tr.Used("s1"); got != 530+420 {
+		t.Errorf("Used() after openai-style call = %d, want 950", got)
+	}
+}
+
 func TestFallsBackToEventNameWithoutSession(t *testing.T) {
 	tr := NewTracker(1000, 500)
 	ctx := context.Background() // no session set

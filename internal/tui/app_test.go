@@ -1387,6 +1387,78 @@ func TestHandleSlashMCPListsServersAndHelp(t *testing.T) {
 	}
 }
 
+func TestShellEscapeCapturesOutputInTranscript(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	_, cmd := m.handleSubmit("!echo shell-ok")
+	if cmd == nil {
+		t.Fatal("!command did not return a run command")
+	}
+	if m.sending {
+		t.Fatal("!command started an agent turn")
+	}
+	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "$ echo shell-ok") {
+		t.Fatalf("transcript missing shell command: %q", got)
+	}
+	if prev, ok := m.history.Prev(""); !ok || prev != "!echo shell-ok" {
+		t.Fatalf("history = %q, want !echo shell-ok", prev)
+	}
+
+	_, _ = m.Update(cmd())
+	got := strings.Join(m.blocks, "\n")
+	if !strings.Contains(got, "shell-ok") {
+		t.Fatalf("transcript missing command output: %q", got)
+	}
+}
+
+func TestShellEscapeRunsInWorkspace(t *testing.T) {
+	m := newTestAppModel(t)
+	root := m.workspaceRoot()
+	if root == "" {
+		t.Fatal("test workspace root is empty")
+	}
+
+	_, cmd := m.handleSubmit("!pwd")
+	if cmd == nil {
+		t.Fatal("!pwd did not return a run command")
+	}
+	_, _ = m.Update(cmd())
+	got := strings.Join(m.blocks, "\n")
+	if !strings.Contains(got, root) {
+		t.Fatalf("pwd output %q, want workspace %q", got, root)
+	}
+}
+
+func TestShellEscapeEmptyShowsUsage(t *testing.T) {
+	m := newTestAppModel(t)
+	_, cmd := m.handleSubmit("!")
+	if cmd != nil {
+		t.Fatal("empty ! returned a run command")
+	}
+	got := strings.Join(m.blocks, "\n")
+	if !strings.Contains(got, "usage: !<command>") {
+		t.Fatalf("transcript = %q, want usage", got)
+	}
+}
+
+func TestTruncateShellOutputKeepsTail(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < maxShellOutputLines+10; i++ {
+		fmt.Fprintf(&b, "line-%d\n", i)
+	}
+	got := truncateShellOutput(b.String())
+	if !strings.Contains(got, "… output truncated") {
+		t.Fatalf("truncated output missing marker: %q", got)
+	}
+	if strings.Contains(got, "line-0\n") {
+		t.Fatal("truncated output kept the first line")
+	}
+	if !strings.Contains(got, fmt.Sprintf("line-%d", maxShellOutputLines+9)) {
+		t.Fatalf("truncated output missing last line: %q", got)
+	}
+}
+
 func TestSkillSlashInvocationStartsTurn(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})

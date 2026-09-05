@@ -7,7 +7,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -439,7 +441,19 @@ func (s *Store) FindSymbols(ctx context.Context, name, kind string) ([]Symbol, e
 // FindSymbolsFuzzy looks up symbols whose name contains the given substring.
 func (s *Store) FindSymbolsFuzzy(ctx context.Context, substr string) ([]Symbol, error) {
 	return s.querySymbols(ctx, `SELECT id, name, kind, package, file, line, end_line, signature, doc, receiver
-		FROM symbols WHERE name LIKE ? ORDER BY name LIMIT 25`, "%"+substr+"%")
+		FROM symbols WHERE name LIKE ? ESCAPE '\' ORDER BY name LIMIT 25`, "%"+escapeLike(substr)+"%")
+}
+
+func escapeLike(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\', '%', '_':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // SearchResult is a symbol matched through the FTS index with its BM25 rank.
@@ -457,6 +471,10 @@ func (s *Store) Search(ctx context.Context, query string, topK int) ([]SearchRes
 	if topK > 100 {
 		topK = 100
 	}
+	match := fts5MatchQuery(query)
+	if match == "" {
+		return nil, nil
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.id, s.name, s.kind, s.package, s.file, s.line, s.end_line,
 			s.signature, s.doc, s.receiver, bm25(symbols_fts)
@@ -465,7 +483,7 @@ func (s *Store) Search(ctx context.Context, query string, topK int) ([]SearchRes
 		WHERE symbols_fts MATCH ?
 		ORDER BY bm25(symbols_fts)
 		LIMIT ?
-	`, query, topK)
+	`, match, topK)
 	if err != nil {
 		return nil, fmt.Errorf("search symbols: %w", err)
 	}
@@ -486,6 +504,41 @@ func (s *Store) Search(ctx context.Context, query string, topK int) ([]SearchRes
 		return nil, fmt.Errorf("search symbols: %w", err)
 	}
 	return out, nil
+}
+
+// fts5MatchQuery turns a user/agent string into a MATCH expression.
+// FTS5 parses punctuation and boolean keywords as query syntax (*, ., :,
+// ^, (), {}, AND/OR/NOT/NEAR, prefix wildcards, column filters). Code
+// search queries are identifier-like (fmt.Errorf, *Store, C++, map[string]any),
+// so only letter/digit/underscore runs are kept and reserved words are quoted.
+func fts5MatchQuery(query string) string {
+	parts := make([]string, 0, 8)
+	var token strings.Builder
+	flush := func() {
+		if token.Len() == 0 {
+			return
+		}
+		parts = append(parts, quoteFTS5Token(token.String()))
+		token.Reset()
+	}
+	for _, r := range query {
+		if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			token.WriteRune(r)
+			continue
+		}
+		flush()
+	}
+	flush()
+	return strings.Join(parts, " ")
+}
+
+func quoteFTS5Token(token string) string {
+	switch strings.ToUpper(token) {
+	case "AND", "OR", "NOT", "NEAR":
+		return `"` + token + `"`
+	default:
+		return token
+	}
 }
 
 // SymbolsInPackage returns all symbols declared in pkg.

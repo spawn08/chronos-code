@@ -393,8 +393,8 @@ func TestGuard_Shell_NeverAllowHardBlocksEvenForPlainShell(t *testing.T) {
 			t.Errorf("expected %q to be denied by never_allow", command)
 			continue
 		}
-		if !strings.Contains(err.Error(), "file_read") || !strings.Contains(err.Error(), "file_grep") {
-			t.Errorf("error for %q = %v, want it to point at file_read/file_grep", command, err)
+		if !strings.Contains(err.Error(), "never_allow") {
+			t.Errorf("error for %q = %v, want never_allow in the message", command, err)
 		}
 	}
 }
@@ -508,13 +508,11 @@ func TestMatchesAnyGlob(t *testing.T) {
 	}
 }
 
-// TestEmbeddedSecurityPolicy_LoadsAndBlocksShellFileReads guards the actual
-// shipped internal/defaults/security.yaml, not a hand-written fixture: it
-// must parse (regex patterns compile), and its never_allow rules must
-// really hard-block the sed/grep-as-file-reader shapes observed repeatedly
-// blowing through the token budget in practice, while leaving pipelined
-// uses and a normal build/test command alone.
-func TestEmbeddedSecurityPolicy_LoadsAndBlocksShellFileReads(t *testing.T) {
+// TestEmbeddedSecurityPolicy_LoadsAndAllowsNormalShell guards the shipped
+// internal/defaults/security.yaml: it must parse, hard-block only destructive
+// never_allow shapes, and leave ordinary agent shell (build/test/git, plus
+// common inspect commands) to the approval flow rather than a hard deny.
+func TestEmbeddedSecurityPolicy_LoadsAndAllowsNormalShell(t *testing.T) {
 	data, err := defaults.FS.ReadFile("security.yaml")
 	if err != nil {
 		t.Fatalf("read embedded security.yaml: %v", err)
@@ -526,9 +524,8 @@ func TestEmbeddedSecurityPolicy_LoadsAndBlocksShellFileReads(t *testing.T) {
 	g := NewGuard(policy, "/workspace", nil)
 
 	blocked := []string{
-		`sed -n '340,430p' internal/tui/app.go`,
-		`grep -n "pattern" internal/tui/app.go`,
-		`grep -rn "pattern" internal/tui`,
+		"sudo true",
+		"rm -rf /",
 	}
 	for _, command := range blocked {
 		evt := &hooks.Event{Type: hooks.EventToolCallBefore, Name: "shell", Input: map[string]any{"command": command}}
@@ -540,6 +537,11 @@ func TestEmbeddedSecurityPolicy_LoadsAndBlocksShellFileReads(t *testing.T) {
 	allowed := []string{
 		"go test ./...",
 		"go test ./... 2>&1 | grep -n FAIL",
+		"make test",
+		"git status",
+		`sed -n '340,430p' internal/tui/app.go`,
+		`grep -n "pattern" internal/tui/app.go`,
+		`grep -rn "pattern" internal/tui`,
 	}
 	for _, command := range allowed {
 		evt := &hooks.Event{Type: hooks.EventToolCallBefore, Name: "shell", Input: map[string]any{"command": command}}

@@ -121,6 +121,9 @@ func TestCodebaseSearchTool(t *testing.T) {
 	if _, err := search.Handler(ctx, map[string]any{"query": ""}); err == nil {
 		t.Fatal("codebase_search accepted an empty query")
 	}
+	if _, err := search.Handler(ctx, map[string]any{"query": "router.go"}); err != nil {
+		t.Fatalf("codebase_search dotted query: %v", err)
+	}
 }
 
 func TestCodebaseMapTool(t *testing.T) {

@@ -43,15 +43,6 @@ shell:
   never_allow:
     - '(^|\s)sudo(\s|$)'
     - 'rm\s+-rf\s+/(\s|$)'
-    # file_read (with start_line/end_line) and file_grep (with regex and
-    # recursive directory search) fully replace these two shapes now — every
-    # agent's system prompt already says so, but agents keep reaching for
-    # shell anyway (habit beats a soft instruction), which burns the
-    # cumulative token budget on redundant round trips. Hard-block them here
-    # instead of just asking nicely. Anchored at the start of the command so
-    # legitimate pipeline uses (`go test 2>&1 | grep -n FAIL`) still work.
-    - '^sed\s+-n\s'
-    - '^grep\s+-[a-zA-Z]*r?n[a-zA-Z]*(\s|$)'
   max_execution_time_sec: 300
 
 secrets:

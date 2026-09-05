@@ -53,6 +53,8 @@ const (
 	statusHeight         = 1
 	maxTranscriptBytes   = 4 << 20
 	maxViewportLines     = 2000
+	maxShellOutputLines  = 200
+	maxShellOutputBytes  = 64 << 10
 	authIdentityTTL      = 30 * time.Second
 )
 
@@ -130,7 +132,10 @@ type subagentDoneMsg struct {
 	err    error
 }
 
-type shellDoneMsg struct{ err error }
+type shellDoneMsg struct {
+	output string
+	err    error
+}
 
 type clipboardWriteResultMsg struct {
 	err      error
@@ -510,9 +515,14 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.finalizeTurn(msg.err)
 
 	case shellDoneMsg:
+		if msg.output != "" {
+			m.appendSystem(truncateShellOutput(msg.output))
+		}
 		if msg.err != nil {
 			m.appendError(msg.err)
 		}
+		m.statusMsg = ""
+		m.refreshViewport()
 		return m, nil
 
 	case clipboardWriteResultMsg:
@@ -1397,15 +1407,59 @@ func (m *appModel) afterViewportScroll() {
 func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
 	cmdStr = strings.TrimSpace(cmdStr)
 	if cmdStr == "" {
+		m.appendError(fmt.Errorf("usage: !<command>"))
+		m.refreshViewport()
 		return m, nil
 	}
-	c := exec.CommandContext(m.ctx, "bash", "-c", cmdStr)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	c.Stdin = os.Stdin
-	return m, tea.ExecProcess(c, func(err error) tea.Msg {
-		return shellDoneMsg{err: err}
-	})
+	m.history.Add("!" + cmdStr)
+	m.appendSystem("$ " + cmdStr)
+	m.statusMsg = "running shell"
+	m.refreshViewport()
+	dir := m.workspaceRoot()
+	ctx := m.ctx
+	return m, func() tea.Msg {
+		return runShellEscape(ctx, dir, cmdStr)
+	}
+}
+
+func runShellEscape(ctx context.Context, dir, cmdStr string) tea.Msg {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "bash"
+	}
+	c := exec.CommandContext(ctx, shell, "-c", cmdStr)
+	if dir != "" {
+		c.Dir = dir
+	}
+	out, err := c.CombinedOutput()
+	if err != nil {
+		err = fmt.Errorf("shell: %w", err)
+	}
+	return shellDoneMsg{output: string(out), err: err}
+}
+
+func truncateShellOutput(output string) string {
+	output = strings.TrimRight(output, "\n")
+	if output == "" {
+		return ""
+	}
+	truncated := false
+	if len(output) > maxShellOutputBytes {
+		output = output[len(output)-maxShellOutputBytes:]
+		if i := strings.IndexByte(output, '\n'); i >= 0 {
+			output = output[i+1:]
+		}
+		truncated = true
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) > maxShellOutputLines {
+		output = strings.Join(lines[len(lines)-maxShellOutputLines:], "\n")
+		truncated = true
+	}
+	if truncated {
+		return "… output truncated\n" + output
+	}
+	return output
 }
 
 func (m *appModel) workspaceRoot() string {

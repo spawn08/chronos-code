@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2024-01-01T00:00:00.000Z" agent="draw.io" version="21.0.0" type="device">
+  <diagram id="request-lifecycle" name="Request Lifecycle">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Lifelines -->
+        <mxCell id="user_hdr" value="User" style="shape=umlLifeline;startSize=40;fillColor=#dbeafe;strokeColor=#1d4ed8;fontColor=#1e3a8a;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="40" width="80" height="700" as="geometry" />
+        </mxCell>
+        <mxCell id="cli_hdr" value="CLI / TUI" style="shape=umlLifeline;startSize=40;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="220" y="40" width="80" height="700" as="geometry" />
+        </mxCell>
+        <mxCell id="orch_hdr" value="Orchestrator" style="shape=umlLifeline;startSize=40;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="80" height="700" as="geometry" />
+        </mxCell>
+        <mxCell id="router_hdr" value="Router" style="shape=umlLifeline;startSize=40;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="40" width="80" height="700" as="geometry" />
+        </mxCell>
+        <mxCell id="guard_hdr" value="Guardrail" style="shape=umlLifeline;startSize=40;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="40" width="80" height="700" as="geometry" />
+        </mxCell>
+        <mxCell id="model_hdr" value="Model / LLM" style="shape=umlLifeline;startSize=40;fillColor=#f3e8ff;strokeColor=#7c3aed;fontColor=#3b0764;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="780" y="40" width="80" height="700" as="geometry" />
+        </mxCell>
+
+        <!-- Messages -->
+        <!-- 1: user input -->
+        <mxCell id="m1" value="1. user input" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;startFill=0;" edge="1" source="user_hdr" target="cli_hdr" parent="1">
+          <mxGeometry x="0" y="120" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 2: dispatch turn -->
+        <mxCell id="m2" value="2. dispatch turn" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="cli_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="160" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 3: classify intent -->
+        <mxCell id="m3" value="3. classify intent" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="router_hdr" parent="1">
+          <mxGeometry x="0" y="200" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 4: routing decision -->
+        <mxCell id="m4" value="4. RoutingDecision (T0/T1/T2)" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;dashed=1;" edge="1" source="router_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="240" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 5: build context -->
+        <mxCell id="m5" value="5. build context (memory, session, skills)" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="280" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 6: model call -->
+        <mxCell id="m6" value="6. ChatRequest" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="model_hdr" parent="1">
+          <mxGeometry x="0" y="320" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 7: tool calls -->
+        <mxCell id="m7" value="7. tool_calls[]" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;dashed=1;" edge="1" source="model_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="360" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 8: guardrail check -->
+        <mxCell id="m8" value="8. check(tool_call)" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="guard_hdr" parent="1">
+          <mxGeometry x="0" y="400" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 9: allow/deny -->
+        <mxCell id="m9" value="9. allow | deny" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;dashed=1;" edge="1" source="guard_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="440" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 10: execute tool -->
+        <mxCell id="m10" value="10. execute tool → result" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="480" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 11: next model call -->
+        <mxCell id="m11" value="11. ChatRequest (with tool results)" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="model_hdr" parent="1">
+          <mxGeometry x="0" y="520" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 12: text response -->
+        <mxCell id="m12" value="12. text response" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;dashed=1;" edge="1" source="model_hdr" target="orch_hdr" parent="1">
+          <mxGeometry x="0" y="560" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 13: stream -->
+        <mxCell id="m13" value="13. stream output" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="orch_hdr" target="cli_hdr" parent="1">
+          <mxGeometry x="0" y="600" relative="1" as="geometry" />
+        </mxCell>
+        <!-- 14: display -->
+        <mxCell id="m14" value="14. display" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;" edge="1" source="cli_hdr" target="user_hdr" parent="1">
+          <mxGeometry x="0" y="640" relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

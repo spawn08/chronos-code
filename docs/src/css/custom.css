@@ -1,0 +1,127 @@
+/**
+ * Chronos Code documentation custom styles.
+ * GitHub Primer-compatible color scheme — works in light and dark mode.
+ */
+
+/* ------ Primer-inspired design tokens ------ */
+:root {
+  --ifm-color-primary: #0969da;
+  --ifm-color-primary-dark: #0860ca;
+  --ifm-color-primary-darker: #075bbf;
+  --ifm-color-primary-darkest: #064b9e;
+  --ifm-color-primary-light: #1a7fe8;
+  --ifm-color-primary-lighter: #2587eb;
+  --ifm-color-primary-lightest: #459cf0;
+
+  --ifm-code-font-size: 90%;
+  --ifm-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial,
+    sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --ifm-font-family-monospace: 'ui-monospace', 'SFMono-Regular', 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+  --ifm-heading-font-weight: 600;
+  --ifm-global-radius: 6px;
+  --ifm-navbar-height: 3.5rem;
+
+  --docusaurus-highlighted-code-line-bg: rgba(9, 105, 218, 0.08);
+}
+
+/* ------ Dark mode tokens ------ */
+[data-theme='dark'] {
+  --ifm-color-primary: #58a6ff;
+  --ifm-color-primary-dark: #3395ff;
+  --ifm-color-primary-darker: #238cff;
+  --ifm-color-primary-darkest: #006de3;
+  --ifm-color-primary-light: #79b8ff;
+  --ifm-color-primary-lighter: #8fc4ff;
+  --ifm-color-primary-lightest: #bee3ff;
+
+  --ifm-background-color: #0d1117;
+  --ifm-background-surface-color: #161b22;
+  --ifm-navbar-background-color: #161b22;
+  --ifm-footer-background-color: #010409;
+  --ifm-toc-border-color: #30363d;
+  --ifm-color-content: #e6edf3;
+  --ifm-heading-color: #e6edf3;
+
+  --docusaurus-highlighted-code-line-bg: rgba(88, 166, 255, 0.1);
+}
+
+/* ------ Navbar ------ */
+.navbar {
+  border-bottom: 1px solid var(--ifm-toc-border-color, #d0d7de);
+  box-shadow: none;
+}
+
+[data-theme='dark'] .navbar {
+  border-bottom-color: #30363d;
+}
+
+/* ------ Mermaid diagrams — constrain width, center, add subtle border ------ */
+.docusaurus-mermaid-container {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid var(--ifm-toc-border-color, #d0d7de);
+  border-radius: var(--ifm-global-radius);
+  background: var(--ifm-background-surface-color, #f6f8fa);
+}
+
+[data-theme='dark'] .docusaurus-mermaid-container {
+  border-color: #30363d;
+  background: #161b22;
+}
+
+.docusaurus-mermaid-container svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ------ Tables ------ */
+table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+table th {
+  background: var(--ifm-color-primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+[data-theme='dark'] table th {
+  background: var(--ifm-color-primary-darkest);
+}
+
+/* ------ Admonitions — tighter style ------ */
+.alert {
+  border-left-width: 4px;
+}
+
+/* ------ Code blocks ------ */
+.theme-code-block {
+  border-radius: var(--ifm-global-radius);
+}
+
+/* ------ Hero / landing ------ */
+.hero--primary {
+  background: linear-gradient(135deg, #0969da 0%, #0550ae 100%);
+}
+
+[data-theme='dark'] .hero--primary {
+  background: linear-gradient(135deg, #1f6feb 0%, #0d419d 100%);
+}
+
+/* ------ Mobile responsiveness ------ */
+@media (max-width: 768px) {
+  .docusaurus-mermaid-container {
+    padding: 0.5rem;
+  }
+
+  table {
+    font-size: 0.8rem;
+  }
+}

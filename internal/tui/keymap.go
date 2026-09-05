@@ -82,7 +82,7 @@ Commands:
 
   @<agent> <msg>     Send message to a specific agent
   @<path>            Attach a workspace file to the message
-  !<cmd>             Execute shell command
+  !<cmd>             Run a local shell command in the workspace (output in chat)
 
 Keys:
   enter              Send; while running, interrupt and replace

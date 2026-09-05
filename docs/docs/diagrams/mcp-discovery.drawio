@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2024-01-01T00:00:00.000Z" agent="draw.io" version="21.0.0" type="device">
+  <diagram id="mcp-discovery" name="MCP Discovery Flow">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Start -->
+        <mxCell id="start" value="Startup" style="ellipse;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="40" width="120" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Read .mcp.json -->
+        <mxCell id="read" value="Read .mcp.json" style="rounded=1;fillColor=#dbeafe;strokeColor=#1d4ed8;fontColor=#1e3a8a;" vertex="1" parent="1">
+          <mxGeometry x="420" y="130" width="160" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- For each server -->
+        <mxCell id="foreach" value="For each server entry" style="rhombus;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="220" width="200" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ValidateManagedServer -->
+        <mxCell id="validate" value="ValidateManagedServer&#xa;(name, transport, creds format)" style="rounded=1;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="340" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Denied branch -->
+        <mxCell id="denied_q" value="Valid?" style="rhombus;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="1">
+          <mxGeometry x="430" y="450" width="140" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="denied" value="Mark StateDenied&#xa;Log warning" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="1">
+          <mxGeometry x="640" y="460" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Load phase: resolve env vars -->
+        <mxCell id="resolve" value="Resolve ${ENV_VAR} references" style="rounded=1;fillColor=#dbeafe;strokeColor=#1d4ed8;fontColor=#1e3a8a;" vertex="1" parent="1">
+          <mxGeometry x="400" y="570" width="200" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- validateRuntimeConfig -->
+        <mxCell id="rtvalidate" value="validateRuntimeConfig&#xa;(env vars set?)" style="rounded=1;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="1">
+          <mxGeometry x="400" y="660" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Invalid branch -->
+        <mxCell id="invalid_q" value="Env set?" style="rhombus;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="1">
+          <mxGeometry x="430" y="770" width="140" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="invalid" value="Mark StateInvalid&#xa;Log warning" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="1">
+          <mxGeometry x="640" y="780" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Policy check -->
+        <mxCell id="policy" value="security.Policy.DecideMCPServer&#xa;(allow / deny / approval_required)" style="rounded=1;fillColor=#f3e8ff;strokeColor=#7c3aed;fontColor=#3b0764;" vertex="1" parent="1">
+          <mxGeometry x="390" y="890" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Connect -->
+        <mxCell id="connect" value="Connect (stdio / SSE)&#xa;Register tools with mcp__&lt;server&gt;__ prefix" style="rounded=1;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1000" width="220" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- StateConnected -->
+        <mxCell id="connected" value="StateConnected&#xa;Tools available" style="ellipse;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="420" y="1110" width="160" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e_start" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="start" target="read" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_read" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="read" target="foreach" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_foreach" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="foreach" target="validate" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_validate" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="validate" target="denied_q" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_deny" value="No" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="denied_q" target="denied" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_yes1" value="Yes" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="denied_q" target="resolve" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_resolve" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="resolve" target="rtvalidate" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_rtvalidate" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="rtvalidate" target="invalid_q" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_invalid" value="No" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="invalid_q" target="invalid" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_yes2" value="Yes" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="invalid_q" target="policy" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_policy" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="policy" target="connect" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_connect" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="connect" target="connected" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

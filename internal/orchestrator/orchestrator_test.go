@@ -417,6 +417,34 @@ func TestCompactActiveSession_ResetsBudgetOnSuccess(t *testing.T) {
 	}
 }
 
+func TestBudgetHookDoesNotAbortWhenSessionCapExceeded(t *testing.T) {
+	provider := &budgetTestProvider{modelID: "claude-haiku-4-5", response: &model.ChatResponse{Content: "ok"}}
+	orch := newBudgetTestOrchestrator(provider)
+	tracker := budget.NewTracker(100, 50)
+	orch.budget = tracker
+	hook := budgetHook{tracker: tracker, orchestrator: orch, agentID: "coder"}
+	orch.agents["coder"].Hooks = []hooks.Hook{hook}
+
+	ctx := storage.WithSession(context.Background(), "session-1")
+	if err := tracker.After(ctx, &hooks.Event{
+		Type:   hooks.EventModelCallAfter,
+		Output: &model.ChatResponse{Usage: model.Usage{PromptTokens: 100}},
+	}); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+
+	err := hook.Before(ctx, &hooks.Event{
+		Type:  hooks.EventModelCallBefore,
+		Input: &model.ChatRequest{Model: "claude-haiku-4-5"},
+	})
+	if err != nil {
+		t.Fatalf("Before() error = %v, want recovery instead of a hard stop", err)
+	}
+	if got := tracker.Used("session-1"); got != 0 {
+		t.Fatalf("Used() after recovery = %d, want 0", got)
+	}
+}
+
 func TestLearningTelemetryEnabledCreatesStoreAndIsolatesAgents(t *testing.T) {
 	root := t.TempDir()
 	agents := map[string]*agent.Agent{

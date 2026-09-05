@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"unicode"
 )
 
 func TestFilesInPackage(t *testing.T) {
@@ -75,6 +76,158 @@ func assertFTSParity(t *testing.T, store *Store, want int) {
 	}
 	if got != want {
 		t.Fatalf("symbols_fts count = %d, want %d", got, want)
+	}
+}
+
+func TestStoreSearchDottedQuery(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.InsertSymbol(ctx, Symbol{
+		Name: "Errorf", Kind: KindFunc, Package: "fmt", File: "fmt.go",
+		Line: 1, EndLine: 2, Signature: "func Errorf(format string, a ...any) error",
+		Doc: "Errorf formats according to a format specifier.",
+	}); err != nil {
+		t.Fatalf("InsertSymbol: %v", err)
+	}
+
+	results, err := store.Search(ctx, "fmt.Errorf", 10)
+	if err != nil {
+		t.Fatalf("Search(fmt.Errorf): %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "Errorf" {
+		t.Fatalf("Search(fmt.Errorf) = %+v, want Errorf", results)
+	}
+
+	results, err = store.Search(ctx, "fmt.go", 10)
+	if err != nil {
+		t.Fatalf("Search(fmt.go): %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "Errorf" {
+		t.Fatalf("Search(fmt.go) = %+v, want Errorf", results)
+	}
+}
+
+func TestFindSymbolsFuzzyEscapesLikeWildcards(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	for _, name := range []string{"foobar", "foo_bar", "foo%bar"} {
+		if err := store.InsertSymbol(ctx, Symbol{Name: name, Kind: KindFunc, Package: "p", File: name + ".go", Line: 1, EndLine: 2}); err != nil {
+			t.Fatalf("InsertSymbol(%s): %v", name, err)
+		}
+	}
+
+	got, err := store.FindSymbolsFuzzy(ctx, "_bar")
+	if err != nil {
+		t.Fatalf("FindSymbolsFuzzy(_bar): %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "foo_bar" {
+		t.Fatalf("FindSymbolsFuzzy(_bar) = %+v, want only foo_bar", got)
+	}
+
+	got, err = store.FindSymbolsFuzzy(ctx, "%bar")
+	if err != nil {
+		t.Fatalf("FindSymbolsFuzzy(%%bar): %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "foo%bar" {
+		t.Fatalf("FindSymbolsFuzzy(%%bar) = %+v, want only foo%%bar", got)
+	}
+}
+
+func TestFTS5MatchQueryQuotesSpecialTokens(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"Router", "Router"},
+		{"fmt.Errorf", "fmt Errorf"},
+		{"router.go", "router go"},
+		{`say "hi"`, "say hi"},
+		{"AND", `"AND"`},
+		{"or", `"or"`},
+		{"NOT", `"NOT"`},
+		{"near", `"near"`},
+		{"handle shell", "handle shell"},
+		{"*Store", "Store"},
+		{"Store*", "Store"},
+		{"foo*", "foo"},
+		{"*foo", "foo"},
+		{"C++", "C"},
+		{"map[string]any", "map string any"},
+		{"github.com/spawn08/chronos-code", "github com spawn08 chronos code"},
+		{"encoding/json", "encoding json"},
+		{"chan<-int", "chan int"},
+		{"name:Router", "name Router"},
+		{"{name}:Router", "name Router"},
+		{"^Router", "Router"},
+		{"NEAR/5", `"NEAR" 5`},
+		{"foo AND bar", `foo "AND" bar`},
+		{"a||b", "a b"},
+		{"a&&b", "a b"},
+		{"@file", "file"},
+		{"#tag", "tag"},
+		{"$var", "var"},
+		{"foo=bar", "foo bar"},
+		{"100%", "100"},
+		{"...", ""},
+		{"***", ""},
+		{"*", ""},
+	}
+	for _, tt := range tests {
+		if got := fts5MatchQuery(tt.in); got != tt.want {
+			t.Errorf("fts5MatchQuery(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestStoreSearchAcceptsFTSSyntaxQueries(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.InsertSymbol(ctx, Symbol{
+		Name: "Router", Kind: KindStruct, Package: "router", File: "router.go",
+		Line: 1, EndLine: 2, Doc: "Routes coding tasks.",
+	}); err != nil {
+		t.Fatalf("InsertSymbol: %v", err)
+	}
+
+	queries := []string{
+		"fmt.Errorf", "router.go", "encoding/json", "github.com/foo.Bar",
+		"*Router", "Router*", "*Router*", "foo*", "*foo",
+		"AND", "OR", "NOT", "NEAR", "NEAR/5", "AND OR NOT",
+		"name:Router", "{name signature}: Router", "^Router",
+		"C++", "operator<<", "chan<-int", "map[string]any",
+		"@Router", "#Router", "$Router", "%Router",
+		"Router=foo", "a||b", "a&&b", "a|b", "a&b", "foo~bar",
+		`say "hi"`, "foo'bar", "`Router`",
+		"...", "***", "*", "()", "{}", "[]",
+		"foo (bar)", "NOT Router", "Router AND OpenStore",
+		"<Router>", "Router?", "Router!", "100%",
+		"foo=bar", "col:term", "term^2",
+	}
+	for _, query := range queries {
+		if _, err := store.Search(ctx, query, 10); err != nil {
+			t.Errorf("Search(%q): %v", query, err)
+		}
+	}
+	for r := rune(1); r < 127; r++ {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == ' ' {
+			continue
+		}
+		query := "Router" + string(r) + "x"
+		if _, err := store.Search(ctx, query, 10); err != nil {
+			t.Errorf("Search(%q): %v", query, err)
+		}
 	}
 }
 

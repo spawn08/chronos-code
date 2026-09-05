@@ -8,3 +8,10 @@ vendor/
 .ppd/*
 *.db-shm
 *.db-wal
+node_modules
+
+# ── Docs build artifacts (Docusaurus) ──────────────────────────────────────
+docs/node_modules/
+docs/build/
+docs/.docusaurus/
+docs/.cache-loader/

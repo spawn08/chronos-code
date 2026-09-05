@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- Background gradient -->
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e3a5f;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#0969da;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2da44e;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)" />
+
+  <!-- Accent bar -->
+  <rect x="0" y="0" width="1200" height="6" fill="url(#accent)" />
+
+  <!-- Grid lines (subtle) -->
+  <g stroke="#1e293b" stroke-width="1" opacity="0.4">
+    <line x1="0" y1="105" x2="1200" y2="105" />
+    <line x1="0" y1="210" x2="1200" y2="210" />
+    <line x1="0" y1="315" x2="1200" y2="315" />
+    <line x1="0" y1="420" x2="1200" y2="420" />
+    <line x1="0" y1="525" x2="1200" y2="525" />
+    <line x1="240" y1="0" x2="240" y2="630" />
+    <line x1="480" y1="0" x2="480" y2="630" />
+    <line x1="720" y1="0" x2="720" y2="630" />
+    <line x1="960" y1="0" x2="960" y2="630" />
+  </g>
+
+  <!-- Logo mark (stylised clock/code symbol) -->
+  <circle cx="140" cy="220" r="72" fill="none" stroke="#0969da" stroke-width="4" opacity="0.8"/>
+  <circle cx="140" cy="220" r="58" fill="none" stroke="#2da44e" stroke-width="2" opacity="0.5"/>
+  <!-- Clock hands -->
+  <line x1="140" y1="220" x2="140" y2="162" stroke="#0969da" stroke-width="5" stroke-linecap="round"/>
+  <line x1="140" y1="220" x2="178" y2="248" stroke="#2da44e" stroke-width="4" stroke-linecap="round"/>
+  <!-- Code brackets -->
+  <text x="88" y="232" font-family="ui-monospace,monospace" font-size="36" fill="#58a6ff" opacity="0.9">&lt;/&gt;</text>
+
+  <!-- Title -->
+  <text x="240" y="200" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
+        font-size="72" font-weight="700" fill="#f0f6ff" letter-spacing="-2">
+    Chronos Code
+  </text>
+
+  <!-- Tagline -->
+  <text x="240" y="270" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
+        font-size="30" font-weight="400" fill="#8b949e" letter-spacing="0">
+    YAML-native AI coding agent harness
+  </text>
+
+  <!-- Divider -->
+  <rect x="240" y="310" width="720" height="2" fill="url(#accent)" opacity="0.6" rx="1"/>
+
+  <!-- Feature pills -->
+  <g font-family="ui-monospace,'SF Mono',Consolas,monospace" font-size="22" fill="#c9d1d9">
+    <!-- Pill 1 -->
+    <rect x="240" y="336" width="200" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+    <text x="340" y="364" text-anchor="middle" fill="#58a6ff">YAML-first</text>
+    <!-- Pill 2 -->
+    <rect x="456" y="336" width="180" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+    <text x="546" y="364" text-anchor="middle" fill="#3fb950">Go graph</text>
+    <!-- Pill 3 -->
+    <rect x="652" y="336" width="140" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+    <text x="722" y="364" text-anchor="middle" fill="#d29922">MCP</text>
+    <!-- Pill 4 -->
+    <rect x="808" y="336" width="160" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+    <text x="888" y="364" text-anchor="middle" fill="#f78166">Memory</text>
+  </g>
+
+  <!-- Build command snippet -->
+  <rect x="240" y="410" width="560" height="60" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="266" y="448" font-family="ui-monospace,'SF Mono',Consolas,monospace" font-size="24" fill="#8b949e">$</text>
+  <text x="294" y="448" font-family="ui-monospace,'SF Mono',Consolas,monospace" font-size="24" fill="#c9d1d9">make build</text>
+  <text x="490" y="448" font-family="ui-monospace,'SF Mono',Consolas,monospace" font-size="24" fill="#3fb950"># bin/chronos-code</text>
+
+  <!-- GitHub link -->
+  <text x="240" y="570" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"
+        font-size="24" fill="#58a6ff">
+    github.com/spawn08/chronos-code
+  </text>
+</svg>

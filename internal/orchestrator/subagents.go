@@ -10,7 +10,7 @@ import (
 	"github.com/spawn08/chronos/sdk/harness"
 )
 
-const configuredSubagentTimeout = 10 * time.Minute
+const configuredSubagentTimeout = 30 * time.Minute
 
 type subagentTurnKey struct{}
 type subagentPathKey struct{}

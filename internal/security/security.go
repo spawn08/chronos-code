@@ -155,7 +155,7 @@ func (g *Guard) checkShellArgs(args map[string]any, requireAllowlisted bool) err
 	}
 
 	if pattern := firstMatchingRegex(g.policy.neverAllow, command); pattern != nil {
-		return fmt.Errorf("security: shell command denied by policy; use file_read for file contents or file_grep for searches instead of shell")
+		return fmt.Errorf("security: shell command denied (matches never_allow pattern %q)", pattern.String())
 	}
 
 	if requireAllowlisted && !g.shellCommandAllowed(command) {

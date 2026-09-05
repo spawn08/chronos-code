@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="Electron" modified="2024-01-01T00:00:00.000Z" agent="draw.io" version="21.0.0" type="device">
+  <diagram id="architecture-overview" name="Architecture Overview">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Surfaces Group -->
+        <mxCell id="surfaces" value="Surfaces" style="swimlane;startSize=30;fillColor=#dbeafe;strokeColor=#1d4ed8;fontColor=#1e3a8a;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="320" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="tui" value="TUI&#xa;(Bubble Tea REPL)" style="rounded=1;fillColor=#bfdbfe;strokeColor=#1d4ed8;fontColor=#1e3a8a;" vertex="1" parent="surfaces">
+          <mxGeometry x="20" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="http" value="HTTP Server&#xa;(/v1/chat)" style="rounded=1;fillColor=#bfdbfe;strokeColor=#1d4ed8;fontColor=#1e3a8a;" vertex="1" parent="surfaces">
+          <mxGeometry x="120" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="cli" value="CLI&#xa;(cmd dispatch)" style="rounded=1;fillColor=#bfdbfe;strokeColor=#1d4ed8;fontColor=#1e3a8a;" vertex="1" parent="surfaces">
+          <mxGeometry x="220" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Core Runtime Group -->
+        <mxCell id="core" value="Core Runtime" style="swimlane;startSize=30;fillColor=#dcfce7;strokeColor=#16a34a;fontColor=#14532d;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="400" y="40" width="320" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="orchestrator" value="Orchestrator&#xa;(agent lifecycle)" style="rounded=1;fillColor=#bbf7d0;strokeColor=#16a34a;fontColor=#14532d;" vertex="1" parent="core">
+          <mxGeometry x="20" y="50" width="130" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="router" value="Router&#xa;(T0/T1/T2)" style="rounded=1;fillColor=#bbf7d0;strokeColor=#16a34a;fontColor=#14532d;" vertex="1" parent="core">
+          <mxGeometry x="170" y="50" width="130" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Context Layer Group -->
+        <mxCell id="context" value="Context &amp; Memory" style="swimlane;startSize=30;fillColor=#fef9c3;strokeColor=#ca8a04;fontColor=#713f12;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="240" width="460" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="session" value="Session&#xa;(SQLite)" style="rounded=1;fillColor=#fef08a;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="context">
+          <mxGeometry x="20" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="memory" value="Memory&#xa;(YAML)" style="rounded=1;fillColor=#fef08a;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="context">
+          <mxGeometry x="120" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="plan" value="Plan&#xa;(SQLite DAG)" style="rounded=1;fillColor=#fef08a;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="context">
+          <mxGeometry x="220" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="contextguard" value="ContextGuard&#xa;(budget+trim)" style="rounded=1;fillColor=#fef08a;strokeColor=#ca8a04;fontColor=#713f12;" vertex="1" parent="context">
+          <mxGeometry x="340" y="50" width="100" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Safety Group -->
+        <mxCell id="safety" value="Safety &amp; Security" style="swimlane;startSize=30;fillColor=#fee2e2;strokeColor=#dc2626;fontColor=#7f1d1d;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="540" y="240" width="340" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="guardrail" value="Guardrail Engine&#xa;(YAML rules)" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="safety">
+          <mxGeometry x="20" y="50" width="130" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="security" value="Security Policy&#xa;(path/shell)" style="rounded=1;fillColor=#fecaca;strokeColor=#dc2626;fontColor=#7f1d1d;" vertex="1" parent="safety">
+          <mxGeometry x="180" y="50" width="130" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Integration Group -->
+        <mxCell id="integrations" value="Integrations" style="swimlane;startSize=30;fillColor=#f3e8ff;strokeColor=#7c3aed;fontColor=#3b0764;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="440" width="340" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp" value="MCP&#xa;(stdio / SSE)" style="rounded=1;fillColor=#e9d5ff;strokeColor=#7c3aed;fontColor=#3b0764;" vertex="1" parent="integrations">
+          <mxGeometry x="20" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="learning" value="Learning&#xa;(suggestions)" style="rounded=1;fillColor=#e9d5ff;strokeColor=#7c3aed;fontColor=#3b0764;" vertex="1" parent="integrations">
+          <mxGeometry x="120" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="teambuilder" value="TeamBuilder" style="rounded=1;fillColor=#e9d5ff;strokeColor=#7c3aed;fontColor=#3b0764;" vertex="1" parent="integrations">
+          <mxGeometry x="220" y="50" width="80" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Chronos Library -->
+        <mxCell id="chronos" value="Chronos Library&#xa;(agent loop + tools)" style="rounded=1;fillColor=#f1f5f9;strokeColor=#64748b;fontColor=#334155;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="760" y="240" width="180" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Edges -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="cli" target="orchestrator" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="tui" target="orchestrator" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="http" target="orchestrator" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="orchestrator" target="router" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="orchestrator" target="chronos" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="chronos" target="guardrail" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="orchestrator" target="contextguard" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="chronos" target="mcp" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
