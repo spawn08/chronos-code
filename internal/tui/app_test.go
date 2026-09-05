@@ -35,6 +35,19 @@ func (s *approvalInstallerStub) SetApprovalHandler(handler tool.ApprovalFunc) {
 func newTestAppModel(t *testing.T) *appModel {
 	t.Helper()
 	root := t.TempDir()
+	// auth.NewStore() and the provider-env precedence chain (see
+	// internal/auth/resolve.go) read $HOME and real provider env vars, not
+	// this test's config. Isolate both so signedIn()/AuthorizedProviders()
+	// don't pick up whatever the machine running the test happens to have
+	// stored (a real keychain entry or exported API key), which would make
+	// status-bar-dependent assertions pass or fail based on host state.
+	t.Setenv("HOME", root)
+	for _, env := range []string{
+		"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+		"CODEX_ACCESS_TOKEN", "OPENAI_API_KEY",
+	} {
+		t.Setenv(env, "")
+	}
 	indexOnStart := false
 	cfg := &config.Config{
 		FileConfig: agent.FileConfig{

@@ -736,11 +736,8 @@ func (m *appModel) interruptTurn() {
 func (m *appModel) viewportHeight() int {
 	bottomHeight := lipgloss.Height(m.bottomView)
 	height := m.height - headerHeight - bottomHeight - statusHeight
-	if m.bottomModal && height < 0 {
+	if height < 0 {
 		return 0
-	}
-	if !m.bottomModal && height < 1 {
-		return 1
 	}
 	return height
 }
@@ -1939,7 +1936,7 @@ func (m *appModel) handleLoginCommand(arg string) tea.Cmd {
 	}
 
 	apiKey := parts[1]
-		if err := m.orch.Login(m.ctx, provider, apiKey); err != nil {
+	if err := m.orch.Login(m.ctx, provider, apiKey); err != nil {
 		m.appendError(err)
 		return nil
 	}
@@ -2211,9 +2208,18 @@ func (m *appModel) refreshPrompt() {
 	} else {
 		m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " ❯ "
 	}
-	if m.signedIn() {
+	switch {
+	case m.signedIn():
 		m.input.Placeholder = "Message chronos-code..."
-	} else {
+	case m.width < 30:
+		// Full and mid-length placeholders below wrap onto a second input
+		// line at these widths, growing bottomView past its normal 3-line
+		// budget (border + 1 content line + border) and overflowing the
+		// fixed-height layout in very narrow terminals.
+		m.input.Placeholder = "Sign in"
+	case m.width < 72:
+		m.input.Placeholder = "Not signed in — /login"
+	default:
 		m.input.Placeholder = "Not signed in — /login or Ctrl+L · Claude Code, Codex, or API key"
 	}
 	if m.width > 0 {
@@ -3012,10 +3018,11 @@ func (m *appModel) renderStatusBar() string {
 	if lipgloss.Width(leftSeg)+lipgloss.Width(rightSeg) > m.width {
 		rightText = " " + m.statusMsg + " "
 		available := m.width - lipgloss.Width(leftSeg)
-		if available < 0 {
-			available = 0
+		if available <= 0 {
+			rightSeg = ""
+		} else {
+			rightSeg = styleStatusRight.Render(truncateToWidth(rightText, available))
 		}
-		rightSeg = styleStatusRight.Render(truncateToWidth(rightText, available))
 	}
 
 	gap := m.width - lipgloss.Width(leftSeg) - lipgloss.Width(rightSeg)
