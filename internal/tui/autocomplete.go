@@ -205,18 +205,6 @@ func fileMentionCandidates(needle string, files []string) []string {
 	return out
 }
 
-func fileMentionScore(path, needle string) int {
-	if needle == "" {
-		return 3
-	}
-	lower := strings.ToLower(path)
-	base := strings.ToLower(filepath.Base(path))
-	if score := filePrefixScore(base, lower, needle); score >= 0 {
-		return score
-	}
-	return fuzzyCommandScore(lower, needle)
-}
-
 func filePrefixScore(base, lower, needle string) int {
 	if base == needle || lower == needle {
 		return 0
