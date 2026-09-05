@@ -75,7 +75,7 @@ Commands:
   /copy visible      Copy the currently visible transcript
   /copy all          Copy the full conversation transcript
   /copy code [n]     Copy the last (or nth) fenced code block
-  /mouse             Toggle mouse-wheel scrolling (shift+drag still selects)
+  /mouse             Opt out of wheel scrolling so unshifted drag-select works
   /clear             Start a new session and clear the screen
   /perf              Show frame timing stats (p50/p95/p99)
   /quit              Exit
@@ -94,12 +94,12 @@ Keys:
   ctrl+shift+x       Copy the last fenced code block from the reply
   ctrl+o             Expand or collapse tool-call details
   tab                Complete the selected slash command, /model, agent, or @file
-  mouse wheel        Scroll conversation history after /mouse
+  mouse wheel        Scroll conversation history
   pgup / pgdown      Scroll conversation history
   ctrl+up / ctrl+down Scroll half a page
   ctrl+home / ctrl+end Jump to top / resume live output
-  drag               Select output and copy with the terminal (cmd+c / ctrl+shift+c)
-  shift+drag         Select text using the terminal while mouse scrolling is active
+  shift+drag         Select output, then copy with the terminal (cmd+c)
+  /mouse             Disable wheel capture for unshifted drag-select
   cmd+c               Copy selected text with the terminal
   cmd+v, ctrl+v      Native clipboard paste; multiline stays in the composer
   permission: y       Allow this call once

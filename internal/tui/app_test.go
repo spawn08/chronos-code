@@ -73,6 +73,7 @@ func newTestAppModel(t *testing.T) *appModel {
 		history:        NewHistory(),
 		clipboardRead:  func() (string, error) { return "", fmt.Errorf("unexpected clipboard read") },
 		clipboardWrite: func(string) error { return fmt.Errorf("unexpected clipboard write") },
+		mouseCapture:   true,
 	}
 }
 
@@ -419,6 +420,39 @@ func TestStreamingDoesNotForceViewportToBottomAfterPageUp(t *testing.T) {
 	}
 }
 
+func TestStreamRenderTickDoesNotRepaintWhenScrolledAway(t *testing.T) {
+	m := newTestAppModel(t)
+	m.followOutput = true
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m.blocks = []string{strings.Repeat("line\n", 40)}
+	m.refreshViewport()
+	m.viewport.GotoBottom()
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.followOutput {
+		t.Fatal("PageUp did not detach live output")
+	}
+
+	m.sending = true
+	before := m.viewport.View()
+	m.appendTurnText("COPY_STABLE_MARKER")
+	_, _ = m.Update(streamRenderTickMsg{})
+	if got := m.viewport.View(); got != before {
+		t.Fatal("stream render tick replaced the scrolled viewport; selection would be wiped")
+	}
+	if strings.Contains(before, "COPY_STABLE_MARKER") {
+		t.Fatal("precondition failed: marker was already in the viewport")
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnd, Mod: tea.ModCtrl})
+	if !m.followOutput {
+		t.Fatal("ctrl+end did not resume live output")
+	}
+	if !strings.Contains(m.viewport.View(), "COPY_STABLE_MARKER") {
+		t.Fatal("ctrl+end did not catch up the frozen transcript")
+	}
+}
+
 func TestStreamDeltaSchedulesBoundedRender(t *testing.T) {
 	m := newTestAppModel(t)
 	m.sending = true
@@ -458,31 +492,30 @@ func TestStreamDeltaDoesNotDuplicateCumulativeFrame(t *testing.T) {
 	}
 }
 
-func TestViewLeavesMouseFreeForTerminalSelectionByDefault(t *testing.T) {
+func TestViewEnablesMouseWheelByDefault(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	if m.mouseCapture {
-		t.Fatal("mouse capture is on by default; drag-select cannot copy")
+	if !m.mouseCapture {
+		t.Fatal("mouse capture is off by default; wheel cannot scroll the alt-screen transcript")
 	}
-	if got := m.View().MouseMode; got != tea.MouseModeNone {
-		t.Errorf("View().MouseMode = %v, want MouseModeNone", got)
-	}
-}
-
-func TestViewEnablesMouseWheelEvents(t *testing.T) {
-	m := newTestAppModel(t)
-	m.mouseCapture = true
-	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-
 	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
 		t.Errorf("View().MouseMode = %v, want MouseModeCellMotion", got)
 	}
 }
 
-func TestMouseWheelScrollsTranscriptWhenCaptureEnabled(t *testing.T) {
+func TestViewDisablesMouseWhenCaptureOptedOut(t *testing.T) {
 	m := newTestAppModel(t)
-	m.mouseCapture = true
+	m.mouseCapture = false
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Errorf("View().MouseMode = %v, want MouseModeNone", got)
+	}
+}
+
+func TestMouseWheelScrollsTranscriptByDefault(t *testing.T) {
+	m := newTestAppModel(t)
 	m.followOutput = true
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
 	m.blocks = []string{strings.Repeat("line\n", 80)}
@@ -499,18 +532,18 @@ func TestMouseWheelScrollsTranscriptWhenCaptureEnabled(t *testing.T) {
 	}
 }
 
-func TestMouseCommandTogglesWheelCapture(t *testing.T) {
+func TestMouseCommandOptsOutOfWheelCapture(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.input.SetValue("/mouse")
 	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if !m.mouseCapture || m.View().MouseMode != tea.MouseModeCellMotion || !strings.Contains(m.statusMsg, "shift+drag") {
-		t.Fatalf("mouse wheel mode = capture:%t mode:%v status:%q", m.mouseCapture, m.View().MouseMode, m.statusMsg)
+	if m.mouseCapture || m.View().MouseMode != tea.MouseModeNone || !strings.Contains(m.statusMsg, "drag selects") {
+		t.Fatalf("mouse selection mode = capture:%t mode:%v status:%q", m.mouseCapture, m.View().MouseMode, m.statusMsg)
 	}
 	m.input.SetValue("/mouse")
 	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.mouseCapture || m.View().MouseMode != tea.MouseModeNone || !strings.Contains(m.statusMsg, "drag selects") {
-		t.Fatalf("mouse selection mode = capture:%t mode:%v status:%q", m.mouseCapture, m.View().MouseMode, m.statusMsg)
+	if !m.mouseCapture || m.View().MouseMode != tea.MouseModeCellMotion || !strings.Contains(m.statusMsg, "shift+drag") {
+		t.Fatalf("mouse wheel mode = capture:%t mode:%v status:%q", m.mouseCapture, m.View().MouseMode, m.statusMsg)
 	}
 }
 
