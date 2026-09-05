@@ -15,3 +15,7 @@ docs/node_modules/
 docs/build/
 docs/.docusaurus/
 docs/.cache-loader/
+
+# ── Claude Code local state (worktrees, task locks) ────────────────────────
+.claude/worktrees/
+.claude/scheduled_tasks.lock
