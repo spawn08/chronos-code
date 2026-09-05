@@ -44,29 +44,19 @@ every model call** — including follow-up rounds in the tool-calling loop.
 
 Source: `internal/orchestrator/context_guard.go`
 
-The effective limit computation:
-
-```
-effectiveLimit = floor(contextLimit × (1 − contextGuardMargin))  // margin = 0.15
-effectiveLimit -= toolTokens                                       // ~150 tokens per tool
-```
-
-When `total > effectiveLimit`, the guard runs `trimMessages`, which:
+The effective limit computation reserves a margin from the model's context window to leave room
+for output, then subtracts an overhead estimate per registered tool. When total context exceeds
+this effective limit, the guard runs `trimMessages`, which:
 
 1. **Protects** the system/pinned prefix (never trimmed)
 2. **Drops** oldest conversation messages, sweeping orphaned tool-result messages with each dropped assistant turn
 3. **Restores** the most recent user turn if all turns were dropped
 4. **Rejects** with an error if messages still exceed budget after trimming — the user must `/clear`
 
-:::warning Known Issue — Context Guard Boundary
-At the exact boundary (`total == effectiveLimit`), the 80% `NearLimit` threshold and the
-`OverLimit` check can diverge. See [Known Issues #2](../known-issues#issue-2-context-guard-budget-boundary).
-:::
-
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `defaultToolReserveTokens` | 150 tokens/tool | Per-tool overhead estimate |
-| `contextGuardMargin` | 0.15 (15%) | Fraction kept free for model output |
+| `contextGuardMargin` | 15% | Fraction kept free for model output |
 | `maxToolResultBytes` | 100 KB | Hard cap per tool result before truncation |
 
 ## ContextReport
@@ -75,7 +65,7 @@ The `/context` TUI command and `context_report: true` config expose a `ContextRe
 
 - **Source names** — which context sources are active
 - **Token counts** — tokens consumed per source
-- **Budget utilization** — percentage of `effectiveLimit` used
+- **Budget utilization** — percentage of effective limit used
 - **Omission reasons** — which sources were trimmed and why
 
 :::note Privacy guarantee

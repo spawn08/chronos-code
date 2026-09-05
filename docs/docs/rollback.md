@@ -72,4 +72,3 @@ Per-consumer (per-agent or per-surface) disable controls are not yet exposed in 
 
 - [Configuration](./configuration) — full config reference
 - [MCP Architecture](./architecture/mcp) — MCP discovery lifecycle
-- [Known Issues](./known-issues) — known gaps in rollback documentation

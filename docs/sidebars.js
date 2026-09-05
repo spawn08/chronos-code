@@ -16,6 +16,19 @@ const sidebars = {
       ],
     },
 
+    // ── Why Chronos Code ─────────────────────────────────────────────────────
+    {
+      type: 'category',
+      label: 'Why Chronos Code',
+      collapsed: false,
+      items: [
+        { type: 'doc', id: 'why-chronos-code', label: 'Why Chronos Code' },
+        { type: 'doc', id: 'comparison',       label: 'How It Compares' },
+        { type: 'doc', id: 'use-cases',        label: 'Use Cases' },
+        { type: 'doc', id: 'best-practices',   label: 'Best Practices' },
+      ],
+    },
+
     // ── Architecture ─────────────────────────────────────────────────────────
     {
       type: 'category',
@@ -47,14 +60,13 @@ const sidebars = {
       ],
     },
 
-    // ── Security & Issues ─────────────────────────────────────────────────────
+    // ── Security ─────────────────────────────────────────────────────────────
     {
       type: 'category',
-      label: 'Security & Issues',
+      label: 'Security',
       collapsed: false,
       items: [
-        { type: 'doc', id: 'security',      label: 'Security Policy' },
-        { type: 'doc', id: 'known-issues',  label: 'Known Issues' },
+        { type: 'doc', id: 'security', label: 'Security Policy' },
       ],
     },
   ],

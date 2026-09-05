@@ -152,7 +152,6 @@ const config = {
             items: [
               { label: 'GitHub',      href: 'https://github.com/spawn08/chronos-code' },
               { label: 'Releases',    href: 'https://github.com/spawn08/chronos-code/releases' },
-              { label: 'Known Issues', to: '/known-issues' },
               { label: 'Blog',        to: '/blog' },
             ],
           },

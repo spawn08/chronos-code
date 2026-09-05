@@ -1,18 +1,13 @@
 ---
 sidebar_position: 2
 title: MCP
-description: ManagedServer lifecycle, Discover/Load/Runtime phases, and credential validation gap
+description: ManagedServer lifecycle, Discover/Load/Runtime phases, and credential validation
 ---
 
 # MCP (Model Context Protocol)
 
 The MCP subsystem (`internal/mcpdiscover`) manages external tool servers defined in `.mcp.json`.
 It handles discovery, validation, startup, namespacing, and cleanup.
-
-:::warning Known Issue — Credential Validation Bypass
-There is a known credential validation bypass in the MCP subsystem between the Discover and Load
-phases. See [Known Issues #1](../known-issues#issue-1-mcp-credential-bypass) for details.
-:::
 
 ## Supported Transports
 
@@ -56,7 +51,7 @@ At startup, `mcpdiscover` reads `.mcp.json` and constructs candidate `ManagedSer
 
 Candidates failing `ValidateManagedServer` are marked **denied** and excluded from loading.
 
-### 2. Load Phase — Validation Gap {#load-phase-validation-gap}
+### 2. Load Phase
 
 Candidates passing Discover enter the Load phase:
 
@@ -64,12 +59,8 @@ Candidates passing Discover enter the Load phase:
 2. **`validateRuntimeConfig`** — runtime credential gate (verifies env vars are set)
 3. Check MCP trust policy from `security.yaml`
 
-:::danger Validation Gap
-A server with an `${ENV_VAR}` reference that passes the Discover-phase format check but has its
-referenced env var **unset** at Load time may progress further than expected before
-`validateRuntimeConfig` catches the missing value. This is tracked in
-[Known Issues #1](../known-issues#issue-1-mcp-credential-bypass).
-:::
+Ensure all referenced environment variables are set before starting Chronos Code so that both
+validation gates can fully evaluate MCP server credentials at startup.
 
 ### 3. Runtime Phase
 
@@ -163,4 +154,3 @@ Restart required. When disabled, `.mcp.json` is not read and no MCP tools are re
 - [MCP Discovery Diagram](../diagrams/mcp-discovery)
 - [Configuration — MCP section](../configuration#mcp-configuration-mcpjson)
 - [Rollback Controls](../rollback)
-- [Known Issues](../known-issues)

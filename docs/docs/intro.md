@@ -11,9 +11,13 @@ description: Chronos Code — YAML-native AI coding agent harness built on the C
 [![Release](https://github.com/spawn08/chronos-code/actions/workflows/release.yml/badge.svg)](https://github.com/spawn08/chronos-code/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/spawn08/chronos-code?sort=semver)](https://github.com/spawn08/chronos-code/releases/latest)
 
-**Chronos Code** is a YAML-native AI coding agent harness built on the [Chronos](https://github.com/spawn08/chronos) agentic framework. It is a single Go binary that loads YAML agents, skills, and policies, then runs them through Chronos.
+**Chronos Code** is a YAML-native AI coding agent harness — a single Go binary that loads your agents, skills, and guardrails from plain files and runs them through the [Chronos](https://github.com/spawn08/chronos) framework. It routes different kinds of work to specialist agents, looks at your code structure before burning API calls on raw file reads, and keeps every configuration decision in files you can read, edit, and version-control.
 
-The product the user talks to is the `chronos-code` primary agent. Specialists are spawned on demand, or when the user `@mention`s them. Persistent memory, a Go code graph, MCP tools, guardrails, and a review-gated learning loop sit around that execution path.
+If you're evaluating whether it's right for your workflow, start here:
+
+- [Why Chronos Code](./why-chronos-code) — the problem it solves and the philosophy behind it
+- [How It Compares](./comparison) — side-by-side with Claude Code, Cursor, Aider, and Copilot Workspace
+- [Use Cases](./use-cases) — concrete scenarios where it makes a real difference
 
 ## Key Features
 
@@ -68,7 +72,11 @@ make build        # produces bin/chronos-code
 
 ## Next Steps
 
+- [Why Chronos Code](./why-chronos-code) — origin story and philosophy
+- [How It Compares](./comparison) — vs. Claude Code, Cursor, Aider, Copilot Workspace
+- [Use Cases](./use-cases) — concrete scenarios
+- [Best Practices](./best-practices) — tips for getting the most out of it
 - [Getting Started](./getting-started) — build, initialize, and run your first session
 - [Configuration](./configuration) — YAML config reference
-- [Architecture Overview](./architecture/intro) — how the subsystems connect
+- [Architecture Overview](./architecture) — how the subsystems connect
 - [Diagrams](./diagrams/architecture-overview) — visual system diagrams

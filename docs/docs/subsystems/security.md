@@ -152,4 +152,3 @@ guardrail path — a hook failure produces a warning, not a tool denial.
 - [Security Policy (operator reference)](../security)
 - [Configuration — Security section](../configuration#security-config-securityyaml)
 - [MCP Subsystem](./mcp) — credential requirement detail
-- [Known Issues](../known-issues) — security findings

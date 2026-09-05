@@ -94,9 +94,7 @@ A secret reference validation failure causes the affected MCP server to be marke
 
 The second gate, `validateRuntimeConfig`, runs during the MCP Load phase. It verifies that every `${ENV_VAR}` referenced in the server config is actually set in the environment. An unset variable causes the server to be marked **unavailable**.
 
-:::warning Known Issue
-There is a boundary condition between `validateSecretReferences` and `validateRuntimeConfig` that can allow a server with an unset env var to progress past the Discover phase. See [Known Issues](../known-issues) — issue #2 for details and current workaround.
-:::
+**Recommendation:** set all referenced environment variables before starting Chronos Code so that both validation gates can fully evaluate MCP server credentials at startup.
 
 ## `--yolo` Mode
 
@@ -133,4 +131,3 @@ If pricing for a model is unavailable, a positive USD cap **fails closed** — t
 
 - [Configuration — Security section](../configuration#security-config-securityyaml)
 - [MCP Architecture](./mcp) — credential requirement detail
-- [Known Issues](../known-issues) — security findings

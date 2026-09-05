@@ -97,9 +97,7 @@ flowchart TD
 
 All failure outcomes are isolated — a failed server does not block healthy servers or chat. Failed servers produce a warning log entry at startup.
 
-:::note Known Issue
-There is a known boundary condition between `ValidateManagedServer` and `validateRuntimeConfig`. See [Known Issues](../known-issues) — issue #2.
-:::
+**Tip:** run `chronos-code mcp test` before starting a session to verify that all MCP servers pass both validation gates and connect successfully.
 
 ## See Also
 

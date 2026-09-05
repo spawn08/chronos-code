@@ -103,11 +103,8 @@ There are two sequential gates for MCP credential checking:
     ▼ Runtime (connect + tool registration)
 ```
 
-:::warning Validation Gap
-There is a known boundary condition between Gate 1 and Gate 2 where a server with an unset env
-var may attempt startup before Gate 2 fully catches it. See
-[Known Issues #1](./known-issues#issue-1-mcp-credential-bypass) and the recommended workaround.
-:::
+**Recommendation:** always set all referenced environment variables before starting Chronos Code
+so that both gates can fully validate MCP server credentials at startup.
 
 ## Security Configuration Reference
 
@@ -196,6 +193,5 @@ See [Rollback Controls](./rollback) for the full per-subsystem disable reference
 
 - [Rollback Controls](./rollback)
 - [Configuration](./configuration)
-- [Known Issues](./known-issues)
 - [Security Subsystem Internals](./subsystems/security)
 - [MCP Subsystem](./subsystems/mcp)

@@ -8,10 +8,6 @@ description: ManagedServer lifecycle, Discover/Load/Runtime phases, credential r
 
 The MCP subsystem (`internal/mcpdiscover`) manages external tool servers defined in `.mcp.json`. It handles discovery, validation, startup, namespacing, and cleanup.
 
-:::warning Known Issue
-There is a known credential validation bypass in the MCP subsystem. See [Known Issues](../known-issues) — issue #1 for details.
-:::
-
 ## Supported Transports
 
 | Transport | Description |
@@ -44,7 +40,7 @@ Candidates that pass the Discover phase enter the Load phase:
 - Run `validateRuntimeConfig` — runtime credential gate (verifies env vars are set)
 - Check MCP trust policy from `security.yaml`
 
-Servers failing `validateRuntimeConfig` (e.g., unset env var) are marked **unavailable** at load time. This is the credential bypass boundary — see [Known Issues](../known-issues).
+Servers failing `validateRuntimeConfig` (e.g., unset env var) are marked **unavailable** at load time. Ensure all referenced environment variables are set before starting Chronos Code.
 
 ### 3. Runtime Phase
 
@@ -121,4 +117,3 @@ Restart required. When disabled, `.mcp.json` is not read and no MCP tools are re
 - [MCP Discovery Diagram](../diagrams/mcp-discovery)
 - [Configuration — MCP section](../configuration#mcp-configuration-mcpjson)
 - [Rollback Controls](../rollback)
-- [Known Issues](../known-issues)
