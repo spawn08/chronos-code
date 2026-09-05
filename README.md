@@ -9,8 +9,11 @@ YAML-native AI coding agent harness built on the [Chronos](https://github.com/sp
 
 Chronos Code is a single Go binary that loads YAML agents, skills, and policies, then runs them through Chronos. The product the user talks to is the `chronos-code` primary agent. Specialists are spawned on demand, or when the user `@mention`s them. Persistent memory, a Go code graph, MCP tools, guardrails, and a review-gated learning loop sit around that execution path.
 
+📖 **[Full documentation](https://spawn08.github.io/chronos-code/)** — architecture, configuration, CLI reference, and rollback guides.
+
 ## Contents
 
+- [Documentation](#documentation)
 - [Features](#features)
 - [Architecture](#architecture)
   - [Request path](#request-path)
@@ -38,6 +41,10 @@ Chronos Code is a single Go binary that loads YAML agents, skills, and policies,
   - [PPD routing](#ppd-routing)
 - [Releases and versioning](#releases-and-versioning)
 - [License](#license)
+
+## Documentation
+
+The full documentation site is published at **[spawn08.github.io/chronos-code](https://spawn08.github.io/chronos-code/)**, covering architecture, configuration, the CLI reference, and rollback procedures. Source lives under [`docs/`](docs/).
 
 ## Features
 
