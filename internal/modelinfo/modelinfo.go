@@ -7,7 +7,11 @@
 // it just shows as "context window: unknown" in the picker.
 package modelinfo
 
-import "sort"
+import (
+	"os"
+	"sort"
+	"strings"
+)
 
 // Info describes one known model.
 type Info struct {
@@ -93,9 +97,23 @@ func LookupByModel(modelID string) (Info, bool) {
 }
 
 // All returns every registered Info, grouped by provider then sorted by
-// model name within each provider, for a stable /model listing.
+// model name within each provider, for a stable /model listing. If
+// AZURE_OPENAI_DEPLOYMENT is set, that deployment name is included as an
+// azure entry too — deployment names are the user's own choice, so the
+// conventional examples in the registry above rarely match what's actually
+// configured, and without this the /model picker would never show the
+// deployment someone's AZURE_OPENAI_* env vars already point at.
 func All() []Info {
 	out := append([]Info(nil), registry...)
+	if dep := strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT")); dep != "" {
+		if _, ok := Lookup("azure", dep); !ok {
+			info := Info{Provider: "azure", Model: dep}
+			if known, ok := Lookup("openai", dep); ok {
+				info.ContextWindow = known.ContextWindow
+			}
+			out = append(out, info)
+		}
+	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Provider != out[j].Provider {
 			return out[i].Provider < out[j].Provider

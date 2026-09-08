@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -13,6 +15,15 @@ import (
 // a documented, stable models-list endpoint this package knows how to
 // call. Callers should fall back to All() (the static registry).
 var ErrUnsupportedProvider = errors.New("modelinfo: live model listing not supported for this provider")
+
+// LiveProviders lists every provider FetchLive can query, kept in lockstep
+// with FetchLive's switch statement so callers that want to try live
+// listing across several providers (e.g. a model picker enriching more than
+// just the active one) don't need their own separate, driftable copy of
+// this list.
+func LiveProviders() []string {
+	return []string{"anthropic", "openai", "azure"}
+}
 
 // fetchTimeout bounds a single live models-list call — short enough that a
 // synchronous caller (e.g. a TUI's /model command) never hangs noticeably.
@@ -26,9 +37,12 @@ var (
 )
 
 // FetchLive queries provider's real models-list API using apiKey and
-// returns live Info entries. Only "anthropic" and "openai" are supported —
-// the two providers with a documented, stable, unauthenticated-schema
-// models-list endpoint — any other provider returns ErrUnsupportedProvider.
+// returns live Info entries. "anthropic" and "openai" use their documented,
+// stable, unauthenticated-schema models-list endpoint. "azure" uses Azure
+// OpenAI's own deployments-as-models listing (its newer "v1 preview" data
+// plane API, mirroring OpenAI's /v1/models shape) against the caller's own
+// AZURE_OPENAI_ENDPOINT — every other provider returns
+// ErrUnsupportedProvider.
 //
 // Model IDs and their existence come straight from the API, never
 // hardcoded. ContextWindow is filled in from this package's static
@@ -43,6 +57,8 @@ func FetchLive(ctx context.Context, provider, apiKey string) ([]Info, error) {
 		return fetchAnthropicModels(ctx, apiKey)
 	case "openai":
 		return fetchOpenAIModels(ctx, apiKey)
+	case "azure":
+		return fetchAzureModels(ctx, apiKey)
 	default:
 		return nil, ErrUnsupportedProvider
 	}
@@ -89,6 +105,43 @@ func fetchOpenAIModels(ctx context.Context, apiKey string) ([]Info, error) {
 	out := make([]Info, len(body.Data))
 	for i, d := range body.Data {
 		out[i] = enrich("openai", d.ID)
+	}
+	return out, nil
+}
+
+// fetchAzureModels lists deployments on the caller's own Azure OpenAI
+// resource, read from AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_VERSION —
+// there is no single azure-wide URL like the other vendors since every
+// customer has their own resource endpoint. Returns ErrUnsupportedProvider
+// if the endpoint isn't configured, since there is nothing to call.
+func fetchAzureModels(ctx context.Context, apiKey string) ([]Info, error) {
+	endpoint := strings.TrimRight(os.Getenv("AZURE_OPENAI_ENDPOINT"), "/")
+	if endpoint == "" {
+		return nil, ErrUnsupportedProvider
+	}
+	apiVersion := os.Getenv("AZURE_OPENAI_API_VERSION")
+	if apiVersion == "" {
+		apiVersion = "preview"
+	}
+
+	url := fmt.Sprintf("%s/openai/v1/models?api-version=%s", endpoint, apiVersion)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("api-key", apiKey)
+
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := doJSON(req, &body); err != nil {
+		return nil, fmt.Errorf("modelinfo: fetch azure models: %w", err)
+	}
+	out := make([]Info, len(body.Data))
+	for i, d := range body.Data {
+		out[i] = enrich("azure", d.ID)
 	}
 	return out, nil
 }

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -31,13 +32,31 @@ type ResolvedCredential struct {
 	ExpiresAt time.Time
 }
 
+// providerEnvVars maps a provider name to the environment variable(s) its
+// API key resolves from in github.com/spawn08/chronos's own buildProvider
+// (sdk/agent/config.go) — kept in lockstep with that table so a provider
+// resolveGeneric reports as authorized here is exactly one buildProvider can
+// actually build. Listed in the same order buildProvider checks them.
+var providerEnvVars = map[string][]string{
+	"gemini":     {"GEMINI_API_KEY", "GOOGLE_API_KEY"},
+	"google":     {"GEMINI_API_KEY", "GOOGLE_API_KEY"},
+	"mistral":    {"MISTRAL_API_KEY"},
+	"azure":      {"AZURE_OPENAI_API_KEY"},
+	"groq":       {"GROQ_API_KEY"},
+	"together":   {"TOGETHER_API_KEY"},
+	"deepseek":   {"DEEPSEEK_API_KEY"},
+	"openrouter": {"OPENROUTER_API_KEY"},
+	"fireworks":  {"FIREWORKS_API_KEY"},
+	"perplexity": {"PERPLEXITY_API_KEY"},
+	"anyscale":   {"ANYSCALE_API_KEY"},
+}
+
 // Resolve dispatches to the provider-specific precedence chain for
 // "anthropic"/"claude" and "openai"/"codex", auto-refreshing chronos-code's
 // own stored OAuth credential (within DefaultRefreshWindow of expiry) along
-// the way. Any other provider name falls back to chronos-code's own stored
-// API-key credential only — the same behavior this package had before the
-// chains below existed, so unrelated providers (gemini, mistral, ...) are
-// unaffected.
+// the way. Any other provider name falls back to resolveGeneric, which
+// checks that provider's own API-key env var (per providerEnvVars) before
+// chronos-code's own stored API-key credential.
 func Resolve(ctx context.Context, store *Store, provider string) ResolvedCredential {
 	switch provider {
 	case "anthropic", "claude":
@@ -113,10 +132,17 @@ func ownOAuthCredential(ctx context.Context, store *Store, provider string) (Res
 	return ResolvedCredential{Provider: provider, Token: cred.AccessToken, Source: SourceOwnOAuth, Method: cred.Method, ExpiresAt: cred.ExpiresAt}, true
 }
 
-// resolveGeneric is the last link common to every chain: chronos-code's own
-// stored API-key credential (`auth login <provider> --api-key ...`). It is
-// also the entire chain for providers with no dedicated precedence rules.
+// resolveGeneric is the chain for every provider with no dedicated
+// precedence rules (gemini, mistral, azure, groq, ...): that provider's own
+// API-key env var (providerEnvVars) takes precedence over chronos-code's own
+// stored API-key credential (`auth login <provider> --api-key ...`), the
+// last resort.
 func resolveGeneric(store *Store, provider string) ResolvedCredential {
+	for _, envVar := range providerEnvVars[strings.ToLower(provider)] {
+		if v := os.Getenv(envVar); v != "" {
+			return ResolvedCredential{Provider: provider, Token: v, Source: SourceAPIKeyEnv, Method: MethodAPIKey}
+		}
+	}
 	if cred, err := store.Load(provider); err == nil && cred.Method == MethodAPIKey && cred.APIKey != "" {
 		return ResolvedCredential{Provider: provider, Token: cred.APIKey, Source: SourceOwnAPIKey, Method: MethodAPIKey}
 	}

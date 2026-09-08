@@ -17,6 +17,9 @@ func clearAuthEnv(t *testing.T) {
 	for _, k := range []string{
 		"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
 		"CODEX_ACCESS_TOKEN", "OPENAI_API_KEY",
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "MISTRAL_API_KEY", "AZURE_OPENAI_API_KEY",
+		"GROQ_API_KEY", "TOGETHER_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+		"FIREWORKS_API_KEY", "PERPLEXITY_API_KEY", "ANYSCALE_API_KEY",
 	} {
 		t.Setenv(k, "")
 	}
@@ -200,4 +203,55 @@ func TestResolveGenericProviderUnaffectedByChains(t *testing.T) {
 	if rc.Token != "gemini-key" || rc.Source != SourceOwnAPIKey {
 		t.Fatalf("rc = %+v, want gemini-key via SourceOwnAPIKey", rc)
 	}
+}
+
+func TestResolveGenericProviderEnvVars(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		provider string
+		envVar   string
+	}{
+		{"azure", "AZURE_OPENAI_API_KEY"},
+		{"gemini", "GEMINI_API_KEY"},
+		{"gemini", "GOOGLE_API_KEY"},
+		{"google", "GEMINI_API_KEY"},
+		{"mistral", "MISTRAL_API_KEY"},
+		{"groq", "GROQ_API_KEY"},
+		{"together", "TOGETHER_API_KEY"},
+		{"deepseek", "DEEPSEEK_API_KEY"},
+		{"openrouter", "OPENROUTER_API_KEY"},
+		{"fireworks", "FIREWORKS_API_KEY"},
+		{"perplexity", "PERPLEXITY_API_KEY"},
+		{"anyscale", "ANYSCALE_API_KEY"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.provider+"/"+tc.envVar, func(t *testing.T) {
+			clearAuthEnv(t)
+			withFakeHome(t)
+			t.Setenv(tc.envVar, "env-key")
+			store := newTestStore(t)
+
+			rc := Resolve(ctx, store, tc.provider)
+			if rc.Token != "env-key" || rc.Source != SourceAPIKeyEnv {
+				t.Fatalf("rc = %+v, want env-key via SourceAPIKeyEnv", rc)
+			}
+		})
+	}
+
+	t.Run("env var wins over own stored api key", func(t *testing.T) {
+		clearAuthEnv(t)
+		withFakeHome(t)
+		t.Setenv("AZURE_OPENAI_API_KEY", "env-key")
+		store := newTestStore(t)
+		if err := store.Save("azure", Credential{Provider: "azure", Method: MethodAPIKey, APIKey: "own-key"}); err != nil {
+			t.Fatal(err)
+		}
+
+		rc := Resolve(ctx, store, "azure")
+		if rc.Token != "env-key" || rc.Source != SourceAPIKeyEnv {
+			t.Fatalf("rc = %+v, want env-key via SourceAPIKeyEnv", rc)
+		}
+	})
 }

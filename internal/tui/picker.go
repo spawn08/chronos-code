@@ -23,6 +23,19 @@ type picker struct {
 	idx        int
 	filter     string
 	filterable bool
+
+	// isModelPicker marks a picker built by newModelPicker, so a
+	// modelPickerLiveMsg that arrives after the user has already dismissed
+	// or replaced it (Ctrl+A, Ctrl+/, Esc) knows not to merge into whatever
+	// picker (if any) is open by then.
+	isModelPicker bool
+
+	// scrollOffset is the index into items of the first row View renders.
+	// View recomputes it every render (see ensureVisible) to track idx, so
+	// a long list — e.g. every live-fetched anthropic/openai/azure model
+	// merged into the Ctrl+M picker — scrolls to keep the selection visible
+	// instead of silently overflowing the terminal.
+	scrollOffset int
 }
 
 func newAgentPicker(m *appModel) *picker {
@@ -47,25 +60,65 @@ func newAgentPicker(m *appModel) *picker {
 
 // newModelPicker lists the static model registry filtered to already
 // authorized providers — the same fallback list handleModelCommand shows
-// when it can't reach a provider's live models endpoint. Keeping the
-// picker to the static list (rather than handleModelCommand's live-fetch
-// path) keeps opening it instant rather than blocking on a network call.
+// when it can't reach a provider's live models endpoint. This keeps opening
+// the picker instant rather than blocking Update() on a network call; the
+// Ctrl+M handler separately kicks off fetchModelPickerLiveCmd, and a
+// modelPickerLiveMsg upgrades these entries for the active provider in
+// place once that live fetch lands (see mergeLiveModelPickerItems).
 func newModelPicker(m *appModel) *picker {
 	authorized := m.authorizedProviderNames()
 	list := filterByProviders(modelinfo.All(), authorized)
 	var items []wizardItem
 	for _, i := range list {
-		items = append(items, wizardItem{
-			label: fmt.Sprintf("%s / %s", i.Provider, i.Model),
-			hint:  formatTokenCount(i.ContextWindow) + " tokens",
-			value: fmt.Sprintf("/model %s %s", i.Provider, i.Model),
-		})
+		items = append(items, modelPickerItem(i, false))
 	}
 	heading := "Switch model:"
 	if len(items) == 0 {
 		heading = "Switch model (no provider authorized yet — run /login):"
 	}
-	return &picker{heading: heading, all: items, items: items}
+	return &picker{heading: heading, all: items, items: items, isModelPicker: true, filterable: true}
+}
+
+func modelPickerItem(i modelinfo.Info, live bool) wizardItem {
+	hint := formatTokenCount(i.ContextWindow) + " tokens"
+	if live {
+		hint += " · live"
+	}
+	return wizardItem{
+		label: fmt.Sprintf("%s / %s", i.Provider, i.Model),
+		hint:  hint,
+		value: fmt.Sprintf("/model %s %s", i.Provider, i.Model),
+	}
+}
+
+// mergeLiveModelPickerItems replaces items' static entries for provider
+// with live (real, vendor-API-confirmed model IDs), preserving their
+// position — this is how e.g. a live Azure deployment list overwrites the
+// three generic example deployment names newModelPicker started with.
+// Provider entries with no live counterpart are left untouched.
+func mergeLiveModelPickerItems(items []wizardItem, provider string, live []modelinfo.Info) []wizardItem {
+	prefix := "/model " + provider + " "
+	liveItems := make([]wizardItem, len(live))
+	for i, info := range live {
+		liveItems[i] = modelPickerItem(info, true)
+	}
+
+	out := make([]wizardItem, 0, len(items)+len(liveItems))
+	spliced := false
+	for _, it := range items {
+		if !strings.HasPrefix(it.value, prefix) {
+			out = append(out, it)
+			continue
+		}
+		if !spliced {
+			out = append(out, liveItems...)
+			spliced = true
+		}
+	}
+	if !spliced {
+		out = append(out, liveItems...)
+	}
+	return out
 }
 
 // paletteCommands lists every slash command documented in helpText, in the
@@ -91,6 +144,7 @@ func (p *picker) applyFilter() {
 	if p.filter == "" {
 		p.items = p.all
 		p.idx = 0
+		p.scrollOffset = 0
 		return
 	}
 	needle := strings.ToLower(p.filter)
@@ -102,10 +156,48 @@ func (p *picker) applyFilter() {
 	}
 	p.items = items
 	p.idx = 0
+	p.scrollOffset = 0
 }
 
-// View renders the picker's heading, optional filter line, and item list.
-func (p *picker) View() string {
+// ensureVisible scrolls the window (scrollOffset) by the minimum amount
+// needed to keep idx inside a window of visible rows, clamped to the item
+// list's bounds. Called from View on every render, so it stays correct
+// regardless of what changed idx or items (navigation, filtering, or a
+// modelPickerLiveMsg merge growing the list).
+func (p *picker) ensureVisible(visible int) {
+	if visible <= 0 {
+		p.scrollOffset = 0
+		return
+	}
+	if p.idx < p.scrollOffset {
+		p.scrollOffset = p.idx
+	}
+	if p.idx >= p.scrollOffset+visible {
+		p.scrollOffset = p.idx - visible + 1
+	}
+	maxOffset := len(p.items) - visible
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if p.scrollOffset > maxOffset {
+		p.scrollOffset = maxOffset
+	}
+	if p.scrollOffset < 0 {
+		p.scrollOffset = 0
+	}
+}
+
+// View renders the picker's heading, optional filter line, and a
+// vertically scrolled window of up to visible items — sized by the caller
+// to fit the terminal (see appModel.pickerVisibleRows) — so a long list
+// (e.g. every live-fetched anthropic/openai/azure model merged into the
+// Ctrl+M picker) scrolls with the selection instead of overflowing.
+func (p *picker) View(visible int) string {
+	if visible <= 0 || visible > len(p.items) {
+		visible = len(p.items)
+	}
+	p.ensureVisible(visible)
+
 	var b strings.Builder
 	b.WriteString(styleHeader.Render(p.heading))
 	b.WriteString("\n")
@@ -116,7 +208,12 @@ func (p *picker) View() string {
 	if len(p.items) == 0 {
 		b.WriteString(styleDim.Render("  (no matches)"))
 	}
-	for i, it := range p.items {
+	end := p.scrollOffset + visible
+	if end > len(p.items) {
+		end = len(p.items)
+	}
+	for i := p.scrollOffset; i < end; i++ {
+		it := p.items[i]
 		marker := "  "
 		if i == p.idx {
 			marker = styleAgentName.Render("→ ")
@@ -127,7 +224,11 @@ func (p *picker) View() string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString(styleDim.Render("\n↑↓ navigate  enter select  esc cancel"))
+	footer := "↑↓ navigate  enter select  esc cancel"
+	if len(p.items) > visible {
+		footer = fmt.Sprintf("showing %d-%d of %d · %s", p.scrollOffset+1, end, len(p.items), footer)
+	}
+	b.WriteString(styleDim.Render("\n" + footer))
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -138,7 +239,25 @@ func (m *appModel) renderPickerModal() string {
 	if width < 1 {
 		width = 1
 	}
-	return styleModal.Width(width).Render(m.picker.View())
+	return styleModal.Width(width).Render(m.picker.View(m.pickerVisibleRows()))
+}
+
+// pickerVisibleRows caps how many items picker.View renders at once so a
+// long list never overflows the terminal. Heading, the blank line before
+// and after the list, and styleModal's border+padding consume a fixed 8
+// rows (9 for a filterable picker's extra filter line) — the same
+// fixed-chrome-budget pattern as approvalDetailBudget for the approval
+// modal.
+func (m *appModel) pickerVisibleRows() int {
+	chrome := 8
+	if m.picker != nil && m.picker.filterable {
+		chrome++
+	}
+	budget := m.height - chrome
+	if budget < 3 {
+		return 3
+	}
+	return budget
 }
 
 // handlePickerKey routes a key event while a picker is active, mirroring

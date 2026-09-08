@@ -19,6 +19,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
@@ -45,6 +46,14 @@ func newTestAppModel(t *testing.T) *appModel {
 	for _, env := range []string{
 		"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
 		"CODEX_ACCESS_TOKEN", "OPENAI_API_KEY",
+		// modelinfo.LiveProviders() env vars: without clearing these, a
+		// developer machine with e.g. AZURE_OPENAI_API_KEY exported in its
+		// shell would leak into AuthorizedProviders and make Ctrl+M model
+		// picker tests fire real live network requests (fetchModelPickerLiveCmd).
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "MISTRAL_API_KEY", "AZURE_OPENAI_API_KEY",
+		"AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT", "AZURE_OPENAI_API_VERSION",
+		"GROQ_API_KEY", "TOGETHER_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY",
+		"FIREWORKS_API_KEY", "PERPLEXITY_API_KEY", "ANYSCALE_API_KEY",
 	} {
 		t.Setenv(env, "")
 	}
@@ -305,9 +314,14 @@ func TestHandleKey_V2PickerShortcuts(t *testing.T) {
 		name        string
 		msg         tea.KeyPressMsg
 		wantHeading string
+		// Ctrl+M also kicks off fetchModelPickerLiveCmd (a bounded,
+		// asynchronous live model list fetch) so the picker opens instantly
+		// with the static registry and upgrades in place once that lands —
+		// see modelPickerLiveMsg. Ctrl+A/Ctrl+/ stay fully synchronous.
+		wantCmd bool
 	}{
 		{name: "Ctrl+A", msg: tea.KeyPressMsg{Code: 'a', Mod: tea.ModCtrl}, wantHeading: "Switch agent:"},
-		{name: "Ctrl+M", msg: tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl}, wantHeading: "Switch model"},
+		{name: "Ctrl+M", msg: tea.KeyPressMsg{Code: 'm', Mod: tea.ModCtrl}, wantHeading: "Switch model", wantCmd: true},
 		{name: "Ctrl+/", msg: tea.KeyPressMsg{Code: '/', Mod: tea.ModCtrl}, wantHeading: "Commands:"},
 	}
 
@@ -315,8 +329,8 @@ func TestHandleKey_V2PickerShortcuts(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newTestAppModel(t)
 			_, cmd := m.Update(tt.msg)
-			if cmd != nil {
-				t.Fatal("picker shortcut returned a command")
+			if (cmd != nil) != tt.wantCmd {
+				t.Fatalf("picker shortcut returned a command = %v, want %v", cmd != nil, tt.wantCmd)
 			}
 			if m.picker == nil {
 				t.Fatal("picker shortcut did not open a picker")
@@ -1384,6 +1398,74 @@ func TestHandleSlashMCPListsServersAndHelp(t *testing.T) {
 	output := strings.Join(m.blocks, "\n")
 	if !strings.Contains(output, "mcp") {
 		t.Errorf("/mcp output = %q, want MCP status or discovery help", output)
+	}
+}
+
+func TestBuiltinSlashCommandIsRecordedInHistory(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	m.handleSubmit("/help")
+
+	if prev, ok := m.history.Prev(""); !ok || prev != "/help" {
+		t.Fatalf("history.Prev() = %q, %v; want /help recalled via Up arrow", prev, ok)
+	}
+}
+
+func TestFetchModelPickerLiveCmdWithNoAuthorizedProvidersReturnsEmpty(t *testing.T) {
+	m := newTestAppModel(t) // clears every LiveProviders() env var; nothing authorized
+
+	msg := fetchModelPickerLiveCmd(m.ctx, m.orch)()
+
+	live, ok := msg.(modelPickerLiveMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want modelPickerLiveMsg", msg)
+	}
+	if len(live.results) != 0 {
+		t.Fatalf("results = %+v, want none (no provider authorized)", live.results)
+	}
+}
+
+func TestModelPickerLiveMsgUpgradesOpenPicker(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	m.picker = newModelPicker(m)
+	if m.picker == nil || !m.picker.isModelPicker {
+		t.Fatal("newModelPicker did not produce a picker marked isModelPicker")
+	}
+
+	_, _ = m.Update(modelPickerLiveMsg{
+		results: []providerModelsResult{
+			{provider: "azure", ok: true, models: []modelinfo.Info{{Provider: "azure", Model: "my-real-deployment"}}},
+		},
+	})
+
+	found := false
+	for _, it := range m.picker.items {
+		if it.value == "/model azure my-real-deployment" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("picker items = %+v, want a live azure entry merged in", m.picker.items)
+	}
+}
+
+func TestModelPickerLiveMsgIgnoredWhenPickerDismissed(t *testing.T) {
+	m := newTestAppModel(t)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	m.picker = nil // dismissed before the live fetch landed
+
+	_, _ = m.Update(modelPickerLiveMsg{
+		results: []providerModelsResult{
+			{provider: "azure", ok: true, models: []modelinfo.Info{{Provider: "azure", Model: "my-real-deployment"}}},
+		},
+	})
+
+	if m.picker != nil {
+		t.Fatalf("picker = %+v, want nil to stay nil", m.picker)
 	}
 }
 

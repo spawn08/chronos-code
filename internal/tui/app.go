@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -135,6 +136,52 @@ type subagentDoneMsg struct {
 type shellDoneMsg struct {
 	output string
 	err    error
+}
+
+// modelPickerLiveMsg carries the results of asynchronously fetching every
+// currently authorized, live-listing-capable provider's real model list
+// (Orchestrator.ListProviderModels) to upgrade an already-open Ctrl+M model
+// picker in place — e.g. so Azure's actual deployments replace the three
+// generic example deployment names the picker opened with. This covers
+// every authorized provider, not just the active one, since Ctrl+M is
+// often opened specifically to discover a provider's real model names
+// *before* switching to it — gating this on the active provider would make
+// it useless for exactly that case.
+type modelPickerLiveMsg struct {
+	results []providerModelsResult
+}
+
+type providerModelsResult struct {
+	provider string
+	models   []modelinfo.Info
+	ok       bool
+}
+
+// fetchModelPickerLiveCmd fires the same live model list request
+// handleModelCommand's bare /model uses for the active provider, but
+// against every currently authorized provider modelinfo.LiveProviders
+// supports. Requests run concurrently, each bounded to 5s, so one
+// slow/unreachable provider can't hold up the others; opening the picker
+// itself (newModelPicker) stays synchronous and instant, and results land
+// later as a single modelPickerLiveMsg.
+func fetchModelPickerLiveCmd(ctx context.Context, orch *orchestrator.Orchestrator) tea.Cmd {
+	return func() tea.Msg {
+		candidates := orch.AuthorizedProviders(ctx, modelinfo.LiveProviders())
+		results := make([]providerModelsResult, len(candidates))
+		var wg sync.WaitGroup
+		for i, provider := range candidates {
+			wg.Add(1)
+			go func(i int, provider string) {
+				defer wg.Done()
+				fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				models, ok := orch.ListProviderModels(fetchCtx, provider)
+				results[i] = providerModelsResult{provider: provider, models: models, ok: ok}
+			}(i, provider)
+		}
+		wg.Wait()
+		return modelPickerLiveMsg{results: results}
+	}
 }
 
 type clipboardWriteResultMsg struct {
@@ -525,6 +572,17 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case modelPickerLiveMsg:
+		if m.picker != nil && m.picker.isModelPicker {
+			for _, r := range msg.results {
+				if r.ok && len(r.models) > 0 {
+					m.picker.all = mergeLiveModelPickerItems(m.picker.all, r.provider, r.models)
+				}
+			}
+			m.picker.applyFilter()
+		}
+		return m, nil
+
 	case clipboardWriteResultMsg:
 		if msg.err != nil {
 			m.statusMsg = "copy failed: " + msg.err.Error()
@@ -686,7 +744,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.ModelPicker):
 		m.picker = newModelPicker(m)
 		m.resizeViewport()
-		return m, nil
+		return m, fetchModelPickerLiveCmd(m.ctx, m.orch)
 	case key.Matches(msg, keys.LoginWizard):
 		m.wizard = newLoginWizard(m)
 		m.resizeViewport()
@@ -873,6 +931,7 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	case strings.HasPrefix(line, "/"):
 		name, task, ok := m.parseSkillInvocation(line)
 		if !ok {
+			m.history.Add(displayLine)
 			if strings.Fields(line)[0] == "/subagent" {
 				return m.handleSubagentCommand(line)
 			}

@@ -71,6 +71,43 @@ func TestFetchLiveOpenAIParsesRealResponseShape(t *testing.T) {
 	}
 }
 
+func TestFetchLiveAzureParsesRealResponseShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("api-key") != "test-key" {
+			t.Errorf("api-key = %q, want test-key", r.Header.Get("api-key"))
+		}
+		if v := r.URL.Query().Get("api-version"); v != "preview" {
+			t.Errorf("api-version = %q, want preview", v)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "my-gpt5-deployment", "object": "model"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	t.Setenv("AZURE_OPENAI_ENDPOINT", srv.URL)
+	t.Setenv("AZURE_OPENAI_API_VERSION", "preview")
+
+	got, err := FetchLive(context.Background(), "azure", "test-key")
+	if err != nil {
+		t.Fatalf("FetchLive: %v", err)
+	}
+	if len(got) != 1 || got[0].Provider != "azure" || got[0].Model != "my-gpt5-deployment" {
+		t.Fatalf("got = %+v, want [{azure my-gpt5-deployment 0}]", got)
+	}
+}
+
+func TestFetchLiveAzureWithoutEndpointIsUnsupported(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_ENDPOINT", "")
+
+	_, err := FetchLive(context.Background(), "azure", "test-key")
+	if err != ErrUnsupportedProvider {
+		t.Fatalf("err = %v, want ErrUnsupportedProvider", err)
+	}
+}
+
 func TestFetchLiveUnsupportedProvider(t *testing.T) {
 	_, err := FetchLive(context.Background(), "some-custom-provider", "key")
 	if err != ErrUnsupportedProvider {

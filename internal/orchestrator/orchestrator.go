@@ -2228,18 +2228,26 @@ func (o *Orchestrator) AuthorizedProviders(ctx context.Context, candidates []str
 }
 
 // ListActiveProviderModels attempts to fetch a live model list for the
-// active agent's provider using its resolved credential
-// (modelinfo.FetchLive) — real model IDs from the vendor's own API, not a
-// hardcoded list. It reports ok=false (never an error the caller must
-// handle) when the provider has no supported live-listing endpoint, no
-// credential is currently resolvable, or the request fails for any reason
-// (network, timeout, auth); callers should fall back to modelinfo.All() in
-// that case, which is the pre-existing, always-available static registry.
+// active agent's provider. See ListProviderModels for the full contract.
 func (o *Orchestrator) ListActiveProviderModels(ctx context.Context) (models []modelinfo.Info, ok bool) {
 	provider, _ := o.ActiveModelInfo()
 	if provider == "" {
 		return nil, false
 	}
+	return o.ListProviderModels(ctx, provider)
+}
+
+// ListProviderModels attempts to fetch a live model list for provider —
+// which need not be the active agent's provider, e.g. so a model picker can
+// show a provider's real deployments/models before the user has ever
+// switched to it — using its resolved credential (modelinfo.FetchLive):
+// real model IDs from the vendor's own API, not a hardcoded list. It
+// reports ok=false (never an error the caller must handle) when the
+// provider has no supported live-listing endpoint, no credential is
+// currently resolvable, or the request fails for any reason (network,
+// timeout, auth); callers should fall back to modelinfo.All() in that case,
+// which is the pre-existing, always-available static registry.
+func (o *Orchestrator) ListProviderModels(ctx context.Context, provider string) (models []modelinfo.Info, ok bool) {
 	key := auth.Resolve(ctx, auth.NewStore(), provider).Token
 	if key == "" {
 		return nil, false

@@ -41,6 +41,33 @@ func TestLookupByModelUnknownReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestAllIncludesAzureDeploymentFromEnv(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_DEPLOYMENT", "my-custom-deployment")
+
+	all := All()
+	for _, i := range all {
+		if i.Provider == "azure" && i.Model == "my-custom-deployment" {
+			return
+		}
+	}
+	t.Fatal("All(): want an azure entry for AZURE_OPENAI_DEPLOYMENT, got none")
+}
+
+func TestAllDoesNotDuplicateKnownAzureDeployment(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+
+	all := All()
+	count := 0
+	for _, i := range all {
+		if i.Provider == "azure" && i.Model == "gpt-4o" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("azure/gpt-4o appears %d times, want 1 (already in static registry)", count)
+	}
+}
+
 func TestAllIsSortedByProviderThenModel(t *testing.T) {
 	all := All()
 	if len(all) == 0 {
