@@ -53,6 +53,17 @@ var registry = []Info{
 	{Provider: "deepseek", Model: "deepseek-chat", ContextWindow: 64_000},
 	{Provider: "groq", Model: "llama-3.3-70b-versatile", ContextWindow: 128_000},
 	{Provider: "openrouter", Model: "meta-llama/llama-3.1-405b", ContextWindow: 128_000},
+
+	// Azure OpenAI: `model` here is the deployment name, which is
+	// user-chosen and arbitrary — these are just the conventional
+	// deployment names Azure's own quickstart docs use, so the /login and
+	// /model pickers have at least one azure entry instead of none. Context
+	// windows mirror the underlying OpenAI model above; pick whatever
+	// deployment name matches your actual model if you named it
+	// differently.
+	{Provider: "azure", Model: "gpt-4o", ContextWindow: 128_000},
+	{Provider: "azure", Model: "gpt-4o-mini", ContextWindow: 128_000},
+	{Provider: "azure", Model: "gpt-5", ContextWindow: 400_000},
 }
 
 // Lookup returns the registered Info for (provider, model), if known.

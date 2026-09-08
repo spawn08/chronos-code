@@ -19,9 +19,19 @@ func TestLookupUnknownModel(t *testing.T) {
 }
 
 func TestLookupByModelUnambiguous(t *testing.T) {
-	info, ok := LookupByModel("gpt-4o")
-	if !ok || info.Provider != "openai" {
-		t.Fatalf("LookupByModel(gpt-4o) = %+v, ok=%v, want openai match", info, ok)
+	info, ok := LookupByModel("mistral-large-latest")
+	if !ok || info.Provider != "mistral" {
+		t.Fatalf("LookupByModel(mistral-large-latest) = %+v, ok=%v, want mistral match", info, ok)
+	}
+}
+
+// gpt-4o is registered under both openai and azure (a deployment name is
+// user-chosen, but conventionally mirrors the underlying model), so it's the
+// ambiguous case LookupByModel's doc comment calls out — verify it actually
+// resolves that way rather than silently picking one provider.
+func TestLookupByModelAmbiguousAcrossProviders(t *testing.T) {
+	if _, ok := LookupByModel("gpt-4o"); ok {
+		t.Fatal("LookupByModel(gpt-4o): want false — registered under both openai and azure")
 	}
 }
 
