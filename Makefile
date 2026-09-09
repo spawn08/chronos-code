@@ -19,7 +19,7 @@ SIZE_LIMIT  := 41943040
 
 build:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) go build -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
+	CGO_ENABLED=$(CGO_ENABLED) go build -tags treesitter -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
 
 build-release:
 	@mkdir -p $(BIN_DIR)

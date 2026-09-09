@@ -338,6 +338,10 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 	}
 	defer tree.Close()
 
+	if err := store.ClearFile(ctx, relPath); err != nil {
+		return 0, 0, fmt.Errorf("clear %s: %w", relPath, err)
+	}
+
 	pkg := filepath.Dir(relPath)
 	if pkg == "." {
 		pkg = "(root)"
