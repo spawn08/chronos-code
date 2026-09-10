@@ -33,6 +33,12 @@ type EdgeKind string
 const (
 	EdgeCall       EdgeKind = "call"
 	EdgeImplements EdgeKind = "implements"
+	// EdgeImport is a package-level (not symbol-level) edge recorded by the
+	// Tier-2 tree-sitter indexer for resolved same-repo import targets.
+	// FromName/ToName hold package identifiers (directory paths), not symbol
+	// names, so PruneStaleEdges validates them against the packages table
+	// instead of the symbols table.
+	EdgeImport EdgeKind = "import"
 )
 
 // Symbol is a single declaration recorded in the graph.
@@ -81,6 +87,20 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("open graph store: %w", err)
 	}
 	db.SetMaxOpenConns(1)
+	// WAL + synchronous=NORMAL trade a small durability window (an OS crash
+	// mid-write can lose the last few commits) for avoiding an fsync on
+	// every single INSERT — the graph store is a rebuildable derived index,
+	// not a source of truth, so that tradeoff is free. Without it, a full
+	// reindex's tens of thousands of per-symbol/per-edge autocommit inserts
+	// are dominated by fsync latency rather than actual work.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set graph store journal mode: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set graph store synchronous mode: %w", err)
+	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -314,8 +334,8 @@ func (s *Store) PruneStaleEdges(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM edges
 		WHERE (source_file != '' AND source_file NOT IN (SELECT path FROM files))
-		   OR from_name NOT IN (SELECT name FROM symbols)
-		   OR to_name NOT IN (SELECT name FROM symbols)
+		   OR (kind = 'import' AND (from_name NOT IN (SELECT name FROM packages) OR to_name NOT IN (SELECT name FROM packages)))
+		   OR (kind != 'import' AND (from_name NOT IN (SELECT name FROM symbols) OR to_name NOT IN (SELECT name FROM symbols)))
 	`)
 	if err != nil {
 		return fmt.Errorf("prune stale edges: %w", err)
@@ -610,6 +630,18 @@ func (s *Store) CalleesOf(ctx context.Context, name string) ([]string, error) {
 // ImplementationsOf returns the distinct concrete type names implementing interfaceName.
 func (s *Store) ImplementationsOf(ctx context.Context, interfaceName string) ([]string, error) {
 	return s.edgeNames(ctx, `SELECT DISTINCT from_name FROM edges WHERE kind = ? AND to_name = ?`, string(EdgeImplements), interfaceName)
+}
+
+// ImportsOf returns the distinct package names that pkg has a resolved,
+// same-repo import edge to (see EdgeImport).
+func (s *Store) ImportsOf(ctx context.Context, pkg string) ([]string, error) {
+	return s.edgeNames(ctx, `SELECT DISTINCT to_name FROM edges WHERE kind = ? AND from_name = ?`, string(EdgeImport), pkg)
+}
+
+// ImportersOf returns the distinct package names that have a resolved,
+// same-repo import edge to pkg (see EdgeImport).
+func (s *Store) ImportersOf(ctx context.Context, pkg string) ([]string, error) {
+	return s.edgeNames(ctx, `SELECT DISTINCT from_name FROM edges WHERE kind = ? AND to_name = ?`, string(EdgeImport), pkg)
 }
 
 func (s *Store) edgeNames(ctx context.Context, query string, args ...any) ([]string, error) {

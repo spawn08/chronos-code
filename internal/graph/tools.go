@@ -358,7 +358,15 @@ func multiResolutionViewTool(store *Store, root string) *tool.Definition {
 				if imports != "" {
 					importList = strings.Split(imports, ",")
 				}
-				return map[string]any{"level": "L1", "package": target, "imports": importList, "symbols": symbolSummaries(syms)}, nil
+				dependsOn, err := store.ImportsOf(ctx, target)
+				if err != nil {
+					return nil, err
+				}
+				dependents, err := store.ImportersOf(ctx, target)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"level": "L1", "package": target, "imports": importList, "depends_on": dependsOn, "dependents": dependents, "symbols": symbolSummaries(syms)}, nil
 			case "L2":
 				if target == "" {
 					return nil, fmt.Errorf("multi_resolution_view: target is required for L2")
