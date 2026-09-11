@@ -2311,6 +2311,32 @@ func (m *appModel) contextUsageSegment() string {
 	return fmt.Sprintf("ctx %s/%s (%d%%)", formatTokenCount(used), formatTokenCount(info.ContextWindow), pct)
 }
 
+// pendingSubagentSegment reports the model of the subagent currently running
+// via spawn_subagent, if any. It scans m.activityArgs rather than tracking a
+// dedicated field because spawn_subagent's "agent" argument is already
+// captured there under whichever key handleModelResp/handleActivity used for
+// that tool call.
+func (m *appModel) pendingSubagentSegment() string {
+	if m.pendingSubagents == 0 || m.orch == nil {
+		return ""
+	}
+	for _, v := range m.activityArgs {
+		args, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := args["agent"].(string)
+		if name == "" {
+			continue
+		}
+		if _, modelID, ok := m.orch.AgentModelInfo(name); ok && modelID != "" {
+			return "sub:" + name + "@" + modelID
+		}
+		return "sub:" + name
+	}
+	return "sub:dynamic"
+}
+
 // refreshPrompt updates the input box's prompt to show the currently active
 // agent (e.g. after /agent, @agent, or auto-routing switches it), matching
 // textarea's documented requirement to re-call SetWidth after changing
@@ -3075,9 +3101,24 @@ func (m *appModel) renderStatusBar() string {
 			runLabel = "stopping"
 		}
 	}
+	// highlightRanges track [start,end) grapheme offsets (matching
+	// lipgloss.StyleRanges/ansi.Cut, not byte offsets) of segments below that
+	// get their own color on top of styleStatusLeft's base styling, applied
+	// after truncation/rendering so the surrounding background survives.
+	var highlightRanges []lipgloss.Range
+	highlight := func(text *string, style lipgloss.Style, appendSeg func() string) {
+		start := utf8.RuneCountInString(*text)
+		*text += appendSeg()
+		highlightRanges = append(highlightRanges, lipgloss.NewRange(start, utf8.RuneCountInString(*text), style))
+	}
+
 	leftText := " ● " + runLabel + " │ " + streamLabel
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
 		leftText = " ● " + runLabel + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
+	}
+	if _, modelID := m.orch.ActiveModelInfo(); modelID != "" {
+		leftText += " │ "
+		highlight(&leftText, styleStatusModel.Style, func() string { return modelID })
 	}
 	if m.width >= 100 {
 		if m.orch.PlanMode() {
@@ -3089,6 +3130,18 @@ func (m *appModel) renderStatusBar() string {
 		leftText += " │ " + string(m.orch.VerificationMode())
 		if route := m.orch.LastRouteStatus(); route != "route:—" {
 			leftText += " │ " + route
+		}
+		if seg := m.pendingSubagentSegment(); seg != "" {
+			leftText += " │ "
+			highlight(&leftText, styleStatusSub.Style, func() string { return seg })
+		}
+		if label, age, ok := m.orch.LastHookActivity(); ok && age < 30*time.Second {
+			leftText += " │ "
+			style := styleStatusHookOK.Style
+			if strings.Contains(label, "✗") {
+				style = styleStatusHookFail.Style
+			}
+			highlight(&leftText, style, func() string { return "hook:" + label })
 		}
 	}
 	if ident := m.sessionIdentitySegment(); ident != "" {
@@ -3113,9 +3166,43 @@ func (m *appModel) renderStatusBar() string {
 			leftText += " ↑"
 		}
 		leftText += " "
+		highlightRanges = nil
 	}
 	leftText = truncateToWidth(leftText, m.width)
 	leftSeg := styleStatusLeft.Render(leftText)
+	if len(highlightRanges) > 0 {
+		// Render highlighted spans as their own complete lipgloss chunks
+		// (each carrying styleStatusLeft's Background/Bold plus its own
+		// Foreground) rather than post-processing leftSeg with
+		// lipgloss.StyleRanges: StyleRanges' "existing styles taken into
+		// account" only preserves ANSI that was already distributed through
+		// the input string, but styleStatusLeft.Render(leftText) applies a
+		// single open/reset pair around the whole line, so text after a
+		// range's own reset would otherwise render with no background.
+		runes := []rune(leftText)
+		plainLen := len(runes)
+		var b strings.Builder
+		pos := 0
+		for _, r := range highlightRanges {
+			if r.Start >= plainLen || r.Start < pos {
+				continue
+			}
+			end := r.End
+			if end > plainLen {
+				end = plainLen
+			}
+			b.WriteString(styleStatusLeft.Render(string(runes[pos:r.Start])))
+			// r.Style is the raw lipgloss.Style stashed in the range (see
+			// highlight() below); route it through lipgloss.Sprint exactly
+			// like terminalStyle.Render does, otherwise this segment skips
+			// the output-profile filtering the rest of the bar gets and can
+			// emit truecolor codes on terminals/pipes that don't support them.
+			b.WriteString(lipgloss.Sprint(r.Style.Render(string(runes[r.Start:end]))))
+			pos = end
+		}
+		b.WriteString(styleStatusLeft.Render(string(runes[pos:])))
+		leftSeg = b.String()
+	}
 
 	rightText := " drag-select copy │ ctrl+shift+c last │ ctrl+/ commands │ ctrl+c interrupt/quit "
 	if m.mouseCapture {

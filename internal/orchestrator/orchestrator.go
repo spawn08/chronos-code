@@ -86,6 +86,7 @@ type Orchestrator struct {
 	permissionChecker  *security.PermissionChecker
 	permissionYolo     atomic.Bool
 	hookRunner         *security.HookRunner
+	hookActivity       *hookActivityTracker
 	learningStore      *learning.SQLStore
 	planMode           atomic.Bool
 	editsMu            sync.Mutex
@@ -300,6 +301,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		return nil, fmt.Errorf("configure subagent delegation: %w", err)
 	}
 	var hookRunner *security.HookRunner
+	hookActivity := &hookActivityTracker{}
 	if len(cfg.Hooks.PreToolCall)+len(cfg.Hooks.PostToolCall)+len(cfg.Hooks.UserPromptSubmit) > 0 {
 		hookRunner, err = security.NewHookRunner(root)
 		if err != nil {
@@ -319,7 +321,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// Wrap tool handlers only after
 		// MCP registration so server tools are covered too, not just the
 		// built-in/YAML-declared ones registered before this point.
-		wrapUserToolHooks(a, cfg.Hooks, hookRunner)
+		wrapUserToolHooks(a, cfg.Hooks, hookRunner, hookActivity)
 		agentID := a.ID
 		toolcompress.WrapDynamic(a, func(ctx context.Context) int {
 			base := tracker.CompressionThreshold(sessionOrAgentKey(ctx, agentID))
@@ -366,6 +368,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		skillCatalog:       skillCatalog,
 		permissionChecker:  security.NewPermissionChecker(policy, root),
 		hookRunner:         hookRunner,
+		hookActivity:       hookActivity,
 		learningStore:      learningStore,
 		lspManager:         languageServerManager,
 		broker:             broker,
@@ -455,7 +458,7 @@ func sessionOrAgentKey(ctx context.Context, agentID string) string {
 	return agentID
 }
 
-func wrapUserToolHooks(a *agent.Agent, configured config.HooksConfig, runner *security.HookRunner) {
+func wrapUserToolHooks(a *agent.Agent, configured config.HooksConfig, runner *security.HookRunner, activity *hookActivityTracker) {
 	if runner == nil {
 		return
 	}
@@ -474,7 +477,9 @@ func wrapUserToolHooks(a *agent.Agent, configured config.HooksConfig, runner *se
 				"agent_id":   a.ID,
 			}
 			for _, hook := range configured.PreToolCall {
-				if _, err := runner.Run(ctx, hook, vars); err != nil {
+				_, err := runner.Run(ctx, hook, vars)
+				activity.record("pre_tool_call", hook.Name, err != nil)
+				if err != nil {
 					return nil, fmt.Errorf("pre-tool hook %q: %w", hook.Name, err)
 				}
 			}
@@ -482,12 +487,52 @@ func wrapUserToolHooks(a *agent.Agent, configured config.HooksConfig, runner *se
 			result, handlerErr := original(ctx, args)
 			vars["tool_output"] = result
 			for _, hook := range configured.PostToolCall {
-				_, _ = runner.Run(ctx, hook, vars)
+				_, err := runner.Run(ctx, hook, vars)
+				activity.record("post_tool_call", hook.Name, err != nil)
 			}
 			return result, handlerErr
 		}
 		a.Tools.Register(&wrapped)
 	}
+}
+
+// hookActivityTracker records the most recently fired user-configured hook
+// (pre_tool_call, post_tool_call, or user_prompt_submit) so the TUI status
+// bar can surface it live without polling security.HookRunner directly.
+type hookActivityTracker struct {
+	last atomic.Pointer[hookActivityRecord]
+}
+
+type hookActivityRecord struct {
+	kind   string
+	name   string
+	at     time.Time
+	failed bool
+}
+
+func (t *hookActivityTracker) record(kind, name string, failed bool) {
+	if t == nil {
+		return
+	}
+	t.last.Store(&hookActivityRecord{kind: kind, name: name, at: time.Now(), failed: failed})
+}
+
+// LastHookActivity reports the most recently fired user hook and how long
+// ago it ran, for the status bar's "hook:" segment. ok is false if no
+// configured hook has fired yet this session.
+func (o *Orchestrator) LastHookActivity() (label string, age time.Duration, ok bool) {
+	if o.hookActivity == nil {
+		return "", 0, false
+	}
+	rec := o.hookActivity.last.Load()
+	if rec == nil {
+		return "", 0, false
+	}
+	label = rec.kind + ":" + rec.name
+	if rec.failed {
+		label += " ✗"
+	}
+	return label, time.Since(rec.at), true
 }
 
 // budgetHook adapts a single shared *budget.Tracker into a per-agent
@@ -1767,6 +1812,7 @@ func (o *Orchestrator) preparePrompt(ctx context.Context, message, agentID, sess
 	}
 	for _, hook := range o.cfg.Hooks.UserPromptSubmit {
 		result, err := o.hookRunner.Run(ctx, hook, vars)
+		o.hookActivity.record("user_prompt_submit", hook.Name, err != nil)
 		if err != nil {
 			contextSourceOmitted(ctx, ContextSourceUserHook, ContextOmittedSourceError)
 			return ctx, message, fmt.Errorf("user-prompt hook %q: %w", hook.Name, err)
@@ -2022,6 +2068,18 @@ func (o *Orchestrator) ActiveModelInfo() (provider, modelID string) {
 		return "", ""
 	}
 	return a.Model.Name(), a.Model.Model()
+}
+
+// AgentModelInfo returns the configured provider/model for a given agent ID
+// (typically a pre-registered subagent spawned via spawn_subagent), for
+// display alongside its activity in the status bar. ok is false if no such
+// agent is registered or it has no model configured.
+func (o *Orchestrator) AgentModelInfo(agentID string) (provider, modelID string, ok bool) {
+	a, exists := o.agents[agentID]
+	if !exists || a.Model == nil {
+		return "", "", false
+	}
+	return a.Model.Name(), a.Model.Model(), true
 }
 
 // SwitchModel rebuilds the active agent's model provider against

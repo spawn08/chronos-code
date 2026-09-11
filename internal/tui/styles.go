@@ -86,4 +86,9 @@ var (
 
 	styleSeparator = newTerminalStyle(lipgloss.NewStyle().Foreground(colorSubtle))
 	styleKeyHint   = newTerminalStyle(lipgloss.NewStyle().Foreground(colorDim))
+
+	styleStatusModel    = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorAccent).Background(colorChromeBg))
+	styleStatusSub      = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorTool).Background(colorChromeBg))
+	styleStatusHookOK   = newTerminalStyle(lipgloss.NewStyle().Foreground(colorDim).Background(colorChromeBg))
+	styleStatusHookFail = newTerminalStyle(lipgloss.NewStyle().Bold(true).Foreground(colorError).Background(colorChromeBg))
 )

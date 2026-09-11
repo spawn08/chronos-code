@@ -1506,7 +1506,7 @@ func TestUserHookPolicyDenialPrecedesMiddleware(t *testing.T) {
 	registerApprovalTool(a.Tools, "shell", &executions)
 	wrapUserToolHooks(a, config.HooksConfig{PreToolCall: []config.HookDef{{
 		Name: "pre", Command: "touch hook-ran", TimeoutMs: 1000,
-	}}}, runner)
+	}}}, runner, orch.hookActivity)
 
 	if _, err := a.Tools.Execute(context.Background(), "shell", map[string]any{"command": "rm dangerous"}); err == nil {
 		t.Fatal("policy-denied tool call succeeded")
@@ -1532,7 +1532,7 @@ func TestUserHookPreFailureBlocksHandlerInOrder(t *testing.T) {
 		{Name: "first", Command: "printf first >> order", TimeoutMs: 1000},
 		{Name: "block", Command: "printf second >> order; exit 7", TimeoutMs: 1000},
 		{Name: "third", Command: "printf third >> order", TimeoutMs: 1000},
-	}}, runner)
+	}}, runner, nil)
 
 	if _, err := a.Tools.Execute(context.Background(), "test", nil); !errors.Is(err, security.ErrHookExit) {
 		t.Fatalf("Execute() error = %v, want hook exit error", err)
@@ -1569,7 +1569,7 @@ func TestUserHookPostSeesRawOutputBeforeCompressionAndCannotMaskResult(t *testin
 	wrapUserToolHooks(a, config.HooksConfig{PostToolCall: []config.HookDef{
 		{Name: "inspect", Command: "printf '%s' {{tool_output}} > raw.json", TimeoutMs: 1000},
 		{Name: "fail", Command: "exit 9", TimeoutMs: 1000},
-	}}, runner)
+	}}, runner, nil)
 	toolcompress.Wrap(a, 1)
 
 	result, err := a.Tools.Execute(storage.WithSession(context.Background(), "session-1"), "test", nil)
