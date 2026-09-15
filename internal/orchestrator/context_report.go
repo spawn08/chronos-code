@@ -23,6 +23,7 @@ const (
 	ContextOmittedNotSelected   = "not_selected"
 	ContextOmittedSourceError   = "source_error"
 	ContextOmittedDisabled      = "disabled"
+	ContextOmittedBudget        = "budget"
 )
 
 // ContextSourceReport is metadata-only. ID and Title are static source
@@ -92,7 +93,7 @@ func contextSourceOmitted(ctx context.Context, kind ContextSourceKind, reason st
 
 func safeOmissionReason(reason string) string {
 	switch reason {
-	case ContextOmittedNotConfigured, ContextOmittedNotSelected, ContextOmittedSourceError, ContextOmittedDisabled:
+	case ContextOmittedNotConfigured, ContextOmittedNotSelected, ContextOmittedSourceError, ContextOmittedDisabled, ContextOmittedBudget:
 		return reason
 	case "auto_extract_disabled", "memory_disabled":
 		return ContextOmittedDisabled
@@ -108,8 +109,9 @@ func (c *contextReportCollector) record(kind ContextSourceKind, count, bytes int
 		if c.sources[i].Kind != kind {
 			continue
 		}
-		if reason != "" && c.sources[i].SelectedCount > 0 {
-			return
+		if reason == ContextOmittedBudget {
+			c.sources[i].SelectedCount = 0
+			c.sources[i].Bytes = 0
 		}
 		c.sources[i].SelectedCount = count
 		c.sources[i].Bytes = bytes

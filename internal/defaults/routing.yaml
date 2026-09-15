@@ -31,25 +31,24 @@ router:
     - "architecture" = user asks about design, structure, patterns
     - "code" = everything else (implement, fix, refactor, add, change, write)
 
-# Complexity-gated implementation paths. Chronos Code follows these instead of
-# exploring ad hoc: cheaper graph first, fewer tool calls, learnings before
-# re-search, PPD only when the work is actually large.
+# Advisory starting paths. max_tool_calls is an effort estimate, not an enforced
+# execution limit. Reassess scope using evidence and complete necessary checks.
 implementation_paths:
   low:
     max_tool_calls: 4
     graph: "L2"
     plan: "skip"
-    hint: "resolve_symbol/graph_query; ranged file_read only if L2 is not enough; one edit or a direct answer; skip spawn"
+    hint: "start with targeted graph/source lookup; work directly when straightforward; expand investigation if needed; complete the requested outcome and verify changes"
   medium:
     max_tool_calls: 12
     graph: "L0-L2"
     plan: "update_plan"
-    hint: "recall-past and learned patterns first; L0/L1 then L2; impact_analysis before edits; test_map after; spawn a specialist only for an isolated loop"
+    hint: "reuse relevant findings; inspect affected code paths; update_plan when useful; implement and integrate; use impact_analysis/test_map to select checks and run them"
   high:
     max_tool_calls: 24
     graph: "L0-L3"
     plan: "ppd-or-update_plan"
-    hint: "L0 landscape; spawn ppd-planner for a durable DAG if multi-package; execute leaf-first; verify each node; remember architecture/decisions"
+    hint: "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed; execute dependency-first; verify integration and every deliverable; retain durable decisions"
 
 # Task complexity and kind to model mapping. Undeclared cells fall back to
 # medium/edit so model selection is deterministic for every classification.

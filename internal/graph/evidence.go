@@ -111,7 +111,6 @@ func codebaseContextTool(store *Store, root string) *tool.Definition {
 					},
 				}},
 			},
-			"anyOf": []any{map[string]any{"required": []string{"query"}}, map[string]any{"required": []string{"symbols"}}, map[string]any{"required": []string{"ranges"}}},
 		},
 		Handler: func(ctx context.Context, args map[string]any) (any, error) {
 			if err := ctx.Err(); err != nil {

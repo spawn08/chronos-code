@@ -56,7 +56,7 @@ The full documentation site is published at **[spawn08.github.io/chronos-code](h
 - **MCP** — stdio and HTTPS SSE servers from `.mcp.json`; tools are namespaced and require approval by default
 - **Guardrails and a security floor** — injection detection, secret scanning, PII filtering, cost caps; project policy and `--yolo` cannot weaken the embedded floor
 - **Two surfaces** — interactive TUI/CLI and `chronos-code serve` HTTP API; SQLite is the default store, PostgreSQL needs the `postgres` build tag
-- **Sessions and memory** — resumable SQLite sessions; project/user/feedback memory as git-diffable YAML with deterministic text recall
+- **Sessions and layered memory** — resumable SQLite sessions with durable compaction checkpoints; episodic outcomes, procedural steps, optional semantic facts, and explicitly scoped organizational knowledge; legacy project/user/feedback YAML stays readable
 - **Embedded defaults** — first run works without files; `chronos-code init` exports editable YAML into `.chronos-code/`
 
 ## Architecture
@@ -131,14 +131,21 @@ To build from source instead, see [Prerequisites](#prerequisites) and [Build](#b
 ### Prerequisites
 
 - Go 1.26+
-- CGO enabled (SQLite)
+- CGO enabled for the full tree-sitter build; core SQLite storage is pure Go
 - [Chronos](https://github.com/spawn08/chronos) as a sibling checkout, or change the `go.mod` `replace` directive
 
 ### Build
 
 ```bash
 make build        # produces bin/chronos-code
+make build-core   # produces bin/chronos-code-core (Go graph, no bundled tree-sitter)
+make size-check-core size-check-full
 ```
+
+`make build` / `make install` use the full parser profile. Release archives use
+the portable core profile (`CGO_ENABLED=0`); non-Go tree-sitter indexing requires
+the full build. Both profiles include sessions, SQLite FTS, memory, hooks, and
+the TUI. Core/full size gates are 40/70 MiB respectively.
 
 ### Initialize a project
 
@@ -205,6 +212,15 @@ Useful flags: `-c/--config`, `--debug`, `--stream` / `--no-stream`, `--permissio
 ```
 
 Project MCP servers live in `.mcp.json` (not under `.chronos-code/`).
+
+Runtime databases now default to `~/.chronos-code/projects/<name>-<id>/`.
+`CHRONOS_CODE_DATA_HOME` overrides the user data root. Existing default project
+databases are imported with verified SQLite snapshots; originals are retained.
+Explicit database paths remain supported. A shared, partitioned
+`~/.chronos-code/memory.db` enables user/organization recall across projects.
+
+See **[Harness reliability, layered memory, and hooks](docs/harness-memory.md)**
+for migration behavior, memory configuration, tool examples, and inspection UI.
 
 ### Precedence
 

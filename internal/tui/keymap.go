@@ -52,6 +52,9 @@ Commands:
   /usage             Show token and USD usage
   /stream            Toggle streaming on/off
   /session           Show current session and recent history
+  /session list      Search sessions; Enter resumes, Tab inspects metadata
+  /inspect [context|changes]
+                     Inspect captured tool/context/edit details; Esc closes
   /resume [id]       Resume the latest (or given) session
   /compact           Summarize session history and reset the token budget
   /rewind            Undo the last file_write (alias: /undo)
@@ -81,10 +84,11 @@ Commands:
   /quit              Exit
 
   @<agent> <msg>     Send message to a specific agent
-  @<path>            Attach a workspace file to the message
+  @<path>            Select a bounded excerpt; receipt shows inclusion/omission
   !<cmd>             Run a local shell command in the workspace (output in chat)
 
 Keys:
+  Inspection         up/down/pgup/pgdown scroll; left/right select; ctrl+shift+c copy
   enter              Send; while running, interrupt and replace
   alt+enter          Queue a follow-up while running
   ctrl+j             Insert newline

@@ -15,6 +15,9 @@ import (
 const (
 	basePromptBudget  = 800
 	totalPromptBudget = 1200
+	// The primary owns the general engineering contract as well as routing.
+	// Mirror internal/cli.primarySystemPromptTokenBudget; specialists stay lean.
+	primaryPromptBudget = 1600
 
 	// Estimated token overhead for skills block + memory context that gets
 	// appended to the system prompt at runtime. The actual size varies per
@@ -66,28 +69,33 @@ func TestPromptTokenBudget(t *testing.T) {
 
 		baseTokens := counter.CountString(ag.SystemPrompt)
 		totalTokens := baseTokens + skillsMemoryOverhead
+		baseBudget, totalBudget := basePromptBudget, totalPromptBudget
+		if ag.ID == "chronos-code" {
+			baseBudget = primaryPromptBudget
+			totalBudget = primaryPromptBudget + skillsMemoryOverhead
+		}
 
 		status := "OK"
-		if baseTokens > basePromptBudget {
-			status = fmt.Sprintf("OVER BASE (%d > %d)", baseTokens, basePromptBudget)
+		if baseTokens > baseBudget {
+			status = fmt.Sprintf("OVER BASE (%d > %d)", baseTokens, baseBudget)
 			allPassed = false
 		}
-		if totalTokens > totalPromptBudget {
-			status = fmt.Sprintf("OVER TOTAL (%d > %d)", totalTokens, totalPromptBudget)
+		if totalTokens > totalBudget {
+			status = fmt.Sprintf("OVER TOTAL (%d > %d)", totalTokens, totalBudget)
 			allPassed = false
 		}
 
 		fmt.Fprintf(&summary, "%-15s %8d %8d %s\n", ag.ID, baseTokens, totalTokens, status)
 
 		t.Run(ag.ID+"/base", func(t *testing.T) {
-			if baseTokens > basePromptBudget {
-				t.Errorf("system prompt is %d tokens, budget is %d", baseTokens, basePromptBudget)
+			if baseTokens > baseBudget {
+				t.Errorf("system prompt is %d tokens, budget is %d", baseTokens, baseBudget)
 			}
 		})
 		t.Run(ag.ID+"/total", func(t *testing.T) {
-			if totalTokens > totalPromptBudget {
+			if totalTokens > totalBudget {
 				t.Errorf("system prompt (%d) + overhead (%d) = %d tokens, budget is %d",
-					baseTokens, skillsMemoryOverhead, totalTokens, totalPromptBudget)
+					baseTokens, skillsMemoryOverhead, totalTokens, totalBudget)
 			}
 		})
 	}

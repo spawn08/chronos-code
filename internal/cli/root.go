@@ -43,10 +43,12 @@ var (
 	jsonMode        bool
 )
 
-// systemPromptTokenBudget is the target ceiling for an agent's base system
-// prompt (PRD P1-005): keeping it lean maximizes the stable, cacheable prefix
-// of every request.
-const systemPromptTokenBudget = 800
+// Specialists retain the lean PRD P1-005 ceiling. The primary agent also owns
+// requirement understanding, continuity, integration, and completion criteria.
+const (
+	systemPromptTokenBudget        = 800
+	primarySystemPromptTokenBudget = 1600
+)
 
 func Execute() error {
 	if err := stripGlobalFlags(); err != nil {
@@ -453,9 +455,13 @@ func runConfig() error {
 		for _, a := range cfg.Agents {
 			counter := model.NewTokenCounter(a.Model.Model)
 			tokens := counter.CountString(a.System)
+			budget := systemPromptTokenBudget
+			if a.ID == orchestrator.DefaultPrimaryAgentID {
+				budget = primarySystemPromptTokenBudget
+			}
 			flag := ""
-			if tokens > systemPromptTokenBudget {
-				flag = fmt.Sprintf(" [over %d-token budget]", systemPromptTokenBudget)
+			if tokens > budget {
+				flag = fmt.Sprintf(" [over %d-token budget]", budget)
 			}
 			fmt.Printf("  - %s: %s (%d tokens%s)\n", a.ID, a.Name, tokens, flag)
 		}

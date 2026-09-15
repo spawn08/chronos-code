@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/document"
 )
 
 const (
@@ -192,6 +193,8 @@ func selectAttachments(ctx context.Context, root, message string, agents []strin
 			switch {
 			case size == 0:
 				receipts[i].Status = "empty (0 bytes)"
+			case document.Supported(receipts[i].Path):
+				receipts[i].Status = fmt.Sprintf("text extracted: %d text bytes from %d source bytes", len(data), size)
 			case int64(len(data)) < size:
 				receipts[i].Status = fmt.Sprintf("truncated: %d/%d bytes included", len(data), size)
 			default:
@@ -311,6 +314,13 @@ func readWorkspaceExcerpt(ctx context.Context, root, token string, limit int) (s
 	}
 	if !info.Mode().IsRegular() {
 		return "", nil, 0, fmt.Errorf("not a regular file")
+	}
+	if document.Supported(canonicalFull) {
+		text, err := document.Extract(ctx, canonicalFull, max(0, limit))
+		if err != nil {
+			return "", nil, 0, err
+		}
+		return filepath.ToSlash(cleaned), []byte(text), info.Size(), nil
 	}
 	f, err := os.Open(canonicalFull)
 	if err != nil {

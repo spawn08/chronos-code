@@ -1834,7 +1834,7 @@ func formatRoutingHint(agentID, intent, specialist string, matched bool, class r
 	if path.Hint == "" {
 		path = router.DefaultPath(class.Complexity)
 	}
-	parts := []string{fmt.Sprintf("Path: complexity=%s kind=%s graph=%s plan=%s max_tools=%d. %s. Graph before files before shell. Recall-past and learned patterns before repeating a search.", class.Complexity, class.Kind, path.Graph, path.Plan, path.MaxToolCalls, path.Hint)}
+	parts := []string{fmt.Sprintf("Path: complexity=%s kind=%s suggested_graph=%s suggested_plan=%s estimated_tools=%d. Advisory only: reassess scope from evidence; complete all requested deliverables and verification within enforced runtime budgets. Suggested approach: %s.", class.Complexity, class.Kind, path.Graph, path.Plan, path.MaxToolCalls, path.Hint)}
 	if class.Complexity == "" {
 		parts = parts[:0]
 	}
@@ -1842,7 +1842,7 @@ func formatRoutingHint(agentID, intent, specialist string, matched bool, class r
 		parts = append(parts, fmt.Sprintf("Routing hint: intent=%s specialist=%s. You remain %s; spawn_subagent %s if that specialist loop is needed.", intent, specialist, agentID, specialist))
 	}
 	if ppd != nil && ppd.Action == router.PPDActionShadow && ppd.Specialist != "" && ppd.Specialist != agentID {
-		parts = append(parts, "PPD: this looks like multi-step or cross-package work. spawn_subagent "+ppd.Specialist+" before implementing.")
+		parts = append(parts, "PPD hint: consider spawn_subagent "+ppd.Specialist+" if this work needs a durable dependency-ordered plan; retain ownership of implementation and verification.")
 	}
 	return strings.Join(parts, "\n")
 }

@@ -110,6 +110,22 @@ func TestEvidenceOneTurnCrossFile(t *testing.T) {
 	}
 }
 
+func TestEvidenceSchemaIsAzureFunctionCompatible(t *testing.T) {
+	s, root := evidenceFixture(t)
+	parameters := codebaseContextTool(s, root).Parameters
+	if parameters["type"] != "object" {
+		t.Fatalf("schema type = %v, want object", parameters["type"])
+	}
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf", "enum", "const", "not"} {
+		if _, found := parameters[keyword]; found {
+			t.Fatalf("Azure-incompatible top-level %s in schema", keyword)
+		}
+	}
+	if _, err := codebaseContextTool(s, root).Handler(context.Background(), map[string]any{}); err == nil {
+		t.Fatal("missing selector bypassed handler validation")
+	}
+}
+
 func TestEvidenceMetadataOnlyBudgetAndConservativeFallback(t *testing.T) {
 	s, root := evidenceFixture(t)
 	for i := 0; i < 30; i++ {

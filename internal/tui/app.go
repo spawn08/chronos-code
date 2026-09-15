@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -362,6 +363,8 @@ type appModel struct {
 	activeRequest       string // Original request only; never replayed after failure.
 	budgetRetried       bool   // Legacy state retained for compatibility; no whole-task retry.
 	lastUsage           model.Usage
+	streamFinalReceived bool
+	streamStopReason    model.StopReason
 	// lastKnownUsage persists the most recent non-zero lastUsage across
 	// turns (finalizeTurn zeroes lastUsage itself once each turn's status
 	// line is computed), so /context and the status bar's context-usage
@@ -433,6 +436,12 @@ type appModel struct {
 // markdown-lite response rendering, and a modal-based permission prompt that
 // doesn't fight bubbletea for stdin the way a second bufio.Reader would.
 func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
+	restoreLogs, err := redirectTUILogs()
+	if err != nil {
+		return err
+	}
+	defer restoreLogs()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -462,7 +471,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	p := tea.NewProgram(m)
 	installApprovalHandlers(orch, NewApprovalHandler(p))
 
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
 }
 
@@ -517,7 +526,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshPrompt()
 		m.resizeViewport()
-		m.setViewportContent(m.renderTranscript())
+		m.refreshViewport()
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -596,6 +605,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.turnID != m.turnID || !m.sending {
 			return m, nil
 		}
+		if msg.err == nil {
+			if m.turnCtx != nil && m.turnCtx.Err() != nil {
+				msg.err = m.turnCtx.Err()
+			} else if !m.streamFinalReceived {
+				msg.err = fmt.Errorf("response stream ended before completion: %w", io.ErrUnexpectedEOF)
+			} else {
+				msg.err = responseStopError(m.streamStopReason)
+			}
+		}
 		return m, m.finalizeTurn(msg.err)
 
 	case chatDoneMsg:
@@ -616,6 +634,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendTurnText(msg.resp.Content)
 			m.lastUsage = msg.resp.Usage
+			if msg.err == nil {
+				msg.err = msg.resp.Err
+			}
+			if msg.err == nil {
+				msg.err = responseStopError(msg.resp.StopReason)
+			}
 		}
 		return m, m.finalizeTurn(msg.err)
 
@@ -959,6 +983,9 @@ func (m *appModel) resizeViewport() {
 		height := m.viewportHeight()
 		if m.viewport.Height() != height {
 			m.viewport.SetHeight(height)
+			if m.followOutput {
+				m.viewport.GotoBottom()
+			}
 			m.viewportViewValid = false
 		}
 	}
@@ -1091,6 +1118,7 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 		m.picker = nil
 	}
 	m.history.Add(displayLine)
+	m.followOutput = true
 	m.appendUserTurn(displayLine)
 	m.refreshPrompt()
 
@@ -1121,6 +1149,8 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	m.turnModelCalls = 0
 	m.turnSubagents = 0
 	m.lastChunk = ""
+	m.streamFinalReceived = false
+	m.streamStopReason = ""
 	var activityCmd tea.Cmd
 	if ch, stop, err := m.orch.SubscribeActivity(); err == nil {
 		m.activityCh = ch
@@ -1189,6 +1219,7 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 	}
 
 	m.history.Add(line)
+	m.followOutput = true
 	m.appendUserTurn(line)
 	m.sending = true
 	m.activeRequest = ""
@@ -1314,7 +1345,7 @@ func listenStream(ctx context.Context, turnID uint64, ch <-chan *model.ChatRespo
 		select {
 		case resp, ok := <-ch:
 			if !ok {
-				return streamDoneMsg{turnID: turnID}
+				return streamDoneMsg{turnID: turnID, err: ctx.Err()}
 			}
 			return streamDeltaMsg{turnID: turnID, ctx: ctx, resp: resp, ch: ch}
 		case <-ctx.Done():
@@ -1347,8 +1378,12 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	resp := msg.resp
-	if resp.Err != nil {
-		return m, m.finalizeTurn(resp.Err)
+	if resp == nil {
+		return m, listenStream(msg.ctx, msg.turnID, msg.ch)
+	}
+	if !resp.Delta {
+		m.streamFinalReceived = true
+		m.streamStopReason = resp.StopReason
 	}
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 || resp.Usage.CompletionTokens > 0 {
 		m.lastUsage.Merge(resp.Usage)
@@ -1389,6 +1424,9 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	if resp.Reasoning != "" {
 		m.appendThinking(resp.Reasoning)
 	}
+	if resp.Err != nil {
+		return m, m.finalizeTurn(resp.Err)
+	}
 	cmds := []tea.Cmd{listenStream(msg.ctx, msg.turnID, msg.ch)}
 	if !m.renderScheduled {
 		m.renderScheduled = true
@@ -1416,6 +1454,23 @@ func (m *appModel) streamText(resp *model.ChatResponse) string {
 	}
 	m.lastChunk = resp.Content
 	return resp.Content
+}
+
+// Keep generation limits distinct from input-budget errors: compacting history
+// does not complete an answer cut off by the provider's output allowance.
+type incompleteResponseError struct{ message string }
+
+func (e *incompleteResponseError) Error() string { return e.message }
+
+func responseStopError(reason model.StopReason) error {
+	switch reason {
+	case model.StopReasonMaxTokens:
+		return &incompleteResponseError{"response incomplete: model output token limit reached; ask to continue from where it stopped"}
+	case model.StopReasonFilter:
+		return &incompleteResponseError{"response incomplete: provider content filter stopped generation"}
+	default:
+		return nil
+	}
 }
 
 func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
@@ -2737,6 +2792,10 @@ func (m *appModel) appendError(err error) {
 // already classified (from the orchestrator retry layer), it uses that message.
 // Otherwise it classifies and returns a friendly message.
 func classifyErrorMessage(err error) string {
+	var incomplete *incompleteResponseError
+	if errors.As(err, &incomplete) {
+		return incomplete.Error()
+	}
 	var classified *apierror.Classified
 	if !errors.As(err, &classified) {
 		classified = apierror.Classify(err)
@@ -2752,6 +2811,10 @@ func classifyErrorMessage(err error) string {
 
 // classifyStatusMessage returns a short status bar label for a failed request.
 func classifyStatusMessage(err error) string {
+	var incomplete *incompleteResponseError
+	if errors.As(err, &incomplete) {
+		return "response incomplete"
+	}
 	var classified *apierror.Classified
 	if errors.As(err, &classified) {
 		return classified.Category.String()
@@ -2858,7 +2921,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.setBlockSource(source)
 	m.hasLastTurn = true
 	m.lastTurnBlockIdx = len(m.blocks) - 1
-	if err == nil {
+	if m.activeAgentText.Len() > 0 {
 		m.lastAssistantText = m.activeAgentText.String()
 	}
 	if m.lastUsage.PromptTokens > 0 || m.lastUsage.CompletionTokens > 0 || m.lastUsage.CacheReadTokens > 0 || m.lastUsage.CacheCreationTokens > 0 {
@@ -3412,6 +3475,11 @@ func (m *appModel) renderStatusBar() string {
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
 		leftText = " ● " + runLabel + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
 	}
+	// Keep the resume hint ahead of model/routing metadata so it cannot be
+	// truncated off-screen while output is paused near the bottom.
+	if !m.followOutput {
+		leftText += fmt.Sprintf(" │ scrolled %d%% · ctrl+end follow", int(m.viewport.ScrollPercent()*100))
+	}
 	if m.orch.PlanMode() {
 		leftText += " │ plan"
 	}
@@ -3446,9 +3514,6 @@ func (m *appModel) renderStatusBar() string {
 	if ctxSeg := m.contextUsageSegment(); ctxSeg != "" {
 		leftText += " │ " + ctxSeg
 	}
-	if !m.followOutput {
-		leftText += fmt.Sprintf(" │ scrolled %d%% · ctrl+end follow", int(m.viewport.ScrollPercent()*100))
-	}
 	if len(m.queuedMessages) > 0 {
 		leftText += fmt.Sprintf(" │ queued %d", len(m.queuedMessages))
 	}
@@ -3462,7 +3527,7 @@ func (m *appModel) renderStatusBar() string {
 			leftText += fmt.Sprintf(" +%d", len(m.queuedMessages))
 		}
 		if !m.followOutput {
-			leftText += " ↑"
+			leftText += " ↑ ctrl+end"
 		}
 		leftText += " "
 		highlightRanges = nil
@@ -3507,15 +3572,17 @@ func (m *appModel) renderStatusBar() string {
 	if m.mouseCapture {
 		rightText = " wheel scroll │ shift+drag copy │ ctrl+shift+c last │ ctrl+/ commands "
 	}
-	if m.statusMsg != "" {
-		rightText = " " + m.statusMsg + " │" + rightText
+	// Errors can contain provider newlines; fixed chrome must remain one row.
+	status := strings.Join(strings.Fields(m.statusMsg), " ")
+	if status != "" {
+		rightText = " " + status + " │" + rightText
 	}
 	if m.width < 90 {
-		rightText = " " + m.statusMsg + " "
+		rightText = " " + status + " "
 	}
 	rightSeg := styleStatusRight.Render(rightText)
 	if lipgloss.Width(leftSeg)+lipgloss.Width(rightSeg) > m.width {
-		rightText = " " + m.statusMsg + " "
+		rightText = " " + status + " "
 		available := m.width - lipgloss.Width(leftSeg)
 		if available <= 0 {
 			rightSeg = ""

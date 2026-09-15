@@ -27,6 +27,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/spawn08/chronos-code/internal/document"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 )
@@ -133,6 +134,9 @@ func Wrap(a *agent.Agent, root string) {
 		if err != nil {
 			return nil, fmt.Errorf("file_read: %w", err)
 		}
+		if document.Supported(resolved) {
+			return readDocumentRange(ctx, resolved, start, end)
+		}
 		outline, explicit := args["outline_only"].(bool)
 		canOutline := args["start_line"] == nil && args["end_line"] == nil &&
 			(!explicit || outline) && strings.HasSuffix(resolved, ".go") &&
@@ -150,6 +154,26 @@ func Wrap(a *agent.Agent, root string) {
 		}
 		return readRange(ctx, resolved, start, end)
 	}
+}
+
+func readDocumentRange(ctx context.Context, path string, start, end int) (any, error) {
+	text, err := document.Extract(ctx, path, maxOutputBytes)
+	if err != nil {
+		return nil, fmt.Errorf("file_read %q: %w", path, err)
+	}
+	lines := strings.Split(text, "\n")
+	if start > len(lines) {
+		return nil, fmt.Errorf("file_read: start_line %d is beyond EOF (%d total lines)", start, len(lines))
+	}
+	last := len(lines)
+	if end > 0 && end < last {
+		last = end
+	}
+	return map[string]any{
+		"path": path, "content": strings.Join(lines[start-1:last], "\n"),
+		"start_line": start, "end_line": last, "total_lines": len(lines),
+		"document": true, "hint": "text extracted from document; PDF layout and DOCX formatting are not preserved",
+	}, nil
 }
 
 func resolvePath(root, path string) string {

@@ -406,6 +406,30 @@ func TestContextGuardOverflowPreservesTaskAndProgress(t *testing.T) {
 	}
 }
 
+func TestContextGuardDropsDynamicPinsBeforeRejectingTask(t *testing.T) {
+	guard := newContextGuardHook("gpt-4", 0, contextGuardOptions{ContextLimit: 1024})
+	collector := newContextReportCollector()
+	ctx := withContextReportCollector(context.Background(), collector)
+	contextSourceSelected(ctx, ContextSourceGraphPrediction, 1, 4000, false)
+	contextSourceSelected(ctx, ContextSourceSkills, 1, 4000, false)
+	req := &model.ChatRequest{Messages: []model.Message{
+		{Role: model.RoleSystem, Content: "Static agent instructions."},
+		{Role: model.RoleSystem, Content: "[Pre-loaded context]\n" + strings.Repeat("graph ", 700)},
+		{Role: model.RoleSystem, Content: "<skill name=\"test\">" + strings.Repeat("skill ", 1200)},
+		{Role: model.RoleUser, Content: "Keep this task."},
+	}}
+	if err := guard.Before(ctx, &hooks.Event{Type: hooks.EventModelCallBefore, Input: req}); err != nil {
+		t.Fatalf("dynamic pins should be shed before overflow: %v", err)
+	}
+	if len(req.Messages) != 2 || req.Messages[0].Content != "Static agent instructions." || req.Messages[1].Content != "Keep this task." {
+		t.Fatalf("unexpected messages after pin shedding: %#v", req.Messages)
+	}
+	report := collector.report()
+	if contextSource(report, ContextSourceGraphPrediction).OmissionReason != ContextOmittedBudget || contextSource(report, ContextSourceSkills).OmissionReason != ContextOmittedBudget {
+		t.Fatalf("dropped sources not reported: %+v", report)
+	}
+}
+
 func TestCapResultUniversalAndUTF8Safe(t *testing.T) {
 	large := strings.Repeat("界🙂\"\n", maxToolResultBytes/4)
 	object := struct {

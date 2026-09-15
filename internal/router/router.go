@@ -57,7 +57,8 @@ type ModelRouting struct {
 // Config is the subset of routing.yaml this package understands. The
 // explicit_switch, escalation, pipelines, and cost_optimization sections are
 // intentionally not modeled — yaml.Unmarshal drops unknown keys.
-// ImplementationPath is the bounded execution graph for a complexity band.
+// ImplementationPath is advisory execution guidance for a complexity band.
+// MaxToolCalls is an effort estimate, not an enforced runtime budget.
 type ImplementationPath struct {
 	MaxToolCalls int    `yaml:"max_tool_calls"`
 	Graph        string `yaml:"graph"`
@@ -109,21 +110,21 @@ func DefaultPath(complexity Complexity) ImplementationPath {
 			MaxToolCalls: 24,
 			Graph:        "L0-L3",
 			Plan:         "ppd-or-update_plan",
-			Hint:         "L0 landscape; spawn ppd-planner if multi-package; leaf-first; verify each node; remember decisions",
+			Hint:         "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed; execute dependency-first; verify integration and every deliverable; retain durable decisions",
 		}
 	case ComplexityMedium:
 		return ImplementationPath{
 			MaxToolCalls: 12,
 			Graph:        "L0-L2",
 			Plan:         "update_plan",
-			Hint:         "recall learnings; impact_analysis before edits; test_map after; spawn only for an isolated loop",
+			Hint:         "reuse relevant findings; inspect affected code paths; update_plan when useful; implement and integrate; use impact_analysis/test_map to select checks and run them",
 		}
 	default:
 		return ImplementationPath{
 			MaxToolCalls: 4,
 			Graph:        "L2",
 			Plan:         "skip",
-			Hint:         "graph_query/resolve_symbol; ranged read if needed; one edit or answer; skip spawn",
+			Hint:         "start with targeted graph/source lookup; work directly when straightforward; expand investigation if needed; complete the requested outcome and verify changes",
 		}
 	}
 }

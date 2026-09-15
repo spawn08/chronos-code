@@ -14,12 +14,19 @@ LDFLAGS  := -s -w \
 CGO_ENABLED ?= 1
 
 SIZE_LIMIT  := 41943040
+FULL_SIZE_LIMIT := 73400320
 
-.PHONY: build build-release test lint size-check fmt vet tidy clean install eval
+.PHONY: build build-core build-full build-release test lint size-check size-check-core size-check-full fmt vet tidy clean install install-core eval
 
-build:
+build: build-full
+
+build-full:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) go build -tags treesitter -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
+
+build-core:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY)-core ./cmd/chronos-code
 
 build-release:
 	@mkdir -p $(BIN_DIR)
@@ -39,6 +46,16 @@ size-check: build-release
 	if [ "$$SIZE" -gt 31457280 ]; then \
 		echo "WARN: binary exceeds 30 MB target ($(SIZE_LIMIT) byte gate active)"; \
 	fi
+
+size-check-core: build-core
+	@SIZE=$$(stat -f%z $(BIN_DIR)/$(BINARY)-core 2>/dev/null || stat -c%s $(BIN_DIR)/$(BINARY)-core); \
+	echo "Core binary: $$SIZE bytes (limit $(SIZE_LIMIT))"; \
+	test "$$SIZE" -le "$(SIZE_LIMIT)"
+
+size-check-full: build-full
+	@SIZE=$$(stat -f%z $(BIN_DIR)/$(BINARY) 2>/dev/null || stat -c%s $(BIN_DIR)/$(BINARY)); \
+	echo "Full binary: $$SIZE bytes (limit $(FULL_SIZE_LIMIT))"; \
+	test "$$SIZE" -le "$(FULL_SIZE_LIMIT)"
 
 test:
 	go test ./... -race -count=1
@@ -63,4 +80,7 @@ clean:
 	rm -rf $(BIN_DIR)
 
 install:
-	CGO_ENABLED=$(CGO_ENABLED) go install -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code
+	CGO_ENABLED=$(CGO_ENABLED) go install -tags treesitter -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code
+
+install-core:
+	CGO_ENABLED=0 go install -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code
