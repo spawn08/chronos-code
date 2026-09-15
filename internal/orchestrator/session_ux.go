@@ -3,12 +3,15 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/storage"
 
+	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/learning"
 	"github.com/spawn08/chronos-code/internal/projectdocs"
 	"github.com/spawn08/chronos-code/internal/router"
@@ -18,16 +21,26 @@ import (
 const planModePrompt = "PLAN MODE is on. Propose a numbered plan only. Do not call file_write, shell, or any mutating tool. Wait for the user to run /plan off before editing."
 
 type fileCheckpoint struct {
-	Path    string
-	Prev    []byte
-	Existed bool
+	Path      string
+	Prev      []byte `json:"-"`
+	Existed   bool
+	ID        string
+	SessionID string
+	Abs       string
+	Snapshot  string
+	Journal   string `json:"-"`
+	State     string
+	PrevHash  string
+	PostHash  string
+	PrevMode  os.FileMode
+	PostMode  os.FileMode
 }
 
 type sessionUXHook struct {
 	orchestrator *Orchestrator
 }
 
-func (h sessionUXHook) Before(_ context.Context, evt *hooks.Event) error {
+func (h sessionUXHook) Before(ctx context.Context, evt *hooks.Event) error {
 	if evt == nil || evt.Type != hooks.EventToolCallBefore || h.orchestrator == nil {
 		return nil
 	}
@@ -35,19 +48,34 @@ func (h sessionUXHook) Before(_ context.Context, evt *hooks.Event) error {
 		return fmt.Errorf("plan mode: %s is blocked until /plan off", evt.Name)
 	}
 	if evt.Name == "file_write" {
-		h.orchestrator.snapshotWrite(evt.Input)
+		return h.orchestrator.prepareWrite(evt.Input, h.editSession(ctx))
 	}
 	return nil
 }
 
-func (h sessionUXHook) After(_ context.Context, evt *hooks.Event) error {
+func (h sessionUXHook) After(ctx context.Context, evt *hooks.Event) error {
 	if evt == nil || evt.Type != hooks.EventToolCallAfter || h.orchestrator == nil {
 		return nil
 	}
-	if evt.Name == "file_write" && evt.Error == nil {
-		h.orchestrator.commitWrite(evt.Input)
+	if evt.Name == "file_write" {
+		if evt.Error != nil {
+			h.orchestrator.discardWrite(evt.Input, h.editSession(ctx))
+			return nil // Preserve the original tool error, including partial writes.
+		}
+		if err := h.orchestrator.finishWrite(evt.Input, h.editSession(ctx)); err != nil {
+			// The runtime currently ignores after-hook errors, so also surface it.
+			slog.Warn("write succeeded but checkpoint could not be committed", "error", err)
+			return err
+		}
 	}
 	return nil
+}
+
+func (h sessionUXHook) editSession(ctx context.Context) string {
+	if id := storage.SessionFromContext(ctx); id != "" {
+		return id
+	}
+	return h.orchestrator.CurrentSessionID()
 }
 
 func mutatingTool(name string) bool {
@@ -210,53 +238,14 @@ func (o *Orchestrator) suggestionStore() *learning.Store {
 	if dir == "" {
 		dir = ".chronos-code/learned"
 	}
-	if !filepath.IsAbs(dir) && o.cfg.Workspace.Root != "" {
-		dir = filepath.Join(o.cfg.Workspace.Root, dir)
+	if !filepath.IsAbs(dir) {
+		root := o.cfg.Workspace.Root
+		if root == "" {
+			root = config.WorkspaceRoot()
+		}
+		dir = filepath.Join(root, dir)
 	}
 	return learning.NewStore(dir)
-}
-
-func (o *Orchestrator) snapshotWrite(input any) {
-	path, abs, ok := o.writePath(input)
-	if !ok {
-		return
-	}
-	cp := fileCheckpoint{Path: path}
-	data, err := os.ReadFile(abs)
-	if err == nil {
-		cp.Existed = true
-		cp.Prev = data
-	}
-	o.editsMu.Lock()
-	o.edits = append(o.edits, cp)
-	o.editsMu.Unlock()
-}
-
-func (o *Orchestrator) commitWrite(input any) {
-	// Snapshot is taken before the write. A failed write leaves a harmless
-	// extra checkpoint that UndoLastEdit can skip if the file already matches.
-	_, _, _ = o.writePath(input)
-}
-
-func (o *Orchestrator) UndoLastEdit() (string, error) {
-	o.editsMu.Lock()
-	defer o.editsMu.Unlock()
-	if len(o.edits) == 0 {
-		return "", fmt.Errorf("nothing to undo")
-	}
-	cp := o.edits[len(o.edits)-1]
-	o.edits = o.edits[:len(o.edits)-1]
-	abs := o.resolvePath(cp.Path)
-	if !cp.Existed {
-		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-			return "", fmt.Errorf("undo create %s: %w", cp.Path, err)
-		}
-		return cp.Path, nil
-	}
-	if err := os.WriteFile(abs, cp.Prev, 0o644); err != nil {
-		return "", fmt.Errorf("undo edit %s: %w", cp.Path, err)
-	}
-	return cp.Path, nil
 }
 
 func (o *Orchestrator) writePath(input any) (rel, abs string, ok bool) {

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
@@ -55,10 +56,15 @@ func Wrap(a *agent.Agent, thresholdTokens int) {
 // session's budget usage grows (PRD P2-009's progressive compression ramp)
 // instead of fixing the threshold for the agent's whole lifetime.
 func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
+	WrapDynamicForTool(a, func(ctx context.Context, _ string, _ map[string]any) int { return thresholdFn(ctx) })
+}
+
+// WrapDynamicForTool selects a compression threshold from the operation that
+// produced this result, rather than another concurrently completed tool call.
+func WrapDynamicForTool(a *agent.Agent, thresholdFn func(context.Context, string, map[string]any) int) {
 	if a.Storage == nil {
 		return
 	}
-	counter := model.NewTokenCounter(a.Model.Model())
 	agentID := a.ID
 	store := a.Storage
 
@@ -73,11 +79,12 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 			if err != nil || result == nil {
 				return result, err
 			}
-			thresholdTokens := thresholdFn(ctx)
+			thresholdTokens := thresholdFn(ctx, name, args)
 			if thresholdTokens <= 0 {
 				thresholdTokens = DefaultThresholdTokens
 			}
 			data, mErr := json.Marshal(result)
+			counter := model.NewTokenCounter(a.Model.Model())
 			if mErr != nil || counter.CountString(string(data)) <= thresholdTokens {
 				return result, nil
 			}
@@ -94,7 +101,19 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 			}, nil
 		}
 	}
+	RegisterReader(a)
+}
 
+// RegisterReader is idempotent, allowing hooks to wrap the retrieval tool before
+// the output pipeline is installed. It never overwrites an existing handler.
+func RegisterReader(a *agent.Agent) {
+	if a.Storage == nil {
+		return
+	}
+	if _, exists := a.Tools.Get(ReadStoredResultTool); exists {
+		return
+	}
+	store, agentID := a.Storage, a.ID
 	a.Tools.Register(&tool.Definition{
 		Name:        ReadStoredResultTool,
 		Description: "Retrieve a bounded chunk of a compressed tool result. Continue with next_offset only when more content is necessary.",
@@ -121,6 +140,9 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 			if offset < 0 || offset > len(content) {
 				return nil, fmt.Errorf("read_stored_result: offset %d outside result of %d bytes", offset, len(content))
 			}
+			if offset < len(content) && !utf8.RuneStart(content[offset]) {
+				return nil, fmt.Errorf("read_stored_result: offset must be a UTF-8 character boundary")
+			}
 			maxBytes := intArg(args["max_bytes"])
 			if maxBytes <= 0 {
 				maxBytes = defaultStoredResultChunkBytes
@@ -132,13 +154,28 @@ func WrapDynamic(a *agent.Agent, thresholdFn func(context.Context) int) {
 			if end > len(content) {
 				end = len(content)
 			}
-			return map[string]any{
-				"content":     content[offset:end],
-				"offset":      offset,
-				"next_offset": end,
-				"total_bytes": len(content),
-				"truncated":   end < len(content),
-			}, nil
+			// Bound the encoded envelope, not just source bytes: JSON escaping
+			// can otherwise cause the outer cap to discard continuation offsets.
+			for {
+				for end > offset && end < len(content) && !utf8.RuneStart(content[end]) {
+					end--
+				}
+				result := map[string]any{
+					"content": content[offset:end], "offset": offset, "next_offset": end,
+					"total_bytes": len(content), "truncated": end < len(content), "storage_key": key,
+				}
+				encoded, err := json.Marshal(result)
+				if err != nil {
+					return nil, fmt.Errorf("read_stored_result: encode chunk: %w", err)
+				}
+				if len(encoded) <= 96<<10 {
+					return result, nil
+				}
+				if end == offset {
+					return nil, fmt.Errorf("read_stored_result: reference metadata exceeds chunk budget")
+				}
+				end = offset + (end-offset)/2
+			}
 		},
 	})
 }

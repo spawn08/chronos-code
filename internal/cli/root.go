@@ -270,6 +270,10 @@ Usage:
   chronos-code memory list [category]                   List remembered notes
   chronos-code memory search <query>                    Search remembered notes
   chronos-code memory forget <id>                        Remove a remembered note
+  chronos-code memory layers list --scope <scope> [--kind <kind>]
+  chronos-code memory layers search <query> --scope <scope> [--kind <kind>]
+  chronos-code memory layers forget <id> --scope <scope>  Invalidate a layered memory
+  chronos-code memory layers --help                      Show scopes, kinds, and retrieval limits
   chronos-code mcp add <name> --command <cmd> [--arg <arg> ...] [--scope project|user]
   chronos-code mcp add <name> --url <https-url> [--scope project|user]
   chronos-code mcp list [--scope project|user]           List canonical MCP servers with secrets redacted
@@ -808,46 +812,147 @@ func runSession() error {
 }
 
 func runMemory() error {
-	if len(os.Args) < 3 {
-		return fmt.Errorf("usage: chronos-code memory [list|search|forget]")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
-	store := memory.NewStore(filepath.Join(config.ConfigDirName, "memory"))
+	return runMemoryCommand(context.Background(), cfg, os.Args[2:], os.Stdout)
+}
 
-	switch os.Args[2] {
+func runMemoryCommand(ctx context.Context, cfg *config.Config, args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: chronos-code memory [list|search|forget|layers]")
+	}
+	paths, err := cfg.ResolveProjectPaths("")
+	if err != nil {
+		return fmt.Errorf("resolve memory paths: %w", err)
+	}
+	if args[0] == "layers" {
+		return runMemoryLayers(ctx, cfg, paths, args[1:], stdout)
+	}
+	store := memory.NewStore(filepath.Join(paths.LegacyDir, "memory")).ForContext(ctx)
+
+	switch args[0] {
 	case "list":
 		category := memory.Category("")
-		if len(os.Args) >= 4 {
-			category = memory.Category(os.Args[3])
+		if len(args) >= 2 {
+			category = memory.Category(args[1])
 		}
 		records, err := store.List(category)
 		if err != nil {
 			return err
 		}
-		printMemoryRecords(records)
+		printMemoryRecords(stdout, records)
 		return nil
 	case "search":
-		if len(os.Args) < 4 {
+		if len(args) < 2 {
 			return fmt.Errorf("usage: chronos-code memory search <query>")
 		}
-		query := strings.Join(os.Args[3:], " ")
+		query := strings.Join(args[1:], " ")
 		records, err := store.Search(query)
 		if err != nil {
 			return err
 		}
-		printMemoryRecords(records)
+		printMemoryRecords(stdout, records)
 		return nil
 	case "forget":
-		if len(os.Args) < 4 {
+		if len(args) < 2 {
 			return fmt.Errorf("usage: chronos-code memory forget <id>")
 		}
-		if err := store.Forget(os.Args[3]); err != nil {
+		if err := store.Forget(args[1]); err != nil {
 			return err
 		}
-		fmt.Printf("forgot %q\n", os.Args[3])
+		fmt.Fprintf(stdout, "forgot %q\n", args[1])
 		return nil
 	default:
-		return fmt.Errorf("unknown memory command: %s", os.Args[2])
+		return fmt.Errorf("unknown memory command: %s", args[0])
 	}
+}
+
+const memoryLayersUsage = `usage:
+  chronos-code memory layers list --scope <scope> [--kind <kind>]
+  chronos-code memory layers search <query> --scope <scope> [--kind <kind>]
+  chronos-code memory layers forget <id> --scope <scope>
+
+Scopes: project, user, tenant, organization (requires memory.organization_id).
+Kinds: episodic, procedural, organizational, semantic (requires memory.semantic_enabled: true).
+Omitting --kind lists/searches all enabled kinds. Forget invalidates one ID in the exact scope.
+List/search return up to 100 active records and 64 KiB of record data, newest/relevance first.
+Identity comes from the canonical project, OS uid, configured organization, and context tenant
+(default tenant for standalone CLI). Identity overrides are not accepted.
+`
+
+func runMemoryLayers(ctx context.Context, cfg *config.Config, paths config.ProjectPaths, args []string, stdout io.Writer) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "help" || args[0] == "-h") {
+		_, err := io.WriteString(stdout, memoryLayersUsage)
+		return err
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("%s", memoryLayersUsage)
+	}
+	scope, rest, err := parseMCPValueFlag(args[1:], "scope", "")
+	if err != nil {
+		return err
+	}
+	if scope == "" {
+		return fmt.Errorf("--scope is required\n%s", memoryLayersUsage)
+	}
+	kind, rest, err := parseMCPValueFlag(rest, "kind", "")
+	if err != nil {
+		return err
+	}
+	for _, arg := range rest {
+		if strings.HasPrefix(arg, "-") {
+			return fmt.Errorf("unknown memory layers flag %q\n%s", arg, memoryLayersUsage)
+		}
+	}
+	query := memory.LayerQuery{Scope: memory.Scope(scope), Kind: memory.Kind(kind)}
+	switch args[0] {
+	case "list":
+		if len(rest) != 0 {
+			return fmt.Errorf("%s", memoryLayersUsage)
+		}
+	case "search":
+		query.Query = strings.Join(rest, " ")
+		if strings.TrimSpace(query.Query) == "" {
+			return fmt.Errorf("search requires a query\n%s", memoryLayersUsage)
+		}
+	case "forget":
+		if len(rest) != 1 || kind != "" {
+			return fmt.Errorf("%s", memoryLayersUsage)
+		}
+	default:
+		return fmt.Errorf("unknown memory layers command %q\n%s", args[0], memoryLayersUsage)
+	}
+	// Shared DB and partition identities mirror runtime setup. Administration
+	// uses the store's maximum retrieval budget rather than the prompt budget.
+	options := memory.LayerOptions{
+		ProjectID: paths.ID, UserID: fmt.Sprintf("uid:%d", os.Getuid()),
+		OrganizationID: cfg.Memory.OrganizationID, SemanticEnabled: cfg.Memory.SemanticMemoryEnabled(),
+		Budget: memory.RetrievalBudget{MaxRecords: memory.MaxLayerRecords, MaxBytes: memory.MaxLayerRecallBytes},
+	}
+	home := filepath.Dir(filepath.Dir(paths.Dir))
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return fmt.Errorf("create shared memory directory: %w", err)
+	}
+	store, err := memory.OpenLayerStore(ctx, filepath.Join(home, "memory.db"))
+	if err != nil {
+		return fmt.Errorf("open layered memory: %w", err)
+	}
+	defer store.Close()
+	if args[0] == "forget" {
+		if err := store.Forget(ctx, options, query.Scope, rest[0]); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(stdout, "forgot %q in %s scope\n", rest[0], scope)
+		return err
+	}
+	records, err := store.Recall(ctx, options, query)
+	if err != nil {
+		return err
+	}
+	// JSON retains procedural steps and provenance for administration.
+	return json.NewEncoder(stdout).Encode(records)
 }
 
 type mcpTestClient interface {
@@ -1111,13 +1216,13 @@ func runTeam() error {
 	}
 }
 
-func printMemoryRecords(records []memory.Record) {
+func printMemoryRecords(stdout io.Writer, records []memory.Record) {
 	if len(records) == 0 {
-		fmt.Println("no memory records")
+		fmt.Fprintln(stdout, "no memory records")
 		return
 	}
 	for _, r := range records {
-		fmt.Printf("%s  [%-8s] %s\n", r.ID, r.Category, r.Content)
+		fmt.Fprintf(stdout, "%s  [%-8s] %s\n", r.ID, r.Category, r.Content)
 	}
 }
 

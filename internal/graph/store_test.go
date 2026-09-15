@@ -5,9 +5,159 @@ import (
 	"database/sql"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"unicode"
 )
+
+func TestReplaceFileRollback(t *testing.T) {
+	for _, failure := range []string{"symbol", "edge", "hash"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			old := FileReplacement{Path: "a.go", Package: "p", Mtime: 1, Hash: "old", Symbols: []Symbol{{Name: "Old", Kind: KindFunc}}, Edges: []Edge{{Kind: EdgeCall, FromName: "Old", ToName: "Target"}}}
+			if err := store.ReplaceFile(ctx, old); err != nil {
+				t.Fatal(err)
+			}
+			triggers := map[string]string{
+				"symbol": `CREATE TRIGGER fail BEFORE INSERT ON symbols WHEN new.name = 'Fail' BEGIN SELECT RAISE(ABORT, 'symbol failure'); END`,
+				"edge":   `CREATE TRIGGER fail BEFORE INSERT ON edges WHEN new.to_name = 'Fail' BEGIN SELECT RAISE(ABORT, 'edge failure'); END`,
+				"hash":   `CREATE TRIGGER fail BEFORE UPDATE ON files WHEN new.content_hash = 'new' BEGIN SELECT RAISE(ABORT, 'hash failure'); END`,
+			}
+			if _, err := store.db.Exec(triggers[failure]); err != nil {
+				t.Fatal(err)
+			}
+			next := FileReplacement{Path: "a.go", Package: "q", Mtime: 2, Hash: "new", Symbols: []Symbol{{Name: "New", Kind: KindFunc}, {Name: "Fail", Kind: KindFunc}}, Edges: []Edge{{Kind: EdgeCall, FromName: "New", ToName: "Target"}, {Kind: EdgeCall, FromName: "New", ToName: "Fail"}}}
+			if err := store.ReplaceFile(ctx, next); err == nil {
+				t.Fatal("expected injected failure")
+			}
+			var pkg, hash string
+			var mtime int64
+			if err := store.db.QueryRow(`SELECT package, mtime, content_hash FROM files WHERE path = 'a.go'`).Scan(&pkg, &mtime, &hash); err != nil {
+				t.Fatal(err)
+			}
+			if pkg != "p" || mtime != 1 || hash != "old" {
+				t.Fatalf("metadata changed: %s %d %s", pkg, mtime, hash)
+			}
+			syms, err := store.SymbolsInFile(ctx, "a.go")
+			if err != nil || len(syms) != 1 || syms[0].Name != "Old" {
+				t.Fatalf("symbols = %v, %v", syms, err)
+			}
+			callers, err := store.CallersOf(ctx, "Target")
+			if err != nil || !reflect.DeepEqual(callers, []string{"Old"}) {
+				t.Fatalf("callers = %v, %v", callers, err)
+			}
+			results, err := store.Search(ctx, "Old", 10)
+			if err != nil || len(results) != 1 {
+				t.Fatalf("old FTS = %v, %v", results, err)
+			}
+			results, err = store.Search(ctx, "New", 10)
+			if err != nil || len(results) != 0 {
+				t.Fatalf("new FTS = %v, %v", results, err)
+			}
+		})
+	}
+}
+
+func TestReplaceFileExplicitOwnershipAndStaleEdges(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	// Legacy mutable state must not affect either concurrent replacement.
+	if err := store.ClearFile(ctx, "unrelated.go"); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for _, path := range []string{"a.go", "b.go"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := store.ReplaceFile(ctx, FileReplacement{Path: path, Package: "p", Hash: "old", Symbols: []Symbol{{Name: "Shared", Kind: KindStruct}}, Edges: []Edge{{Kind: EdgeImplements, FromName: "Shared", ToName: "Interface"}, {Kind: EdgeCall, FromName: "Shared.Method", ToName: "Target"}, {Kind: EdgeCall, FromName: "Shared.Method", ToName: "Target"}}})
+			if err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if err := store.ReplaceFile(ctx, FileReplacement{Path: "a.go", Package: "p", Hash: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT count(*) FROM edges WHERE source_file != 'b.go'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("stale/incorrectly owned edges = %d, %v", count, err)
+	}
+	if err := store.db.QueryRow(`SELECT count(*) FROM edges WHERE source_file = 'b.go'`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("other file edges = %d, %v", count, err)
+	}
+	if err := store.ReplaceFile(ctx, FileReplacement{Path: "b.go", Symbols: []Symbol{{File: "wrong.go"}}}); err == nil {
+		t.Fatal("accepted a mismatched symbol file")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := store.ReplaceFile(canceled, FileReplacement{Path: "b.go"}); err == nil {
+		t.Fatal("accepted canceled replacement")
+	}
+	if hash, err := store.FileHash(ctx, "b.go"); err != nil || hash != "old" {
+		t.Fatalf("hash = %q, %v", hash, err)
+	}
+}
+
+func TestStoreReopenDoesNotRebuildFTS(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "graph.db")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertSymbol(ctx, Symbol{Name: "Persisted", File: "a.go"}); err != nil {
+		t.Fatal(err)
+	}
+	// FTS rebuild deletes its shadow data. Make that operation fail so this
+	// proves normal reopen does not silently rebuild an already-current index.
+	if _, err := store.db.Exec(`CREATE TRIGGER forbid_fts_rebuild BEFORE DELETE ON symbols_fts_data BEGIN SELECT RAISE(ABORT, 'unexpected FTS rebuild'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	results, err := store.Search(ctx, "Persisted", 10)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("reopened search = %v, %v", results, err)
+	}
+}
+
+func TestReplaceFileRemovesLegacyUnownedMethodEdges(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InsertSymbol(ctx, Symbol{Name: "Run", Kind: KindMethod, File: "a.go", Receiver: "*Worker"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertEdge(ctx, Edge{Kind: EdgeCall, FromName: "Worker.Run", ToName: "Target"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceFile(ctx, FileReplacement{Path: "a.go", Hash: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if callers, err := store.CallersOf(ctx, "Target"); err != nil || len(callers) != 0 {
+		t.Fatalf("legacy method edge survived: %v, %v", callers, err)
+	}
+}
 
 func TestFilesInPackage(t *testing.T) {
 	ctx := context.Background()

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
@@ -18,57 +20,98 @@ import (
 // check.
 type contextGuardHook struct {
 	modelID string
-	// reserveForTools is a fixed token budget reserved for tool definitions so
-	// the message trim accounts for their invisible overhead.
-	reserveForTools int
+	options contextGuardOptions
 }
 
-const (
-	// defaultToolReserveTokens is a conservative per-tool overhead estimate.
-	// Each tool definition consumes name + description + JSON schema tokens.
-	defaultToolReserveTokens = 150
-	// contextGuardMargin is the fraction of the context window to keep free
-	// for the model's output and overhead.
-	contextGuardMargin = 0.15
-)
+// contextGuardOptions accepts a configured context ceiling, clamped to the live
+// model's known SDK window. Unknown deployments use the configured value;
+// zero uses the SDK's known window or its default for unknown models.
+// MaxOutputTokens is used only when the request does not specify MaxTokens.
+type contextGuardOptions struct {
+	ContextLimit    int
+	MaxOutputTokens int
+}
 
-func newContextGuardHook(modelID string, numTools int) *contextGuardHook {
-	return &contextGuardHook{
-		modelID:         modelID,
-		reserveForTools: numTools * defaultToolReserveTokens,
+const contextGuardMargin = 0.15
+
+// The legacy tool count is intentionally ignored: definitions are measured on
+// every call, including tools registered after hook construction.
+func newContextGuardHook(modelID string, _ int, options ...contextGuardOptions) *contextGuardHook {
+	h := &contextGuardHook{modelID: modelID}
+	if len(options) > 0 {
+		h.options = options[0]
 	}
+	return h
 }
+
+// ContextBudgetOverflowError means preflight could not fit a request without
+// deleting the current task or tool progress. Recovery must change the budget
+// or input; retrying the same request cannot help.
+type ContextBudgetOverflowError struct {
+	ModelID       string
+	MessageTokens int
+	BudgetTokens  int
+	ContextLimit  int
+	SchemaTokens  int
+	OutputTokens  int
+}
+
+func (e *ContextBudgetOverflowError) Error() string {
+	return fmt.Sprintf("context guard: messages (%d tokens) exceed safe model budget (%d tokens after schema/output reserve) for %s; compact history or reduce attachments", e.MessageTokens, e.BudgetTokens, e.ModelID)
+}
+
+func (e *ContextBudgetOverflowError) ContextBudgetExceeded() bool { return true }
 
 func (h *contextGuardHook) Before(_ context.Context, evt *hooks.Event) error {
-	if evt.Type != hooks.EventModelCallBefore {
+	if evt == nil || evt.Type != hooks.EventModelCallBefore {
 		return nil
 	}
 	req, ok := evt.Input.(*model.ChatRequest)
-	if !ok || req == nil || len(req.Messages) == 0 {
+	if !ok || req == nil {
 		return nil
 	}
 
 	modelID := req.Model
+	if provider, ok := evt.Metadata["provider"].(model.Provider); modelID == "" && ok && provider != nil {
+		modelID = provider.Model()
+	}
 	if modelID == "" {
 		modelID = h.modelID
 	}
-	contextLimit := model.ContextLimit(modelID, 0)
-	if contextLimit <= 0 {
-		return nil
+	contextLimit := h.options.ContextLimit
+	if knownLimit, known := model.KnownContextLimit(modelID); known {
+		if contextLimit <= 0 || knownLimit < contextLimit {
+			contextLimit = knownLimit
+		}
+	} else if contextLimit <= 0 {
+		contextLimit = model.ContextLimit(modelID, 0)
 	}
 
-	toolTokens := h.reserveForTools
-	if toolTokens == 0 && len(req.Tools) > 0 {
-		toolTokens = estimateToolTokens(req.Tools)
+	counter := guardTokenCounter{model.NewTokenCounter(modelID)}
+	schemaTokens := 0
+	if len(req.Tools) > 0 {
+		data, err := json.Marshal(req.Tools)
+		if err != nil {
+			return fmt.Errorf("context guard: encode tool schemas: %w", err)
+		}
+		schemaTokens += counter.CountString(string(data))
+	}
+	if req.ResponseFormat == "json_schema" && req.Metadata["json_schema"] != nil {
+		data, err := json.Marshal(req.Metadata["json_schema"])
+		if err != nil {
+			return fmt.Errorf("context guard: encode output schema: %w", err)
+		}
+		schemaTokens += counter.CountString(string(data))
 	}
 
-	effectiveLimit := int(float64(contextLimit) * (1.0 - contextGuardMargin))
-	effectiveLimit -= toolTokens
-	if effectiveLimit <= 0 {
-		effectiveLimit = contextLimit / 2
+	outputTokens := req.MaxTokens
+	if outputTokens <= 0 {
+		outputTokens = h.options.MaxOutputTokens
 	}
-
-	counter := model.NewTokenCounter(modelID)
+	// Keep at least the existing safety margin for provider framing/tokenizer
+	// differences, but never under-reserve an explicit output allowance.
+	outputTokens = max(outputTokens, contextLimit-int(float64(contextLimit)*(1-contextGuardMargin)))
+	effectiveLimit := contextLimit - outputTokens - schemaTokens
 	total := counter.CountTokens(req.Messages)
 	if total <= effectiveLimit {
 		return nil
@@ -79,19 +122,11 @@ func (h *contextGuardHook) Before(_ context.Context, evt *hooks.Event) error {
 	for protectedPrefix < len(req.Messages) && req.Messages[protectedPrefix].Role == model.RoleSystem {
 		protectedPrefix++
 	}
-	if protectedPrefix >= len(req.Messages) {
-		return nil
-	}
-
-	// Trim oldest conversation messages until we fit. Always keep at least
-	// one user/assistant turn: Anthropic and Gemini strip system messages
-	// into a separate field, so a system-only request 400s with
-	// "it must contain at least one message" — which is exactly the failure
-	// seen after a tool-calling round when orphan tool-results wipe the tail.
 	trimmed := trimMessages(counter, req.Messages, protectedPrefix, effectiveLimit)
 	if tokens := counter.CountTokens(trimmed); tokens > effectiveLimit {
-		return fmt.Errorf("context guard: messages (%d tokens) exceed safe model budget (%d tokens after tool/output reserve) even after trimming; use /clear to start a fresh session",
-			tokens, effectiveLimit)
+		return &ContextBudgetOverflowError{ModelID: modelID, MessageTokens: tokens,
+			BudgetTokens: effectiveLimit, ContextLimit: contextLimit,
+			SchemaTokens: schemaTokens, OutputTokens: outputTokens}
 	}
 	req.Messages = trimmed
 	return nil
@@ -101,9 +136,31 @@ func (h *contextGuardHook) After(_ context.Context, _ *hooks.Event) error {
 	return nil
 }
 
-// trimMessages drops the oldest non-protected messages until total tokens <=
-// limit. When a dropped assistant message carries tool calls, any immediately
-// following tool-result messages are dropped with it.
+// guardTokenCounter includes attachment text/data and call IDs omitted by the
+// SDK counter. Binary media is conservatively estimated by encoded byte size;
+// exact provider-specific media accounting still belongs in the SDK.
+type guardTokenCounter struct{ model.TokenCounter }
+
+func (c guardTokenCounter) CountTokens(messages []model.Message) int {
+	total := c.TokenCounter.CountTokens(messages)
+	for _, m := range messages {
+		total += c.CountString(m.ToolCallID)
+		for _, call := range m.ToolCalls {
+			total += c.CountString(call.ID)
+		}
+		for _, part := range m.Parts {
+			total += c.CountString(part.Text) + c.CountString(part.ImageURL) + c.CountString(part.FileName)
+			total += (len(part.Data) + 2) / 3
+		}
+		for _, audio := range m.Audio {
+			total += c.CountString(audio.Transcript) + (len(audio.Data)+2)/3
+		}
+	}
+	return total
+}
+
+// trimMessages shrinks tool payloads first, then removes only complete older
+// user turns. The latest user message and every subsequent call/result stay.
 func trimMessages(counter model.TokenCounter, messages []model.Message, protectedPrefix, limit int) []model.Message {
 	if limit <= 0 || counter == nil || protectedPrefix < 0 {
 		return messages
@@ -115,32 +172,47 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 	msgs := make([]model.Message, len(messages))
 	copy(msgs, messages)
 
+	// Rebuild each preview from the original, avoiding nested truncation
+	// envelopes and preserving original full-result references.
 	total := counter.CountTokens(msgs)
-	if total <= limit {
-		return msgs
-	}
-	base := counter.CountTokens(nil)
-	cost := func(m model.Message) int { return counter.CountTokens([]model.Message{m}) - base }
-
-	original := msgs
-	for total > limit && len(msgs) > protectedPrefix+1 {
-		total -= cost(msgs[protectedPrefix])
-		msgs = append(msgs[:protectedPrefix:protectedPrefix], msgs[protectedPrefix+1:]...)
-		// Drop orphaned tool results, but never the last remaining
-		// conversation message — the inner loop used to wipe the whole
-		// tail after the assistant/tool-call turn was dropped.
-		for len(msgs) > protectedPrefix+1 && msgs[protectedPrefix].Role == model.RoleTool {
-			total -= cost(msgs[protectedPrefix])
-			msgs = append(msgs[:protectedPrefix:protectedPrefix], msgs[protectedPrefix+1:]...)
+	for capBytes := maxToolResultBytes; total > limit; capBytes = max(256, capBytes/2) {
+		for i, m := range messages {
+			if m.Role == model.RoleTool && len(m.Content) > capBytes {
+				content := cappedToolContent(m.Content, capBytes)
+				saving := counter.CountString(msgs[i].Content) - counter.CountString(content)
+				if saving > 0 {
+					msgs[i].Content = content
+					total -= saving
+				}
+				if total <= limit {
+					break
+				}
+			}
+		}
+		if capBytes <= 256 {
+			break
 		}
 	}
-	if !hasUserOrAssistant(msgs, protectedPrefix) {
-		msgs = restoreLastUserTurn(original, protectedPrefix)
-	}
-	if counter.CountTokens(msgs) > limit {
-		if collapsed := collapseToLastUser(original, protectedPrefix); len(collapsed) > 0 {
-			msgs = collapsed
+	for total > limit {
+		nextUser := -1
+		for i := protectedPrefix + 1; i < len(msgs); i++ {
+			if msgs[i].Role == model.RoleUser {
+				nextUser = i
+				break
+			}
 		}
+		if nextUser < 0 {
+			break
+		}
+		kept := append([]model.Message(nil), msgs[:protectedPrefix]...)
+		for _, m := range msgs[protectedPrefix:nextUser] {
+			if m.Role == model.RoleSystem {
+				kept = append(kept, m)
+			}
+		}
+		protectedPrefix = len(kept)
+		msgs = append(kept, msgs[nextUser:]...)
+		total = counter.CountTokens(msgs)
 	}
 	return msgs
 }
@@ -155,65 +227,17 @@ func hasUserOrAssistant(messages []model.Message, from int) bool {
 	return false
 }
 
-// restoreLastUserTurn keeps the protected prefix plus the most recent user
-// message and everything after it (the in-flight tool-calling turn).
-func restoreLastUserTurn(messages []model.Message, protectedPrefix int) []model.Message {
-	if protectedPrefix < 0 {
-		protectedPrefix = 0
-	}
-	if protectedPrefix > len(messages) {
-		protectedPrefix = len(messages)
-	}
-	lastUser := -1
-	for i := len(messages) - 1; i >= protectedPrefix; i-- {
-		if messages[i].Role == model.RoleUser {
-			lastUser = i
-			break
-		}
-	}
-	out := make([]model.Message, 0, len(messages))
-	out = append(out, messages[:protectedPrefix]...)
-	if lastUser >= 0 {
-		return append(out, messages[lastUser:]...)
-	}
-	if protectedPrefix < len(messages) {
-		return append(out, messages[len(messages)-1])
-	}
-	return out
-}
-
-func collapseToLastUser(messages []model.Message, protectedPrefix int) []model.Message {
-	if protectedPrefix < 0 {
-		protectedPrefix = 0
-	}
-	if protectedPrefix > len(messages) {
-		protectedPrefix = len(messages)
-	}
-	lastUser := -1
-	for i := len(messages) - 1; i >= protectedPrefix; i-- {
-		if messages[i].Role == model.RoleUser {
-			lastUser = i
-			break
-		}
-	}
-	if lastUser < 0 {
-		return nil
-	}
-	out := make([]model.Message, 0, protectedPrefix+1)
-	out = append(out, messages[:protectedPrefix]...)
-	return append(out, messages[lastUser])
-}
-
-// maxToolResultBytes is the hard cap on any single tool result. Results
-// exceeding this are truncated before they enter the message history.
+// maxToolResultBytes is the serialized size target for a tool result. Payloads
+// exceeding this are truncated before they enter the message history; existing
+// artifact references remain indivisible and subject to the request budget.
 // This is a last-resort safety net — toolcompress should compress before
 // this limit is reached, but some paths (MCP tools, incctx injections)
 // can bypass compression.
 const maxToolResultBytes = 100 << 10 // 100 KB
 
 // wrapToolResultCap installs a size-limiting wrapper on every tool so that
-// no single result can inject more than maxToolResultBytes into the
-// conversation. This runs after toolcompress (which evicts large results to
+// result payloads are bounded to maxToolResultBytes in the conversation.
+// This runs after toolcompress (which evicts large results to
 // storage) as a safety net for results that bypass compression.
 func wrapToolResultCap(a *agent.Agent) {
 	for _, def := range a.Tools.List() {
@@ -234,36 +258,66 @@ func wrapToolResultCap(a *agent.Agent) {
 }
 
 func capResult(result any) any {
-	switch v := result.(type) {
-	case string:
-		if len(v) > maxToolResultBytes {
-			return v[:maxToolResultBytes] + fmt.Sprintf("\n... [truncated: %d bytes total, showing first %d]", len(v), maxToolResultBytes)
-		}
-	case map[string]any:
-		data, err := json.Marshal(v)
-		if err != nil || len(data) <= maxToolResultBytes {
-			return result
-		}
-		return map[string]any{
-			"truncated":   true,
-			"preview":     string(data[:maxToolResultBytes]),
-			"total_bytes": len(data),
-			"shown_bytes": maxToolResultBytes,
-		}
+	if s, ok := result.(string); ok {
+		result = strings.ToValidUTF8(s, "\uFFFD")
 	}
-	return result
+	data, err := json.Marshal(result)
+	if err != nil {
+		return map[string]any{"error": "tool result is not JSON serializable", "truncated": true}
+	}
+	if len(data) <= maxToolResultBytes {
+		return result
+	}
+	if content, ok := result.(string); ok {
+		data = []byte(content)
+	}
+	return cappedResult(data, maxToolResultBytes)
 }
 
-func estimateToolTokens(tools []model.ToolDefinition) int {
-	total := 0
-	for _, t := range tools {
-		total += 10 // name + type framing
-		total += len(t.Function.Name) / 4
-		total += len(t.Function.Description) / 4
-		if t.Function.Parameters != nil {
-			data, _ := json.Marshal(t.Function.Parameters)
-			total += len(data) / 4
+func cappedToolContent(content string, limit int) string {
+	data, _ := json.Marshal(cappedResult([]byte(strings.ToValidUTF8(content, "\uFFFD")), limit))
+	return string(data)
+}
+
+// cappedResult bounds the entire serialized envelope, including JSON escaping
+// and metadata. It carries real reference fields forward, never inventing a
+// storage key for content that has not actually been externalized.
+func cappedResult(data []byte, limit int) map[string]any {
+	out := map[string]any{"truncated": true, "total_bytes": len(data), "shown_bytes": 0, "preview": ""}
+	var object map[string]any
+	if json.Unmarshal(data, &object) == nil {
+		for _, key := range []string{"storage_key", "artifact_id", "artifact_path", "artifact_uri", "full_content_ref", "full_size_bytes", "total_bytes"} {
+			if value, ok := object[key]; ok {
+				out[key] = value
+			}
 		}
 	}
-	return total
+	// References are indivisible. If they alone exceed a request-time preview
+	// target, keep them; the guard will reject the still-oversized request.
+	preview := strings.ToValidUTF8(string(data), "\uFFFD")
+	lo, hi := 0, min(len(preview), limit)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		out["preview"] = utf8Prefix(preview, mid)
+		out["shown_bytes"] = len(out["preview"].(string))
+		encoded, _ := json.Marshal(out)
+		if len(encoded) <= limit {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	out["preview"] = utf8Prefix(preview, lo)
+	out["shown_bytes"] = len(out["preview"].(string))
+	return out
+}
+
+func utf8Prefix(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

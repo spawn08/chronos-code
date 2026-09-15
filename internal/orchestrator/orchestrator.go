@@ -88,6 +88,8 @@ type Orchestrator struct {
 	hookRunner         *security.HookRunner
 	hookActivity       *hookActivityTracker
 	learningStore      *learning.SQLStore
+	telemetryRecorders []*learning.TelemetryRecorder
+	runtimeMemory      *runtimeMemory
 	planMode           atomic.Bool
 	editsMu            sync.Mutex
 	edits              []fileCheckpoint
@@ -189,45 +191,44 @@ func OpenStorageForCLI(cfg *config.Config) (storage.Storage, string, error) {
 // session" heuristic) — this is how the CLI's `--resume <id>` flag resumes a
 // specific prior session rather than just "the latest one."
 func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Orchestrator, err error) {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	paths, err := cfg.ResolveProjectPaths("")
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime paths: %w", err)
+	}
+	// Keep caller configuration (including embedded-path provenance) intact.
+	configuredGraphDB := cfg.Workspace.GraphDB
+	runtimeConfig := *cfg
+	runtimeConfig.Workspace.Root = paths.Root
+	runtimeConfig.Workspace.GraphDB = paths.GraphDB
+	cfg = &runtimeConfig
 	store, dsn, err := openStorage(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
+	if err := writeProjectMetadata(paths); err != nil {
+		fmt.Printf("warning: write project data metadata: %v\n", err)
+	}
 	var learningStore *learning.SQLStore
 	var languageServerManager *lsp.Manager
 	var mcpRuntimes []*mcpdiscover.Runtime
+	orch := &Orchestrator{store: store}
 	defer func() {
 		if err == nil {
 			return
 		}
-		var cleanupErrs []error
-		if learningStore != nil {
-			if closeErr := learningStore.Close(context.Background()); closeErr != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("close learning telemetry after startup failure: %w", closeErr))
-			}
-		}
-		if languageServerManager != nil {
-			if closeErr := languageServerManager.Close(); closeErr != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("close LSP manager after startup failure: %w", closeErr))
-			}
-		}
-		for _, runtime := range mcpRuntimes {
-			if closeErr := runtime.Close(); closeErr != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("close MCP runtime after startup failure: %w", closeErr))
-			}
-		}
-		if closeErr := store.Close(); closeErr != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("close storage after startup failure: %w", closeErr))
-		}
-		err = errors.Join(append([]error{err}, cleanupErrs...)...)
+		err = errors.Join(err, orch.Close())
 	}()
 
 	applyStoredCredentials(ctx, cfg)
 
-	agents, err := agent.BuildAll(ctx, &cfg.FileConfig)
+	agents, err := agent.BuildAllWithOptions(ctx, &cfg.FileConfig, agent.BuildAllOptions{DefaultStorage: store})
 	if err != nil {
 		return nil, fmt.Errorf("build agents: %w", err)
 	}
+	orch.agents = agents
 
 	order := make([]string, 0, len(agents))
 	for _, ac := range cfg.Agents {
@@ -237,30 +238,38 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 	sort.Strings(order)
 
-	for _, a := range agents {
-		if a.Storage == nil {
-			a.Storage = store
-		}
-	}
 	setupTracing(store, agents)
 
 	projectDir, userDir, discoverErr := config.Discover()
 	if discoverErr != nil {
 		fmt.Printf("warning: discover project config dir: %v (falling back to embedded defaults)\n", discoverErr)
 	}
+	projectDir = paths.LegacyDir
 
 	sessionMgr := session.NewManager(store, dsn)
 	sessions := setupSessions(ctx, cfg, sessionMgr, agents, resumeSessionID)
 
+	if err := migrateDefaultDatabase(ctx, paths, paths.GraphDB, "graph.db", configuredGraphDB); err != nil {
+		return nil, err
+	}
 	graphStore, watcher := setupGraph(ctx, cfg, agents)
+	orch.graphStore, orch.watcher = graphStore, watcher
 
 	root := cfg.Workspace.Root
 	if root == "" {
 		root = config.WorkspaceRoot()
 	}
-	learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents)
+	learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents, paths)
 	if err != nil {
 		return nil, fmt.Errorf("configure learning telemetry: %w", err)
+	}
+	orch.learningStore = learningStore
+	for _, a := range agents {
+		for _, hook := range a.Hooks {
+			if recorder, ok := hook.(*learning.TelemetryRecorder); ok {
+				orch.telemetryRecorders = append(orch.telemetryRecorders, recorder)
+			}
+		}
 	}
 	wsInfo := setupWorkspace(root, agents)
 
@@ -268,14 +277,20 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		setupSessionSummaries(sessionMgr, agents)
 	}
 	memStore := setupMemory(cfg, agents)
+	orch.runtimeMemory, err = setupRuntimeMemory(ctx, cfg, paths, agents)
+	if err != nil {
+		return nil, fmt.Errorf("configure layered memory: %w", err)
+	}
 	if cfg.Learning.PatternInjectionEnabled() {
 		setupLearnedPatterns(ctx, cfg, root, agents)
 	}
 
 	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
+	orch.projectDocsWatcher = pdWatcher
 
 	skillCatalog := setupSkills(cfg, root, agents)
 	languageServerManager = setupLSP(root, wsInfo, agents)
+	orch.lspManager = languageServerManager
 
 	rt, routingConfig := setupRouter(cfg, projectDir, selectPrimaryAgent(agents, order))
 
@@ -294,6 +309,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	actBuf := activation.NewBuffer(50)
 	broker := chronosstream.NewBroker(chronosstream.WithBufferSize(256))
+	orch.actBuf, orch.broker = actBuf, broker
 	for _, a := range agents {
 		a.Broker = broker
 	}
@@ -316,24 +332,18 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		}
 		discoveredServers = discovered.Servers
 	}
-	mcpRuntimes = setupMCPRuntimes(ctx, agents, discoveredServers, policy, mcpdiscover.DefaultConnectTimeout, mcpdiscover.NewClient)
+	mcpPool := mcpdiscover.NewSharedClientFactory(nil)
+	mcpRuntimes = setupMCPRuntimes(ctx, agents, discoveredServers, policy, mcpdiscover.DefaultConnectTimeout, mcpPool.NewClient)
+	orch.mcpRuntimes = mcpRuntimes
 	for _, a := range agents {
-		// Wrap tool handlers only after
-		// MCP registration so server tools are covered too, not just the
-		// built-in/YAML-declared ones registered before this point.
-		wrapUserToolHooks(a, cfg.Hooks, hookRunner, hookActivity)
-		agentID := a.ID
-		toolcompress.WrapDynamic(a, func(ctx context.Context) int {
-			base := tracker.CompressionThreshold(sessionOrAgentKey(ctx, agentID))
-			w := attBudget.CurrentWeight(sessionOrAgentKey(ctx, agentID))
-			return attention.AdjustThreshold(base, w)
-		})
-		wrapToolResultCap(a)
+		// Finish logical implementations before adding cross-cutting wrappers:
+		// outlines, ranges, grep and cache hits all enter the same pipeline.
 		incctx.Wrap(a, root)
 		incctx.WrapGrep(a, root)
 		if graphStore != nil {
 			activation.Wrap(a, graphStore, actBuf)
 		}
+		wrapToolPipeline(a, tracker, cfg.Hooks, hookRunner, hookActivity)
 	}
 
 	teams := setupTeams(cfg, agents)
@@ -342,7 +352,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	active := selectPrimaryAgent(agents, order)
 
-	orch := &Orchestrator{
+	*orch = Orchestrator{
 		agents:             agents,
 		order:              order,
 		active:             active,
@@ -370,10 +380,12 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		hookRunner:         hookRunner,
 		hookActivity:       hookActivity,
 		learningStore:      learningStore,
+		telemetryRecorders: orch.telemetryRecorders,
+		runtimeMemory:      orch.runtimeMemory,
 		lspManager:         languageServerManager,
 		broker:             broker,
 		policy:             policy,
-		mcpFactory:         mcpdiscover.NewClient,
+		mcpFactory:         mcpPool.NewClient,
 		mcpTimeout:         mcpdiscover.DefaultConnectTimeout,
 		mcpRuntimes:        mcpRuntimes,
 	}
@@ -383,7 +395,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// the model's context window, preventing 413/400 token-limit errors that
 		// the SDK's tool-calling loop doesn't guard against.
 		a.Hooks = append(a.Hooks, sessionUXHook{orchestrator: orch})
-		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List())))
+		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List()), contextGuardOptions{
+			ContextLimit: a.ContextCfg.MaxContextTokens,
+		}))
 		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
 		// Keep the budget hook last: if it reserves, no later Before hook can
 		// abort the call and strand the reservation.
@@ -671,20 +685,33 @@ func setupSessions(ctx context.Context, cfg *config.Config, mgr *session.Manager
 	return sessions
 }
 
-func setupLearningTelemetry(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent) (*learning.SQLStore, error) {
+func setupLearningTelemetry(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent, resolved ...config.ProjectPaths) (*learning.SQLStore, error) {
 	if !cfg.Learning.Enabled {
 		return nil, nil
 	}
 	dir := filepath.Join(root, config.ConfigDirName)
+	dbPath := filepath.Join(dir, "memory.db")
+	if len(resolved) > 0 {
+		dbPath = resolved[0].TelemetryDB
+		dir = filepath.Dir(dbPath)
+		if err := snapshotLegacyDatabase(ctx, filepath.Join(resolved[0].LegacyDir, "memory.db"), dbPath); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create learning telemetry directory %s: %w", dir, err)
 	}
-	store, err := learning.OpenSQLStore(ctx, filepath.Join(dir, "memory.db"))
+	store, err := learning.OpenSQLStore(ctx, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open learning telemetry: %w", err)
 	}
 	for _, a := range agents {
-		a.Hooks = append(a.Hooks, learning.NewTelemetryRecorder(store, root, a.ID))
+		if len(resolved) > 0 {
+			a.Hooks = append(a.Hooks, learning.NewAsyncTelemetryRecorder(store, root, a.ID, learning.TelemetryRecorderOptions{}))
+		} else {
+			// Compatibility for synchronous helper callers; New owns async workers.
+			a.Hooks = append(a.Hooks, learning.NewTelemetryRecorder(store, root, a.ID))
+		}
 	}
 	return store, nil
 }
@@ -966,7 +993,11 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 	if !cfg.Memory.Enabled {
 		return nil
 	}
-	dir := filepath.Join(config.ConfigDirName, "memory")
+	root := cfg.Workspace.Root
+	if root == "" {
+		root = config.WorkspaceRoot()
+	}
+	dir := filepath.Join(root, config.ConfigDirName, "memory")
 	store := memory.NewStore(dir)
 	for _, a := range agents {
 		prev := a.ContextPinsFn
@@ -1077,6 +1108,12 @@ func setupLearnedPatternPins(store *learning.Store, repoPath, sourceRevision str
 func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent) *projectdocs.Watcher {
 	cwd, err := os.Getwd()
 	if err != nil {
+		cwd = root
+	}
+	if canonical, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = canonical
+	}
+	if rel, err := filepath.Rel(root, cwd); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		cwd = root
 	}
 	bundle, err := projectdocs.Load(root, cwd)
@@ -1546,21 +1583,40 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		}
 	}
 	if request.Mode == ExecutionStreaming {
-		result.Stream, err = o.executeStreamWithRecovery(ctx, a, sessionID, agentID, message)
+		if o.runtimeMemory == nil {
+			result.Stream, err = o.executeStreamWithRecovery(ctx, a, sessionID, message)
+			if err == nil {
+				result.Stream = assessStream(ctx, result.Stream, request)
+			}
+			result.ContextReport = o.contextReport(collector)
+			return result, err
+		}
+		streamCtx, cancel := context.WithCancel(ctx)
+		result.Stream, err = o.executeStreamWithRecovery(streamCtx, a, sessionID, message)
 		if err == nil {
-			result.Stream = assessStream(ctx, result.Stream, request)
+			result.Stream = assessStream(streamCtx, result.Stream, request)
+			result.Stream = o.runtimeMemory.observeStream(streamCtx, result.Stream, request.Message, cancel)
+		} else {
+			cancel()
+			o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
 		}
 		result.ContextReport = o.contextReport(collector)
 		return result, err
 	}
-	result.Response, err = o.executeBlockingWithRecovery(ctx, a, sessionID, agentID, message)
+	result.Response, err = o.executeBlockingWithRecovery(ctx, a, sessionID, message)
 	result.ContextReport = o.contextReport(collector)
 	if err != nil {
+		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
 		return result, err
 	}
 	decision := verification.Assess(request.VerificationMode, true, request.VerificationObligations, request.VerificationEvents)
 	if !decision.Allowed {
-		return result, fmt.Errorf("verification does not support successful completion")
+		err := fmt.Errorf("verification does not support successful completion")
+		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
+		return result, err
+	}
+	if result.Response != nil {
+		o.runtimeMemory.recordEpisode(ctx, request.Message, result.Response.Content, result.Response.Err)
 	}
 	return result, nil
 }
@@ -1572,137 +1628,34 @@ func (o *Orchestrator) contextReport(collector *contextReportCollector) ContextR
 	return collector.report()
 }
 
-const (
-	maxAPIRetries     = 2
-	maxCompactRetries = 1
-)
-
-func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.Agent, sessionID, agentID, message string) (<-chan *model.ChatResponse, error) {
-	chatStream := func() (<-chan *model.ChatResponse, error) {
-		if sessionID != "" && a.Storage != nil {
-			return a.ChatStreamWithSession(ctx, sessionID, message)
-		}
-		return a.ChatStream(ctx, message)
+// Recovery belongs to the SDK's model-request boundary. Resubmitting a chat
+// would append the user message again and could repeat already committed tools.
+func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.Agent, sessionID, message string) (<-chan *model.ChatResponse, error) {
+	var stream <-chan *model.ChatResponse
+	var err error
+	if sessionID != "" && a.Storage != nil {
+		stream, err = a.ChatStreamWithSession(ctx, sessionID, message)
+	} else {
+		stream, err = a.ChatStream(ctx, message)
 	}
-
-	stream, err := chatStream()
-	if err == nil {
-		return stream, nil
+	if err != nil {
+		return nil, apierror.Classify(err)
 	}
-
-	classified := apierror.Classify(err)
-
-	if apierror.IsCompactable(classified) {
-		o.publishRetryEvent(ctx, agentID, classified.Message)
-		if compactErr := o.CompactActiveSession(ctx); compactErr == nil {
-			stream, err = chatStream()
-			if err == nil {
-				return stream, nil
-			}
-			classified = apierror.Classify(err)
-		}
-	}
-
-	if classified.Retryable {
-		for attempt := 1; attempt <= maxAPIRetries; attempt++ {
-			delay := classified.RetryAfter
-			if delay <= 0 {
-				delay = time.Duration(attempt) * 5 * time.Second
-			}
-			o.publishRetryEvent(ctx, agentID, fmt.Sprintf("%s (retry %d/%d in %s)", classified.Message, attempt, maxAPIRetries, delay.Round(time.Second)))
-			if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
-				return nil, err
-			}
-			stream, err = chatStream()
-			if err == nil {
-				return stream, nil
-			}
-			classified = apierror.Classify(err)
-			if !classified.Retryable {
-				break
-			}
-		}
-	}
-
-	return nil, classified
+	return stream, nil
 }
 
-func (o *Orchestrator) executeBlockingWithRecovery(ctx context.Context, a *agent.Agent, sessionID, agentID, message string) (*model.ChatResponse, error) {
-	chat := func() (*model.ChatResponse, error) {
-		if sessionID != "" && a.Storage != nil {
-			return a.ChatWithSession(ctx, sessionID, message)
-		}
-		return a.Chat(ctx, message)
+func (o *Orchestrator) executeBlockingWithRecovery(ctx context.Context, a *agent.Agent, sessionID, message string) (*model.ChatResponse, error) {
+	var response *model.ChatResponse
+	var err error
+	if sessionID != "" && a.Storage != nil {
+		response, err = a.ChatWithSession(ctx, sessionID, message)
+	} else {
+		response, err = a.Chat(ctx, message)
 	}
-
-	resp, err := chat()
-	if err == nil {
-		return resp, nil
+	if err != nil {
+		return nil, apierror.Classify(err)
 	}
-
-	classified := apierror.Classify(err)
-
-	if apierror.IsCompactable(classified) {
-		o.publishRetryEvent(ctx, agentID, classified.Message)
-		if compactErr := o.CompactActiveSession(ctx); compactErr == nil {
-			resp, err = chat()
-			if err == nil {
-				return resp, nil
-			}
-			classified = apierror.Classify(err)
-		}
-	}
-
-	if classified.Retryable {
-		for attempt := 1; attempt <= maxAPIRetries; attempt++ {
-			delay := classified.RetryAfter
-			if delay <= 0 {
-				delay = time.Duration(attempt) * 5 * time.Second
-			}
-			o.publishRetryEvent(ctx, agentID, fmt.Sprintf("%s (retry %d/%d in %s)", classified.Message, attempt, maxAPIRetries, delay.Round(time.Second)))
-			if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
-				return nil, err
-			}
-			resp, err = chat()
-			if err == nil {
-				return resp, nil
-			}
-			classified = apierror.Classify(err)
-			if !classified.Retryable {
-				break
-			}
-		}
-	}
-
-	return nil, classified
-}
-
-func (o *Orchestrator) publishRetryEvent(ctx context.Context, agentID, message string) {
-	if o.broker == nil {
-		return
-	}
-	o.broker.PublishTopic(o.CurrentSessionID(), chronosstream.Event{
-		Type: chronosstream.EventCustom,
-		Data: map[string]any{
-			"agent":   agentID,
-			"type":    "api_retry",
-			"message": message,
-		},
-	})
-}
-
-func sleepContext(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return ctx.Err()
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	return response, nil
 }
 
 func (o *Orchestrator) applyMemoryIntent(ctx context.Context, intent memory.Intent) (*memory.IntentResult, error) {
@@ -1764,6 +1717,11 @@ func assessStream(ctx context.Context, stream <-chan *model.ChatResponse, reques
 						}
 					}
 					return
+				}
+				if response != nil && response.Err != nil {
+					classified := *response
+					classified.Err = apierror.Classify(response.Err)
+					response = &classified
 				}
 				select {
 				case assessed <- response:
@@ -1972,6 +1930,13 @@ func (o *Orchestrator) escalateModel(ctx context.Context, agentID string) error 
 func (o *Orchestrator) SetApprovalHandler(handler tool.ApprovalFunc) {
 	for _, a := range o.agents {
 		a.Tools.SetApprovalHandler(func(ctx context.Context, toolName string, args map[string]any) (bool, error) {
+			// LayerTools are host-bound memory operations, not arbitrary file IO.
+			// Preserve their allow policy after generic permission normalization;
+			// the registry still enforces explicit denials and handlers enforce
+			// scope isolation, semantic opt-in and explicit org publication.
+			if o.runtimeMemory != nil && isLayerMemoryTool(toolName) {
+				return true, nil
+			}
 			switch o.permissionChecker.Check(toolName, args, o.permissionYolo.Load()) {
 			case security.Auto:
 				return true, nil
@@ -2402,7 +2367,8 @@ func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover
 	}
 	factory := o.mcpFactory
 	if factory == nil {
-		factory = mcpdiscover.NewClient
+		factory = mcpdiscover.NewSharedClientFactory(nil).NewClient
+		o.mcpFactory = factory
 	}
 	timeout := o.mcpTimeout
 	if timeout <= 0 {
@@ -2424,8 +2390,12 @@ func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover
 			return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP runtime for agent %q is not available", id)
 		}
 		before := registeredToolNameSet(a)
-		o.mcpRuntimes[i].RememberServer(cfg)
-		last = o.mcpRuntimes[i].ConnectServer(ctx, cfg, a.Tools, o.policy, timeout, factory)
+		agentConfig, known := o.mcpRuntimes[i].Server(name)
+		if !known {
+			agentConfig = cfg
+			o.mcpRuntimes[i].RememberServer(agentConfig)
+		}
+		last = o.mcpRuntimes[i].ConnectServer(ctx, agentConfig, a.Tools, o.policy, timeout, factory)
 		wrapLateTools(a, before, o)
 	}
 	if last.Name == "" {
@@ -2469,54 +2439,52 @@ func wrapLateTools(a *agent.Agent, before map[string]struct{}, o *Orchestrator) 
 	if a == nil || a.Tools == nil {
 		return
 	}
-	var pending []*tool.Definition
+	if o == nil {
+		o = &Orchestrator{}
+	}
+	// A temporary registry limits installation to new definitions. Re-wrapping
+	// the existing registry would execute hooks twice and re-compress references.
+	partial := &agent.Agent{ID: a.ID, Model: a.Model, Storage: a.Storage, Tools: tool.NewRegistry()}
 	for _, def := range a.Tools.List() {
 		if _, existed := before[def.Name]; existed || def.Handler == nil {
 			continue
-		}
-		copied := *def
-		pending = append(pending, &copied)
-	}
-	for _, def := range pending {
-		orig := def.Handler
-		if o != nil && o.hookRunner != nil && o.cfg != nil {
-			toolName := def.Name
-			configured := o.cfg.Hooks
-			runner := o.hookRunner
-			hooked := orig
-			orig = func(ctx context.Context, args map[string]any) (any, error) {
-				vars := map[string]any{
-					"tool_name":  toolName,
-					"tool_args":  args,
-					"session_id": storage.SessionFromContext(ctx),
-					"agent_id":   a.ID,
-				}
-				for _, hook := range configured.PreToolCall {
-					if _, err := runner.Run(ctx, hook, vars); err != nil {
-						return nil, fmt.Errorf("pre-tool hook %q: %w", hook.Name, err)
-					}
-				}
-				result, handlerErr := hooked(ctx, args)
-				vars["tool_output"] = result
-				for _, hook := range configured.PostToolCall {
-					_, _ = runner.Run(ctx, hook, vars)
-				}
-				return result, handlerErr
-			}
 		}
 		wrapped := *def
 		if wrapped.Permission != tool.PermDeny {
 			wrapped.Permission = tool.PermRequireApproval
 		}
-		wrapped.Handler = func(ctx context.Context, args map[string]any) (any, error) {
-			result, err := orig(ctx, args)
-			if err != nil || result == nil {
-				return result, err
-			}
-			return capResult(result), nil
-		}
-		a.Tools.Register(&wrapped)
+		partial.Tools.Register(&wrapped)
 	}
+	if len(partial.Tools.List()) == 0 {
+		return
+	}
+	var configured config.HooksConfig
+	if o.cfg != nil {
+		configured = o.cfg.Hooks
+	}
+	wrapToolPipeline(partial, o.budget, configured, o.hookRunner, o.hookActivity)
+	for _, def := range partial.Tools.List() {
+		if _, existed := before[def.Name]; !existed {
+			a.Tools.Register(def)
+		}
+	}
+}
+
+func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config.HooksConfig, runner *security.HookRunner, activity *hookActivityTracker) {
+	toolcompress.RegisterReader(a)
+	wrapUserToolHooks(a, configured, runner, activity)
+	toolcompress.WrapDynamicForTool(a, func(ctx context.Context, name string, args map[string]any) int {
+		base := toolcompress.DefaultThresholdTokens
+		if tracker != nil {
+			base = tracker.CompressionThreshold(sessionOrAgentKey(ctx, a.ID))
+		}
+		weight := attention.Weight(attention.Classify(name, args))
+		if name == "codebase_search" || name == "codebase_map" || name == "codebase_context" {
+			weight = attention.Weight(attention.CatGraph)
+		}
+		return attention.AdjustThreshold(base, weight)
+	})
+	wrapToolResultCap(a)
 }
 
 func (o *Orchestrator) ListSkills() []SkillInfo {
@@ -2778,6 +2746,9 @@ func setupTeams(cfg *config.Config, agents map[string]*agent.Agent) map[string]*
 }
 
 func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, discovered []mcp.ServerConfig, policy *security.Policy, timeout time.Duration, factory mcpdiscover.ClientFactory) []*mcpdiscover.Runtime {
+	if factory == nil {
+		factory = mcpdiscover.NewSharedClientFactory(nil).NewClient
+	}
 	agentIDs := make([]string, 0, len(agents))
 	for id := range agents {
 		agentIDs = append(agentIDs, id)
@@ -2787,6 +2758,8 @@ func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, disco
 	for _, id := range agentIDs {
 		a := agents[id]
 		configured := make([]mcp.ServerConfig, 0, len(a.MCPClients))
+		// BuildAll records unconnected SDK clients. Hand their configs to the
+		// policy-gated runtime; transport creation is lazy in the shared factory.
 		for _, client := range a.MCPClients {
 			configured = append(configured, client.Config())
 			_ = client.Close()
@@ -2810,6 +2783,11 @@ func (o *Orchestrator) Close() error {
 		runtimes := append([]*mcpdiscover.Runtime(nil), o.mcpRuntimes...)
 		o.mcpMu.Unlock()
 		var errs []error
+		if o.runtimeMemory != nil {
+			if err := o.runtimeMemory.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close layered memory: %w", err))
+			}
+		}
 		for _, runtime := range runtimes {
 			if err := runtime.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close MCP runtime: %w", err))
@@ -2825,9 +2803,19 @@ func (o *Orchestrator) Close() error {
 				errs = append(errs, fmt.Errorf("close project docs watcher: %w", err))
 			}
 		}
+		if o.actBuf != nil {
+			if err := o.actBuf.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close activation buffer: %w", err))
+			}
+		}
 		if o.graphStore != nil {
 			if err := o.graphStore.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close graph store: %w", err))
+			}
+		}
+		for _, recorder := range o.telemetryRecorders {
+			if err := recorder.Close(context.Background()); err != nil {
+				errs = append(errs, fmt.Errorf("close telemetry recorder: %w", err))
 			}
 		}
 		if o.learningStore != nil {
@@ -2845,8 +2833,23 @@ func (o *Orchestrator) Close() error {
 				errs = append(errs, fmt.Errorf("close activity broker: %w", err))
 			}
 		}
+		stores := map[storage.Storage]bool{}
 		if o.store != nil {
-			if err := o.store.Close(); err != nil {
+			stores[o.store] = true
+		}
+		for _, a := range o.agents {
+			if a.Storage != nil {
+				stores[a.Storage] = true
+			}
+			// Before MCP runtime handoff, the SDK agent still owns its clients.
+			for _, client := range a.MCPClients {
+				if err := client.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("close agent MCP client: %w", err))
+				}
+			}
+		}
+		for store := range stores {
+			if err := store.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close storage: %w", err))
 			}
 		}
@@ -2856,19 +2859,28 @@ func (o *Orchestrator) Close() error {
 }
 
 func openStorage(cfg *config.Config) (storage.Storage, string, error) {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	paths, err := cfg.ResolveProjectPaths("")
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve storage paths: %w", err)
+	}
 	backend := "sqlite"
-	dsn := ".chronos-code/sessions.db"
+	dsn := paths.SessionsDB
+	configuredDSN := ""
 	if cfg.Defaults != nil {
+		configuredDSN = cfg.Defaults.Storage.DSN
 		if cfg.Defaults.Storage.Backend != "" {
 			backend = cfg.Defaults.Storage.Backend
-		}
-		if cfg.Defaults.Storage.DSN != "" {
-			dsn = cfg.Defaults.Storage.DSN
 		}
 	}
 	switch backend {
 	case "sqlite":
-		if dir := filepath.Dir(dsn); dir != "." && dir != "" {
+		if err := migrateDefaultDatabase(context.Background(), paths, dsn, "sessions.db", configuredDSN); err != nil {
+			return nil, "", err
+		}
+		if dir := filepath.Dir(dsn); dsn != ":memory:" && !strings.HasPrefix(dsn, "file:") && dir != "." && dir != "" {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return nil, "", fmt.Errorf("create storage dir %s: %w", dir, err)
 			}
@@ -2878,7 +2890,7 @@ func openStorage(cfg *config.Config) (storage.Storage, string, error) {
 			return nil, "", fmt.Errorf("sqlite: %w", err)
 		}
 		if err := store.Migrate(context.Background()); err != nil {
-			return nil, "", fmt.Errorf("sqlite migrate: %w", err)
+			return nil, "", errors.Join(fmt.Errorf("sqlite migrate: %w", err), store.Close())
 		}
 		return store, dsn, nil
 	case "postgres":

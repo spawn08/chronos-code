@@ -22,6 +22,7 @@ func Tools(store *Store, root string) []*tool.Definition {
 	return []*tool.Definition{
 		graphQueryTool(store),
 		codebaseSearchTool(store),
+		codebaseContextTool(store, root),
 		codebaseMapTool(store, root),
 		findCallersTool(store),
 		findImplementationsTool(store),

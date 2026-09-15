@@ -3,6 +3,8 @@ package learning
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -264,5 +266,267 @@ func TestTelemetryIgnoresUnsupportedEventsAndReturnsStorageErrors(t *testing.T) 
 	}
 	if err := recorder.Before(context.Background(), &hooks.Event{Type: hooks.EventModelCallBefore, Name: "model"}); err == nil {
 		t.Fatal("Before(supported) storage error = nil")
+	}
+}
+
+func TestAsyncTelemetrySnapshotsAndDrains(t *testing.T) {
+	store := openTestSQLStore(t)
+	ctx, cancel := context.WithCancel(storage.WithSession(context.Background(), "snapshot"))
+	defer cancel()
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	r := NewAsyncTelemetryRecorder(store, "/repo", "coder", TelemetryRecorderOptions{})
+	t.Cleanup(func() { _ = r.Close(context.Background()) })
+	input := map[string]any{"prompt": []string{"input-secret"}}
+	output := &model.ChatResponse{Content: "output-secret", Usage: model.Usage{PromptTokens: 7, CompletionTokens: 11}}
+	inputHash, _ := eventFingerprint(input)
+	outputHash, _ := eventFingerprint(output)
+	evt := &hooks.Event{Type: hooks.EventModelCallBefore, Name: "model", Input: input, Metadata: map[string]any{"secret": "metadata-secret"}}
+	if err := r.Before(ctx, evt); err != nil {
+		t.Fatal(err)
+	}
+	waitTelemetryDBWait(t, store)
+	callID := evt.Metadata[telemetryCorrelationKey]
+	evt.Type, evt.Output = hooks.EventModelCallAfter, output
+	if err := r.After(ctx, evt); err != nil {
+		t.Fatal(err)
+	}
+	// Mutating all caller-owned data after the hook returns must be safe even
+	// while the worker is using the snapshot, including nested input and usage.
+	mutated := make(chan struct{})
+	go func() {
+		defer close(mutated)
+		for i := 0; i < 1000; i++ {
+			input["prompt"].([]string)[0] = "changed"
+			output.Content = "changed"
+			output.Usage.PromptTokens = i
+			evt.Metadata[telemetryCorrelationKey] = "changed"
+			evt.Name = "changed"
+		}
+	}()
+	cancel() // Accepted telemetry is independent of the agent call's lifetime.
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-mutated
+	var content string
+	var turns, in, out int
+	if err := store.db.QueryRow(`SELECT content FROM turns`).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["name"] != "model" || payload["correlation_id"] != callID || payload["input_hash"] != inputHash || payload["output_hash"] != outputHash || payload["state"] != "completed" {
+		t.Fatalf("snapshot changed: %s", content)
+	}
+	if strings.Contains(content, "secret") {
+		t.Fatalf("raw secret in telemetry: %s", content)
+	}
+	if err := store.db.QueryRow(`SELECT turns, input_tokens, output_tokens FROM sessions WHERE id = 'snapshot'`).Scan(&turns, &in, &out); err != nil {
+		t.Fatal(err)
+	}
+	if turns != 1 || in != 7 || out != 11 {
+		t.Fatalf("totals = %d/%d/%d", turns, in, out)
+	}
+	if err := r.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.Ping(); err != nil {
+		t.Fatalf("recorder closed borrowed store: %v", err)
+	}
+}
+
+func TestAsyncTelemetrySaturationAndClose(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	r := NewAsyncTelemetryRecorder(store, "/repo", "coder", TelemetryRecorderOptions{QueueCapacity: 1})
+	t.Cleanup(func() { _ = r.Close(ctx) })
+	record := func() {
+		t.Helper()
+		if err := r.After(ctx, &hooks.Event{Type: hooks.EventToolCallAfter, Name: "tool", Input: "input-secret", Output: "output-secret"}); err != nil {
+			t.Fatalf("optional telemetry aborted hook: %v", err)
+		}
+	}
+	record()
+	waitTelemetryDBWait(t, store)
+	record()
+	record() // Full queue: must return without waiting for the DB connection.
+	if got := r.Stats(); got.Accepted != 2 || got.Dropped != 1 || got.Processed != 0 {
+		t.Fatalf("saturated stats = %+v", got)
+	}
+	deadline, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := r.Flush(deadline); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Flush deadline = %v", err)
+	}
+	if err := r.Close(deadline); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Close deadline = %v", err)
+	}
+	record() // Shutdown rejects new work without aborting the agent.
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := r.Close(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := r.Stats(); got.Accepted != 2 || got.Processed != 2 || got.Dropped != 2 || got.Errors != 0 {
+		t.Fatalf("closed stats = %+v", got)
+	}
+	var calls int
+	if err := store.db.QueryRow(`SELECT count(*) FROM tool_calls WHERE input LIKE 'sha256:%' AND output LIKE 'sha256:%'`).Scan(&calls); err != nil || calls != 2 {
+		t.Fatalf("drained tool calls = %d, err = %v", calls, err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatal("Close retained correlation state")
+	}
+}
+
+func TestAsyncTelemetryErrorsAreObservableAndNonfatal(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	if err := store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r := NewAsyncTelemetryRecorder(store, "/repo", "coder", TelemetryRecorderOptions{})
+	t.Cleanup(func() { _ = r.Close(ctx) })
+	for _, typ := range []hooks.EventType{hooks.EventModelCallBefore, hooks.EventToolCallBefore} {
+		if err := r.Before(ctx, &hooks.Event{Type: typ, Name: "call"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Before(ctx, &hooks.Event{Type: hooks.EventToolCallBefore, Input: make(chan int)}); err != nil {
+		t.Fatalf("snapshot error aborted hook: %v", err)
+	}
+	if err := r.Flush(ctx); err == nil {
+		t.Fatal("Flush did not report errors")
+	}
+	for i := 0; i < 2; i++ {
+		if err := r.Close(ctx); err == nil {
+			t.Fatal("Close did not report retained error")
+		}
+	}
+	if got := r.Stats(); got.Accepted != 2 || got.Processed != 2 || got.Errors != 3 || got.Dropped != 0 {
+		t.Fatalf("error stats = %+v", got)
+	}
+}
+
+func TestAsyncTelemetryWriteTimeout(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	r := NewAsyncTelemetryRecorder(store, "/repo", "coder", TelemetryRecorderOptions{WriteTimeout: 20 * time.Millisecond})
+	if err := r.Before(ctx, &hooks.Event{Type: hooks.EventModelCallBefore}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("write timeout = %v", err)
+	}
+	if got := r.Stats(); got.Errors != 1 || got.Processed != 1 {
+		t.Fatalf("timeout stats = %+v", got)
+	}
+}
+
+func TestAsyncTelemetryBoundedStateAndDuplicateCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	r := NewAsyncTelemetryRecorder(store, "/repo", "coder", TelemetryRecorderOptions{QueueCapacity: 64, CompletedCallLimit: 3, PendingCallLimit: 2})
+	t.Cleanup(func() { _ = r.Close(ctx) })
+	var last *hooks.Event
+	for i := 0; i < 20; i++ {
+		last = &hooks.Event{Type: hooks.EventModelCallAfter, Output: &model.ChatResponse{Usage: model.Usage{PromptTokens: 1}}}
+		if err := r.After(ctx, last); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Before(storage.WithSession(ctx, fmt.Sprint(i)), &hooks.Event{Type: hooks.EventToolCallBefore}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.calls) != 5 {
+		t.Fatalf("retained calls = %d, want 3 completed + 2 pending", len(r.calls))
+	}
+	for i := 0; i < 10; i++ {
+		if err := r.After(ctx, last); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var turns, tokens int
+	if err := store.db.QueryRow(`SELECT turns, input_tokens FROM sessions WHERE id = 'coder'`).Scan(&turns, &tokens); err != nil {
+		t.Fatal(err)
+	}
+	if turns != 20 || tokens != 20 || len(r.calls) != 5 {
+		t.Fatalf("duplicate changed totals/state: turns=%d tokens=%d retained=%d", turns, tokens, len(r.calls))
+	}
+}
+
+func TestAsyncTelemetryConcurrentHooksFlushAndClose(t *testing.T) {
+	ctx := context.Background()
+	r := NewAsyncTelemetryRecorder(openTestSQLStore(t), "/repo", "coder", TelemetryRecorderOptions{QueueCapacity: 8})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if err := r.After(ctx, &hooks.Event{Type: hooks.EventModelCallAfter}); err != nil {
+					t.Error(err)
+				}
+				_ = r.Stats()
+				if err := r.Flush(ctx); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := r.Close(ctx); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := r.Stats(); got.Accepted+got.Dropped != 160 || got.Processed != got.Accepted || got.Errors != 0 {
+		t.Fatalf("concurrent stats = %+v", got)
+	}
+}
+
+func waitTelemetryDBWait(t *testing.T, store *SQLStore) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for store.db.Stats().WaitCount == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("telemetry worker did not reach database")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

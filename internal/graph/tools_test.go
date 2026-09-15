@@ -32,7 +32,7 @@ func TestToolsAgainstOwnRepo(t *testing.T) {
 	for _, d := range defs {
 		byName[d.Name] = d
 	}
-	wantTools := []string{"graph_query", "find_callers", "find_implementations", "multi_resolution_view", "resolve_symbol", "codebase_search", "codebase_map"}
+	wantTools := []string{"graph_query", "find_callers", "find_implementations", "multi_resolution_view", "resolve_symbol", "codebase_search", "codebase_map", "codebase_context"}
 	if len(defs) != len(wantTools) {
 		t.Fatalf("Tools returned %d definitions, want %d", len(defs), len(wantTools))
 	}

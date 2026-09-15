@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -35,22 +36,48 @@ func findProjectConfigDir() string {
 	return ""
 }
 
-// WorkspaceRoot returns the project root: the nearest ancestor of the current
-// directory containing a .git directory, or the current directory if none is
-// found.
+// WorkspaceRoot returns the canonical project/worktree root of the current
+// directory, or the canonical current directory if no .git marker is found.
+// Call ResolveProjectPaths when root resolution errors must be reported.
 func WorkspaceRoot() string {
-	cwd, err := os.Getwd()
+	root, err := canonicalProjectRoot("")
 	if err != nil {
 		return "."
 	}
-	dir := cwd
+	return root
+}
+
+func canonicalProjectRoot(root string) (string, error) {
+	if root == "" {
+		root = "."
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("absolute project root: %w", err)
+	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("canonical project root: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("stat project root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("project root %q is not a directory", abs)
+	}
+	dir := abs
 	for {
-		if info, err := os.Stat(filepath.Join(dir, ".git")); err == nil && info.IsDir() {
-			return dir
+		info, err := os.Stat(filepath.Join(dir, ".git"))
+		if err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+			return dir, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat project .git marker: %w", err)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return cwd
+			return abs, nil
 		}
 		dir = parent
 	}

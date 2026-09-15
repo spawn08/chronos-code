@@ -3,6 +3,7 @@ package apierror
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,39 @@ import (
 func TestClassifyNil(t *testing.T) {
 	if got := Classify(nil); got != nil {
 		t.Fatalf("Classify(nil) = %v, want nil", got)
+	}
+}
+
+func TestTerminalGuidanceDoesNotPromiseAnotherAutomaticAttempt(t *testing.T) {
+	for _, status := range []int{400, 408, 413, 429, 500, 529} {
+		got := Classify(&model.APIError{StatusCode: status, Body: "maximum context exceeded"})
+		text := strings.ToLower(got.Message)
+		if strings.Contains(text, "retrying") || strings.Contains(text, "compacting session") || strings.Contains(text, "will retry") {
+			t.Fatalf("status %d promises work that is not scheduled: %s", status, got.Message)
+		}
+		if IsCompactable(got) && !strings.Contains(text, "/compact") {
+			t.Fatalf("context failure lacks actionable guidance: %s", got.Message)
+		}
+	}
+}
+
+type localBudgetError struct{ exceeded bool }
+
+func (e *localBudgetError) Error() string               { return "local preflight failure" }
+func (e *localBudgetError) ContextBudgetExceeded() bool { return e.exceeded }
+
+func TestClassifyTypedBudgetOverflow(t *testing.T) {
+	original := &localBudgetError{exceeded: true}
+	err := fmt.Errorf("agent: %w", fmt.Errorf("hook: %w", original))
+	got := Classify(err)
+	if got.Category != CategoryContextLength || !IsCompactable(got) || got.Retryable {
+		t.Fatalf("expected recoverable overflow without unchanged retry: %#v", got)
+	}
+	if !errors.Is(got, original) {
+		t.Fatal("lost original typed error")
+	}
+	if got := Classify(&localBudgetError{}); got.Category != CategoryUnknown {
+		t.Fatalf("false marker should not classify as overflow: %#v", got)
 	}
 }
 

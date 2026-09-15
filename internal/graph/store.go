@@ -61,6 +61,20 @@ type FileRecord struct {
 	Package string
 }
 
+// FileReplacement is the complete set of facts produced by one source file.
+// Path owns every edge; Symbol.File and Symbol.Package may be empty (inherited
+// from Path/Package), but must match when supplied. Hash must describe the
+// bytes used to extract these facts; an empty hash leaves the file uncached.
+// Package import metadata is managed separately through UpsertPackage.
+type FileReplacement struct {
+	Path    string
+	Package string
+	Mtime   int64
+	Hash    string
+	Symbols []Symbol
+	Edges   []Edge
+}
+
 // Edge is a directed relationship between two symbols, referenced by name
 // (not ID) so lookups don't require resolving the source side first.
 type Edge struct {
@@ -110,7 +124,16 @@ func OpenStore(path string) (*Store, error) {
 }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin graph migration: %w", err)
+	}
+	defer tx.Rollback()
+	var ftsObjects int
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('symbols_fts', 'symbols_ai', 'symbols_ad')`).Scan(&ftsObjects); err != nil {
+		return fmt.Errorf("inspect symbols fts schema: %w", err)
+	}
+	_, err = tx.Exec(`
 		CREATE TABLE IF NOT EXISTS files (
 			path         TEXT PRIMARY KEY,
 			package      TEXT NOT NULL,
@@ -161,25 +184,35 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate graph store: %w", err)
 	}
-	if err := s.addContentHashColumn(); err != nil {
+	if err := s.addContentHashColumn(tx); err != nil {
 		return err
 	}
-	if err := s.addEdgeSourceFileColumn(); err != nil {
+	if err := s.addEdgeSourceFileColumn(tx); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity ON edges(kind, from_name, to_name, source_file)`); err != nil {
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_edges_source_file ON edges(source_file)`); err != nil {
+		return fmt.Errorf("create edge source file index: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity ON edges(kind, from_name, to_name, source_file)`); err != nil {
 		return fmt.Errorf("create edge identity index: %w", err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')`); err != nil {
-		return fmt.Errorf("rebuild symbols fts: %w", err)
+	// Only backfill when introducing FTS or repairing missing sync triggers.
+	// The schema and backfill commit together, so interrupted upgrades retry.
+	if ftsObjects != 3 {
+		if _, err := tx.Exec(`INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')`); err != nil {
+			return fmt.Errorf("rebuild symbols fts: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit graph migration: %w", err)
 	}
 	return nil
 }
 
 // addEdgeSourceFileColumn adds edges.source_file for graph databases created
 // before edges were associated with the file that produced them.
-func (s *Store) addEdgeSourceFileColumn() error {
-	rows, err := s.db.Query(`PRAGMA table_info(edges)`)
+func (s *Store) addEdgeSourceFileColumn(tx *sql.Tx) error {
+	rows, err := tx.Query(`PRAGMA table_info(edges)`)
 	if err != nil {
 		return fmt.Errorf("inspect edges schema: %w", err)
 	}
@@ -198,7 +231,7 @@ func (s *Store) addEdgeSourceFileColumn() error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("inspect edges schema: %w", err)
 	}
-	if _, err := s.db.Exec(`ALTER TABLE edges ADD COLUMN source_file TEXT NOT NULL DEFAULT ''`); err != nil {
+	if _, err := tx.Exec(`ALTER TABLE edges ADD COLUMN source_file TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add edge source_file column: %w", err)
 	}
 	return nil
@@ -209,8 +242,8 @@ func (s *Store) addEdgeSourceFileColumn() error {
 // against an already-existing files table, so pre-existing databases need
 // this explicit ALTER. SQLite errors on a duplicate column, so check
 // PRAGMA table_info first rather than attempting the ALTER unconditionally.
-func (s *Store) addContentHashColumn() error {
-	rows, err := s.db.Query(`PRAGMA table_info(files)`)
+func (s *Store) addContentHashColumn(tx *sql.Tx) error {
+	rows, err := tx.Query(`PRAGMA table_info(files)`)
 	if err != nil {
 		return fmt.Errorf("inspect files schema: %w", err)
 	}
@@ -229,7 +262,7 @@ func (s *Store) addContentHashColumn() error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("inspect files schema: %w", err)
 	}
-	if _, err := s.db.Exec(`ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+	if _, err := tx.Exec(`ALTER TABLE files ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add content_hash column: %w", err)
 	}
 	return nil
@@ -247,6 +280,89 @@ func (s *Store) Reset(ctx context.Context) error {
 		return fmt.Errorf("reset graph store: %w", err)
 	}
 	return nil
+}
+
+// ReplaceFile atomically replaces a file's symbols, outgoing edges, FTS entries,
+// and metadata. Inserts reuse prepared statements in a single transaction and
+// the hash is written last. Any failure (including cancellation) preserves the
+// previous committed file. It neither reads nor changes legacy currentFilePath.
+func (s *Store) ReplaceFile(ctx context.Context, file FileReplacement) error {
+	if file.Path == "" {
+		return fmt.Errorf("replace file: empty source path")
+	}
+	for _, sym := range file.Symbols {
+		if (sym.File != "" && sym.File != file.Path) || (sym.Package != "" && sym.Package != file.Package) {
+			return fmt.Errorf("replace file %s: symbol %s belongs to another file or package", file.Path, sym.Name)
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace file %s: %w", file.Path, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM edges WHERE source_file IN (?, '')
+		AND (source_file = ? OR from_name IN (
+			SELECT name FROM symbols WHERE file = ?
+			UNION SELECT ltrim(receiver, '*') || '.' || name FROM symbols WHERE file = ? AND receiver != ''
+		))`, file.Path, file.Path, file.Path, file.Path); err != nil {
+		return fmt.Errorf("replace file %s edges: %w", file.Path, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbols WHERE file = ?`, file.Path); err != nil {
+		return fmt.Errorf("replace file %s symbols: %w", file.Path, err)
+	}
+	symbolStmt, err := tx.PrepareContext(ctx, `INSERT INTO symbols
+		(name, kind, package, file, line, end_line, signature, doc, receiver) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare file %s symbols: %w", file.Path, err)
+	}
+	defer symbolStmt.Close()
+	for _, sym := range file.Symbols {
+		if _, err := symbolStmt.ExecContext(ctx, sym.Name, string(sym.Kind), file.Package, file.Path, sym.Line, sym.EndLine, sym.Signature, sym.Doc, sym.Receiver); err != nil {
+			return fmt.Errorf("replace file %s symbol %s: %w", file.Path, sym.Name, err)
+		}
+	}
+	edgeStmt, err := tx.PrepareContext(ctx, `INSERT INTO edges (kind, from_name, to_name, source_file)
+		VALUES (?, ?, ?, ?) ON CONFLICT(kind, from_name, to_name, source_file) DO NOTHING`)
+	if err != nil {
+		return fmt.Errorf("prepare file %s edges: %w", file.Path, err)
+	}
+	defer edgeStmt.Close()
+	for _, edge := range file.Edges {
+		if _, err := edgeStmt.ExecContext(ctx, string(edge.Kind), edge.FromName, edge.ToName, file.Path); err != nil {
+			return fmt.Errorf("replace file %s edge %s->%s: %w", file.Path, edge.FromName, edge.ToName, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO files (path, package, mtime, content_hash) VALUES (?, ?, ?, ?)
+		ON CONFLICT(path) DO UPDATE SET package = excluded.package, mtime = excluded.mtime, content_hash = excluded.content_hash`,
+		file.Path, file.Package, file.Mtime, file.Hash); err != nil {
+		return fmt.Errorf("replace file %s metadata: %w", file.Path, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace file %s: %w", file.Path, err)
+	}
+	return nil
+}
+
+// fileImplements reads source-owned relationships for semantic invalidation.
+func (s *Store) fileImplements(ctx context.Context, path string) ([]Edge, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT from_name, to_name FROM edges WHERE source_file = ? AND kind = ?`, path, string(EdgeImplements))
+	if err != nil {
+		return nil, fmt.Errorf("query file %s implements edges: %w", path, err)
+	}
+	defer rows.Close()
+	var edges []Edge
+	for rows.Next() {
+		edge := Edge{Kind: EdgeImplements}
+		if err := rows.Scan(&edge.FromName, &edge.ToName); err != nil {
+			return nil, fmt.Errorf("scan file %s implements edge: %w", path, err)
+		}
+		edges = append(edges, edge)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read file %s implements edges: %w", path, err)
+	}
+	return edges, nil
 }
 
 // ClearFile removes all graph facts previously recorded for path, so an

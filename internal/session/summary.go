@@ -13,6 +13,14 @@ import (
 
 const summarySessionPageSize = 100
 
+// Keep enough context for ranking even when the final output budget is tiny.
+const summaryCandidateMinBytes = 2000
+
+// Optional adapter capability; storage.Storage remains compatible with older adapters.
+type sessionSummaryReader interface {
+	ReadSessionSummary(ctx context.Context, sessionID string, maxBytes int) (text, source string, sourceSeq int64, truncated bool, err error)
+}
+
 // Summary is bounded context selected from one prior session.
 type Summary struct {
 	SessionID string
@@ -32,33 +40,46 @@ func (m *Manager) RecallSummaries(ctx context.Context, agentID, activeSessionID,
 		return nil, nil
 	}
 
-	var candidates []Summary
-	for offset := 0; ; offset += summarySessionPageSize {
-		sessions, err := m.store.ListSessions(ctx, agentID, summarySessionPageSize, offset)
+	sessions, err := m.store.ListSessions(ctx, agentID, summarySessionPageSize, 0)
+	if err != nil {
+		return nil, err
+	}
+	queryTerms := summaryTerms(query)
+	type scoredSummary struct {
+		Summary
+		score int
+	}
+	var candidates []scoredSummary
+	reader, projected := m.store.(sessionSummaryReader)
+	candidateBytes := max(maxBytes, summaryCandidateMinBytes)
+	for _, stored := range sessions[:min(len(sessions), summarySessionPageSize)] {
+		if stored == nil || stored.ID == activeSessionID || stored.AgentID != agentID {
+			continue
+		}
+		var candidate Summary
+		if projected {
+			candidate = Summary{SessionID: stored.ID, AgentID: stored.AgentID, UpdatedAt: stored.UpdatedAt}
+			candidate.Text, candidate.Source, candidate.SourceSeq, candidate.Truncated, err = reader.ReadSessionSummary(ctx, stored.ID, candidateBytes)
+		} else {
+			// ListEvents has no limit parameter. Only legacy adapters use this path.
+			var events []*storage.Event
+			events, err = m.store.ListEvents(ctx, stored.ID, 0)
+			if err == nil {
+				candidate, _ = summaryFromEvents(stored, events)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
-		for _, stored := range sessions {
-			if stored == nil || stored.ID == activeSessionID || stored.AgentID != agentID {
-				continue
-			}
-			events, err := m.store.ListEvents(ctx, stored.ID, 0)
-			if err != nil {
-				return nil, err
-			}
-			if candidate, ok := summaryFromEvents(stored, events); ok {
-				candidates = append(candidates, candidate)
-			}
-		}
-		if len(sessions) < summarySessionPageSize {
-			break
+		candidate.Text, candidate.Truncated = truncateSummary(candidate.Text, candidateBytes, candidate.Truncated)
+		if candidate.Text != "" {
+			candidates = append(candidates, scoredSummary{candidate, summaryRelevance(candidate.Text, queryTerms)})
 		}
 	}
 
-	queryTerms := summaryTerms(query)
 	sort.Slice(candidates, func(i, j int) bool {
-		iScore := summaryRelevance(candidates[i].Text, queryTerms)
-		jScore := summaryRelevance(candidates[j].Text, queryTerms)
+		iScore := candidates[i].score
+		jScore := candidates[j].score
 		if iScore != jScore {
 			return iScore > jScore
 		}
@@ -70,7 +91,8 @@ func (m *Manager) RecallSummaries(ctx context.Context, agentID, activeSessionID,
 
 	selected := make([]Summary, 0, min(maxSessions, len(candidates)))
 	remaining := maxBytes
-	for _, candidate := range candidates {
+	for _, scored := range candidates {
+		candidate := scored.Summary
 		if len(selected) == maxSessions || remaining == 0 {
 			break
 		}

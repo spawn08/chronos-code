@@ -54,6 +54,9 @@ const (
 	statusHeight         = 1
 	maxTranscriptBytes   = 4 << 20
 	maxViewportLines     = 2000
+	maxRenderBytes       = 256 << 10
+	maxItemRenderBytes   = 64 << 10
+	maxInspectionBytes   = 1 << 20
 	maxShellOutputLines  = 200
 	maxShellOutputBytes  = 64 << 10
 	authIdentityTTL      = 30 * time.Second
@@ -78,6 +81,7 @@ type streamStartedMsg struct {
 	ch            <-chan *model.ChatResponse
 	contextReport orchestrator.ContextReport
 	memoryIntent  *memory.IntentResult
+	attachments   string
 }
 
 type streamDeltaMsg struct {
@@ -108,6 +112,7 @@ type turnItemKind uint8
 const (
 	turnItemText turnItemKind = iota
 	turnItemActivity
+	turnItemReceipt
 )
 
 type turnItem struct {
@@ -115,6 +120,41 @@ type turnItem struct {
 	content       string
 	rendered      string
 	renderedWidth int
+	text          *strings.Builder
+	activity      activityKind
+	toolName      string
+	callID        string
+	agentID       string
+	args          string
+	result        string
+	failure       string
+	started       time.Time
+	duration      time.Duration
+	observedTime  bool
+	settled       bool
+}
+
+type activityKind uint8
+
+const (
+	activityTool activityKind = iota
+	activityModel
+	activityRetry
+	activityContext
+	activityThinking
+	activityProgress
+)
+
+// Raw source is retained separately from the width-dependent block cache.
+// Both caches are bounded; the latest complete assistant text also serves copy.
+type transcriptSource struct {
+	user        string
+	items       []turnItem
+	name        string
+	err         error
+	interrupted bool
+	bytes       int
+	width       int
 }
 
 // chatDoneMsg carries the result of a non-streaming orch.Chat call.
@@ -123,7 +163,14 @@ type chatDoneMsg struct {
 	resp          *model.ChatResponse
 	contextReport orchestrator.ContextReport
 	memoryIntent  *memory.IntentResult
+	attachments   string
 	err           error
+}
+
+type maintenanceDoneMsg struct {
+	turnID uint64
+	text   string
+	err    error
 }
 
 type subagentDoneMsg struct {
@@ -286,16 +333,18 @@ type appModel struct {
 	ready         bool
 
 	blocks              []string // finalized, already-rendered transcript entries
+	blockSources        []*transcriptSource
+	rawBlockBytes       int
 	blockBytes          int
 	trimmedBlocks       int
 	finalizedText       string
 	finalizedDirty      bool
 	finalizedCount      int
-	transcriptBuf       strings.Builder
 	activeAgentText     strings.Builder
 	activeTurnItems     []turnItem
 	activityIndex       map[string]int
 	activityArgs        map[string]any
+	activityDetailBytes int
 	pendingToolCalls    int
 	pendingSubagents    int
 	turnModelCalls      int
@@ -310,9 +359,8 @@ type appModel struct {
 	lastTurnBlockIdx    int
 	hasLastTurn         bool
 	toolsExpanded       bool
-	activeRequest       string
-	activeSkill         string
-	budgetRetried       bool
+	activeRequest       string // Original request only; never replayed after failure.
+	budgetRetried       bool   // Legacy state retained for compatibility; no whole-task retry.
 	lastUsage           model.Usage
 	// lastKnownUsage persists the most recent non-zero lastUsage across
 	// turns (finalizeTurn zeroes lastUsage itself once each turn's status
@@ -345,11 +393,14 @@ type appModel struct {
 	bottomView   string
 	bottomModal  bool
 
-	approval *pendingApproval
-	wizard   *loginWizard
-	picker   *picker
+	approval   *pendingApproval
+	wizard     *loginWizard
+	picker     *picker
+	inspection *inspectionOverlay
 
 	queuedMessages []string
+	pastedInputs   map[string]string
+	pasteID        uint64
 
 	searching     bool
 	searchQuery   string
@@ -445,10 +496,17 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.perf.recordUpdateStart()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		widthChanged := m.width != msg.Width
 		m.width, m.height = msg.Width, msg.Height
 		contentWidth := msg.Width
 		if contentWidth < 1 {
 			contentWidth = 1
+		}
+		if widthChanged {
+			m.invalidateRenderCache()
+		}
+		if m.inspection != nil {
+			m.inspection.resize(msg.Width, msg.Height)
 		}
 		if !m.ready {
 			m.viewport = viewport.New()
@@ -469,16 +527,21 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready || !m.mouseCapture {
 			return m, nil
 		}
+		if m.inspection != nil && m.approval == nil {
+			var cmd tea.Cmd
+			m.inspection.viewport, cmd = m.inspection.viewport.Update(msg)
+			return m, cmd
+		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.afterViewportScroll()
 		return m, cmd
 
 	case tea.PasteMsg:
-		if m.approval != nil || m.wizard != nil || m.picker != nil || m.searching {
+		if m.approval != nil || m.wizard != nil || m.picker != nil || m.inspection != nil || m.searching {
 			return m, nil
 		}
-		m.input.InsertString(msg.Content)
+		m.insertPaste(msg.Content)
 		m.resizeViewport()
 		return m, nil
 
@@ -501,8 +564,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamStartedMsg:
-		if msg.turnID != m.turnID {
+		if msg.turnID != m.turnID || !m.sending {
 			return m, nil
+		}
+		m.captureAttachmentReceipt(msg.attachments)
+		if msg.ctx.Err() != nil {
+			return m, m.finalizeTurn(msg.ctx.Err())
 		}
 		m.captureExecutionMetadata(msg.contextReport, msg.memoryIntent)
 		return m, listenStream(msg.ctx, msg.turnID, msg.ch)
@@ -526,20 +593,25 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamDoneMsg:
-		if msg.turnID != m.turnID {
+		if msg.turnID != m.turnID || !m.sending {
 			return m, nil
 		}
 		return m, m.finalizeTurn(msg.err)
 
 	case chatDoneMsg:
-		if msg.turnID != m.turnID {
+		if msg.turnID != m.turnID || !m.sending {
 			return m, nil
+		}
+		m.captureAttachmentReceipt(msg.attachments)
+		if m.turnCtx != nil && m.turnCtx.Err() != nil {
+			return m, m.finalizeTurn(m.turnCtx.Err())
 		}
 		m.captureExecutionMetadata(msg.contextReport, msg.memoryIntent)
 		if msg.resp != nil {
 			if m.activityCh == nil {
 				for _, tc := range msg.resp.ToolCalls {
 					m.appendTurnActivity(RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
+					m.setLastToolMetadata(tc.Name, tc.ID, tc.Arguments)
 				}
 			}
 			m.appendTurnText(msg.resp.Content)
@@ -547,12 +619,38 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.finalizeTurn(msg.err)
 
+	case maintenanceDoneMsg:
+		if msg.turnID != m.turnID || !m.sending {
+			return m, nil
+		}
+		if m.turnCancel != nil {
+			m.turnCancel()
+		}
+		m.turnCtx, m.turnCancel = nil, nil
+		m.sending = false
+		m.turnInterrupted = false
+		m.statusMsg = ""
+		if msg.err != nil {
+			m.appendError(msg.err)
+		} else {
+			m.appendSystem(msg.text)
+		}
+		m.refreshViewport()
+		if len(m.queuedMessages) > 0 {
+			line := m.queuedMessages[0]
+			m.queuedMessages = m.queuedMessages[1:]
+			return m.handleSubmit(line)
+		}
+		return m, nil
+
 	case subagentDoneMsg:
 		if msg.turnID != m.turnID {
 			return m, nil
 		}
 		if idx, ok := m.activityIndex["direct-subagent"]; ok {
 			m.activeTurnItems[idx].content = RenderToolActivity("", "subagent:"+msg.name, m.activityArgs["direct-subagent"], true, msg.err)
+			m.activeTurnItems[idx].result = m.captureActivityValue(msg.result)
+			m.activeTurnItems[idx].failure = m.captureActivityValue(msg.err)
 		}
 		m.pendingToolCalls = 0
 		m.pendingSubagents = 0
@@ -583,6 +681,30 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sessionPickerMsg:
+		if m.picker != msg.picker || m.turnID != msg.turnID {
+			return m, nil
+		}
+		p := m.picker
+		p.loading = false
+		if msg.err != nil {
+			p.heading = "Sessions: " + msg.err.Error()
+		} else {
+			p.all = append(p.all, msg.items...)
+			for id, detail := range msg.details {
+				p.details[id] = detail
+			}
+			p.offset += msg.count
+			p.more = msg.count == sessionPageSize && p.offset < maxPickerSessions
+			p.heading = fmt.Sprintf("Sessions (%d loaded):", len(p.all))
+			if p.offset >= maxPickerSessions {
+				p.heading = fmt.Sprintf("Latest %d sessions:", maxPickerSessions)
+			}
+			p.applyFilter()
+		}
+		m.resizeViewport()
+		return m, nil
+
 	case clipboardWriteResultMsg:
 		if msg.err != nil {
 			m.statusMsg = "copy failed: " + msg.err.Error()
@@ -600,7 +722,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "paste failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.input.InsertString(msg.content)
+		m.insertPaste(msg.content)
 		m.statusMsg = "pasted clipboard"
 		m.resizeViewport()
 		return m, nil
@@ -624,6 +746,9 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.approval != nil {
 		return m.handleApprovalKey(msg)
+	}
+	if m.inspection != nil {
+		return m.handleInspectionKey(msg)
 	}
 	if m.wizard != nil {
 		return m.handleWizardKey(msg)
@@ -714,13 +839,16 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, keys.Submit):
-		line := strings.TrimSpace(m.input.Value())
+		line := m.expandPastes(strings.TrimSpace(m.input.Value()))
 		if line == "" {
 			return m, nil
 		}
 		m.input.Reset()
 		m.completionIdx = 0
 		m.resizeViewport()
+		if strings.Fields(line)[0] == "/inspect" || line == "/session list" {
+			return m.handleSubmit(line)
+		}
 		if m.sending {
 			m.queuedMessages = append([]string{line}, m.queuedMessages...)
 			m.interruptTurn()
@@ -728,7 +856,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleSubmit(line)
 	case msg.String() == "alt+enter" && m.sending:
-		line := strings.TrimSpace(m.input.Value())
+		line := m.expandPastes(strings.TrimSpace(m.input.Value()))
 		if line == "" {
 			return m, nil
 		}
@@ -956,17 +1084,18 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 			line = parts[1]
 		}
 	}
-	if root := m.workspaceRoot(); root != "" {
-		line = attachReferencedFiles(root, line, m.orch.ListAgents())
+	if m.picker != nil && m.picker.isSessionPicker {
+		if m.picker.cancel != nil {
+			m.picker.cancel()
+		}
+		m.picker = nil
 	}
-
 	m.history.Add(displayLine)
 	m.appendUserTurn(displayLine)
 	m.refreshPrompt()
 
 	m.sending = true
 	m.activeRequest = line
-	m.activeSkill = explicitSkill
 	m.budgetRetried = false
 	m.turnID++
 	m.turnCtx, m.turnCancel = context.WithCancel(m.ctx)
@@ -986,6 +1115,7 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 	m.turnCostStart = m.orch.SessionCost()
 	m.activeAgentText.Reset()
 	m.activeTurnItems = nil
+	m.activityDetailBytes = 0
 	m.activityIndex = make(map[string]int)
 	m.activityArgs = make(map[string]any)
 	m.turnModelCalls = 0
@@ -1062,7 +1192,6 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 	m.appendUserTurn(line)
 	m.sending = true
 	m.activeRequest = ""
-	m.activeSkill = ""
 	m.budgetRetried = false
 	m.turnID++
 	m.turnCtx, m.turnCancel = context.WithCancel(m.ctx)
@@ -1070,12 +1199,14 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 	m.turnCostStart = m.orch.SessionCost()
 	m.activeAgentText.Reset()
 	m.activeTurnItems = nil
+	m.activityDetailBytes = 0
 	m.activityIndex = map[string]int{"direct-subagent": 0}
-	m.activityArgs = map[string]any{"direct-subagent": args}
+	m.activityArgs = map[string]any{"direct-subagent": activitySummaryArgs(args)}
 	m.pendingToolCalls = 1
 	m.pendingSubagents = 1
 	m.turnSubagents = 1
 	m.appendTurnActivity(RenderToolActivity("", "subagent:"+name, args, false, nil))
+	m.setLastToolMetadata("spawn_subagent", "direct-subagent", inspectionValue(args))
 	turnID := m.turnID
 	turnCtx := m.turnCtx
 	var activityCmd tea.Cmd
@@ -1094,23 +1225,56 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) tea.Cmd {
 	orch := m.orch
 	stream := m.stream
+	root := m.workspaceRoot()
+	agents := append([]string(nil), orch.ListAgents()...)
+	// One byte per token is deliberately conservative. Spend at most a quarter
+	// of the configured/live context window on the ENTIRE initial input; the
+	// orchestrator still accounts for actual system/history/schema/output costs.
+	limit := maxInputBytes
+	if a := orch.ActiveAgent(); a != nil {
+		window := a.ContextCfg.MaxContextTokens
+		if a.Model != nil {
+			if known, ok := model.KnownContextLimit(a.Model.Model()); ok && (window <= 0 || known < window) {
+				window = known
+			}
+			if window <= 0 {
+				window = model.ContextLimit(a.Model.Model(), 0)
+			}
+		}
+		if window > 0 {
+			limit = min(limit, window/4)
+		}
+	}
 	return func() tea.Msg {
+		input, err := prepareInput(ctx, root, message, agents, limit)
+		if err != nil {
+			return chatDoneMsg{turnID: turnID, attachments: input.Receipt, err: err}
+		}
+		if err := ctx.Err(); err != nil {
+			return chatDoneMsg{turnID: turnID, attachments: input.Receipt, err: err}
+		}
 		if stream {
 			result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
-				Message:          message,
+				Message:          input.Message,
 				Mode:             orchestrator.ExecutionStreaming,
 				SessionID:        orch.CurrentSessionID(),
 				VerificationMode: orch.VerificationMode(),
 			})
 			if err != nil {
-				return chatDoneMsg{turnID: turnID, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, err: err}
+				return chatDoneMsg{turnID: turnID, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, err: err}
 			}
-			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent}
+			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt}
 		}
 		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
-			Message: message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
+			Message: input.Message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
 		})
-		return chatDoneMsg{turnID: turnID, resp: result.Response, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, err: err}
+		return chatDoneMsg{turnID: turnID, resp: result.Response, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, err: err}
+	}
+}
+
+func (m *appModel) captureAttachmentReceipt(receipt string) {
+	if receipt != "" {
+		m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemReceipt, content: strings.TrimSpace(receipt)})
 	}
 }
 
@@ -1129,9 +1293,11 @@ func (m *appModel) captureExecutionMetadata(report orchestrator.ContextReport, i
 	line := RenderContextSummary(report, intent)
 	if idx, ok := m.activityIndex["context-report"]; ok && idx < len(m.activeTurnItems) {
 		m.activeTurnItems[idx].content = line
+		m.activeTurnItems[idx].result = RenderContextReport(report, intent, 0)
 		return
 	}
-	m.appendTurnActivity(line)
+	m.appendActivity(activityContext, line)
+	m.activeTurnItems[len(m.activeTurnItems)-1].result = RenderContextReport(report, intent, 0)
 	if m.activityIndex == nil {
 		m.activityIndex = make(map[string]int)
 	}
@@ -1177,20 +1343,11 @@ func listenActivity(ctx context.Context, turnID uint64, ch <-chan chronosstream.
 }
 
 func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
-	if msg.turnID != m.turnID {
+	if msg.turnID != m.turnID || !m.sending {
 		return m, nil
 	}
 	resp := msg.resp
 	if resp.Err != nil {
-		classified := apierror.Classify(resp.Err)
-		if apierror.IsCompactable(classified) && !m.budgetRetried && m.activeRequest != "" {
-			m.appendTurnActivity(styleDim.Render("  ↻ " + classified.Message))
-			if compactErr := m.orch.CompactActiveSession(m.ctx); compactErr == nil {
-				m.budgetRetried = true
-				m.refreshViewport()
-				return m, m.sendCmd(m.turnCtx, m.turnID, m.activeRequest)
-			}
-		}
 		return m, m.finalizeTurn(resp.Err)
 	}
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CacheReadTokens > 0 || resp.Usage.CacheCreationTokens > 0 || resp.Usage.CompletionTokens > 0 {
@@ -1207,21 +1364,23 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 				var args map[string]any
 				_ = json.Unmarshal([]byte(tc.Arguments), &args)
 				m.appendTurnActivity(RenderToolActivity("", tc.Name, args, false, nil))
+				m.setLastToolMetadata(tc.Name, tc.ID, tc.Arguments)
 				m.activityIndex[key] = len(m.activeTurnItems) - 1
-				m.activityArgs[key] = args
+				m.activityArgs[key] = activitySummaryArgs(args)
 				m.pendingToolCalls++
 				m.pendingSubagents++
 				m.turnSubagents++
 			}
 		} else if m.activityCh == nil {
 			m.appendTurnActivity(RenderToolCall(tc.Name, SummarizeArgs(tc.Arguments)))
+			m.setLastToolMetadata(tc.Name, tc.ID, tc.Arguments)
 			m.pendingToolCalls++
 		}
 	}
 	if text := m.streamText(resp); text != "" {
 		if m.activityCh == nil && m.pendingToolCalls > 0 && len(resp.ToolCalls) == 0 {
 			label := progressLabel(m.pendingToolCalls, m.pendingSubagents, "completed")
-			m.appendTurnActivity(styleAgentName.Render("  ✓ " + label))
+			m.appendActivity(activityProgress, styleAgentName.Render("  ✓ "+label))
 			m.pendingToolCalls = 0
 			m.pendingSubagents = 0
 		}
@@ -1289,7 +1448,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		if idx, ok := m.activityIndex[key]; ok && idx < len(m.activeTurnItems) {
 			m.activeTurnItems[idx].content = line
 		} else {
-			m.appendTurnActivity(line)
+			m.appendActivity(activityModel, line)
 			m.activityIndex[key] = len(m.activeTurnItems) - 1
 		}
 	case chronosstream.EventToolCall:
@@ -1308,13 +1467,40 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 				m.turnSubagents++
 			}
 		}
-		m.activityArgs[activityKey] = data["args"]
+		m.activityArgs[activityKey] = activitySummaryArgs(data["args"])
+		item := &m.activeTurnItems[m.activityIndex[activityKey]]
+		item.toolName, item.agentID, item.callID = toolName, agentID, callID
+		item.args = m.captureActivityValue(data["args"])
+		item.started = time.Now()
 	case chronosstream.EventToolResult:
 		line := RenderToolActivity(label, toolName, m.activityArgs[activityKey], true, data["error"])
 		if idx, ok := m.activityIndex[activityKey]; ok && idx < len(m.activeTurnItems) {
 			m.activeTurnItems[idx].content = line
 		} else {
 			m.appendTurnActivity(line)
+			m.activityIndex[activityKey] = len(m.activeTurnItems) - 1
+		}
+		item := &m.activeTurnItems[m.activityIndex[activityKey]]
+		item.toolName, item.agentID, item.callID = toolName, agentID, callID
+		item.result, item.failure = m.captureActivityValue(data["result"]), m.captureActivityValue(data["error"])
+		if duration, ok := data["duration_ms"].(float64); ok {
+			item.duration = time.Duration(duration * float64(time.Millisecond))
+		} else if duration, ok := data["duration_ms"].(int64); ok {
+			item.duration = time.Duration(duration) * time.Millisecond
+		} else if duration, ok := data["duration_ms"].(int); ok {
+			item.duration = time.Duration(duration) * time.Millisecond
+		} else if duration, ok := data["duration"].(time.Duration); ok {
+			item.duration = duration
+		} else if !item.started.IsZero() {
+			item.duration = time.Since(item.started)
+			item.observedTime = true
+		}
+		if item.duration > 0 {
+			prefix := ""
+			if item.observedTime {
+				prefix = "~"
+			}
+			item.content += styleDim.Render(" · " + prefix + item.duration.Round(time.Millisecond).String())
 		}
 		if m.pendingToolCalls > 0 {
 			m.pendingToolCalls--
@@ -1331,7 +1517,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 			if idx, ok := m.activityIndex[key]; ok && idx < len(m.activeTurnItems) {
 				m.activeTurnItems[idx].content = line
 			} else {
-				m.appendTurnActivity(line)
+				m.appendActivity(activityRetry, line)
 				m.activityIndex[key] = len(m.activeTurnItems) - 1
 			}
 		} else {
@@ -1355,13 +1541,18 @@ func (m *appModel) appendTurnText(text string) {
 	m.activeAgentText.WriteString(text)
 	if n := len(m.activeTurnItems); n > 0 && m.activeTurnItems[n-1].kind == turnItemText {
 		item := &m.activeTurnItems[n-1]
-		item.content += text
-		if item.rendered != "" {
-			item.rendered = appendWrappedText(item.rendered, text, item.renderedWidth)
+		if item.text == nil {
+			item.text = &strings.Builder{}
+			item.text.WriteString(item.content)
 		}
+		item.text.WriteString(text)
+		item.content = item.text.String()
+		item.rendered = ""
 		return
 	}
-	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemText, content: text})
+	b := &strings.Builder{}
+	b.WriteString(text)
+	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemText, content: b.String(), text: b})
 }
 
 func (m *appModel) appendThinking(text string) {
@@ -1374,11 +1565,15 @@ func (m *appModel) appendThinking(text string) {
 	const key = "thinking"
 	if idx, ok := m.activityIndex[key]; ok && idx < len(m.activeTurnItems) {
 		item := &m.activeTurnItems[idx]
-		item.content += text
+		item.text.WriteString(text)
+		item.content = item.text.String()
 		item.rendered = ""
 		return
 	}
-	m.appendTurnActivity(styleDim.Render("thinking: " + text))
+	b := &strings.Builder{}
+	b.WriteString("thinking: " + text)
+	m.appendActivity(activityThinking, b.String())
+	m.activeTurnItems[len(m.activeTurnItems)-1].text = b
 	m.activityIndex[key] = len(m.activeTurnItems) - 1
 }
 
@@ -1400,7 +1595,25 @@ func appendWrappedText(existing, suffix string, width int) string {
 }
 
 func (m *appModel) appendTurnActivity(line string) {
-	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemActivity, content: line})
+	m.appendActivity(activityTool, line)
+}
+
+func (m *appModel) appendActivity(kind activityKind, line string) {
+	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemActivity, activity: kind, content: line})
+}
+
+func (m *appModel) setLastToolMetadata(name, id, args string) {
+	item := &m.activeTurnItems[len(m.activeTurnItems)-1]
+	item.toolName, item.callID, item.args = name, id, m.captureActivityValue(args)
+}
+
+func (m *appModel) captureActivityValue(value any) string {
+	text := inspectionValue(value)
+	if m.activityDetailBytes+len(text) > maxTranscriptBytes {
+		return "[detail capture budget exhausted (4 MiB/turn); retrieve original source/artifact paths]"
+	}
+	m.activityDetailBytes += len(text)
+	return text
 }
 
 func (m *appModel) setViewportContent(s string) {
@@ -1530,27 +1743,56 @@ func (m *appModel) workspaceRoot() string {
 	return m.workDir
 }
 
-func (m *appModel) handleMCPCommand(arg string) {
+// maintenanceCmd establishes cancellation/turn identity on Update, but invokes
+// the operation only when Bubble Tea runs the command. Synchronous approval
+// callbacks can therefore wait for Update without deadlocking it.
+func (m *appModel) maintenanceCmd(status string, run func(context.Context) (string, error)) tea.Cmd {
+	m.sending = true
+	m.turnID++
+	m.turnCtx, m.turnCancel = context.WithCancel(m.ctx)
+	m.turnInterrupted = false
+	m.statusMsg = status
+	ctx, turnID := m.turnCtx, m.turnID
+	return func() tea.Msg {
+		if err := ctx.Err(); err != nil {
+			return maintenanceDoneMsg{turnID: turnID, err: err}
+		}
+		text, err := run(ctx)
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return maintenanceDoneMsg{turnID: turnID, text: text, err: err}
+	}
+}
+
+func (m *appModel) handleMCPCommand(arg string) tea.Cmd {
 	fields := strings.Fields(arg)
 	if len(fields) == 0 {
 		m.appendSystem(m.mcpStatusText())
-		return
+		return nil
 	}
 	switch fields[0] {
 	case "connect":
 		if len(fields) != 2 {
 			m.appendError(fmt.Errorf("usage: /mcp connect <name>"))
-			return
+			return nil
 		}
-		status, err := m.orch.ConnectMCP(m.ctx, fields[1])
-		if err != nil {
-			m.appendError(err)
-			return
+		if m.sending {
+			m.appendError(fmt.Errorf("cannot connect MCP while a response is in progress"))
+			return nil
 		}
-		m.appendSystem(fmt.Sprintf("connected %s (%d tools)", status.Name, status.Tools))
+		orch, name := m.orch, fields[1]
+		return m.maintenanceCmd("connecting MCP", func(ctx context.Context) (string, error) {
+			status, err := orch.ConnectMCP(ctx, name)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("connected %s (%d tools)", status.Name, status.Tools), nil
+		})
 	default:
 		m.appendError(fmt.Errorf("unknown mcp command %q (try /mcp or /mcp connect <name>)", fields[0]))
 	}
+	return nil
 }
 
 func (m *appModel) mcpStatusText() string {
@@ -1650,6 +1892,13 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.handleWhoamiCommand(arg)
 	case "/context":
 		m.handleContextCommand()
+	case "/inspect":
+		if arg != "" && arg != "context" && arg != "changes" {
+			m.appendError(fmt.Errorf("usage: /inspect [context|changes]"))
+			break
+		}
+		m.inspectTurn(arg)
+		return m, nil
 	case "/usage":
 		m.appendSystem(m.usageSummary())
 	case "/stream":
@@ -1665,6 +1914,8 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.blocks = nil
+		m.blockSources = nil
+		m.rawBlockBytes = 0
 		m.blockBytes = 0
 		m.trimmedBlocks = 0
 		m.invalidateRenderCache()
@@ -1700,14 +1951,10 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.perf.stats(), formatBytes(stats.HeapAlloc), formatBytes(stats.TotalAlloc),
 			formatBytes(stats.Sys), formatBytes(uint64(m.transcriptBytes()))))
 	case "/session":
-		var b strings.Builder
-		fmt.Fprintf(&b, "current session: %s\n", m.orch.CurrentSessionID())
-		if sessions, err := m.orch.SessionManager().List(m.ctx, m.orch.ActiveID(), 10, 0); err == nil {
-			for _, s := range sessions {
-				fmt.Fprintf(&b, "  %s  %-10s updated %s\n", s.ID, s.Status, s.UpdatedAt.Format("2006-01-02 15:04"))
-			}
+		if arg == "list" {
+			return m, m.openSessionPicker()
 		}
-		m.appendSystem(strings.TrimRight(b.String(), "\n"))
+		m.appendSystem("current session: " + m.orch.CurrentSessionID() + "\n/session list opens searchable sessions; /resume continues the latest.")
 	case "/memory":
 		store := m.orch.MemoryStore()
 		if store == nil {
@@ -1729,7 +1976,9 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.appendSystem(strings.TrimRight(b.String(), "\n"))
 	case "/mcp":
-		m.handleMCPCommand(arg)
+		cmd := m.handleMCPCommand(arg)
+		m.refreshViewport()
+		return m, cmd
 	case "/skills":
 		catalog := m.orch.ListSkills()
 		if len(catalog) == 0 {
@@ -1774,11 +2023,13 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.appendError(fmt.Errorf("cannot compact while a response is in progress"))
 			break
 		}
-		if err := m.orch.CompactActiveSession(m.ctx); err != nil {
-			m.appendError(err)
-			break
-		}
-		m.appendSystem("session compacted")
+		orch := m.orch
+		return m, m.maintenanceCmd("compacting session", func(ctx context.Context) (string, error) {
+			if err := orch.CompactActiveSession(ctx); err != nil {
+				return "", err
+			}
+			return "session compacted", nil
+		})
 	case "/rewind", "/undo":
 		path, err := m.orch.UndoLastEdit()
 		if err != nil {
@@ -1843,7 +2094,7 @@ func (m *appModel) copyText(arg string) (content, okStatus string, err error) {
 		}
 		return visible, "copied visible output", nil
 	case "all", "transcript":
-		all := strings.TrimRight(ansi.Strip(m.renderTranscript()), "\n")
+		all := strings.TrimRight(ansi.Strip(m.copyTranscriptText()), "\n")
 		if strings.TrimSpace(all) == "" {
 			return "", "", fmt.Errorf("nothing to copy")
 		}
@@ -1874,7 +2125,45 @@ func (m *appModel) copyCodeBlock(args []string) (content, okStatus string, err e
 }
 
 func (m *appModel) visiblePlainText() string {
+	if m.inspection != nil && m.approval == nil {
+		return strings.TrimRight(ansi.Strip(m.inspection.viewport.View()), "\n")
+	}
 	return strings.TrimRight(ansi.Strip(m.viewport.View()), "\n")
+}
+
+// Full retained source is assembled only for an explicit clipboard request,
+// never on the render path. Fences and long lines survive viewport clipping.
+func (m *appModel) copyTranscriptText() string {
+	var b strings.Builder
+	writeItems := func(items []turnItem) {
+		for _, item := range items {
+			b.WriteString(item.content)
+			b.WriteString("\n\n")
+		}
+	}
+	for i, block := range m.blocks {
+		if i < len(m.blockSources) && m.blockSources[i] != nil {
+			source := m.blockSources[i]
+			if source.user != "" {
+				b.WriteString("❯ you\n" + source.user)
+			} else {
+				b.WriteString("✦ " + source.name + "\n")
+				writeItems(source.items)
+				if source.err != nil {
+					b.WriteString(classifyErrorMessage(source.err))
+				}
+			}
+		} else if m.hasLastTurn && i == m.lastTurnBlockIdx {
+			writeItems(m.lastTurnItems)
+		} else {
+			b.WriteString(block)
+		}
+		b.WriteString("\n\n")
+	}
+	if m.sending {
+		writeItems(m.activeTurnItems)
+	}
+	return b.String()
 }
 
 func (m *appModel) copyClipboardCmd(content, okStatus string) tea.Cmd {
@@ -2429,8 +2718,9 @@ func (m *appModel) sessionIdentitySegment() string {
 // styleHeaderBar's comment in styles.go).
 func (m *appModel) appendUserTurn(line string) {
 	header := RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width())
-	body := wrapText(line, m.viewport.Width())
+	body := wrapText(boundedTextTail(line, maxItemRenderBytes, maxViewportLines), m.viewport.Width())
 	m.appendBlock(header + "\n" + body)
+	m.setBlockSource(&transcriptSource{user: line, bytes: len(line), width: m.viewport.Width()})
 	m.setViewportContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 }
@@ -2448,11 +2738,14 @@ func (m *appModel) appendError(err error) {
 // Otherwise it classifies and returns a friendly message.
 func classifyErrorMessage(err error) string {
 	var classified *apierror.Classified
-	if errors.As(err, &classified) {
-		return classified.Message
+	if !errors.As(err, &classified) {
+		classified = apierror.Classify(err)
 	}
-	if c := apierror.Classify(err); c != nil {
-		return c.Message
+	if classified != nil {
+		if classified.Category == apierror.CategoryContextLength || classified.Category == apierror.CategoryRequestTooLarge {
+			return "Request exceeds the model input budget. Use /compact to summarize history, or reduce attachments. /clear starts a fresh conversation. Completed actions were not replayed."
+		}
+		return classified.Message
 	}
 	return "error: " + err.Error()
 }
@@ -2471,20 +2764,39 @@ func classifyStatusMessage(err error) string {
 
 func (m *appModel) appendBlock(block string) {
 	m.blocks = append(m.blocks, block)
+	m.blockSources = append(m.blockSources, nil)
 	m.blockBytes += len(block)
-	if !m.finalizedDirty && m.finalizedCount == len(m.blocks)-1 {
-		if m.finalizedText != "" {
-			m.finalizedText += "\n\n"
-		}
-		m.finalizedText += block
-		m.finalizedCount++
-	} else {
-		m.finalizedDirty = true
+	m.finalizedDirty = true
+	m.trimTranscript()
+}
+
+func (m *appModel) setBlockSource(source *transcriptSource) {
+	if len(m.blockSources) == 0 || source.bytes > maxTranscriptBytes {
+		return
 	}
+	m.blockSources[len(m.blockSources)-1] = source
+	m.rawBlockBytes += source.bytes
+	for i := 0; m.rawBlockBytes > maxTranscriptBytes && i < len(m.blockSources); i++ {
+		if old := m.blockSources[i]; old != nil {
+			m.rawBlockBytes -= old.bytes
+			m.blockSources[i] = nil
+		}
+	}
+}
+
+func (m *appModel) trimTranscript() {
 	trimmed := 0
-	for m.blockBytes > maxTranscriptBytes && len(m.blocks) > 1 {
+	for (m.blockBytes > maxTranscriptBytes || len(m.blocks) > maxViewportLines) && len(m.blocks) > 1 {
 		m.blockBytes -= len(m.blocks[0])
+		m.blocks[0] = ""
 		m.blocks = m.blocks[1:]
+		if len(m.blockSources) > 0 {
+			if source := m.blockSources[0]; source != nil {
+				m.rawBlockBytes -= source.bytes
+			}
+			m.blockSources[0] = nil
+			m.blockSources = m.blockSources[1:]
+		}
 		m.trimmedBlocks++
 		trimmed++
 	}
@@ -2513,16 +2825,12 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	if interrupted {
 		err = nil
 	}
-	if budgetExhausted && !m.budgetRetried && m.activeRequest != "" {
-		if cmd, resetErr := m.retryInFreshSession(); resetErr == nil {
-			return cmd
-		} else {
-			err = fmt.Errorf("%w; automatic session rollover failed: %v", err, resetErr)
-		}
-	}
+	// Never replay activeRequest: earlier tool calls may already have mutated
+	// the workspace. Recoverable model-call retries belong to the SDK.
 	m.settleTurnActivities(err)
 	m.sending = false
 	for i := range m.activeTurnItems {
+		m.activeTurnItems[i].settled = true
 		if m.activeTurnItems[i].kind == turnItemText {
 			m.activeTurnItems[i].rendered = ""
 		}
@@ -2537,10 +2845,17 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.stopActivity = nil
 		m.activityCh = nil
 	}
-	m.lastTurnItems = cloneTurnItems(m.activeTurnItems)
+	items := cloneTurnItems(m.activeTurnItems)
 	m.lastTurnErr = err
 	m.lastTurnInterrupted = interrupted
-	m.appendBlock(m.buildAssistantBlock(m.lastTurnItems, interrupted, err))
+	m.appendBlock(m.buildAssistantBlock(items, interrupted, err))
+	m.lastTurnItems = items
+	source := &transcriptSource{items: cloneTurnItems(m.lastTurnItems), name: m.displayAgentName(),
+		interrupted: interrupted, err: err, width: m.viewport.Width()}
+	for _, item := range source.items {
+		source.bytes += len(item.content) + len(item.args) + len(item.result) + len(item.failure)
+	}
+	m.setBlockSource(source)
 	m.hasLastTurn = true
 	m.lastTurnBlockIdx = len(m.blocks) - 1
 	if err == nil {
@@ -2568,7 +2883,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.statusMsg = "interrupted"
 	} else if err != nil {
 		if budgetExhausted {
-			m.statusMsg = "budget exhausted │ /clear to continue"
+			m.statusMsg = "budget exhausted │ /compact to continue"
 		} else {
 			m.statusMsg = classifyStatusMessage(err) + " · " + m.usageStatus()
 		}
@@ -2578,13 +2893,13 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.turnInterrupted = false
 	m.activeAgentText.Reset()
 	m.activeTurnItems = nil
+	m.activityDetailBytes = 0
 	m.activityIndex = nil
 	m.activityArgs = nil
 	m.pendingToolCalls = 0
 	m.pendingSubagents = 0
 	m.lastChunk = ""
 	m.activeRequest = ""
-	m.activeSkill = ""
 	m.budgetRetried = false
 	m.lastUsage = model.Usage{}
 	m.setViewportContent(m.renderTranscript())
@@ -2616,99 +2931,53 @@ func (m *appModel) settleTurnActivities(err error) {
 	}
 }
 
-func (m *appModel) retryInFreshSession() (tea.Cmd, error) {
-	if m.turnCancel != nil {
-		m.turnCancel()
-	}
-	if m.stopActivity != nil {
-		m.stopActivity()
-		m.stopActivity = nil
-		m.activityCh = nil
-	}
-
-	// Prefer compacting the existing session over discarding it: a budget
-	// cap is a cumulative-cost concern, not a context-window concern, so the
-	// conversation itself is usually still small and worth keeping. Only
-	// fall back to a brand-new, empty session if compaction itself fails
-	// (e.g. the summarizer call errors) — recovering with a clean slate
-	// beats getting stuck unable to recover at all.
-	activityLine := "  ↻ session budget reached · compacting history and resuming"
-	statusMsg := "session compacted after budget limit"
-	if compactErr := m.orch.CompactActiveSession(m.ctx); compactErr != nil {
-		if _, err := m.orch.ResetSession(m.ctx); err != nil {
-			return nil, err
-		}
-		activityLine = "  ↻ session budget reached · continuing in a fresh session"
-		statusMsg = "session renewed after budget limit"
-	}
-	m.turnCostStart = m.orch.SessionCost()
-	m.lastKnownUsage = model.Usage{}
-	m.lastTurnCost = budget.SessionCost{}
-	m.budgetRetried = true
-	m.turnID++
-	m.turnCtx, m.turnCancel = context.WithCancel(m.ctx)
-	if m.activeSkill != "" {
-		ctx, err := m.orch.WithSkill(m.turnCtx, m.activeSkill)
-		if err != nil {
-			return nil, err
-		}
-		m.turnCtx = ctx
-	}
-	m.lastUsage = model.Usage{}
-	m.lastChunk = ""
-	m.pendingToolCalls = 0
-	m.pendingSubagents = 0
-	m.activityIndex = make(map[string]int)
-	m.activityArgs = make(map[string]any)
-	m.appendTurnActivity(styleDim.Render(activityLine))
-	m.statusMsg = statusMsg
-	turnID := m.turnID
-	turnCtx := m.turnCtx
-	var activityCmd tea.Cmd
-	if ch, stop, subscribeErr := m.orch.SubscribeActivity(); subscribeErr == nil {
-		m.activityCh = ch
-		m.stopActivity = stop
-		activityCmd = listenActivity(turnCtx, turnID, ch)
-	}
-	m.refreshViewport()
-	return tea.Batch(m.sendCmd(turnCtx, turnID, m.activeRequest), m.spin.Tick, activityCmd), nil
-}
-
 func (m *appModel) renderTranscript() string {
-	m.transcriptBuf.Reset()
-	m.transcriptBuf.WriteString(m.renderFinalizedTranscript())
-
-	if m.sending {
-		if m.transcriptBuf.Len() > 0 {
-			m.transcriptBuf.WriteString("\n\n")
-		}
-		m.transcriptBuf.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
-		m.transcriptBuf.WriteByte('\n')
-		if len(m.activeTurnItems) > 0 {
-			m.transcriptBuf.WriteString(m.renderTurnItems())
-		} else {
-			m.transcriptBuf.WriteString(styleDim.Render(m.spin.View() + " thinking..."))
-		}
+	finalized := m.renderFinalizedTranscript()
+	if !m.sending {
+		return finalized
 	}
-
-	return m.transcriptBuf.String()
+	body := styleDim.Render(m.spin.View() + " thinking...")
+	if len(m.activeTurnItems) > 0 {
+		body = m.renderTurnItems()
+	}
+	active := RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()) + "\n" + body
+	return boundedTranscriptJoin([]string{finalized, active})
 }
 
 func (m *appModel) renderFinalizedTranscript() string {
 	if !m.finalizedDirty && m.finalizedCount == len(m.blocks) {
 		return m.finalizedText
 	}
-	var b strings.Builder
-	if m.trimmedBlocks > 0 {
-		fmt.Fprintf(&b, "%s\n\n", styleDim.Render(fmt.Sprintf("[%d older transcript blocks omitted]", m.trimmedBlocks)))
-	}
-	for i, block := range m.blocks {
-		if i > 0 {
-			b.WriteString("\n\n")
+	var parts []string
+	remaining, lines := maxRenderBytes, 0
+	for i := len(m.blocks) - 1; i >= 0 && remaining > 0 && lines < maxViewportLines; i-- {
+		block := m.blocks[i]
+		if i < len(m.blockSources) {
+			if source := m.blockSources[i]; source != nil && source.width != m.viewport.Width() {
+				if source.user != "" {
+					block = RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width()) + "\n" +
+						wrapText(boundedTextTail(source.user, maxItemRenderBytes, maxViewportLines), m.viewport.Width())
+				} else {
+					block = m.buildAssistantBlockNamed(source.items, source.interrupted, source.err, source.name)
+				}
+				m.blockBytes += len(block) - len(m.blocks[i])
+				m.blocks[i] = block
+				source.width = m.viewport.Width()
+			}
 		}
-		b.WriteString(block)
+		block = boundedTextTail(block, remaining, maxViewportLines-lines)
+		parts = append(parts, block)
+		remaining -= len(block) + 2
+		lines += strings.Count(block, "\n") + 2
 	}
-	m.finalizedText = b.String()
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	m.trimTranscript()
+	if m.trimmedBlocks > 0 && remaining > 0 && lines < maxViewportLines {
+		parts = append([]string{styleDim.Render(fmt.Sprintf("[%d older transcript blocks omitted]", m.trimmedBlocks))}, parts...)
+	}
+	m.finalizedText = boundedTranscriptJoin(parts)
 	m.finalizedCount = len(m.blocks)
 	m.finalizedDirty = false
 	return m.finalizedText
@@ -2748,6 +3017,9 @@ func cloneTurnItems(items []turnItem) []turnItem {
 	}
 	out := make([]turnItem, len(items))
 	copy(out, items)
+	for i := range out {
+		out[i].text = nil // Snapshot strings remain immutable as a live builder grows.
+	}
 	return out
 }
 
@@ -2761,8 +3033,12 @@ func turnHasText(items []turnItem) bool {
 }
 
 func (m *appModel) buildAssistantBlock(items []turnItem, interrupted bool, err error) string {
+	return m.buildAssistantBlockNamed(items, interrupted, err, m.displayAgentName())
+}
+
+func (m *appModel) buildAssistantBlockNamed(items []turnItem, interrupted bool, err error, name string) string {
 	var b strings.Builder
-	b.WriteString(RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()))
+	b.WriteString(RenderTurnHeader("✦", name, styleAgentName, m.viewport.Width()))
 	if err != nil {
 		b.WriteByte('\n')
 		if len(items) > 0 {
@@ -2771,7 +3047,7 @@ func (m *appModel) buildAssistantBlock(items []turnItem, interrupted bool, err e
 		}
 		message := classifyErrorMessage(err)
 		if strings.Contains(err.Error(), "token budget exceeded for session") {
-			message += "\n\nThis session has reached its cumulative token limit. Use /clear to start a fresh session."
+			message += "\n\nThis session has reached its cumulative token limit. Use /compact to summarize history and reset its budget. Use /clear to start a fresh session (active conversation context is discarded). Completed actions were not replayed."
 		}
 		b.WriteString(wrapText(styleError.Render(message), m.viewport.Width()))
 		return b.String()
@@ -2796,10 +3072,23 @@ func (m *appModel) renderTurnItems() string {
 }
 
 func (m *appModel) renderItemList(items []turnItem) string {
-	if m.toolsExpanded {
-		return m.renderExpandedItems(items)
+	start, size := len(items), 0
+	for start > 0 && len(items)-start < maxViewportLines {
+		n := min(len(items[start-1].content), maxItemRenderBytes) + 2
+		if size+n > maxRenderBytes && start < len(items) {
+			break
+		}
+		size += n
+		start--
 	}
-	return m.renderCollapsedItems(items)
+	items = items[start:]
+	var rendered string
+	if m.toolsExpanded {
+		rendered = m.renderExpandedItems(items)
+	} else {
+		rendered = m.renderCollapsedItems(items)
+	}
+	return boundedTextTail(rendered, maxRenderBytes, maxViewportLines)
 }
 
 func (m *appModel) renderExpandedItems(items []turnItem) string {
@@ -2823,7 +3112,7 @@ func (m *appModel) renderCollapsedItems(items []turnItem) string {
 	i := 0
 	wrote := false
 	for i < len(items) {
-		if items[i].kind == turnItemText {
+		if items[i].kind != turnItemActivity || items[i].activity != activityTool {
 			if wrote {
 				b.WriteString("\n\n")
 			}
@@ -2833,7 +3122,7 @@ func (m *appModel) renderCollapsedItems(items []turnItem) string {
 			continue
 		}
 		j := i
-		for j < len(items) && items[j].kind == turnItemActivity {
+		for j < len(items) && items[j].kind == turnItemActivity && items[j].activity == activityTool {
 			j++
 		}
 		if wrote {
@@ -2877,17 +3166,21 @@ func (m *appModel) renderActivityRun(run []turnItem) string {
 }
 
 func (m *appModel) renderOneItem(item *turnItem) string {
+	content := boundedTextTail(item.content, maxItemRenderBytes, maxViewportLines)
+	if item.kind == turnItemReceipt {
+		return styleDim.Render(wrapText(content, m.viewport.Width()))
+	}
 	if item.kind == turnItemActivity {
-		return truncateToWidth(item.content, m.viewport.Width())
+		return truncateToWidth(content, m.viewport.Width())
 	}
 	width := m.viewport.Width()
 	if item.rendered != "" && item.renderedWidth == width {
 		return item.rendered
 	}
-	if m.sending {
-		item.rendered = wrapText(item.content, width)
+	if m.sending && !item.settled {
+		item.rendered = wrapText(content, width)
 	} else {
-		item.rendered = RenderMarkdownLite(item.content, width)
+		item.rendered = RenderMarkdownLite(content, width)
 	}
 	item.renderedWidth = width
 	return item.rendered
@@ -2933,6 +3226,9 @@ func (m *appModel) View() tea.View {
 	view := tea.View{
 		Content:   joinLayout(m.renderHeaderBar(), m.transcriptView(), m.bottomView, m.renderStatusBar()),
 		AltScreen: true,
+	}
+	if m.inspection != nil && m.approval == nil {
+		view.Content = joinLayout(m.renderHeaderBar(), m.inspection.View(), m.renderStatusBar())
 	}
 	if m.mouseCapture {
 		view.MouseMode = tea.MouseModeCellMotion
@@ -3116,14 +3412,14 @@ func (m *appModel) renderStatusBar() string {
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
 		leftText = " ● " + runLabel + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
 	}
+	if m.orch.PlanMode() {
+		leftText += " │ plan"
+	}
 	if _, modelID := m.orch.ActiveModelInfo(); modelID != "" {
 		leftText += " │ "
 		highlight(&leftText, styleStatusModel.Style, func() string { return modelID })
 	}
 	if m.width >= 100 {
-		if m.orch.PlanMode() {
-			leftText += " │ plan"
-		}
 		if think := m.orch.ThinkingLevel(); think != "off" {
 			leftText += " │ think:" + think
 		}
@@ -3159,6 +3455,9 @@ func (m *appModel) renderStatusBar() string {
 	leftText += " "
 	if m.width < 72 {
 		leftText = " ● " + runLabel
+		if m.orch.PlanMode() {
+			leftText += " │ plan"
+		}
 		if len(m.queuedMessages) > 0 {
 			leftText += fmt.Sprintf(" +%d", len(m.queuedMessages))
 		}

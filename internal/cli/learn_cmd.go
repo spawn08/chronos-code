@@ -35,10 +35,17 @@ func runLearn() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	paths, err := cfg.ResolveProjectPaths("")
+	if err != nil {
+		return fmt.Errorf("resolve learning paths: %w", err)
+	}
 
 	outputDir := cfg.Learning.OutputDir
 	if outputDir == "" {
 		outputDir = defaultLearningOutputDir
+	}
+	if !filepath.IsAbs(outputDir) {
+		outputDir = filepath.Join(paths.Root, outputDir)
 	}
 	store := learning.NewStore(outputDir)
 
@@ -104,7 +111,7 @@ func learnCandidates(cfg *config.Config) error {
 	}
 	defer store.Close(ctx)
 
-	candidates, err := store.Candidates(ctx, root)
+	candidates, err := workspaceLearningCandidates(ctx, store, cfg, root)
 	if err != nil {
 		return err
 	}
@@ -127,7 +134,7 @@ func learnPromote(cfg *config.Config, triggerHash string) error {
 	}
 	defer store.Close(ctx)
 
-	candidates, err := store.Candidates(ctx, root)
+	candidates, err := workspaceLearningCandidates(ctx, store, cfg, root)
 	if err != nil {
 		return err
 	}
@@ -149,20 +156,52 @@ func learnPromote(cfg *config.Config, triggerHash string) error {
 	return fmt.Errorf("learning candidate %q not found", triggerHash)
 }
 
+func workspaceLearningCandidates(ctx context.Context, store *learning.SQLStore, cfg *config.Config, root string) ([]learning.PatternCandidate, error) {
+	candidates, err := store.Candidates(ctx, root)
+	if err != nil || len(candidates) != 0 || cfg.Workspace.Root == "" || cfg.Workspace.Root == root {
+		return candidates, err
+	}
+	// Legacy telemetry used workspace.root verbatim. A snapshot migration does
+	// not rewrite those keys; allow the configured alias only for this same root.
+	alias, err := filepath.Abs(cfg.Workspace.Root)
+	if err != nil {
+		return candidates, nil
+	}
+	canonical, err := filepath.EvalSymlinks(alias)
+	if err != nil || canonical != root {
+		return candidates, nil
+	}
+	return store.Candidates(ctx, cfg.Workspace.Root)
+}
+
 func openWorkspaceLearningStore(ctx context.Context, cfg *config.Config) (*learning.SQLStore, string, error) {
-	root := cfg.Workspace.Root
-	if root == "" {
-		root = config.WorkspaceRoot()
+	paths, err := cfg.ResolveProjectPaths("")
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve learning paths: %w", err)
 	}
-	dir := filepath.Join(root, config.ConfigDirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, "", fmt.Errorf("create learning directory %q: %w", dir, err)
+	// Runtime migrates telemetry, but administration may be invoked first.
+	// Open existing state only; an empty on-disk canonical DB would prevent a
+	// later runtime migration from importing the legacy data.
+	dbPath := ":memory:"
+	for _, path := range []string{paths.TelemetryDB, filepath.Join(paths.LegacyDir, "memory.db")} {
+		info, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("inspect learning database %q: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, "", fmt.Errorf("learning database %q is not a regular file", path)
+		}
+		dbPath = path
+		break
 	}
-	store, err := learning.OpenSQLStore(ctx, filepath.Join(dir, "memory.db"))
+	store, err := learning.OpenSQLStore(ctx, dbPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("open workspace learning store: %w", err)
 	}
-	return store, root, nil
+	return store, paths.Root, nil
 }
 
 func userSkillsDir(cfg *config.Config) (string, error) {

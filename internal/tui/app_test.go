@@ -1733,12 +1733,12 @@ func TestFinalizeTurn_BudgetErrorStopsQueuedRetries(t *testing.T) {
 	if !strings.Contains(transcript, "file_read") {
 		t.Fatalf("failed turn discarded its activity timeline: %q", transcript)
 	}
-	if m.statusMsg != "budget exhausted │ /clear to continue" {
+	if m.statusMsg != "budget exhausted │ /compact to continue" {
 		t.Fatalf("statusMsg = %q", m.statusMsg)
 	}
 }
 
-func TestFinalizeTurn_BudgetErrorCompactsAndRetriesInSameSession(t *testing.T) {
+func TestFinalizeTurn_BudgetErrorDoesNotReplayCompletedActions(t *testing.T) {
 	m := newTestAppModel(t)
 	m.sending = true
 	m.activeRequest = "continue the task"
@@ -1747,24 +1747,18 @@ func TestFinalizeTurn_BudgetErrorCompactsAndRetriesInSameSession(t *testing.T) {
 
 	cmd := m.finalizeTurn(fmt.Errorf("token budget exceeded for session %q: used 10 of 10 tokens", oldSession))
 
-	if cmd == nil || !m.sending || !m.budgetRetried {
-		t.Fatal("budget exhaustion did not schedule one retry")
+	if cmd != nil || m.sending || m.budgetRetried {
+		t.Fatal("budget exhaustion must not replay the task")
 	}
-	// Compaction (not a hard reset) is the default recovery path: the
-	// session's conversation history is what's worth keeping, since a
-	// budget cap is a cumulative-cost concern, not a context-window one.
-	// With nothing yet persisted to this synthetic session, CompactSession
-	// is a trivial no-op success, so the same session ID carries forward.
 	if got := m.orch.CurrentSessionID(); got != oldSession {
-		t.Fatalf("expected compaction to keep the same session: old=%q new=%q", oldSession, got)
+		t.Fatalf("failure must retain session: old=%q new=%q", oldSession, got)
 	}
-	if m.lastKnownUsage.PromptTokens != 0 {
-		t.Fatalf("session recovery retained usage: %+v", m.lastKnownUsage)
+	if m.lastKnownUsage.PromptTokens != 10 {
+		t.Fatalf("failure discarded usage: %+v", m.lastKnownUsage)
 	}
-	if got := m.renderTranscript(); !strings.Contains(got, "compacting history and resuming") {
-		t.Fatalf("automatic compaction is not visible in transcript: %q", got)
+	if got := m.renderTranscript(); !strings.Contains(got, "token") {
+		t.Fatalf("failure not visible in transcript: %q", got)
 	}
-	m.turnCancel()
 }
 
 func TestEnterWhileSendingInterruptsBeforeReplacement(t *testing.T) {

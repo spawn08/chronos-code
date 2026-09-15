@@ -79,10 +79,21 @@ func Classify(err error) *Classified {
 		return nil
 	}
 
+	// Structural typing keeps local preflight errors independent of this
+	// package and survives the SDK's wrapped hook errors.
+	var overflow interface{ ContextBudgetExceeded() bool }
+	if errors.As(err, &overflow) && overflow.ContextBudgetExceeded() {
+		return &Classified{
+			Category: CategoryContextLength,
+			Message:  "Request exceeds the safe model budget. Compact history or reduce attachments before retrying; the current task and tool progress were preserved.",
+			Original: err,
+		}
+	}
+
 	if errors.Is(err, model.ErrCircuitOpen) {
 		return &Classified{
 			Category:  CategoryCircuitOpen,
-			Message:   "Provider is temporarily unavailable (circuit breaker open). Will retry shortly.",
+			Message:   "Provider is temporarily unavailable (circuit breaker open). Try again after it recovers.",
 			Retryable: true,
 			Original:  err,
 		}
@@ -103,7 +114,7 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 	case apiErr.StatusCode == 529 || strings.Contains(body, "overloaded"):
 		return &Classified{
 			Category:   CategoryOverloaded,
-			Message:    "The model is currently overloaded. Retrying automatically...",
+			Message:    "The model is currently overloaded. Try again shortly.",
 			Retryable:  true,
 			RetryAfter: coalesce(apiErr.RetryAfter, 10*time.Second),
 			Original:   original,
@@ -112,9 +123,9 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 	case apiErr.StatusCode == 429:
 		var msg string
 		if apiErr.RetryAfter > 0 {
-			msg = fmt.Sprintf("Rate limited by the API. Retrying in %s...", apiErr.RetryAfter.Round(time.Second))
+			msg = fmt.Sprintf("Rate limited by the API. Try again after %s.", apiErr.RetryAfter.Round(time.Second))
 		} else {
-			msg = "Rate limited by the API. Retrying automatically..."
+			msg = "Rate limited by the API. Wait before trying again."
 		}
 		return &Classified{
 			Category:   CategoryRateLimited,
@@ -127,7 +138,7 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 	case apiErr.StatusCode == 413 || strings.Contains(body, "request_too_large"):
 		return &Classified{
 			Category:  CategoryRequestTooLarge,
-			Message:   "Request too large — the conversation exceeds the model's maximum input size. Compacting session...",
+			Message:   "Request too large. Use /compact to summarize history, or reduce attachments before continuing.",
 			Retryable: false,
 			Original:  original,
 		}
@@ -135,7 +146,7 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 	case apiErr.StatusCode == 400 && isContextLengthError(body):
 		return &Classified{
 			Category:  CategoryContextLength,
-			Message:   "Context length exceeded — the conversation is too long for this model. Compacting session...",
+			Message:   "Context length exceeded. Use /compact to summarize history, or select a model with a larger context window.",
 			Retryable: false,
 			Original:  original,
 		}
@@ -197,7 +208,7 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 	case apiErr.StatusCode == 408:
 		return &Classified{
 			Category:   CategoryTimeout,
-			Message:    "Request timed out. Retrying...",
+			Message:    "Request timed out. Check provider availability before trying again.",
 			Retryable:  true,
 			RetryAfter: 2 * time.Second,
 			Original:   original,
@@ -207,7 +218,7 @@ func classifyAPIError(apiErr *model.APIError, original error) *Classified {
 		name := serverErrorName(apiErr.StatusCode)
 		return &Classified{
 			Category:   CategoryServerError,
-			Message:    fmt.Sprintf("Server error (%s). Retrying automatically...", name),
+			Message:    fmt.Sprintf("Server error (%s). Try again after the provider recovers.", name),
 			Retryable:  true,
 			RetryAfter: coalesce(apiErr.RetryAfter, 5*time.Second),
 			Original:   original,
@@ -229,7 +240,7 @@ func classifyByMessage(err error) *Classified {
 	case strings.Contains(msg, "overloaded"):
 		return &Classified{
 			Category:   CategoryOverloaded,
-			Message:    "The model is currently overloaded. Retrying automatically...",
+			Message:    "The model is currently overloaded. Try again shortly.",
 			Retryable:  true,
 			RetryAfter: 10 * time.Second,
 			Original:   err,
@@ -237,7 +248,7 @@ func classifyByMessage(err error) *Classified {
 	case strings.Contains(msg, "rate limit") || strings.Contains(msg, "rate_limit") || strings.Contains(msg, "too many requests"):
 		return &Classified{
 			Category:   CategoryRateLimited,
-			Message:    "Rate limited by the API. Retrying automatically...",
+			Message:    "Rate limited by the API. Wait before trying again.",
 			Retryable:  true,
 			RetryAfter: 5 * time.Second,
 			Original:   err,
@@ -245,14 +256,14 @@ func classifyByMessage(err error) *Classified {
 	case strings.Contains(msg, "request_too_large") || strings.Contains(msg, "request entity too large") || strings.Contains(msg, "413"):
 		return &Classified{
 			Category:  CategoryRequestTooLarge,
-			Message:   "Request too large — the conversation exceeds the model's maximum input size. Compacting session...",
+			Message:   "Request too large. Use /compact to summarize history, or reduce attachments before continuing.",
 			Retryable: false,
 			Original:  err,
 		}
 	case isContextLengthError(msg):
 		return &Classified{
 			Category:  CategoryContextLength,
-			Message:   "Context length exceeded — the conversation is too long for this model. Compacting session...",
+			Message:   "Context length exceeded. Use /compact to summarize history, or select a model with a larger context window.",
 			Retryable: false,
 			Original:  err,
 		}
@@ -275,7 +286,7 @@ func classifyByMessage(err error) *Classified {
 	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded"):
 		return &Classified{
 			Category:   CategoryTimeout,
-			Message:    "Request timed out. Retrying...",
+			Message:    "Request timed out. Check provider availability before trying again.",
 			Retryable:  true,
 			RetryAfter: 2 * time.Second,
 			Original:   err,

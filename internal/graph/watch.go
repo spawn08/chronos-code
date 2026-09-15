@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -16,22 +15,25 @@ import (
 // touch sequence, or a git checkout touching many files) into one reindex.
 const debounceWindow = 300 * time.Millisecond
 
-// Watcher applies incremental reindexes as .go files change under the
-// indexer's root, so the graph stays fresh without a full reindex per edit.
+// Watcher reconciles bursts of source/build-input and directory changes.
 type Watcher struct {
-	ix     *Indexer
-	fsw    *fsnotify.Watcher
-	cancel context.CancelFunc
-	done   chan struct{}
+	ix       *Indexer
+	fsw      *fsnotify.Watcher
+	cancel   context.CancelFunc
+	done     chan struct{}
+	closeErr error
 }
 
 // Watch starts a background watcher for ix.Root. Call Close to stop it.
 func Watch(ctx context.Context, ix *Indexer) (*Watcher, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("create fs watcher: %w", err)
 	}
-	if err := addDirsRecursive(fsw, ix.Root); err != nil {
+	if err := addDirsRecursive(ctx, fsw, ix.Root); err != nil {
 		fsw.Close()
 		return nil, fmt.Errorf("watch %s: %w", ix.Root, err)
 	}
@@ -46,14 +48,20 @@ func Watch(ctx context.Context, ix *Indexer) (*Watcher, error) {
 func (w *Watcher) Close() error {
 	w.cancel()
 	<-w.done
-	return w.fsw.Close()
+	return w.closeErr
 }
 
 func (w *Watcher) loop(ctx context.Context) {
 	defer close(w.done)
+	defer func() { w.closeErr = w.fsw.Close() }()
 
 	pending := make(map[string]struct{})
 	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	timerC := func() <-chan time.Time {
 		if timer == nil {
 			return nil
@@ -69,12 +77,19 @@ func (w *Watcher) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if !strings.HasSuffix(ev.Name, ".go") {
-				if ev.Op&fsnotify.Create != 0 {
-					if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-						_ = addDirsRecursive(w.fsw, ev.Name)
+			if ev.Op&fsnotify.Create != 0 {
+				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+					if skipGraphDir(info.Name()) && info.Name() != ".chronos" {
+						continue
+					}
+					if err := addDirsRecursive(ctx, w.fsw, ev.Name); err != nil && ctx.Err() == nil {
+						log.Printf("graph watcher: add directory: %v", err)
 					}
 				}
+			}
+			// Removed/renamed directories no longer have stat information.
+			// Reconcile them too, including pre-populated directory creates.
+			if !graphExtension(ev.Name) && !graphConfigFile(ev.Name) && ev.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
 				continue
 			}
 			pending[ev.Name] = struct{}{}
@@ -100,38 +115,29 @@ func (w *Watcher) loop(ctx context.Context) {
 	}
 }
 
-// reindex calls IndexFile once per changed directory. IndexFile itself
-// checks each file's content hash before doing any real work, so a save
-// event where an editor rewrote a file without changing its bytes (a
-// common touch-on-save pattern) is cheap here rather than needing its own
-// hash check in this loop.
+// reindex performs one pre-load scan per burst. Selecting just one event per
+// directory could choose an unchanged sibling and suppress the actual edit.
 func (w *Watcher) reindex(ctx context.Context, paths []string) {
-	seenDirs := make(map[string]struct{})
-	for _, p := range paths {
-		dir := filepath.Dir(p)
-		if _, ok := seenDirs[dir]; ok {
-			continue
-		}
-		seenDirs[dir] = struct{}{}
-		if _, err := w.ix.IndexFile(ctx, p); err != nil {
-			log.Printf("graph watcher: reindex %s: %v", dir, err)
-		}
+	if len(paths) == 0 || ctx.Err() != nil {
+		return
+	}
+	if _, err := w.ix.IndexAll(ctx); err != nil && ctx.Err() == nil {
+		log.Printf("graph watcher: reindex: %v", err)
 	}
 }
 
-func addDirsRecursive(fsw *fsnotify.Watcher, root string) error {
+func addDirsRecursive(ctx context.Context, fsw *fsnotify.Watcher, root string) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if !d.IsDir() {
 			return nil
 		}
-		name := d.Name()
-		if name != "." && strings.HasPrefix(name, ".") {
-			return filepath.SkipDir
-		}
-		if name == "vendor" || name == "node_modules" {
+		if path != root && skipGraphDir(d.Name()) && d.Name() != ".chronos" {
 			return filepath.SkipDir
 		}
 		return fsw.Add(path)

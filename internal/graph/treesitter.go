@@ -14,8 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/cespare/xxhash/v2"
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/bash"
 	"github.com/smacker/go-tree-sitter/c"
@@ -359,10 +359,13 @@ func kotlinKindFor(n *sitter.Node, src []byte, fallback SymbolKind) SymbolKind {
 // for resolveImportTargets, "import" edges to other in-repo packages;
 // implements-edge resolution remains out of scope for tree-sitter languages
 // since it needs type information this syntactic pass doesn't have. Returns
-// the number of symbols and edges recorded, and an error only for file-read
-// or parse failures. An unsupported extension is not an error: it returns
-// (0, 0, nil).
+// the number of symbols and edges committed. Unchanged content and unsupported
+// extensions return (0, 0, nil). Read, parser, cancellation, and persistence
+// failures are returned; replacement failures retain the previous file facts.
 func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (symbols, edges int, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
 	spec := tsLangFor(strings.ToLower(filepath.Ext(relPath)))
 	if spec == nil {
 		return 0, 0, nil
@@ -372,22 +375,34 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 	if !filepath.IsAbs(absPath) {
 		absPath = filepath.Join(root, relPath)
 	}
+	relPath, err = filepath.Rel(root, absPath)
+	if err != nil || relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return 0, 0, fmt.Errorf("non-Go source outside workspace: %s", absPath)
+	}
 	source, err := os.ReadFile(absPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read %s: %w", relPath, err)
 	}
+	hash := fmt.Sprintf("%016x", xxhash.Sum64(source))
+	stored, err := store.FileHash(ctx, relPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	if stored == hash {
+		return 0, 0, nil
+	}
 
 	parser := sitter.NewParser()
+	defer parser.Close()
 	parser.SetLanguage(spec.lang)
 	tree, err := parser.ParseCtx(ctx, nil, source)
 	if err != nil {
 		return 0, 0, fmt.Errorf("parse %s: %w", relPath, err)
 	}
-	defer tree.Close()
-
-	if err := store.ClearFile(ctx, relPath); err != nil {
-		return 0, 0, fmt.Errorf("clear %s: %w", relPath, err)
+	if tree == nil {
+		return 0, 0, fmt.Errorf("parse %s: no syntax tree", relPath)
 	}
+	defer tree.Close()
 
 	pkg := filepath.Dir(relPath)
 	if pkg == "." {
@@ -395,12 +410,10 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 	}
 
 	var imports []string
-	count := 0
-	edgeCount := 0
+	var facts []Symbol
+	var relationships []Edge
 	fileDir := filepath.Dir(relPath)
-	// edgeSeen dedupes within this file's pass; InsertEdge is also
-	// INSERT-OR-IGNORE-safe against the DB's unique index, but this avoids
-	// redundant calls for e.g. a function that calls the same callee twice.
+	// Deduplicate facts before the atomic replacement transaction.
 	edgeSeen := make(map[string]bool)
 
 	// walk carries enclosing, the bare name of the nearest containing
@@ -411,7 +424,7 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 	// documents for the Go Tier-1 indexer.
 	var walk func(n *sitter.Node, enclosing string)
 	walk = func(n *sitter.Node, enclosing string) {
-		if n == nil {
+		if n == nil || ctx.Err() != nil {
 			return
 		}
 		typ := n.Type()
@@ -429,9 +442,7 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 						continue
 					}
 					edgeSeen[key] = true
-					if insertErr := store.InsertEdge(ctx, Edge{Kind: EdgeImport, FromName: pkg, ToName: target}); insertErr == nil {
-						edgeCount++
-					}
+					relationships = append(relationships, Edge{Kind: EdgeImport, FromName: pkg, ToName: target})
 				}
 			}
 		}
@@ -440,9 +451,7 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 				key := "call|" + enclosing + "|" + callee
 				if !edgeSeen[key] {
 					edgeSeen[key] = true
-					if insertErr := store.InsertEdge(ctx, Edge{Kind: EdgeCall, FromName: enclosing, ToName: callee}); insertErr == nil {
-						edgeCount++
-					}
+					relationships = append(relationships, Edge{Kind: EdgeCall, FromName: enclosing, ToName: callee})
 				}
 			}
 		}
@@ -467,9 +476,7 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 					EndLine:   int(n.EndPoint().Row) + 1,
 					Signature: firstLine(n.Content(source)),
 				}
-				if insertErr := store.InsertSymbol(ctx, sym); insertErr == nil {
-					count++
-				}
+				facts = append(facts, sym)
 				if spec.funcContainerTypes[typ] {
 					nextEnclosing = name
 				}
@@ -481,19 +488,21 @@ func IndexNonGoFile(ctx context.Context, store *Store, root, relPath string) (sy
 		}
 	}
 	walk(tree.RootNode(), "")
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
 
-	mtime := time.Now().Unix()
+	var mtime int64
 	if info, statErr := os.Stat(absPath); statErr == nil {
 		mtime = info.ModTime().Unix()
 	}
-	if err := store.UpsertFile(ctx, relPath, pkg, mtime); err != nil {
-		return count, edgeCount, err
-	}
 	if err := store.UpsertPackage(ctx, pkg, strings.Join(imports, ",")); err != nil {
-		return count, edgeCount, err
+		return 0, 0, err
 	}
-
-	return count, edgeCount, nil
+	if err := store.ReplaceFile(ctx, FileReplacement{Path: relPath, Package: pkg, Mtime: mtime, Hash: hash, Symbols: facts, Edges: relationships}); err != nil {
+		return 0, 0, err
+	}
+	return len(facts), len(relationships), nil
 }
 
 // firstLine returns the first line of s, trimmed, truncating very long

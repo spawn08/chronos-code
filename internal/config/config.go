@@ -264,6 +264,24 @@ type MemoryConfig struct {
 	Enabled     bool   `yaml:"enabled,omitempty"`
 	Backend     string `yaml:"backend,omitempty"`
 	AutoExtract bool   `yaml:"auto_extract,omitempty"`
+
+	LayeredEnabled  *bool  `yaml:"layered_enabled,omitempty"`
+	SemanticEnabled *bool  `yaml:"semantic_enabled,omitempty"`
+	OrganizationID  string `yaml:"organization_id,omitempty"`
+	// Zero leaves recall limits to the memory runtime's bounded defaults.
+	ContextBudgetTokens int `yaml:"context_budget_tokens,omitempty"`
+	MaxRecords          int `yaml:"max_records,omitempty"`
+}
+
+// LayeredMemoryEnabled defaults layered memory on. Enabled remains the master
+// memory switch and must also be honored by callers.
+func (c MemoryConfig) LayeredMemoryEnabled() bool {
+	return c.LayeredEnabled == nil || *c.LayeredEnabled
+}
+
+// SemanticMemoryEnabled requires explicit opt-in.
+func (c MemoryConfig) SemanticMemoryEnabled() bool {
+	return c.SemanticEnabled != nil && *c.SemanticEnabled
 }
 
 type SessionConfig struct {
@@ -573,9 +591,6 @@ func mergeFileConfig(base, overlay *agent.FileConfig) {
 	if len(overlay.Teams) > 0 {
 		base.Teams = overlay.Teams
 	}
-	if overlay.Defaults != nil {
-		base.Defaults = overlay.Defaults
-	}
 	if overlay.SkillsDir != "" {
 		base.SkillsDir = overlay.SkillsDir
 	}
@@ -583,6 +598,12 @@ func mergeFileConfig(base, overlay *agent.FileConfig) {
 
 func mergeConfig(base, overlay *Config, source string) {
 	mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+	if overlay.Defaults != nil {
+		if base.Defaults == nil {
+			base.Defaults = &agent.AgentConfig{}
+		}
+		mergeTypedSection(base.Defaults, *overlay.Defaults, overlay.set, "defaults")
+	}
 	mergeHooks(&base.Hooks, overlay.Hooks)
 	base.Providers = mergeProviders(base.Providers, overlay.Providers)
 	mergeTypedSection(&base.Router, overlay.Router, overlay.set, "router")

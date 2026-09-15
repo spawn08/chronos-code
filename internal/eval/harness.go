@@ -1,11 +1,18 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/spawn08/chronos/engine/model"
@@ -66,11 +73,11 @@ type TaskResult struct {
 	OptimizedTokens int
 	RoutedAgent     string   // informational: which agent routing.yaml would send Description to
 	RoutedTier      string   // informational: that agent's configured tier (T1/T2)
-	Violations      []string // non-empty means a P1-006/P2-007/P2-008 contract didn't fire as expected
+	Violations      []string // missing requested evidence or incorrect final compression
 }
 
-// Success reports whether every efficiency contract this task exercises
-// actually fired.
+// Success reports whether every step delivered its requested evidence and
+// applied compression to the final logical result when needed.
 func (r TaskResult) Success() bool { return len(r.Violations) == 0 }
 
 // SavingsRatio is the fraction of baseline tokens the optimized path avoided.
@@ -114,6 +121,18 @@ func normalizeResult(v any, dir, placeholder string) any {
 			out[i], _ = normalizeResult(vv, dir, placeholder).(map[string]any)
 		}
 		return out
+	case []string:
+		out := make([]string, len(val))
+		for i, s := range val {
+			out[i] = strings.ReplaceAll(s, dir, placeholder)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, v := range val {
+			out[i] = normalizeResult(v, dir, placeholder)
+		}
+		return out
 	case string:
 		return strings.ReplaceAll(val, dir, placeholder)
 	default:
@@ -121,16 +140,9 @@ func normalizeResult(v any, dir, placeholder string) any {
 	}
 }
 
-// wrapNormalize wraps every handler currently registered on reg so its
-// result has dir replaced with placeholder before any other wrapper
-// (toolcompress, incctx) or this package's own token counting ever observes
-// it. This must run before toolcompress.WrapDynamic/incctx.Wrap are applied
-// (see RunTask): toolcompress's content hash and preview truncation
-// (agent.EvictLargeResult) operate on whatever value reaches them, and
-// os.MkdirTemp's random per-run directory name — embedded verbatim in
-// file_read/file_list/file_grep's "path" field — would otherwise make the
-// hash, the preview text, and this suite's token counts nondeterministic
-// across runs and machines.
+// wrapNormalize runs after logical handlers (including incctx) and before
+// compression/token counting. Normalize the actual returned representation so
+// outlines, ranges, hashes and previews cannot contain random workspace paths.
 func wrapNormalize(reg *tool.Registry, dir, placeholder string) {
 	for _, def := range reg.List() {
 		orig := def.Handler
@@ -206,9 +218,7 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 	}
 	defer os.RemoveAll(dir)
 
-	sizes := make(map[string]int, len(t.Files))
 	for relPath, content := range t.Files {
-		sizes[relPath] = len(content)
 		full := filepath.Join(dir, relPath)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return TaskResult{}, fmt.Errorf("eval: task %s: write fixture %s: %w", t.ID, relPath, err)
@@ -222,28 +232,33 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 	wrapNormalize(baselineReg, dir, workspacePlaceholder)
 
 	optReg := newRegistry(dir, t.Difficulty)
-	wrapNormalize(optReg, dir, workspacePlaceholder)
 	optAgent := &agent.Agent{
 		ID:      t.ID + "-optimized",
 		Tools:   optReg,
 		Storage: memory.New(),
 		Model:   stubProvider{evalModelName},
 	}
-	// Wrap in the same order internal/orchestrator.New uses: toolcompress
-	// wraps the raw handlers first, then incctx wraps file_read again on top
-	// — so a first-time large-file read short-circuits at the incctx layer
-	// (outline) before ever reaching the toolcompress layer beneath it,
-	// exactly like a real agent's tool call. wrapNormalize sits beneath both
-	// (applied first), so toolcompress's content hash/preview and incctx's
-	// fallback full-content reads only ever see the normalized path.
-	toolcompress.WrapDynamic(optAgent, func(context.Context) int { return compressionThresholdTokens })
+	// Match the production logical-handler -> final compression order.
 	incctx.Wrap(optAgent, dir)
+	incctx.WrapGrep(optAgent, dir)
+	wrapNormalize(optReg, dir, workspacePlaceholder)
+	// Observe the same execution, rather than replaying tools to determine the
+	// compression threshold (which would duplicate mutations). RunTask is serial.
+	var logicalOut any
+	for _, def := range optReg.List() {
+		original := def.Handler
+		def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+			out, err := original(ctx, args)
+			logicalOut = out
+			return out, err
+		}
+	}
+	toolcompress.WrapDynamic(optAgent, func(context.Context) int { return compressionThresholdTokens })
 
 	counter := model.NewTokenCounter(evalModelName)
 	res := TaskResult{TaskID: t.ID, Category: t.Category, Difficulty: t.Difficulty}
-	seen := make(map[string]bool)
 
-	for _, step := range t.Steps {
+	for i, step := range t.Steps {
 		baseDef, ok := baselineReg.Get(step.Tool)
 		if !ok {
 			return TaskResult{}, fmt.Errorf("eval: task %s: unknown baseline tool %q", t.ID, step.Tool)
@@ -265,12 +280,8 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 		baseTokens := jsonTokens(counter, baseOut, dir)
 		res.BaselineTokens += baseTokens
 		res.OptimizedTokens += jsonTokens(counter, optOut, dir)
-		res.Violations = append(res.Violations, checkContract(step, optOut, baseTokens, seen, sizes)...)
-
-		if step.Tool == "file_read" {
-			if path, _ := step.Args["path"].(string); path != "" {
-				seen[path] = true
-			}
+		for _, violation := range ValidateStep(ctx, step, t.Files, logicalOut, optOut, optReg) {
+			res.Violations = append(res.Violations, fmt.Sprintf("step %d (%s): %s", i+1, step.Tool, violation))
 		}
 	}
 
@@ -300,48 +311,250 @@ func jsonTokens(counter model.TokenCounter, v any, dir string) int {
 	return counter.CountString(normalized)
 }
 
-// checkContract verifies that the optimized path's efficiency machinery
-// fired when it should have, generalizing acceptance criteria from P1-006
-// (compress large results), P2-007 (outline large Go files on first read,
-// never outline on explicit-range/small reads), and P2-008 (skip redundant
-// reads of an unchanged file).
-func checkContract(step Step, optOut any, baselineTokens int, seen map[string]bool, sizes map[string]int) []string {
-	out, _ := optOut.(map[string]any)
-
-	if step.Tool == "file_read" {
-		path, _ := step.Args["path"].(string)
-
-		if seen[path] {
-			if unchanged, _ := out["unchanged"].(bool); !unchanged {
-				return []string{fmt.Sprintf("file_read: expected unchanged=true on repeat read of %s (P2-008)", path)}
-			}
-			return nil
-		}
-
-		_, hasStart := step.Args["start_line"]
-		_, hasEnd := step.Args["end_line"]
-		outlineOnly, hasOutlineOnly := step.Args["outline_only"].(bool)
-		explicitFull := hasOutlineOnly && !outlineOnly
-		shouldOutline := strings.HasSuffix(path, ".go") && !hasStart && !hasEnd && !explicitFull && sizes[path] > outlineThresholdBytes
-
-		if shouldOutline {
-			if outline, _ := out["outline"].(bool); !outline {
-				return []string{fmt.Sprintf("file_read: expected outline=true for first read of %s (%d bytes) (P2-007)", path, sizes[path])}
-			}
-			return nil // outlining short-circuits before the inner toolcompress layer runs
-		}
-		if outline, _ := out["outline"].(bool); outline {
-			return []string{fmt.Sprintf("file_read: unexpected outline=true for %s (explicit range or small file) (P2-007)", path)}
-		}
-		// Falls through: a small first-time read or an explicit-range/force
-		// read reaches the inner toolcompress-wrapped handler like any other
-		// tool result, so the generic compression check below still applies.
+// ValidateStep checks one step independently of prior reads. files is the
+// immutable fixture oracle; logicalOut is the normalized pre-compression result
+// from that execution. A compressed delivered result must be reconstructible via
+// tools' public read_stored_result handler, not merely have a plausible preview.
+// Retrieval is verifier IO, not an additional model trajectory step: token totals
+// measure immediate tool responses, not the cost of a model reading every artifact.
+func ValidateStep(ctx context.Context, step Step, files map[string]string, logicalOut, delivered any, tools *tool.Registry) []string {
+	logicalJSON, err := json.Marshal(logicalOut)
+	if err != nil {
+		return []string{fmt.Sprintf("invalid logical result: %v", err)}
 	}
-
-	if baselineTokens > compressionThresholdTokens {
-		if compressed, _ := out["compressed"].(bool); !compressed {
-			return []string{fmt.Sprintf("%s: expected compressed=true (%d tokens > %d) (P1-006)", step.Tool, baselineTokens, compressionThresholdTokens)}
+	var logical map[string]any
+	if err := json.Unmarshal(logicalJSON, &logical); err != nil || logical == nil {
+		return []string{"logical result must be an object"}
+	}
+	var violations []string
+	switch step.Tool {
+	case "file_read":
+		if err := validateRead(step, files, logical); err != nil {
+			violations = append(violations, err.Error())
 		}
+	case "file_grep":
+		if err := validateGrep(step, files, logical); err != nil {
+			violations = append(violations, err.Error())
+		}
+	}
+	out, ok := delivered.(map[string]any)
+	if !ok || out == nil {
+		return append(violations, "delivered result must be an object")
+	}
+	counter := model.NewTokenCounter(evalModelName)
+	compressed, _ := out["compressed"].(bool)
+	logicalTokens := counter.CountString(string(logicalJSON))
+	if compressed != (logicalTokens > compressionThresholdTokens) {
+		violations = append(violations, fmt.Sprintf("compressed=%t for %d logical tokens (threshold %d)", compressed, logicalTokens, compressionThresholdTokens))
+	}
+	if compressed && jsonTokens(counter, delivered, workspacePlaceholder) > compressionThresholdTokens {
+		violations = append(violations, "compressed envelope exceeds token budget")
+	}
+	evidence := delivered
+	if compressed {
+		evidence, err = retrieveEvidence(ctx, out, tools)
+		if err != nil {
+			return append(violations, fmt.Sprintf("stored evidence: %v", err))
+		}
+	}
+	evidenceJSON, err := json.Marshal(evidence)
+	if err != nil || !bytes.Equal(logicalJSON, evidenceJSON) {
+		violations = append(violations, "delivered/retrieved evidence differs from the logical result")
+	}
+	return violations
+}
+
+func retrieveEvidence(ctx context.Context, out map[string]any, tools *tool.Registry) (any, error) {
+	key, _ := out["storage_key"].(string)
+	size, ok := exactInt(out["full_size_bytes"])
+	// Offline verification must itself be bounded, even for a corrupt reader.
+	if tools == nil || key == "" || !ok || size <= 0 || size > 4<<20 {
+		return nil, fmt.Errorf("missing reader/key or invalid full_size_bytes")
+	}
+	var data strings.Builder
+	for calls := 0; calls < 128; calls++ {
+		chunk, err := tools.Execute(ctx, toolcompress.ReadStoredResultTool, map[string]any{"key": key, "offset": data.Len()})
+		if err != nil {
+			return nil, err
+		}
+		m, ok := chunk.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("chunk must be an object")
+		}
+		text, textOK := m["content"].(string)
+		offset, offsetOK := exactInt(m["offset"])
+		next, nextOK := exactInt(m["next_offset"])
+		total, totalOK := exactInt(m["total_bytes"])
+		more, moreOK := m["truncated"].(bool)
+		if !textOK || !offsetOK || !nextOK || !totalOK || !moreOK ||
+			m["storage_key"] != key || offset != data.Len() || next != offset+len(text) ||
+			next <= offset || next > size || total != size || more != (next < size) {
+			return nil, fmt.Errorf("invalid chunk coordinates/continuation")
+		}
+		data.WriteString(text)
+		if !more {
+			var evidence any
+			if err := json.Unmarshal([]byte(data.String()), &evidence); err != nil {
+				return nil, fmt.Errorf("decode stored result: %w", err)
+			}
+			return evidence, nil
+		}
+	}
+	return nil, fmt.Errorf("stored result exceeded chunk limit")
+}
+
+func exactInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case float64:
+		return int(n), float64(int(n)) == n
+	default:
+		return 0, false
+	}
+}
+
+func validateRead(step Step, files map[string]string, out map[string]any) error {
+	path, _ := step.Args["path"].(string)
+	source, exists := files[path]
+	if !exists {
+		return fmt.Errorf("file_read: no fixture oracle for %q", path)
+	}
+	if out["path"] != filepath.Join(workspacePlaceholder, path) || out["unchanged"] == true || out["truncated"] == true {
+		return fmt.Errorf("file_read: missing complete evidence/path for %s", path)
+	}
+	_, hasStart := step.Args["start_line"]
+	_, hasEnd := step.Args["end_line"]
+	outlineOnly, explicit := step.Args["outline_only"].(bool)
+	expectedOutline, parseErr := declarationShape(source, false)
+	shouldOutline := strings.HasSuffix(path, ".go") && !hasStart && !hasEnd &&
+		(!explicit || outlineOnly) && (outlineOnly || len(source) > outlineThresholdBytes) &&
+		len(source) <= 1<<20 && parseErr == nil && expectedOutline != "package evidence\n"
+	if shouldOutline {
+		decls, ok := out["declarations"].([]any)
+		if out["outline"] != true || !ok || len(decls) == 0 {
+			return fmt.Errorf("file_read: expected nonempty declaration outline for %s", path)
+		}
+		var text strings.Builder
+		text.WriteString("package evidence\n")
+		for _, decl := range decls {
+			s, ok := decl.(string)
+			if !ok {
+				return fmt.Errorf("file_read: invalid declaration in %s", path)
+			}
+			text.WriteString(s + "\n")
+		}
+		actual, err := declarationShape(text.String(), true)
+		if err != nil || actual != expectedOutline {
+			return fmt.Errorf("file_read: incomplete/incorrect declaration outline for %s", path)
+		}
+		return nil
+	}
+	if out["outline"] == true {
+		return fmt.Errorf("file_read: outline cannot satisfy requested source/range for %s", path)
+	}
+	lines := strings.Split(source, "\n")
+	start, end := 1, len(lines)
+	if hasStart {
+		var ok bool
+		start, ok = exactInt(step.Args["start_line"])
+		if !ok || start < 1 || start > len(lines) {
+			return fmt.Errorf("file_read: invalid requested start_line")
+		}
+	}
+	if hasEnd {
+		var ok bool
+		end, ok = exactInt(step.Args["end_line"])
+		if !ok || end < start {
+			return fmt.Errorf("file_read: invalid requested end_line")
+		}
+		end = min(end, len(lines))
+	}
+	actualStart, startOK := exactInt(out["start_line"])
+	actualEnd, endOK := exactInt(out["end_line"])
+	if out["content"] != strings.Join(lines[start-1:end], "\n") || !startOK || !endOK || actualStart != start || actualEnd != end {
+		return fmt.Errorf("file_read: incorrect source/range %s:%d-%d", path, start, end)
+	}
+	if total := out["total_lines"]; total != nil {
+		if n, ok := exactInt(total); !ok || n != len(lines) {
+			return fmt.Errorf("file_read: incorrect total_lines for %s", path)
+		}
+	}
+	return nil
+}
+
+// Parse both sides independently and compare complete declaration structure,
+// ignoring comments/package spelling. An outline cannot contain function bodies
+// or omit/change signatures even if its outline=true marker looks convincing.
+func declarationShape(source string, isOutline bool) (string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "fixture.go", source, 0)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	buf.WriteString("package evidence\n")
+	for _, decl := range file.Decls {
+		if f, ok := decl.(*ast.FuncDecl); ok {
+			if isOutline && f.Body != nil {
+				return "", fmt.Errorf("outline contains function body")
+			}
+			f.Body = nil
+		}
+		// Format each declaration separately: source positions must not make
+		// empty lines left behind by removed bodies part of the comparison.
+		if err := format.Node(&buf, fset, decl); err != nil {
+			return "", err
+		}
+		buf.WriteByte('\n')
+	}
+	return buf.String(), nil
+}
+
+func validateGrep(step Step, files map[string]string, out map[string]any) error {
+	path, _ := step.Args["path"].(string)
+	pattern, _ := step.Args["pattern"].(string)
+	matcher := func(line string) bool { return strings.Contains(line, pattern) }
+	if step.Args["regex"] == true {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf("file_grep: invalid fixture pattern: %w", err)
+		}
+		matcher = re.MatchString
+	}
+	_, single := files[path]
+	if out["truncated"] == true || out["path"] != filepath.Join(workspacePlaceholder, path) || out["recursive"] != !single {
+		return fmt.Errorf("file_grep: incomplete result or incorrect path/mode")
+	}
+	var expected []string
+	for name, source := range files {
+		if single && name != path || !single && path != "." && !strings.HasPrefix(name, strings.TrimSuffix(path, "/")+"/") {
+			continue
+		}
+		for i, line := range strings.Split(source, "\n") {
+			if matcher(line) {
+				m := map[string]any{"line_number": i + 1, "content": line}
+				if !single {
+					m["file"] = filepath.Join(workspacePlaceholder, name)
+				}
+				encoded, _ := json.Marshal(m)
+				expected = append(expected, string(encoded))
+			}
+		}
+	}
+	matches, ok := out["matches"].([]any)
+	if !ok {
+		return fmt.Errorf("file_grep: missing matches")
+	}
+	actual := make([]string, len(matches))
+	for i, match := range matches {
+		encoded, _ := json.Marshal(match)
+		actual[i] = string(encoded)
+	}
+	sort.Strings(actual)
+	sort.Strings(expected)
+	if strings.Join(actual, "\n") != strings.Join(expected, "\n") {
+		return fmt.Errorf("file_grep: incorrect matching evidence")
 	}
 	return nil
 }

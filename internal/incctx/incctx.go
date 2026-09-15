@@ -1,55 +1,34 @@
-// Package incctx implements PRD P2-007 "Incremental context loading" and
-// P2-008 "Semantic dedup + file content cache", both scoped to wrapping the
-// "file_read" and "file_grep" tools' Handlers. The package is deliberately
-// named incctx (not context) to avoid shadowing the stdlib context package
-// in every file that imports both.
+// Package incctx replaces the SDK's whole-file read/grep handlers with bounded
+// incremental IO. It deliberately does not infer current context coverage from
+// mtime: an earlier outline, range, or compacted turn is not the requested source.
 //
-// The chronos SDK's builtin file_read/file_grep are intentionally minimal
-// (single-file, whole-file, plain substring). Rather than changing the
-// shared SDK for every consumer, this package upgrades chronos-code's own
-// copies of those tools in place — after agent.BuildAgent/BuildAll register
-// the builtins, Wrap/WrapGrep swap in a richer Handler and extend the
-// declared JSON Schema Parameters so the model can discover the new
-// arguments, without chronos itself knowing this happened.
-//
-// Wrap intercepts file_read calls in three cases before delegating to the
-// original handler: (1) if the file's mtime is unchanged since the last read
-// in this conversation, it short-circuits with an "unchanged" marker instead
-// of re-reading (P2-008); (2) if the file is a Go source file over 2000
-// bytes and the caller didn't ask for a specific line range or full content,
-// it returns an AST-derived outline of top-level declarations instead of the
-// full file content (P2-007); (3) if the caller passed start_line/end_line,
-// the full content is read once and then sliced to that range before being
-// returned — the underlying SDK handler has no notion of line ranges, so
-// this slicing happens entirely on the chronos-code side. All cases fall
-// through to the original handler whenever they can't confidently produce a
-// result (stat failure, parse error, empty outline).
-//
-// WrapGrep extends file_grep the same way: the underlying SDK handler only
-// searches one file with a plain substring match. WrapGrep adds recursive
-// directory search (skipping .git/vendor/node_modules) and an optional
-// regex=true mode, both implemented in chronos-code and layered on top of
-// the SDK's single-file substring search via the original handler.
+// Install these wrappers on the builtins BEFORE handler middleware (hooks,
+// compression, audit/security wrappers). Direct IO cannot delegate to an opaque
+// whole-file handler without losing its bounds and source coordinates. Registry
+// permissions/approval still execute outside the handler. These wrappers are not
+// adapters for custom handlers with their own authorization or virtual files.
 package incctx
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
 	"go/token"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
+	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
-	"github.com/spawn08/chronos/storage"
 )
 
 // fileReadTool is the name of the tool Wrap intercepts.
@@ -66,134 +45,167 @@ const outlineSizeThreshold = 2000
 // so a recursive search can't blow up the response size.
 const grepMaxMatches = 500
 
+// Bounds apply even to force/full-content requests. A bounded prefix is marked
+// truncated; an unrepresentable line or unreachable range produces an error.
+const (
+	maxLineBytes     = 64 << 10
+	maxOutputBytes   = 256 << 10
+	maxScanBytes     = 8 << 20
+	maxOutlineBytes  = 1 << 20
+	grepMaxScanBytes = 32 << 20
+	grepMaxEntries   = 10000
+	grepMaxDepth     = 64
+)
+
+var (
+	errScanLimit = errors.New("scan byte limit reached; narrow the path or range")
+	errLongLine  = errors.New("line exceeds 64 KiB; use a byte-oriented tool")
+	errStopScan  = errors.New("requested scan complete")
+	errBinary    = errors.New("binary file skipped")
+)
+
 // grepSkipDirs are directory names a recursive file_grep never descends
 // into: version control internals and dependency trees are large, rarely
 // what a caller is searching for, and expensive to walk.
 var grepSkipDirs = map[string]bool{
-	".git":         true,
-	"node_modules": true,
-	"vendor":       true,
+	".git":          true,
+	"node_modules":  true,
+	"vendor":        true,
+	".chronos-code": true,
+	".hg":           true,
+	".svn":          true,
+	"__pycache__":   true,
+	".venv":         true,
 }
 
-// Wrap wraps a's registered "file_read" tool handler so that unchanged files
-// are served from an in-memory mtime cache instead of being re-read
-// (P2-008), and large Go files are served as AST-aware outlines instead of
-// full content by default (P2-007). root is used to resolve relative paths
-// passed in the "path" argument, matching how the underlying file_read tool
-// resolves them. Wrap is a no-op if a has no "file_read" tool registered.
+// Wrap installs bounded source reads and optional Go outlines. Relative paths
+// resolve against root, as in the SDK. force is accepted for compatibility;
+// every request now reads fresh content. It does not disable resource bounds.
 func Wrap(a *agent.Agent, root string) {
 	def, ok := a.Tools.Get(fileReadTool)
 	if !ok {
 		return
 	}
-	orig := def.Handler
-	agentID := a.ID
-
-	def.Description += " Pass start_line/end_line (1-indexed, inclusive) to read only part of a large file instead of the whole thing."
+	def.Description += " Pass start_line/end_line (positive, 1-indexed, inclusive) for source ranges. Reads are bounded to 256 KiB output, 64 KiB per line and 8 MiB scanned; truncated results include a continuation line."
 	props := toolProperties(def)
 	props["start_line"] = map[string]any{
 		"type":        "integer",
+		"minimum":     1,
 		"description": "First line to return, 1-indexed inclusive. Omit to start from the beginning of the file.",
 	}
 	props["end_line"] = map[string]any{
 		"type":        "integer",
+		"minimum":     1,
 		"description": "Last line to return, 1-indexed inclusive. Omit to read to the end of the file.",
 	}
 
-	var mu sync.Mutex
-	cache := make(map[string]map[string]int64) // cacheKey -> resolvedPath -> mtimeUnixNano
+	props["force"] = map[string]any{"type": "boolean", "description": "Re-read fresh source (the default); resource bounds still apply."}
+	props["outline_only"] = map[string]any{"type": "boolean", "description": "Request a Go declaration outline; false requests source. Explicit line ranges take precedence. Outlines are limited to 1 MiB input."}
 
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("file_read: %w", err)
+		}
 		path, _ := args["path"].(string)
 		if path == "" {
-			return orig(ctx, args)
+			return nil, fmt.Errorf("file_read: 'path' argument is required")
 		}
-
-		resolvedPath := path
-		if !filepath.IsAbs(path) {
-			resolvedPath = filepath.Join(root, path)
-		}
-
-		force, _ := args["force"].(bool)
-		if _, has := args["force"]; has {
-			delete(args, "force")
-		}
-
-		stat, statErr := os.Stat(resolvedPath)
-		if statErr != nil {
-			return orig(ctx, args)
-		}
-
-		key := sessionOrAgent(ctx, agentID)
-		mtime := stat.ModTime().UnixNano()
-
-		if !force {
-			mu.Lock()
-			prevMtime, seen := cache[key][resolvedPath]
-			mu.Unlock()
-			if seen && prevMtime == mtime {
-				return map[string]any{
-					"unchanged": true,
-					"path":      path,
-					"mtime":     stat.ModTime().Format(time.RFC3339),
-					"hint":      "content unchanged since last read; pass force=true to re-read anyway",
-				}, nil
-			}
-		}
-
-		outlineOnly, hasOutlineOnly := args["outline_only"].(bool)
-		explicitlyFullContent := hasOutlineOnly && !outlineOnly
-		canOutline := args["start_line"] == nil &&
-			args["end_line"] == nil &&
-			!explicitlyFullContent &&
-			strings.HasSuffix(resolvedPath, ".go") &&
-			stat.Size() > outlineSizeThreshold
-
-		if canOutline {
-			outline, outlineErr := goOutline(resolvedPath)
-			if outlineErr == nil && len(outline) > 0 {
-				mu.Lock()
-				if cache[key] == nil {
-					cache[key] = make(map[string]int64)
-				}
-				cache[key][resolvedPath] = mtime
-				mu.Unlock()
-				return map[string]any{
-					"path":         path,
-					"outline":      true,
-					"declarations": outline,
-					"hint":         "outline only (no function bodies); call file_read again with start_line/end_line, or outline_only=false, for full source",
-				}, nil
-			}
-		}
-
-		result, err := orig(ctx, args)
+		start, err := lineArg(args, "start_line", 1)
 		if err != nil {
-			return result, err
+			return nil, err
 		}
-
-		startArg, hasStart := intArg(args, "start_line")
-		endArg, hasEnd := intArg(args, "end_line")
-		if resMap, ok := result.(map[string]any); ok && (hasStart || hasEnd) {
-			if content, ok := resMap["content"].(string); ok {
-				lines := strings.Split(content, "\n")
-				total := len(lines)
-				start, end := clampLineRange(startArg, hasStart, endArg, hasEnd, total)
-				resMap["content"] = strings.Join(lines[start-1:end], "\n")
-				resMap["start_line"] = start
-				resMap["end_line"] = end
-				resMap["total_lines"] = total
+		end, err := lineArg(args, "end_line", 0)
+		if err != nil {
+			return nil, err
+		}
+		if end != 0 && end < start {
+			return nil, fmt.Errorf("file_read: end_line must be >= start_line")
+		}
+		for _, key := range []string{"force", "outline_only"} {
+			if v, exists := args[key]; exists {
+				if _, ok := v.(bool); !ok {
+					return nil, fmt.Errorf("file_read: %s must be a boolean", key)
+				}
 			}
 		}
-
-		mu.Lock()
-		if cache[key] == nil {
-			cache[key] = make(map[string]int64)
+		resolved := resolvePath(root, path)
+		stat, err := os.Stat(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("file_read: %w", err)
 		}
-		cache[key][resolvedPath] = mtime
-		mu.Unlock()
-		return result, err
+		outline, explicit := args["outline_only"].(bool)
+		canOutline := args["start_line"] == nil && args["end_line"] == nil &&
+			(!explicit || outline) && strings.HasSuffix(resolved, ".go") &&
+			stat.Mode().IsRegular() && stat.Size() <= maxOutlineBytes &&
+			(outline || stat.Size() > outlineSizeThreshold)
+		if canOutline {
+			decls, outlineErr := goOutline(ctx, resolved)
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("file_read: %w", ctx.Err())
+			}
+			if outlineErr == nil && len(decls) > 0 {
+				return map[string]any{"path": resolved, "outline": true, "declarations": decls,
+					"hint": "outline only; use start_line/end_line or outline_only=false for source"}, nil
+			}
+		}
+		return readRange(ctx, resolved, start, end)
 	}
+}
+
+func resolvePath(root, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
+}
+
+// readRange stops at the requested end, rather than scanning the remainder just
+// to count it. total_lines is nil unless EOF is observed (Split-style lines,
+// including the empty final line after a trailing newline).
+func readRange(ctx context.Context, path string, start, end int) (any, error) {
+	var content strings.Builder
+	last := start - 1
+	truncated := false
+	stats, err := scanFile(ctx, path, maxScanBytes, func(n int, line string) error {
+		if n < start {
+			return nil
+		}
+		separator := 0
+		if last >= start {
+			separator = 1
+		}
+		if content.Len()+separator+len(line) > maxOutputBytes {
+			truncated = true
+			return errStopScan
+		}
+		if separator != 0 {
+			content.WriteByte('\n')
+		}
+		content.WriteString(line)
+		last = n
+		if end != 0 && n == end {
+			return errStopScan
+		}
+		return nil
+	})
+	if errors.Is(err, errScanLimit) && last >= start {
+		truncated = true
+	} else if err != nil {
+		return nil, fmt.Errorf("file_read %q: %w", path, err)
+	}
+	if last < start {
+		return nil, fmt.Errorf("file_read: start_line %d is beyond EOF (%d total lines)", start, stats.lines)
+	}
+	result := map[string]any{"path": path, "content": content.String(), "start_line": start,
+		"end_line": last, "total_lines": nil, "truncated": truncated}
+	if stats.complete {
+		result["total_lines"] = stats.lines
+	}
+	if truncated {
+		result["next_start_line"] = last + 1
+		result["hint"] = "bounded prefix; request a narrower range starting at next_start_line (8 MiB scan limit still applies)"
+	}
+	return result, nil
 }
 
 // toolProperties returns def's JSON Schema "properties" map, initializing
@@ -211,86 +223,58 @@ func toolProperties(def *tool.Definition) map[string]any {
 	return props
 }
 
-// intArg extracts an integer argument that may have been decoded as any of
-// Go's JSON-numeric types (float64 from encoding/json, or a plain int from a
-// caller that built args directly).
-func intArg(args map[string]any, key string) (int, bool) {
+func lineArg(args map[string]any, key string, fallback int) (int, error) {
+	if _, exists := args[key]; !exists {
+		return fallback, nil
+	}
+	n := 0
 	switch v := args[key].(type) {
 	case float64:
-		return int(v), true
+		// float64(MaxInt) rounds up on 64-bit machines, so reject that edge.
+		if v >= 1 && v < float64(math.MaxInt) && math.Trunc(v) == v {
+			n = int(v)
+		}
 	case int:
-		return v, true
-	default:
-		return 0, false
+		n = v
 	}
+	if n < 1 {
+		return 0, fmt.Errorf("file_read: %s must be a positive integer within the supported line range", key)
+	}
+	return n, nil
 }
 
-// clampLineRange resolves a requested (start, end) line range against a
-// file's total line count, defaulting an omitted bound to the corresponding
-// edge of the file and clamping both to [1, total].
-func clampLineRange(start int, hasStart bool, end int, hasEnd bool, total int) (int, int) {
-	if !hasStart {
-		start = 1
-	}
-	if !hasEnd {
-		end = total
-	}
-	if start < 1 {
-		start = 1
-	}
-	if end > total {
-		end = total
-	}
-	if end < start {
-		end = start
-	}
-	return start, end
-}
-
-// WrapGrep wraps a's registered "file_grep" tool handler so that, in
-// addition to the SDK's single-file substring search, path may be a
-// directory (searched recursively, skipping grepSkipDirs) and pattern may be
-// a regular expression when regex=true is passed. root is used to resolve
-// relative paths, matching how the underlying file_grep tool resolves them.
-// WrapGrep is a no-op if a has no "file_grep" tool registered.
+// WrapGrep installs bounded literal/regex search for files and directories.
+// Directory traversal is batched (not WalkDir's whole-directory sort), skips
+// symlinks/special files, and has aggregate byte, entry, depth and output limits.
+// Ignore names are explicit below; this is not a gitignore interpreter.
 func WrapGrep(a *agent.Agent, root string) {
 	def, ok := a.Tools.Get(fileGrepTool)
 	if !ok {
 		return
 	}
-	orig := def.Handler
-
-	def.Description = "Search for a pattern in a file or, if path is a directory, recursively in every file beneath it (skipping .git, vendor, node_modules). Set regex=true to treat pattern as a regular expression (supports alternation like \"foo|bar\"); otherwise it's a plain substring match."
+	def.Description = "Search a file or directory recursively, skipping binary files, symlinks and .git/.hg/.svn/vendor/node_modules/.chronos-code/.venv/__pycache__ directories. Set regex=true for a regular expression; otherwise matches a literal substring. Bounded to 500 matches, 256 KiB output, 64 KiB lines, 8 MiB per file, 32 MiB total, 10000 entries and 64 directory levels. Check truncated for incomplete searches."
 	toolProperties(def)["regex"] = map[string]any{
 		"type":        "boolean",
 		"description": "Treat pattern as a regular expression instead of a literal substring",
 	}
 
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("file_grep: %w", err)
+		}
 		p, _ := args["path"].(string)
 		pattern, _ := args["pattern"].(string)
 		useRegex, _ := args["regex"].(bool)
 		if p == "" || pattern == "" {
-			return orig(ctx, args)
+			return nil, fmt.Errorf("file_grep: 'path' and non-empty 'pattern' arguments are required")
 		}
-
-		resolvedPath := p
-		if !filepath.IsAbs(p) {
-			resolvedPath = filepath.Join(root, p)
+		if len(pattern) > maxLineBytes {
+			return nil, fmt.Errorf("file_grep: pattern exceeds 64 KiB")
 		}
-
-		info, statErr := os.Stat(resolvedPath)
+		resolvedPath := resolvePath(root, p)
+		info, statErr := os.Lstat(resolvedPath)
 		if statErr != nil {
-			if !useRegex {
-				// Defer to the SDK's own error path for a plain search.
-				return orig(ctx, args)
-			}
 			return nil, fmt.Errorf("file_grep: %w", statErr)
-		}
-		if !info.IsDir() && !useRegex {
-			// Plain substring search on a single file: the SDK handler
-			// already does exactly this.
-			return orig(ctx, args)
 		}
 
 		var matcher func(line string) bool
@@ -304,74 +288,246 @@ func WrapGrep(a *agent.Agent, root string) {
 			matcher = func(line string) bool { return strings.Contains(line, pattern) }
 		}
 
-		if !info.IsDir() {
-			matches, err := grepFile(resolvedPath, matcher, grepMaxMatches)
-			if err != nil {
-				return nil, fmt.Errorf("file_grep: %w", err)
-			}
-			return map[string]any{"path": resolvedPath, "pattern": pattern, "matches": matches}, nil
+		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0)}
+		var err error
+		if info.IsDir() {
+			err = search.walk(ctx, resolvedPath, 0)
+		} else if info.Mode().IsRegular() {
+			err = search.file(ctx, resolvedPath, false)
+		} else {
+			return nil, fmt.Errorf("file_grep: path must be a regular file or directory, not a symlink or special file")
 		}
-
-		var matches []map[string]any
-		truncated := false
-		walkErr := filepath.WalkDir(resolvedPath, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				if grepSkipDirs[d.Name()] {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if len(matches) >= grepMaxMatches {
-				truncated = true
-				return filepath.SkipAll
-			}
-			fileMatches, err := grepFile(path, matcher, grepMaxMatches-len(matches))
-			if err != nil {
-				return nil
-			}
-			for _, m := range fileMatches {
-				m["file"] = path
-				matches = append(matches, m)
-			}
-			return nil
-		})
-		if walkErr != nil {
-			return nil, fmt.Errorf("file_grep: %w", walkErr)
+		if err != nil {
+			return nil, fmt.Errorf("file_grep: %w", err)
 		}
 		return map[string]any{
 			"path":      resolvedPath,
 			"pattern":   pattern,
-			"recursive": true,
-			"matches":   matches,
-			"truncated": truncated,
+			"recursive": info.IsDir(),
+			"matches":   search.matches,
+			"truncated": search.truncated,
 		}, nil
 	}
 }
 
-// grepFile scans path line by line and returns up to maxMatches lines
-// satisfying matcher.
-func grepFile(path string, matcher func(string) bool, maxMatches int) ([]map[string]any, error) {
-	data, err := os.ReadFile(path)
+type grepSearch struct {
+	matcher   func(string) bool
+	matches   []map[string]any
+	remaining int64
+	output    int
+	entries   int
+	truncated bool
+	stopped   bool
+}
+
+func (s *grepSearch) file(ctx context.Context, path string, recursive bool) error {
+	before, outputBefore := len(s.matches), s.output
+	stats, err := scanFile(ctx, path, min(int64(maxScanBytes), s.remaining), func(n int, line string) error {
+		if strings.IndexByte(line, 0) >= 0 || !utf8.ValidString(line) {
+			return errBinary
+		}
+		if !s.matcher(line) {
+			return nil
+		}
+		// Allow for JSON escaping (up to six bytes per source byte), keys,
+		// coordinates, and repeated file paths, not just matched text.
+		cost := 6*len(line) + 80
+		if recursive {
+			cost += 6 * len(path)
+		}
+		if len(s.matches) >= grepMaxMatches || s.output+cost > maxOutputBytes {
+			s.truncated, s.stopped = true, true
+			return errStopScan
+		}
+		m := map[string]any{"line_number": n, "content": line}
+		if recursive {
+			m["file"] = path
+		}
+		s.matches = append(s.matches, m)
+		s.output += cost
+		if len(s.matches) == grepMaxMatches {
+			s.truncated, s.stopped = true, true
+			return errStopScan
+		}
+		return nil
+	})
+	s.remaining -= stats.bytes
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, errBinary) {
+		// Discard earlier text matches if a later scanned line identifies binary.
+		s.matches, s.output = s.matches[:before], outputBefore
+		return nil
+	}
+	if errors.Is(err, errScanLimit) || errors.Is(err, errLongLine) {
+		s.truncated = true
+		return nil
+	}
+	return err
+}
+
+func (s *grepSearch) walk(ctx context.Context, path string, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if grepSkipDirs[filepath.Base(path)] {
+		return nil
+	}
+	if depth >= grepMaxDepth {
+		s.truncated = true
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.stopped || s.remaining <= 0 || s.entries >= grepMaxEntries {
+			s.truncated, s.stopped = true, true
+			return nil
+		}
+		entries, readErr := dir.ReadDir(128)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if s.stopped || s.remaining <= 0 || s.entries >= grepMaxEntries {
+				s.truncated, s.stopped = true, true
+				return nil
+			}
+			s.entries++
+			child := filepath.Join(path, entry.Name())
+			var err error
+			if entry.IsDir() {
+				err = s.walk(ctx, child, depth+1)
+			} else if entry.Type().IsRegular() {
+				err = s.file(ctx, child, true)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err != nil {
+				// Unreadable/disappeared entries make a recursive search partial.
+				s.truncated = true
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+type scanStats struct {
+	bytes    int64
+	lines    int
+	complete bool
+}
+
+// budgetReader checks cancellation at every buffered IO boundary and never
+// consumes beyond its byte allowance. Exhaustion is not confused with EOF.
+type budgetReader struct {
+	ctx       context.Context
+	r         io.Reader
+	remaining int64
+}
+
+func (r *budgetReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if r.remaining <= 0 {
+		return 0, errScanLimit
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
+func openRegular(path string) (*os.File, error) {
+	// Reject devices/FIFOs before opening: a canceled context cannot interrupt
+	// a blocked FIFO open. Regular filesystem syscalls themselves are synchronous.
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(string(data), "\n")
-	var matches []map[string]any
-	for i, line := range lines {
-		if len(matches) >= maxMatches {
-			break
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%q is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err = f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		if err != nil {
+			return nil, err
 		}
-		if matcher(line) {
-			matches = append(matches, map[string]any{
-				"line_number": i + 1,
-				"content":     line,
-			})
+		return nil, fmt.Errorf("%q is not a regular file", path)
+	}
+	return f, nil
+}
+
+func scanFile(ctx context.Context, path string, limit int64, visit func(int, string) error) (scanStats, error) {
+	if err := ctx.Err(); err != nil {
+		return scanStats{}, err
+	}
+	f, err := openRegular(path)
+	if err != nil {
+		return scanStats{}, err
+	}
+	defer f.Close()
+	return scanLines(ctx, f, limit, visit)
+}
+
+func scanLines(ctx context.Context, input io.Reader, limit int64, visit func(int, string) error) (stats scanStats, err error) {
+	r := &budgetReader{ctx: ctx, r: input, remaining: limit}
+	defer func() { stats.bytes = limit - r.remaining }()
+	reader := bufio.NewReaderSize(r, maxLineBytes+1)
+	for n := 1; ; n++ {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		line, readErr := reader.ReadSlice('\n')
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			return stats, errLongLine
+		}
+		if readErr != nil && readErr != io.EOF {
+			return stats, readErr
+		}
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		if len(line) > maxLineBytes {
+			return stats, errLongLine
+		}
+		stats.lines, stats.complete = n, readErr == io.EOF
+		visitErr := visit(n, string(line))
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		if visitErr != nil {
+			if errors.Is(visitErr, errStopScan) {
+				return stats, nil
+			}
+			return stats, visitErr
+		}
+		if stats.complete {
+			return stats, nil
 		}
 	}
-	return matches, nil
 }
 
 // goOutline parses the Go source file at path and returns one string per
@@ -380,17 +536,39 @@ func grepFile(path string, matcher func(string) bool, maxMatches int) ([]map[str
 // very long) for *ast.GenDecl (const/var/type groups). Declarations that
 // can't be confidently rendered are skipped rather than aborting the whole
 // outline. Returns (nil, err) on a genuine parse failure.
-func goOutline(path string) ([]string, error) {
+func goOutline(ctx context.Context, path string) ([]string, error) {
+	f, err := openRegular(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Bound the parser input even if the file grows after stat. No unbounded
+	// parser file read, and cancellation is checked during input and rendering.
+	data, err := io.ReadAll(&budgetReader{ctx: ctx, r: f, remaining: maxOutlineBytes + 1})
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxOutlineBytes {
+		return nil, errScanLimit
+	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	file, err := parser.ParseFile(fset, path, data, parser.ParseComments)
 	if err != nil {
 		return nil, err
 	}
 
 	outline := make([]string, 0, len(file.Decls))
+	size := 0
 	for _, decl := range file.Decls {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if s, ok := renderDecl(fset, decl); ok {
+			if len(s) > maxLineBytes || size+len(s) > maxOutputBytes {
+				return nil, errScanLimit
+			}
 			outline = append(outline, s)
+			size += len(s)
 		}
 	}
 	return outline, nil
@@ -431,13 +609,4 @@ func renderDecl(fset *token.FileSet, decl ast.Decl) (s string, ok bool) {
 	default:
 		return "", false
 	}
-}
-
-// sessionOrAgent resolves a per-conversation cache key: the active session
-// ID if one is present on ctx, falling back to the agent's own ID.
-func sessionOrAgent(ctx context.Context, agentID string) string {
-	if id := storage.SessionFromContext(ctx); id != "" {
-		return id
-	}
-	return agentID
 }

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"github.com/spawn08/chronos/engine/hooks"
@@ -15,11 +18,15 @@ import (
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
+	storagememory "github.com/spawn08/chronos/storage/adapters/memory"
+	storagesqlite "github.com/spawn08/chronos/storage/adapters/sqlite"
 
 	"github.com/spawn08/chronos-code/internal/activation"
 	"github.com/spawn08/chronos-code/internal/apierror"
+	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/graph"
+	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/verification"
 )
@@ -428,9 +435,18 @@ type failNProvider struct {
 	mu        sync.Mutex
 	failsLeft int
 	failErr   error
+	calls     atomic.Int32
+	started   chan struct{}
 }
 
 func (p *failNProvider) Chat(_ context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+	p.calls.Add(1)
+	if p.started != nil {
+		select {
+		case p.started <- struct{}{}:
+		default:
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failsLeft > 0 {
@@ -441,6 +457,13 @@ func (p *failNProvider) Chat(_ context.Context, _ *model.ChatRequest) (*model.Ch
 }
 
 func (p *failNProvider) StreamChat(_ context.Context, _ *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	p.calls.Add(1)
+	if p.started != nil {
+		select {
+		case p.started <- struct{}{}:
+		default:
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failsLeft > 0 {
@@ -456,99 +479,247 @@ func (p *failNProvider) StreamChat(_ context.Context, _ *model.ChatRequest) (<-c
 func (p *failNProvider) Name() string  { return "test" }
 func (p *failNProvider) Model() string { return "test-model" }
 
-func TestExecuteRetriesTransientErrors(t *testing.T) {
-	apiErr := &model.APIError{StatusCode: 429, Status: "429 Too Many Requests"}
-	provider := &failNProvider{failsLeft: 1, failErr: fmt.Errorf("anthropic chat: %w", apiErr)}
-	a := newExecutionTestAgent("coder", provider)
-	orch := &Orchestrator{
-		agents:         map[string]*agent.Agent{"coder": a},
-		active:         "coder",
-		routingState:   make(map[string]router.Classification),
-		modelOverrides: make(map[string]bool),
+func TestExecutePreservesSDKTransientRetry(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		for _, persistent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("mode=%d/persistent=%t", mode, persistent), func(t *testing.T) {
+				provider := &failNProvider{failsLeft: 1, failErr: &model.APIError{StatusCode: 429}}
+				a := newExecutionTestAgent("coder", provider)
+				if persistent {
+					a.Storage = storagememory.New()
+				}
+				orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder"}
+				t.Cleanup(func() { _ = orch.Close() })
+				response, err := executeTestTurn(context.Background(), orch, ExecutionRequest{Message: "hello", SessionID: "retry-session", Mode: mode})
+				if err != nil || response == nil || response.Content != "recovered" || provider.calls.Load() != 2 {
+					t.Fatalf("response=%+v err=%v calls=%d; want SDK recovery in 2 attempts", response, err, provider.calls.Load())
+				}
+			})
+		}
 	}
+}
 
-	result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "hello"})
+// Classification is presentation metadata, not permission to retry a chat. The
+// SDK alone decides which requests can be retried and when its bound is spent.
+func TestExecuteReturnsClassifiedErrorWithoutOuterRetry(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		for _, failure := range []struct {
+			name     string
+			err      error
+			category apierror.Category
+			calls    int32
+		}{
+			{"exhausted", &model.APIError{StatusCode: 529, RetryAfter: time.Millisecond}, apierror.CategoryOverloaded, 2},
+			{"auth", &model.APIError{StatusCode: 401}, apierror.CategoryAuth, 1},
+			{"untyped-overload", errors.New("provider overloaded"), apierror.CategoryOverloaded, 1},
+			{"long-retry-after", &model.APIError{StatusCode: 429, RetryAfter: time.Hour}, apierror.CategoryRateLimited, 1},
+		} {
+			t.Run(fmt.Sprintf("mode=%d/%s", mode, failure.name), func(t *testing.T) {
+				provider := &failNProvider{failsLeft: 100, failErr: failure.err}
+				orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)}, active: "coder"}
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				_, err := executeTestTurn(ctx, orch, ExecutionRequest{Message: "hello", Mode: mode})
+				var classified *apierror.Classified
+				if !errors.Is(err, failure.err) || !errors.As(err, &classified) || classified.Category != failure.category || provider.calls.Load() != failure.calls {
+					t.Fatalf("error=%v (%T) calls=%d; want category=%s, original error and %d SDK attempts", err, err, provider.calls.Load(), failure.category, failure.calls)
+				}
+			})
+		}
+	}
+}
+
+func TestExecuteCancellationStopsSDKRetry(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			provider := &failNProvider{failsLeft: 100, failErr: &model.APIError{StatusCode: 503, RetryAfter: time.Second}, started: make(chan struct{}, 1)}
+			orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)}, active: "coder"}
+			done := make(chan error, 1)
+			go func() {
+				_, err := executeTestTurn(ctx, orch, ExecutionRequest{Message: "hello", Mode: mode})
+				done <- err
+			}()
+			select {
+			case <-provider.started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("provider call did not start")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) || provider.calls.Load() != 1 {
+					t.Fatalf("cancellation error=%v calls=%d; want context.Canceled and one attempt", err, provider.calls.Load())
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("cancellation did not stop execution")
+			}
+		})
+	}
+}
+
+type executionRejectingGuard struct {
+	checks atomic.Int32
+}
+
+func (g *executionRejectingGuard) Check(context.Context, string) guardrails.Result {
+	g.checks.Add(1)
+	return guardrails.Result{Reason: "context_length exceeded"}
+}
+
+func TestExecutePreflightFailureDoesNotResubmitSession(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			provider := &failNProvider{}
+			a := newExecutionTestAgent("coder", provider)
+			a.Storage = storagememory.New()
+			guard := &executionRejectingGuard{}
+			a.Guardrails.AddRule(guardrails.Rule{Name: "preflight", Position: guardrails.Input, Guardrail: guard})
+			orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", sessions: map[string]string{"coder": "preflight-session"}}
+			t.Cleanup(func() { _ = orch.Close() })
+			// Session chat persists the user before input validation. Even a
+			// synchronous streaming-start failure must not resubmit that user.
+			_, err := executeTestTurn(context.Background(), orch, ExecutionRequest{Message: "task", SessionID: "preflight-session", Mode: mode})
+			var classified *apierror.Classified
+			if !errors.As(err, &classified) || classified.Category != apierror.CategoryContextLength {
+				t.Fatalf("preflight error=%v (%T), want classified context error", err, err)
+			}
+			events, err := a.Storage.ListEvents(context.Background(), "preflight-session", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if guard.checks.Load() != 1 || provider.calls.Load() != 0 || len(events) != 1 {
+				t.Fatalf("preflight checks=%d provider calls=%d ledger events=%d; want 1, 0, 1", guard.checks.Load(), provider.calls.Load(), len(events))
+			}
+		})
+	}
+}
+
+type mutationFailureProvider struct {
+	calls atomic.Int32
+	err   error
+}
+
+func (p *mutationFailureProvider) Name() string  { return "mutation-failure" }
+func (p *mutationFailureProvider) Model() string { return "test-model" }
+func (p *mutationFailureProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
+	p.calls.Add(1)
+	for _, message := range req.Messages {
+		if message.Role == model.RoleTool {
+			return nil, p.err
+		}
+	}
+	return &model.ChatResponse{StopReason: model.StopReasonToolCall, ToolCalls: []model.ToolCall{{
+		ID: "mutation", Name: "mutate", Arguments: `{}`,
+	}}}, nil
+}
+
+func (p *mutationFailureProvider) StreamChat(ctx context.Context, req *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	response, err := p.Chat(ctx, req)
 	if err != nil {
-		t.Fatalf("Execute() should have retried and succeeded, got error: %v", err)
+		return nil, err
 	}
-	if result.Response == nil || result.Response.Content != "recovered" {
-		t.Fatalf("Execute() response = %v, want recovered", result.Response)
-	}
+	stream := make(chan *model.ChatResponse, 1)
+	stream <- response
+	close(stream)
+	return stream, nil
 }
 
-// Note: streaming model errors flow through the channel (resp.Err), not as
-// direct return values from ChatStream. The agent SDK only returns errors
-// directly for pre-flight failures (no model, guardrails, session setup).
-// Streaming model error recovery is handled at the TUI layer.
-
-func TestExecuteReturnsClassifiedErrorWhenRetriesExhausted(t *testing.T) {
-	apiErr := &model.APIError{StatusCode: 529, Status: "529 Overloaded"}
-	provider := &failNProvider{failsLeft: 100, failErr: fmt.Errorf("anthropic chat: %w", apiErr)}
-	a := newExecutionTestAgent("coder", provider)
-	orch := &Orchestrator{
-		agents:         map[string]*agent.Agent{"coder": a},
-		active:         "coder",
-		routingState:   make(map[string]router.Classification),
-		modelOverrides: make(map[string]bool),
+// executeTestTurn drains the public stream so ledger/episode assertions observe
+// completed execution, including the SDK's terminal error chunk.
+func executeTestTurn(ctx context.Context, orch *Orchestrator, request ExecutionRequest) (*model.ChatResponse, error) {
+	result, err := orch.Execute(ctx, request)
+	if err != nil || result.Stream == nil {
+		return result.Response, err
 	}
-
-	_, err := orch.Execute(context.Background(), ExecutionRequest{Message: "hello"})
+	response := &model.ChatResponse{}
+	for chunk := range result.Stream {
+		if chunk != nil {
+			response.Content += chunk.Content
+			if chunk.Err != nil {
+				err = chunk.Err
+			}
+		}
+	}
 	if err == nil {
-		t.Fatal("Execute() should have returned an error after exhausting retries")
+		err = ctx.Err()
 	}
-	var classified *apierror.Classified
-	if !errors.As(err, &classified) {
-		t.Fatalf("Execute() error should be *apierror.Classified, got %T: %v", err, err)
-	}
-	if classified.Category != apierror.CategoryOverloaded {
-		t.Errorf("classified.Category = %v, want %v", classified.Category, apierror.CategoryOverloaded)
-	}
+	return response, err
 }
 
-func TestExecuteDoesNotRetryTerminalErrors(t *testing.T) {
-	apiErr := &model.APIError{StatusCode: 401, Status: "401 Unauthorized"}
-	callCount := 0
-	provider := &failNProvider{failsLeft: 100, failErr: fmt.Errorf("anthropic chat: %w", apiErr)}
-	// Wrap to count calls
-	countingProvider := &countingProviderWrapper{inner: provider, count: &callCount}
-	a := newExecutionTestAgent("coder", countingProvider)
-	orch := &Orchestrator{
-		agents:         map[string]*agent.Agent{"coder": a},
-		active:         "coder",
-		routingState:   make(map[string]router.Classification),
-		modelOverrides: make(map[string]bool),
-	}
-
-	_, err := orch.Execute(context.Background(), ExecutionRequest{Message: "hello"})
-	if err == nil {
-		t.Fatal("Execute() should have returned an auth error")
-	}
-	var classified *apierror.Classified
-	if !errors.As(err, &classified) {
-		t.Fatalf("Execute() error should be *apierror.Classified, got %T", err)
-	}
-	if classified.Category != apierror.CategoryAuth {
-		t.Errorf("classified.Category = %v, want %v", classified.Category, apierror.CategoryAuth)
-	}
-	if callCount != 1 {
-		t.Errorf("terminal errors should not be retried, got %d calls", callCount)
+func TestExecuteFailureAfterMutationDoesNotReplayTask(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		for _, failure := range []struct {
+			name     string
+			err      *model.APIError
+			category apierror.Category
+			calls    int32
+		}{
+			{"transient", &model.APIError{StatusCode: 503, RetryAfter: time.Millisecond}, apierror.CategoryServerError, 3},
+			{"too-large", &model.APIError{StatusCode: 413}, apierror.CategoryRequestTooLarge, 2},
+			{"context-length", &model.APIError{StatusCode: 400, Body: "context_length exceeded"}, apierror.CategoryContextLength, 2},
+		} {
+			t.Run(fmt.Sprintf("mode=%d/%s", mode, failure.name), func(t *testing.T) {
+				ctx := storage.WithSession(context.Background(), "mutation-session")
+				store, err := storagesqlite.New(filepath.Join(t.TempDir(), "sessions.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				orch := &Orchestrator{store: store}
+				t.Cleanup(func() { _ = orch.Close() })
+				if err := store.Migrate(ctx); err != nil {
+					t.Fatal(err)
+				}
+				provider := &mutationFailureProvider{err: failure.err}
+				a := newExecutionTestAgent("coder", provider)
+				a.Storage = store
+				var mutations atomic.Int32
+				a.Tools.Register(&tool.Definition{Name: "mutate", Permission: tool.PermAllow, Handler: func(context.Context, map[string]any) (any, error) {
+					mutations.Add(1)
+					return "mutation committed", nil
+				}})
+				layers, err := memory.OpenLayerStore(ctx, filepath.Join(t.TempDir(), "memory.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				tracker := budget.NewTracker(1000, 500)
+				if err := tracker.After(ctx, &hooks.Event{Type: hooks.EventModelCallAfter, Output: &model.ChatResponse{Usage: model.Usage{PromptTokens: 100}}}); err != nil {
+					t.Fatal(err)
+				}
+				*orch = Orchestrator{
+					agents: map[string]*agent.Agent{"coder": a}, active: "coder", store: store,
+					sessions: map[string]string{"coder": "mutation-session"}, budget: tracker,
+					runtimeMemory: &runtimeMemory{store: layers, options: memory.LayerOptions{ProjectID: "project"}, stop: make(chan struct{})},
+				}
+				_, executionErr := executeTestTurn(ctx, orch, ExecutionRequest{
+					Message: "perform mutation", RequestedAgent: "coder", SessionID: "mutation-session", Mode: mode,
+				})
+				events, err := store.ListEvents(ctx, "mutation-session", 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				users := 0
+				for _, event := range events {
+					if payload, ok := event.Payload.(map[string]any); ok && event.Type == "chat_message" && payload["role"] == "user" {
+						users++
+					}
+				}
+				if mutations.Load() != 1 || users != 1 || provider.calls.Load() != failure.calls {
+					t.Errorf("mutations=%d user ledger entries=%d provider calls=%d; want 1, 1, %d", mutations.Load(), users, provider.calls.Load(), failure.calls)
+				}
+				if used := tracker.Used("mutation-session"); used != 100 {
+					t.Errorf("error reset cumulative usage: got %d, want 100", used)
+				}
+				var classified *apierror.Classified
+				if !errors.Is(executionErr, failure.err) || !errors.As(executionErr, &classified) || classified.Category != failure.category {
+					t.Errorf("error=%v (%T), want original error with category %s", executionErr, executionErr, failure.category)
+				}
+				episodes, err := layers.Recall(ctx, orch.runtimeMemory.options, memory.LayerQuery{Scope: memory.ScopeProject, Kind: memory.KindEpisodic})
+				if err != nil || len(episodes) != 1 || !strings.Contains(episodes[0].Content, "Outcome (failed)") || episodes[0].Provenance.SessionID != "mutation-session" {
+					t.Errorf("failure episode forwarding: %+v, %v", episodes, err)
+				}
+			})
+		}
 	}
 }
-
-type countingProviderWrapper struct {
-	inner model.Provider
-	count *int
-}
-
-func (w *countingProviderWrapper) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
-	*w.count++
-	return w.inner.Chat(ctx, req)
-}
-
-func (w *countingProviderWrapper) StreamChat(ctx context.Context, req *model.ChatRequest) (<-chan *model.ChatResponse, error) {
-	*w.count++
-	return w.inner.StreamChat(ctx, req)
-}
-
-func (w *countingProviderWrapper) Name() string  { return w.inner.Name() }
-func (w *countingProviderWrapper) Model() string { return w.inner.Model() }

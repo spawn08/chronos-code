@@ -7,8 +7,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
@@ -27,6 +31,277 @@ var (
 // lipgloss.Style is a value type — calling .Width() / .MaxWidth() on these returns
 // a new copy without mutating the base, so sharing them across concurrent calls is safe.
 var truncateBaseStyle = lipgloss.NewStyle()
+
+// Inspection is a read-only snapshot. Its viewport owns scrolling separately
+// from the transcript, so inspecting a running turn never jumps live output.
+type inspectionOverlay struct {
+	title    string
+	content  string
+	viewport viewport.Model
+	width    int
+	overview string
+	entries  []inspectionEntry
+	entry    int
+}
+
+type inspectionEntry struct{ title, content string }
+
+func (m *appModel) openInspection(title, content string) {
+	m.inspection = &inspectionOverlay{title: title, content: limitInspection(content), viewport: viewport.New(), entry: -1}
+	m.inspection.overview = m.inspection.content
+	m.inspection.resize(m.width, m.height)
+}
+
+func (v *inspectionOverlay) resize(width, height int) {
+	width = max(1, width)
+	v.viewport.SetWidth(width)
+	v.viewport.SetHeight(max(1, height-4))
+	if v.width != width {
+		offset := v.viewport.YOffset()
+		v.viewport.SetContent(wrapText(ansi.Strip(v.content), width))
+		v.viewport.SetYOffset(offset)
+		v.width = width
+	}
+}
+
+func (v *inspectionOverlay) View() string {
+	header := truncateToWidth(styleHeader.Render(v.title+" · snapshot"), v.width)
+	footer := truncateToWidth(fmt.Sprintf("↑↓ pgup/pgdn home/end · esc · %.0f%%", v.viewport.ScrollPercent()*100), v.width)
+	if len(v.entries) > 0 {
+		footer = truncateToWidth(fmt.Sprintf("←→ detail %d/%d · ↑↓ pg · esc", v.entry+1, len(v.entries)), v.width)
+	}
+	return joinLayout(header, v.viewport.View(), styleDim.Render(footer))
+}
+
+func (m *appModel) handleInspectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+shift+c" {
+		return m, m.copyClipboardCmd(ansi.Strip(m.inspection.content), "copied inspection")
+	}
+	switch msg.Code {
+	case tea.KeyEsc:
+		m.inspection = nil
+		return m, nil
+	case tea.KeyHome:
+		m.inspection.viewport.GotoTop()
+		return m, nil
+	case tea.KeyEnd:
+		m.inspection.viewport.GotoBottom()
+		return m, nil
+	case tea.KeyLeft, tea.KeyRight:
+		v := m.inspection
+		if len(v.entries) == 0 {
+			return m, nil
+		}
+		delta := 1
+		if msg.Code == tea.KeyLeft {
+			delta = -1
+		}
+		v.entry = min(len(v.entries)-1, max(-1, v.entry+delta))
+		if v.entry < 0 {
+			v.title, v.content = "Turn overview · read-only", v.overview
+		} else {
+			v.title = v.entries[v.entry].title + " · read-only"
+			v.content = limitInspection(v.entries[v.entry].content)
+		}
+		v.width = 0
+		v.resize(m.width, m.height)
+		v.viewport.GotoTop()
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.inspection.viewport, cmd = m.inspection.viewport.Update(msg)
+	return m, cmd
+}
+
+func limitInspection(s string) string {
+	if len(s) <= maxInspectionBytes {
+		return s
+	}
+	s = s[:maxInspectionBytes]
+	for n := 0; n < utf8.UTFMax-1 && len(s) > 0 && !utf8.ValidString(s); n++ {
+		s = s[:len(s)-1]
+	}
+	s = strings.ToValidUTF8(s, "�")
+	return s + "\n[inspection capped at 1 MiB; retrieve source/artifact paths for remaining data]"
+}
+
+// boundedTextTail returns a view onto the existing string. It never copies or
+// scans the omitted prefix, including a multi-megabyte single-line response.
+func boundedTextTail(s string, byteLimit, lineLimit int) string {
+	start := max(0, len(s)-max(0, byteLimit))
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	lines := 0
+	for i := len(s) - 1; i >= start; i-- {
+		if s[i] == '\n' {
+			lines++
+			if lines >= lineLimit {
+				start = i + 1
+				break
+			}
+		}
+	}
+	return s[start:]
+}
+
+func boundedTranscriptJoin(parts []string) string {
+	var tails []string
+	remaining, lines := maxRenderBytes, 0
+	for i := len(parts) - 1; i >= 0 && remaining > 0 && lines < maxViewportLines; i-- {
+		part := boundedTextTail(parts[i], remaining, maxViewportLines-lines)
+		tails = append(tails, part)
+		remaining -= len(part) + 2
+		lines += strings.Count(part, "\n") + 2
+	}
+	for i, j := 0, len(tails)-1; i < j; i, j = i+1, j-1 {
+		tails[i], tails[j] = tails[j], tails[i]
+	}
+	return boundedTextTail(strings.Join(tails, "\n\n"), maxRenderBytes, maxViewportLines)
+}
+
+func inspectionValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	if err, ok := value.(error); ok {
+		return limitInspection(err.Error())
+	}
+	if text, ok := value.(string); ok {
+		return limitInspection(text)
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return limitInspection(fmt.Sprint(value))
+	}
+	return limitInspection(string(data))
+}
+
+// Lifecycle summaries must not retain full edit bodies after the bounded
+// detail snapshot has been captured. Delegation/path fields stay structured.
+func activitySummaryArgs(value any) any {
+	args, ok := value.(map[string]any)
+	if !ok {
+		return summarizeActivityValue(value)
+	}
+	copy := make(map[string]any, len(args))
+	for name, value := range args {
+		switch v := value.(type) {
+		case string:
+			if len(v) > 1024 {
+				v = strings.Clone(v[:1024]) + "…"
+			}
+			copy[name] = v
+		case nil, bool, int, int64, float64:
+			copy[name] = value
+		default:
+			copy[name] = summarizeActivityValue(value)
+		}
+	}
+	return copy
+}
+
+func activityTitle(kind activityKind) string {
+	switch kind {
+	case activityModel:
+		return "model"
+	case activityRetry:
+		return "retry"
+	case activityContext:
+		return "context"
+	case activityThinking:
+		return "thinking"
+	case activityProgress:
+		return "progress"
+	default:
+		return "tool"
+	}
+}
+
+func activityDetails(item turnItem) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %s\n", activityTitle(item.activity), ansi.Strip(item.content))
+	if item.toolName != "" {
+		fmt.Fprintf(&b, "tool: %s\nagent: %s\ncall: %s\n", item.toolName, item.agentID, item.callID)
+	}
+	if item.duration > 0 {
+		label := "duration"
+		if item.observedTime {
+			label = "observed elapsed (event delivery)"
+		}
+		fmt.Fprintf(&b, "%s: %s\n", label, item.duration)
+	}
+	for _, field := range []struct{ name, text string }{{"arguments", item.args}, {"result", item.result}, {"error", item.failure}} {
+		if field.text != "" {
+			fmt.Fprintf(&b, "\n%s:\n%s\n", field.name, field.text)
+		}
+	}
+	return limitInspection(b.String())
+}
+
+func (m *appModel) inspectTurn(filter string) {
+	if filter == "context" {
+		content := "No context report yet."
+		if m.lastContextReport != nil {
+			content = RenderContextReport(*m.lastContextReport, m.lastMemoryIntent, 0)
+		}
+		m.openInspection("Context · read-only", content)
+		return
+	}
+	items := m.lastTurnItems
+	if m.sending {
+		items = m.activeTurnItems
+	}
+	var b strings.Builder
+	b.WriteString("Read-only turn snapshot. Reopen /inspect to refresh.\n")
+	if filter == "changes" {
+		b.WriteString("Captured edit arguments/results; this is not a working-tree diff. /rewind undoes the last supported edit.\n")
+	}
+	count := 0
+	for _, item := range items {
+		if filter == "changes" && item.toolName != "file_write" && item.toolName != "file_edit" && item.toolName != "apply_patch" {
+			continue
+		}
+		count++
+		b.WriteString("\n---\n")
+		if item.kind == turnItemActivity {
+			b.WriteString(activityDetails(item))
+		} else {
+			b.WriteString(limitInspection(item.content))
+		}
+		if b.Len() > maxInspectionBytes {
+			break
+		}
+	}
+	if count == 0 {
+		b.WriteString("\nNo captured details for this view.")
+	}
+	m.openInspection("Turn details · read-only · "+filter, b.String())
+	// Each captured field remains independently reachable even when the
+	// aggregate overview exceeds its display cap. Navigation does not mutate
+	// tools or query storage and uses immutable string snapshots.
+	for _, item := range items {
+		if filter == "changes" && item.toolName != "file_write" && item.toolName != "file_edit" && item.toolName != "apply_patch" {
+			continue
+		}
+		if item.kind != turnItemActivity {
+			m.inspection.entries = append(m.inspection.entries, inspectionEntry{"Text / receipt", item.content})
+			continue
+		}
+		heading := activityTitle(item.activity)
+		if item.toolName != "" {
+			heading = item.toolName + " " + item.callID
+		}
+		metadata := item
+		metadata.args, metadata.result, metadata.failure = "", "", ""
+		m.inspection.entries = append(m.inspection.entries, inspectionEntry{heading, activityDetails(metadata)})
+		for _, field := range []struct{ name, text string }{{"arguments", item.args}, {"result", item.result}, {"error", item.failure}} {
+			if field.text != "" {
+				m.inspection.entries = append(m.inspection.entries, inspectionEntry{heading + " · " + field.name, field.text})
+			}
+		}
+	}
+}
 
 // RenderMarkdownLite converts a small, deliberately restricted markdown
 // subset (headers, **bold**, _italic_, `inline code`, fenced code blocks,
