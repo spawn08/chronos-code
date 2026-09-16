@@ -387,8 +387,8 @@ func TestBundledModelRouting(t *testing.T) {
 	want := map[Classification]ModelSpec{
 		{Complexity: ComplexityLow, Kind: TaskKindEdit}:       {Provider: "anthropic", Model: "claude-haiku-4-5"},
 		{Complexity: ComplexityLow, Kind: TaskKindExplain}:    {Provider: "anthropic", Model: "claude-haiku-4-5"},
-		{Complexity: ComplexityMedium, Kind: TaskKindEdit}:    {Provider: "anthropic", Model: "claude-sonnet-4-6"},
-		{Complexity: ComplexityHigh, Kind: TaskKindRefactor}:  {Provider: "anthropic", Model: "claude-sonnet-4-6"},
+		{Complexity: ComplexityMedium, Kind: TaskKindEdit}:    {Provider: "anthropic", Model: "claude-sonnet-5"},
+		{Complexity: ComplexityHigh, Kind: TaskKindRefactor}:  {Provider: "anthropic", Model: "claude-sonnet-5"},
 		{Complexity: ComplexityHigh, Kind: TaskKindDebug}:     {Provider: "anthropic", Model: "claude-opus-4-8"},
 		{Complexity: ComplexityHigh, Kind: TaskKindArchitect}: {Provider: "anthropic", Model: "claude-opus-4-8"},
 	}

@@ -1938,7 +1938,7 @@ func TestUsageSummaryShowsCacheHits(t *testing.T) {
 	m.lastModelCalls = 3
 
 	summary := m.usageSummary()
-	for _, want := range []string{"cache read 12000", "cache write 80", "input 400", "output 20"} {
+	for _, want := range []string{"cache read 12000", "cache write 80", "input 400", "output 20", "context 12500"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("usageSummary() = %q, want substring %q", summary, want)
 		}

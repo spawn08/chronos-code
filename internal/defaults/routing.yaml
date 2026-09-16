@@ -64,11 +64,11 @@ model_routing:
     medium:
       edit:
         provider: "anthropic"
-        model: "claude-sonnet-4-6"
+        model: "claude-sonnet-5"
     high:
       refactor:
         provider: "anthropic"
-        model: "claude-sonnet-4-6"
+        model: "claude-sonnet-5"
       debug:
         provider: "anthropic"
         model: "claude-opus-4-8"

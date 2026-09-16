@@ -2487,6 +2487,9 @@ func (m *appModel) handleContextCommand() {
 		b.WriteString("context window: unknown (model not in registry)\n")
 	}
 	fmt.Fprintln(&b, m.usageSummary())
+	if contextTokens := m.lastKnownUsage.WindowTokens(); contextTokens > 0 {
+		fmt.Fprintf(&b, "latest model context: %s tokens\n", formatTokenCount(contextTokens))
+	}
 	if status := m.orch.BudgetStatusLine(); status != "" {
 		fmt.Fprintln(&b, status)
 	}
@@ -2552,8 +2555,12 @@ func (m *appModel) handleLearnCommand(arg string) {
 func (m *appModel) usageSummary() string {
 	input, output, cacheRead, cacheWrite := m.turnUsageCounts()
 	session := m.orch.SessionCost()
-	return fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ output %d │ cost %s",
-		input, cacheRead, cacheWrite, output, m.formatCost(m.lastTurnCost.SpentMicrodollars), m.lastModelCalls, m.lastSubagents,
+	contextTokens := int64(m.lastKnownUsage.WindowTokens())
+	if contextTokens == 0 {
+		contextTokens = input + cacheRead + cacheWrite + output
+	}
+	return fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ context %d │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ output %d │ cost %s",
+		input, cacheRead, cacheWrite, output, contextTokens, m.formatCost(m.lastTurnCost.SpentMicrodollars), m.lastModelCalls, m.lastSubagents,
 		session.InputTokens, session.CacheReadTokens, session.OutputTokens,
 		m.formatCost(session.SpentMicrodollars))
 }

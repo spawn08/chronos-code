@@ -1628,12 +1628,26 @@ func (o *Orchestrator) contextReport(collector *contextReportCollector) ContextR
 	return collector.report()
 }
 
+const (
+	maxOutputSegments  = 3
+	continuationPrompt = "Your previous response was cut off because it reached the output token limit. Continue exactly where it stopped. Do not repeat any text already provided."
+)
+
+// Output-token exhaustion is a successful provider response, not a retryable
+// request failure. Continue in the same durable session: the SDK has persisted
+// the partial assistant message, so this neither re-submits the original user
+// request nor replays committed tool calls. Bound follow-ups to prevent an
+// unbounded loop when a model repeatedly exhausts its output limit.
+func canContinueOutput(a *agent.Agent, sessionID string) bool {
+	return a != nil && a.Storage != nil && sessionID != ""
+}
+
 // Recovery belongs to the SDK's model-request boundary. Resubmitting a chat
 // would append the user message again and could repeat already committed tools.
 func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.Agent, sessionID, message string) (<-chan *model.ChatResponse, error) {
 	var stream <-chan *model.ChatResponse
 	var err error
-	if sessionID != "" && a.Storage != nil {
+	if canContinueOutput(a, sessionID) {
 		stream, err = a.ChatStreamWithSession(ctx, sessionID, message)
 	} else {
 		stream, err = a.ChatStream(ctx, message)
@@ -1641,19 +1655,72 @@ func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.A
 	if err != nil {
 		return nil, apierror.Classify(err)
 	}
-	return stream, nil
+	if !canContinueOutput(a, sessionID) {
+		return stream, nil
+	}
+
+	out := make(chan *model.ChatResponse, 64)
+	go func() {
+		defer close(out)
+		for attempt := 0; ; attempt++ {
+			maxTokens := false
+			for response := range stream {
+				isOutputLimit := response != nil && !response.Delta && response.StopReason == model.StopReasonMaxTokens
+				if isOutputLimit {
+					maxTokens = true
+					// This terminal chunk is only terminal for the individual model
+					// call. Suppress it while continuing so stream consumers do not
+					// render a spurious incomplete-response error between segments.
+					if attempt < maxOutputSegments-1 {
+						continue
+					}
+				}
+				select {
+				case out <- response:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if !maxTokens || attempt >= maxOutputSegments-1 || ctx.Err() != nil {
+				return
+			}
+			stream, err = a.ChatStreamWithSession(ctx, sessionID, continuationPrompt)
+			if err != nil {
+				select {
+				case out <- &model.ChatResponse{Err: apierror.Classify(err)}:
+				case <-ctx.Done():
+				}
+				return
+			}
+		}
+	}()
+	return out, nil
 }
 
 func (o *Orchestrator) executeBlockingWithRecovery(ctx context.Context, a *agent.Agent, sessionID, message string) (*model.ChatResponse, error) {
 	var response *model.ChatResponse
 	var err error
-	if sessionID != "" && a.Storage != nil {
+	if canContinueOutput(a, sessionID) {
 		response, err = a.ChatWithSession(ctx, sessionID, message)
 	} else {
 		response, err = a.Chat(ctx, message)
 	}
 	if err != nil {
 		return nil, apierror.Classify(err)
+	}
+	if !canContinueOutput(a, sessionID) {
+		return response, nil
+	}
+
+	for attempt := 0; response != nil && response.StopReason == model.StopReasonMaxTokens && attempt < maxOutputSegments-1; attempt++ {
+		partial := response.Content
+		response, err = a.ChatWithSession(ctx, sessionID, continuationPrompt)
+		if err != nil {
+			return nil, apierror.Classify(err)
+		}
+		if response != nil {
+			response.Content = partial + response.Content
+		}
 	}
 	return response, nil
 }

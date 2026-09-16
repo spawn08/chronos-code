@@ -637,6 +637,9 @@ func executeTestTurn(ctx context.Context, orch *Orchestrator, request ExecutionR
 	for chunk := range result.Stream {
 		if chunk != nil {
 			response.Content += chunk.Content
+			if chunk.StopReason != "" {
+				response.StopReason = chunk.StopReason
+			}
 			if chunk.Err != nil {
 				err = chunk.Err
 			}
@@ -721,5 +724,100 @@ func TestExecuteFailureAfterMutationDoesNotReplayTask(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type outputLimitedProvider struct {
+	mu        sync.Mutex
+	responses []*model.ChatResponse
+	requests  []*model.ChatRequest
+	calls     int
+}
+
+func (p *outputLimitedProvider) next(req *model.ChatRequest) (*model.ChatResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requests = append(p.requests, req)
+	if p.calls >= len(p.responses) {
+		return nil, fmt.Errorf("unexpected model call %d", p.calls+1)
+	}
+	response := *p.responses[p.calls]
+	p.calls++
+	return &response, nil
+}
+
+func (p *outputLimitedProvider) Chat(_ context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
+	return p.next(req)
+}
+
+func (p *outputLimitedProvider) StreamChat(_ context.Context, req *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	response, err := p.next(req)
+	if err != nil {
+		return nil, err
+	}
+	stream := make(chan *model.ChatResponse, 2)
+	if response.Content != "" {
+		stream <- &model.ChatResponse{Role: model.RoleAssistant, Delta: true, Content: response.Content}
+	}
+	stream <- &model.ChatResponse{Role: model.RoleAssistant, StopReason: response.StopReason}
+	close(stream)
+	return stream, nil
+}
+
+func (*outputLimitedProvider) Name() string  { return "test" }
+func (*outputLimitedProvider) Model() string { return "test-model" }
+
+func TestExecuteContinuesOutputLimitedResponse(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			provider := &outputLimitedProvider{responses: []*model.ChatResponse{
+				{Role: model.RoleAssistant, Content: "partial ", StopReason: model.StopReasonMaxTokens},
+				{Role: model.RoleAssistant, Content: "completion", StopReason: model.StopReasonEnd},
+			}}
+			a := newExecutionTestAgent("coder", provider)
+			a.Storage = storagememory.New()
+			orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder"}
+			t.Cleanup(func() { _ = orch.Close() })
+
+			response, err := executeTestTurn(context.Background(), orch, ExecutionRequest{Message: "original task", SessionID: "continuation-session", Mode: mode})
+			if err != nil || response == nil || response.Content != "partial completion" {
+				t.Fatalf("response=%+v err=%v, want completed response", response, err)
+			}
+			if provider.calls != 2 {
+				t.Fatalf("model calls=%d, want 2", provider.calls)
+			}
+			last := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
+			if last.Role != model.RoleUser || last.Content != continuationPrompt {
+				t.Fatalf("continuation request last message=%+v, want continuation prompt", last)
+			}
+		})
+	}
+}
+
+func TestExecuteStopsAfterMaximumOutputSegments(t *testing.T) {
+	for _, mode := range []ExecutionMode{ExecutionBlocking, ExecutionStreaming} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			provider := &outputLimitedProvider{responses: []*model.ChatResponse{
+				{Role: model.RoleAssistant, Content: "one ", StopReason: model.StopReasonMaxTokens},
+				{Role: model.RoleAssistant, Content: "two ", StopReason: model.StopReasonMaxTokens},
+				{Role: model.RoleAssistant, Content: "three", StopReason: model.StopReasonMaxTokens},
+				{Role: model.RoleAssistant, Content: "must not be requested", StopReason: model.StopReasonEnd},
+			}}
+			a := newExecutionTestAgent("coder", provider)
+			a.Storage = storagememory.New()
+			orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder"}
+			t.Cleanup(func() { _ = orch.Close() })
+
+			response, err := executeTestTurn(context.Background(), orch, ExecutionRequest{Message: "original task", SessionID: "continuation-session", Mode: mode})
+			if err != nil || response == nil || response.Content != "one two three" {
+				t.Fatalf("response=%+v err=%v, want bounded partial response", response, err)
+			}
+			if response.StopReason != model.StopReasonMaxTokens {
+				t.Fatalf("stop reason=%q, want %q", response.StopReason, model.StopReasonMaxTokens)
+			}
+			if provider.calls != maxOutputSegments {
+				t.Fatalf("model calls=%d, want %d", provider.calls, maxOutputSegments)
+			}
+		})
 	}
 }
