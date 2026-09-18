@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
@@ -295,7 +297,7 @@ Usage:
   chronos-code plan <operation> --db <path> ...             Inspect or operate a durable plan database
   chronos-code skills list                                  List discovered skills (project + user + bundled)
   chronos-code skills show <name>                           Show a skill's metadata and body
-  chronos-code serve [--listen :8430] [--auth api_key]     Start HTTP server for team deployment
+  chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>]  Start HTTP server for team deployment
   chronos-code version            Print version information
   chronos-code help               Show this help
 
@@ -328,22 +330,28 @@ func runAgents() error {
 }
 
 func loadAndBuild() (*orchestrator.Orchestrator, error) {
+	orch, _, err := loadConfigAndBuild()
+	return orch, err
+}
+
+func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+		return nil, nil, fmt.Errorf("load config: %w", err)
 	}
 	ctx := context.Background()
 	orch, err := orchestrator.New(ctx, cfg, resumeSessionID)
 	if err != nil {
-		return nil, fmt.Errorf("build orchestrator: %w", err)
+		return nil, nil, fmt.Errorf("build orchestrator: %w", err)
 	}
 	if usdBudgetSet {
 		orch.SetUSDCap(usdBudgetCap)
 	}
 	if err := orch.SetPermissionMode(effectivePermissionMode()); err != nil {
-		return nil, fmt.Errorf("apply --permission-mode: %w", err)
+		_ = orch.Close()
+		return nil, nil, fmt.Errorf("apply --permission-mode: %w", err)
 	}
-	return orch, nil
+	return orch, cfg, nil
 }
 
 func effectivePermissionMode() string {
@@ -1262,34 +1270,55 @@ func resolveStorage(cfg *config.Config) string {
 func runServe() error {
 	args := os.Args[2:]
 
-	orch, err := loadAndBuild()
+	orch, appCfg, err := loadConfigAndBuild()
 	if err != nil {
 		return err
 	}
 	defer orch.Close()
 
+	serverDefaults := appCfg.Server
 	cfg := server.ServerConfig{
-		Listen:          flagValue(args, "listen", ":8430"),
-		AuthType:        flagValue(args, "auth", "api_key"),
-		APIKey:          flagValue(args, "api-key", os.Getenv("CHRONOS_CODE_API_KEY")),
-		CORSOrigins:     flagValue(args, "cors-origins", "*"),
-		RateLimitPerMin: 60,
+		Listen:          flagValue(args, "listen", firstNonEmpty(serverDefaults.Listen, ":8430")),
+		AuthType:        flagValue(args, "auth", firstNonEmpty(serverDefaults.AuthType, "api_key")),
+		APIKey:          flagValue(args, "api-key", firstNonEmpty(os.Getenv("CHRONOS_CODE_API_KEY"), serverDefaults.APIKey)),
+		TenantID:        flagValue(args, "tenant-id", firstNonEmpty(os.Getenv("CHRONOS_CODE_TENANT_ID"), serverDefaults.TenantID)),
+		OIDCIssuer:      flagValue(args, "oidc-issuer", firstNonEmpty(os.Getenv("CHRONOS_CODE_OIDC_ISSUER"), serverDefaults.OIDCIssuer)),
+		OIDCClientID:    flagValue(args, "oidc-client-id", firstNonEmpty(os.Getenv("CHRONOS_CODE_OIDC_CLIENT_ID"), serverDefaults.OIDCClientID)),
+		CORSOrigins:     flagValue(args, "cors-origins", firstNonEmpty(serverDefaults.CORSOrigins, "*")),
+		MaxConcurrent:   serverDefaults.MaxConcurrent,
+		RateLimitPerMin: serverDefaults.RateLimitPerMin,
+	}
+	if cfg.MaxConcurrent <= 0 {
+		cfg.MaxConcurrent = 1
+	}
+	if cfg.RateLimitPerMin <= 0 {
+		cfg.RateLimitPerMin = 60
+	}
+	if maxStr := flagValue(args, "max-concurrent", ""); maxStr != "" {
+		maxConcurrent, parseErr := strconv.Atoi(maxStr)
+		if parseErr != nil || maxConcurrent <= 0 {
+			return fmt.Errorf("serve: --max-concurrent must be a positive integer")
+		}
+		cfg.MaxConcurrent = maxConcurrent
 	}
 	if rateStr := flagValue(args, "rate-limit", ""); rateStr != "" {
-		var rate int
-		fmt.Sscanf(rateStr, "%d", &rate)
-		if rate > 0 {
-			cfg.RateLimitPerMin = rate
+		rate, parseErr := strconv.Atoi(rateStr)
+		if parseErr != nil || rate < 0 {
+			return fmt.Errorf("serve: --rate-limit must be a non-negative integer")
 		}
+		cfg.RateLimitPerMin = rate
 	}
 	if cfg.AuthType == "api_key" && cfg.APIKey == "" {
 		return fmt.Errorf("serve: --api-key or CHRONOS_CODE_API_KEY required when --auth=api_key; use --auth=none to disable")
 	}
+	if cfg.AuthType == "api_key" && cfg.TenantID == "" {
+		return fmt.Errorf("serve: --tenant-id or CHRONOS_CODE_TENANT_ID required when --auth=api_key")
+	}
 
 	srv := server.New(orch, cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Start() }()
@@ -1303,4 +1332,13 @@ func runServe() error {
 		defer shutCancel()
 		return srv.Shutdown(shutCtx)
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

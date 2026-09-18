@@ -159,6 +159,39 @@ func TestServerRejectsAPIKeyConfigurationWithoutTenant(t *testing.T) {
 	}
 }
 
+func TestExecutionConcurrencyLimit(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none", MaxConcurrent: 1})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	handler := s.limitExecution(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat", nil))
+		firstDone <- response
+	}()
+	<-started
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/chat", nil))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status=%d, want %d", second.Code, http.StatusTooManyRequests)
+	}
+	if second.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After=%q, want 1", second.Header().Get("Retry-After"))
+	}
+
+	close(release)
+	if first := <-firstDone; first.Code != http.StatusNoContent {
+		t.Fatalf("first status=%d, want %d", first.Code, http.StatusNoContent)
+	}
+}
+
 func TestOIDCRequestRejectsMissingTenantClaim(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

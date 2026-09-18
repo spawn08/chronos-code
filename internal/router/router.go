@@ -109,15 +109,15 @@ func DefaultPath(complexity Complexity) ImplementationPath {
 		return ImplementationPath{
 			MaxToolCalls: 24,
 			Graph:        "L0-L3",
-			Plan:         "ppd-or-update_plan",
-			Hint:         "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed; execute dependency-first; verify integration and every deliverable; retain durable decisions",
+			Plan:         "ppd-or-working-plan",
+			Hint:         "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed and execution is wired for the selected mode; otherwise maintain a working plan, execute dependency-first, and verify integration and every deliverable",
 		}
 	case ComplexityMedium:
 		return ImplementationPath{
 			MaxToolCalls: 12,
 			Graph:        "L0-L2",
-			Plan:         "update_plan",
-			Hint:         "reuse relevant findings; inspect affected code paths; update_plan when useful; implement and integrate; use impact_analysis/test_map to select checks and run them",
+			Plan:         "working-plan",
+			Hint:         "reuse relevant findings; inspect affected code paths; maintain a concise working plan when useful; implement and integrate; use impact_analysis/test_map to help select checks, then run sufficient verification for the actual risk",
 		}
 	default:
 		return ImplementationPath{

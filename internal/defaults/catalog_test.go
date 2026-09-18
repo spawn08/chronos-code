@@ -2,7 +2,10 @@ package defaults
 
 import (
 	"io/fs"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestCatalogCoversEveryEmbeddedArtifact(t *testing.T) {
@@ -61,5 +64,25 @@ func TestCatalogMarksUnsupportedArtifactsExportOnly(t *testing.T) {
 func TestValidateCatalog(t *testing.T) {
 	if err := ValidateCatalog(); err != nil {
 		t.Fatalf("ValidateCatalog() error = %v", err)
+	}
+}
+
+func TestRuntimeAgentPromptsDoNotRequireUnavailablePlanningTools(t *testing.T) {
+	for _, path := range []string{"agents/chronos-code.yaml", "agents/coder.yaml"} {
+		data, err := ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) error = %v", path, err)
+		}
+		var document struct {
+			SystemPrompt string `yaml:"system_prompt"`
+		}
+		if err := yaml.Unmarshal(data, &document); err != nil {
+			t.Fatalf("parse %q: %v", path, err)
+		}
+		for _, unavailable := range []string{"update_plan", "fs_write", "fs_read"} {
+			if strings.Contains(document.SystemPrompt, unavailable) {
+				t.Errorf("runtime prompt %q requires unavailable tool %q", path, unavailable)
+			}
+		}
 	}
 }

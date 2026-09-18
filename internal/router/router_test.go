@@ -365,11 +365,11 @@ func TestBundledImplementationPaths(t *testing.T) {
 		t.Fatalf("low path = %+v", low)
 	}
 	medium := cfg.PathFor(ComplexityMedium)
-	if medium.MaxToolCalls != 12 || medium.Plan != "update_plan" {
+	if medium.MaxToolCalls != 12 || medium.Plan != "working-plan" {
 		t.Fatalf("medium path = %+v", medium)
 	}
 	high := cfg.PathFor(ComplexityHigh)
-	if high.MaxToolCalls != 24 || high.Plan != "ppd-or-update_plan" {
+	if high.MaxToolCalls != 24 || high.Plan != "ppd-or-working-plan" {
 		t.Fatalf("high path = %+v", high)
 	}
 }

@@ -26,6 +26,7 @@ const sidebars = {
         { type: 'doc', id: 'comparison',       label: 'How It Compares' },
         { type: 'doc', id: 'use-cases',        label: 'Use Cases' },
         { type: 'doc', id: 'best-practices',   label: 'Best Practices' },
+        { type: 'doc', id: 'production-readiness', label: 'Production Readiness' },
       ],
     },
 

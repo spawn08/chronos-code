@@ -4,11 +4,139 @@ import (
 	"context"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
+
+	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/router"
 )
+
+func TestBuildRuntimeCapabilityManifestScopesLiveCapabilities(t *testing.T) {
+	coderTools := tool.NewRegistry()
+	coderTools.Register(&tool.Definition{Name: "file_write", Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
+	coderTools.Register(&tool.Definition{Name: "lsp_diagnostics", Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
+	coderTools.Register(&tool.Definition{Name: "mcp__github__search", Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
+	coderTools.Register(&tool.Definition{Name: "denied", Permission: tool.PermDeny, Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
+	readerTools := tool.NewRegistry()
+	readerTools.Register(&tool.Definition{Name: "file_read", Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
+
+	manifest := buildRuntimeCapabilityManifest(map[string]*agent.Agent{
+		"coder":  {ID: "coder", Tools: coderTools},
+		"reader": {ID: "reader", Tools: readerTools},
+	}, true)
+	available := config.CapabilityManifest{Capabilities: manifest.Capabilities}
+	for _, requirement := range []config.Capability{
+		{Name: capabilityGraphCode},
+		{Name: capabilityPlanMode},
+		{Name: capabilityLSPTools},
+		{Name: capabilityToolPrefix + "file_write", Agent: "coder"},
+		{Name: capabilityWriteFiles, Agent: "coder"},
+		{Name: capabilityMCPPrefix + "github", Agent: "coder"},
+		{Name: capabilityToolPrefix + "file_read", Agent: "reader"},
+	} {
+		if err := (config.CapabilityManifest{Capabilities: []config.Capability{requirement}}).Validate(available); err != nil {
+			t.Errorf("expected capability %+v: %v", requirement, err)
+		}
+	}
+	for _, requirement := range []config.Capability{
+		{Name: capabilityToolPrefix + "file_write", Agent: "reader"},
+		{Name: capabilityToolPrefix + "denied", Agent: "coder"},
+		{Name: capabilityClosedLoopPPD},
+	} {
+		if err := (config.CapabilityManifest{Capabilities: []config.Capability{requirement}}).Validate(available); err == nil {
+			t.Errorf("unexpected capability %+v", requirement)
+		}
+	}
+}
+
+func TestValidateRuntimeCapabilitiesRejectsUninstalledConfiguredTool(t *testing.T) {
+	cfg := &config.Config{FileConfig: agent.FileConfig{Agents: []agent.AgentConfig{{
+		ID: "coder", Tools: []agent.ToolConfig{{Name: "update_plan", Description: "export-only placeholder"}},
+	}}}}
+	agents := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
+
+	_, _, err := validateRuntimeCapabilities(cfg, agents, false, nil)
+	if err == nil || !strings.Contains(err.Error(), `"tool:update_plan"`) {
+		t.Fatalf("validateRuntimeCapabilities() error = %v, want unavailable configured tool", err)
+	}
+}
+
+func TestValidateRuntimeCapabilitiesWarnsForOptionalRequirement(t *testing.T) {
+	cfg := &config.Config{RuntimeCaps: config.CapabilityManifest{Capabilities: []config.Capability{{
+		Name: "lsp:tools", Optional: true,
+	}}}}
+
+	_, warnings, err := validateRuntimeCapabilities(cfg, nil, false, nil)
+	if err != nil {
+		t.Fatalf("validateRuntimeCapabilities() error = %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], `"lsp:tools"`) {
+		t.Fatalf("warnings = %v, want optional LSP warning", warnings)
+	}
+}
+
+func TestValidateRuntimeCapabilitiesRejectsEnabledPPD(t *testing.T) {
+	routingConfig := &router.Config{PPD: router.PPDConfig{Mode: router.PPDModeEnabled}}
+
+	_, _, err := validateRuntimeCapabilities(&config.Config{}, nil, false, routingConfig)
+	if err == nil || !strings.Contains(err.Error(), capabilityClosedLoopPPD) {
+		t.Fatalf("validateRuntimeCapabilities() error = %v, want closed-loop PPD requirement", err)
+	}
+}
+
+func TestNewRejectsUnavailableConfiguredToolDuringStartup(t *testing.T) {
+	root := t.TempDir()
+	indexOnStart := false
+	cfg := &config.Config{
+		FileConfig: agent.FileConfig{
+			Defaults: &agent.AgentConfig{Storage: agent.StorageConfig{Backend: "sqlite", DSN: root + "/sessions.db"}},
+			Agents: []agent.AgentConfig{{
+				ID:    "coder",
+				Model: agent.ModelConfig{Provider: "openai", Model: "gpt-4o-mini", APIKey: "test-key"},
+				Tools: []agent.ToolConfig{{Name: "update_plan", Description: "not installed by Chronos Code"}},
+			}},
+		},
+		Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart},
+		Learning:  config.LearningConfig{Enabled: false},
+	}
+
+	orch, err := New(context.Background(), cfg, "")
+	if orch != nil {
+		_ = orch.Close()
+		t.Fatal("New() returned an orchestrator for an unavailable required tool")
+	}
+	if err == nil || !strings.Contains(err.Error(), `"tool:update_plan"`) {
+		t.Fatalf("New() error = %v, want startup capability failure", err)
+	}
+}
+
+func TestEmbeddedDefaultsPassRuntimeCapabilityValidation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	t.Chdir(root)
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+	indexOnStart := false
+	cfg.Workspace.Root = root
+	cfg.Workspace.IndexOnStart = &indexOnStart
+	cfg.Learning.Enabled = false
+	cfg.Defaults.Storage = agent.StorageConfig{Backend: "sqlite", DSN: root + "/sessions.db"}
+
+	orch, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatalf("New() with embedded defaults error = %v", err)
+	}
+	t.Cleanup(func() { _ = orch.Close() })
+	if len(orch.capabilities.Capabilities) == 0 {
+		t.Fatal("runtime capability manifest is empty")
+	}
+}
 
 func TestWithToolPhaseSelectsBoundedSchemasWithoutMutatingRegistry(t *testing.T) {
 	registry := tool.NewRegistry()

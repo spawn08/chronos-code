@@ -30,6 +30,7 @@ type Config struct {
 	Tools        ToolsConfig                 `yaml:"tools,omitempty"`
 	Learning     LearningConfig              `yaml:"learning,omitempty"`
 	Verification VerificationConfig          `yaml:"verification,omitempty"`
+	RuntimeCaps  CapabilityManifest          `yaml:"runtime_capabilities,omitempty"`
 	Server       ServerConfig                `yaml:"server,omitempty"`
 	Hooks        HooksConfig                 `yaml:"hooks,omitempty"`
 	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
@@ -210,6 +211,9 @@ type ServerConfig struct {
 	Listen          string `yaml:"listen,omitempty"`
 	AuthType        string `yaml:"auth_type,omitempty"`
 	APIKey          string `yaml:"api_key,omitempty"`
+	TenantID        string `yaml:"tenant_id,omitempty"`
+	OIDCIssuer      string `yaml:"oidc_issuer,omitempty"`
+	OIDCClientID    string `yaml:"oidc_client_id,omitempty"`
 	CORSOrigins     string `yaml:"cors_origins,omitempty"`
 	MaxConcurrent   int    `yaml:"max_concurrent,omitempty"`
 	RateLimitPerMin int    `yaml:"rate_limit_per_min,omitempty"`
@@ -614,6 +618,7 @@ func mergeConfig(base, overlay *Config, source string) {
 	mergeTypedSection(&base.Tools, overlay.Tools, overlay.set, "tools")
 	mergeTypedSection(&base.Learning, overlay.Learning, overlay.set, "learning")
 	mergeTypedSection(&base.Verification, overlay.Verification, overlay.set, "verification")
+	mergeTypedSection(&base.RuntimeCaps, overlay.RuntimeCaps, overlay.set, "runtime_capabilities")
 	mergeTypedSection(&base.Server, overlay.Server, overlay.set, "server")
 	if base.sources == nil {
 		base.sources = make(map[string]string)

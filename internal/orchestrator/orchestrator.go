@@ -104,6 +104,7 @@ type Orchestrator struct {
 	mcpRuntimes        []*mcpdiscover.Runtime
 	mcpMu              sync.Mutex
 	mcpClosed          bool
+	capabilities       RuntimeCapabilityManifest
 	closeOnce          sync.Once
 	closeErr           error
 }
@@ -285,9 +286,6 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		setupLearnedPatterns(ctx, cfg, root, agents)
 	}
 
-	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
-	orch.projectDocsWatcher = pdWatcher
-
 	skillCatalog := setupSkills(cfg, root, agents)
 	languageServerManager = setupLSP(root, wsInfo, agents)
 	orch.lspManager = languageServerManager
@@ -349,6 +347,18 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	teams := setupTeams(cfg, agents)
 
 	normalizeToolPermissions(agents)
+	capabilityManifest, capabilityWarnings, err := validateRuntimeCapabilities(cfg, agents, graphStore != nil, routingConfig)
+	if err != nil {
+		return nil, err
+	}
+	for _, warning := range capabilityWarnings {
+		fmt.Printf("warning: %s\n", warning)
+	}
+
+	// Project-document compression can invoke a model. Keep it behind the
+	// capability contract so invalid runtime prompts fail before any model call.
+	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
+	orch.projectDocsWatcher = pdWatcher
 
 	active := selectPrimaryAgent(agents, order)
 
@@ -388,6 +398,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		mcpFactory:         mcpPool.NewClient,
 		mcpTimeout:         mcpdiscover.DefaultConnectTimeout,
 		mcpRuntimes:        mcpRuntimes,
+		capabilities:       capabilityManifest,
 	}
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {

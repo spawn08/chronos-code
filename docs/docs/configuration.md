@@ -94,6 +94,24 @@ verification:
 
 `enforce` refuses a successful completion when the runtime has verification obligations without current evidence. It does not invent checks.
 
+### Runtime Capabilities
+
+Agent tools declared under `agents[].tools` must resolve to callable runtime tools. Startup fails before a model call if a configured tool is unavailable. Additional service requirements can be declared explicitly:
+
+```yaml
+runtime_capabilities:
+  capabilities:
+    - name: graph:code
+    - name: tool:file_write
+      agent: coder
+    - name: lsp:tools
+      optional: true
+```
+
+Supported capability namespaces are `tool:<name>`, `graph:code`, `lsp:tools`, `mcp:<server>`, `planning:plan-mode`, `write:files`, and `write:shell`. Tool, MCP, and write requirements should specify an `agent`. Missing required capabilities stop startup; missing optional capabilities produce a warning.
+
+Export-only examples such as `tools.yaml` and `mcp-servers.yaml` do not count as runtime capability evidence.
+
 ### Native Thinking
 
 Off by default. Enable in YAML or with `/think` in the TUI:
@@ -121,8 +139,8 @@ router:
     high:   { model: claude-opus-... }
 
 ppd:
-  mode: enabled            # enabled | shadow | disabled
-  # enabled  — qualifying work delegated to ppd-planner
+  mode: shadow             # enabled | shadow | disabled
+  # enabled  — rejected until closed-loop durable PPD execution is available
   # shadow   — observe routing decisions without invoking ppd-planner
   # disabled — skip PPD policy entirely
 ```
@@ -196,7 +214,7 @@ Use `chronos-code login` for OAuth and enterprise credential flows. `chronos-cod
 | Tree-sitter graph | Optional `treesitter` build tag |
 | PostgreSQL storage | Optional `postgres` build tag |
 | LSP tools | Optional `lsp` build tag |
-| PPD policy | `enabled` in embedded `routing.yaml`; `shadow` observes; `disabled` skips |
+| PPD policy | `shadow` by default; `enabled` is rejected until closed-loop durable execution is available |
 | Verification | `report` by default; `enforce` is opt-in |
 | Learning suggestions | On, human review required; `auto_distill: false` |
 | Vector recall and branchable sessions | Roadmap |

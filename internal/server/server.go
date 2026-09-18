@@ -24,19 +24,20 @@ type ServerConfig struct {
 	OIDCIssuer      string // required when AuthType is "oidc"
 	OIDCClientID    string // required when AuthType is "oidc"
 	CORSOrigins     string // comma-separated allowed origins; "*" for all
-	MaxConcurrent   int    // max concurrent sessions (unused placeholder)
+	MaxConcurrent   int    // max concurrent agent executions; defaults to 1
 	RateLimitPerMin int    // per-IP requests per minute; 0 disables
 	InstanceID      string // unique ID for this instance; auto-generated if empty
 }
 
 // Server wraps an Orchestrator in an HTTP server with REST API endpoints.
 type Server struct {
-	orch      *orchestrator.Orchestrator
-	cfg       ServerConfig
-	srv       *http.Server
-	limiter   *rateLimiter
-	router    *SessionRouter
-	configErr error
+	orch       *orchestrator.Orchestrator
+	cfg        ServerConfig
+	srv        *http.Server
+	limiter    *rateLimiter
+	executions chan struct{}
+	router     *SessionRouter
+	configErr  error
 }
 
 // New creates a Server wired to orch. Call Start to begin serving.
@@ -44,7 +45,17 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8430"
 	}
-	s := &Server{orch: orch, cfg: cfg, router: NewSessionRouter(cfg.InstanceID)}
+	if cfg.MaxConcurrent <= 0 {
+		// Agents currently contain request-mutated model state. Keep server
+		// execution serialized by default until model selection is request-scoped.
+		cfg.MaxConcurrent = 1
+	}
+	s := &Server{
+		orch:       orch,
+		cfg:        cfg,
+		executions: make(chan struct{}, cfg.MaxConcurrent),
+		router:     NewSessionRouter(cfg.InstanceID),
+	}
 	if cfg.RateLimitPerMin > 0 {
 		s.limiter = newRateLimiter(cfg.RateLimitPerMin, time.Minute)
 	}
@@ -54,8 +65,8 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /ready", s.handleReady)
 
-	mux.HandleFunc("POST /v1/chat", s.handleChat)
-	mux.HandleFunc("POST /v1/chat/stream", s.handleChatStream)
+	mux.Handle("POST /v1/chat", s.limitExecution(http.HandlerFunc(s.handleChat)))
+	mux.Handle("POST /v1/chat/stream", s.limitExecution(http.HandlerFunc(s.handleChatStream)))
 
 	mux.HandleFunc("GET /v1/sessions", s.handleListSessions)
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
@@ -68,7 +79,7 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	mux.HandleFunc("POST /v1/memory/search", s.handleSearchMemory)
 
 	mux.HandleFunc("GET /v1/teams", s.handleListTeams)
-	mux.HandleFunc("POST /v1/teams/{id}/run", s.handleRunTeam)
+	mux.Handle("POST /v1/teams/{id}/run", s.limitExecution(http.HandlerFunc(s.handleRunTeam)))
 
 	var handler http.Handler = mux
 	switch cfg.AuthType {
@@ -115,6 +126,21 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 		IdleTimeout:       120 * time.Second,
 	}
 	return s
+}
+
+func (s *Server) limitExecution(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.executions <- struct{}{}:
+			defer func() { <-s.executions }()
+			next.ServeHTTP(w, r)
+		case <-r.Context().Done():
+			writeJSON(w, http.StatusRequestTimeout, map[string]string{"error": "request canceled while waiting for execution capacity"})
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "maximum concurrent agent executions reached"})
+		}
+	})
 }
 
 // Start begins listening and serving. It blocks until the server shuts down

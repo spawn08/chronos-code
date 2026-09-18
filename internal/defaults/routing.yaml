@@ -1,7 +1,8 @@
 # Chronos Code — Agent Routing Configuration
 # Classifies intent so Chronos Code can pick a model and (when useful)
 # spawn a specialist. The conversation stays on the primary agent unless
-# the user @mentions / /agent switches, or PPD enabled-mode delegates.
+# the user @mentions / /agent switches, or explicitly configured PPD
+# enabled-mode delegates.
 
 meta:
   version: "1.0.0"
@@ -42,13 +43,13 @@ implementation_paths:
   medium:
     max_tool_calls: 12
     graph: "L0-L2"
-    plan: "update_plan"
-    hint: "reuse relevant findings; inspect affected code paths; update_plan when useful; implement and integrate; use impact_analysis/test_map to select checks and run them"
+    plan: "working-plan"
+    hint: "reuse relevant findings; inspect affected code paths; maintain a concise working plan when useful; implement and integrate; use impact_analysis/test_map to help select checks, then run sufficient verification for the actual risk"
   high:
     max_tool_calls: 24
     graph: "L0-L3"
-    plan: "ppd-or-update_plan"
-    hint: "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed; execute dependency-first; verify integration and every deliverable; retain durable decisions"
+    plan: "ppd-or-working-plan"
+    hint: "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed and execution is wired for the selected mode; otherwise maintain a working plan, execute dependency-first, and verify integration and every deliverable"
 
 # Task complexity and kind to model mapping. Undeclared cells fall back to
 # medium/edit so model selection is deterministic for every classification.
@@ -76,12 +77,13 @@ model_routing:
         provider: "anthropic"
         model: "claude-opus-4-8"
 
-# Persistent-plan decomposition is live. Qualifying work is delegated to the
-# PPD specialist. Set mode to "shadow" to observe without invoking it, or
-# "disabled" to skip the policy.
+# Persistent-plan decomposition defaults to observation only. Enabled mode
+# currently delegates the turn to the read-only planner, so it is opt-in until
+# planner output is durably scheduled and implementation resumes automatically.
+# Set mode to "enabled" for explicit planning trials or "disabled" to skip it.
 ppd:
   version: "v1"
-  mode: "enabled"
+  mode: "shadow"
   specialist: "ppd-planner"
   max_planner_calls: 1
   thresholds:
