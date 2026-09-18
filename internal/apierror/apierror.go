@@ -72,6 +72,23 @@ type Classified struct {
 func (c *Classified) Error() string { return c.Message }
 func (c *Classified) Unwrap() error { return c.Original }
 
+// ExecutionStopReason exposes a dependency-neutral terminal category to the
+// orchestration result contract.
+func (c *Classified) ExecutionStopReason() string {
+	switch c.Category {
+	case CategoryAuth:
+		return "authentication_failed"
+	case CategoryTimeout:
+		return "timeout"
+	case CategoryRequestTooLarge, CategoryContextLength, CategoryNotFound, CategoryInvalidRequest, CategoryContentFilter:
+		return "invalid_request"
+	case CategoryOverloaded, CategoryRateLimited, CategoryServerError, CategoryNetworkError, CategoryCircuitOpen:
+		return "provider_retryable"
+	default:
+		return "internal_error"
+	}
+}
+
 // Classify inspects err and returns a Classified error with a user-friendly
 // message. If err is nil, returns nil.
 func Classify(err error) *Classified {

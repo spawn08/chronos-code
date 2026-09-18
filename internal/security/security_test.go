@@ -30,6 +30,24 @@ func defaultTestPolicy() *Policy {
 	}
 }
 
+func TestRedactValueCopiesAndRedactsNestedArguments(t *testing.T) {
+	original := map[string]any{
+		"command": "deploy --token secret-123",
+		"nested":  []any{"safe", "secret-456"},
+	}
+	redacted := RedactValue(original, []string{`secret-[0-9]+`}).(map[string]any)
+	if redacted["command"] != "deploy --token [REDACTED]" {
+		t.Fatalf("redacted command = %q", redacted["command"])
+	}
+	nested := redacted["nested"].([]any)
+	if nested[1] != "[REDACTED]" {
+		t.Fatalf("redacted nested value = %q", nested[1])
+	}
+	if original["command"] != "deploy --token secret-123" {
+		t.Fatal("RedactValue mutated caller input")
+	}
+}
+
 func TestLoadPolicy(t *testing.T) {
 	const raw = `
 version: "v1"

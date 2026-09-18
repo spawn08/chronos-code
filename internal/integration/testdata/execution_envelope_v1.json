@@ -1,0 +1,32 @@
+{
+  "schema_version": "chronos.execution.v1",
+  "task_id": "task-1",
+  "session_id": "session-1",
+  "tenant_id": "tenant-1",
+  "agent_id": "coder",
+  "correlation_id": "request-1",
+  "status": "succeeded",
+  "stop_reason": "success",
+  "content": "answer",
+  "usage": {
+    "prompt_tokens": 7,
+    "completion_tokens": 3,
+    "cache_read_tokens": 2,
+    "cache_creation_tokens": 1
+  },
+  "cost_microdollars": 22,
+  "changed_paths": ["main.go"],
+  "verification": {
+    "status": "satisfied",
+    "allowed": true,
+    "obligations": [
+      {
+        "id": "test:go test ./...",
+        "kind": "test",
+        "status": "satisfied",
+        "command": "go test ./...",
+        "paths": ["main.go"]
+      }
+    ]
+  }
+}

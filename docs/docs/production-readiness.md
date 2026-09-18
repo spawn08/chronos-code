@@ -30,7 +30,7 @@ This file is the single source of truth for the production-grade program. It rep
 | Delegation | Bounded subagents and parallel-safe tool fan-out exist | Specialists share the checkout; YAML delegation allowlists are not consistently enforced |
 | Server | REST/SSE, auth, tenancy middleware, rate limiting, and storage readiness exist | Lifecycle, limits, result contracts, and request-local state are incomplete |
 | Security | Non-weakenable policy floor, approvals, secret guardrails, and checkpoints | TUI shell escape bypasses the common tool policy; OS sandbox is not bound to production shell execution |
-| Operations | Explicit subsystem close paths and race-enabled tests | No complete retention controller, structured request logging, or bounded disk-growth contract |
+| Operations | Explicit subsystem close paths, retention controls, structured request logging, and race-enabled tests | Soak evidence for bounded growth is still pending |
 | Evaluation | Deterministic token-efficiency gate and task-runner infrastructure | No valid paired coding-quality baseline; checked-in PPD results are correctly marked invalid |
 
 ## Competitive target matrix
@@ -580,7 +580,7 @@ The current working tree contains these runtime-active default and contract chan
 - Coder guidance no longer treats graph output as infallible or narrowly targeted tests as always sufficient.
 - Tests lock the PPD rollout default and reject reintroduction of unavailable planning-tool requirements.
 
-This does not complete durable PPD execution or runtime verification. It removes two known sources of autonomous-task failure while those foundations are implemented in later phases.
+Durable PPD execution and runtime verification are now implemented behind their rollout gates. PPD remains in `shadow` until valid benchmark evidence permits promotion.
 
 P0.1 runtime capability validation was completed on 2026-09-18:
 
@@ -591,7 +591,21 @@ P0.1 runtime capability validation was completed on 2026-09-18:
 - Explicit PPD `enabled` mode is rejected until `planning:closed-loop-ppd` is implemented. The default remains `shadow`.
 - Embedded defaults and missing-capability startup fixtures are covered by focused tests.
 
-The next dependency-ordered package is P0.2, the runtime verification ledger.
+The dependency-ordered runtime ledger, repair, isolation, and result-contract packages are implemented in the current working tree.
+
+### Batch C: runtime evidence, bounded repair, and containment
+
+Implementation is present in the working tree and passed the consolidated test phase:
+
+- Task ledgers now carry typed write/check evidence, normalized scopes, hashes, timestamps, provenance, and mutation revisions.
+- File and shell tools feed runtime evidence through the common tool pipeline; unknown shell commands conservatively invalidate workspace evidence.
+- Verification obligations are derived from observed mutation and final decisions are available to blocking and streaming callers.
+- Repair limits cover attempts, model calls, tool calls, wall time, tokens, and cost; repair continues in the same session with a bounded failure-only prompt.
+- Repeated identical verification failure stops without another model call and terminal reasons are typed.
+- HTTP handlers now have strict bounded JSON decoding, deadlines, panic recovery, correlation IDs, and draining readiness.
+- TUI shell escape now uses the registered shell tool and the ordinary hook, policy, approval, and evidence path.
+
+These behaviors passed the repository-wide race suite on 2026-09-18.
 
 ### Slice B: HTTP safety containment
 
@@ -599,7 +613,7 @@ Implemented on 2026-09-18:
 
 - `serve` now resolves API-key tenant identity and OIDC settings from CLI, environment, or YAML-backed server configuration.
 - SIGINT/SIGTERM now enters the existing ten-second graceful shutdown path.
-- Agent execution endpoints enforce `max_concurrent`; the default is one while provider selection remains shared mutable state.
+- Agent execution endpoints enforce `max_concurrent`; the conservative default remains one even though provider selection is now request-scoped.
 - Excess execution requests return HTTP 429 with `Retry-After: 1`; health and non-execution endpoints remain available.
 - Invalid concurrency and rate-limit flags fail with actionable errors.
 - Permission-setup failure closes the partially built orchestrator.
@@ -614,4 +628,32 @@ cd docs && npm run build
 
 Result: passed. The documentation build emitted the existing warning that the inline author in `2025-01-01-welcome.md` is not declared in `authors.yml`; it did not fail the build and is unrelated to this slice.
 
-Remaining work in P0.4: strict body decoding and size limits, request deadlines, panic recovery, correlation IDs, request-scoped provider selection, draining readiness, idempotency, and race tests above concurrency one.
+The previously listed P0.4 items are implemented and passed the consolidated test run.
+
+### P2.3 observability and fleet readiness
+
+Implementation is present in the working tree and passed package, race, binary, and documentation verification:
+
+- JSON request/task logs carry correlation, task, session, tenant, and agent identifiers without prompt or tool payloads.
+- The authenticated Prometheus endpoint reports work, provider, tool, budget, verification, MCP, cleanup, and disk-use state.
+- Liveness, readiness, and draining are independent endpoints; draining rejects new execution work.
+- Multi-instance mode uses an explicit deterministic affinity contract and rejects a session on every non-owner node before execution.
+- Deployment guidance covers single-host, CI, backend-orchestrated, and fleet modes with conservative permission profiles.
+- Release automation creates an SPDX SBOM, SHA-256 checksums, GitHub provenance, and a keyless Sigstore signature and verification.
+
+Release remains externally blocked until the local Chronos changes on top of `62817f39b00bc8ee860ec8a0dbd37e5d6065dcfd` are published as a compatible revision. The workflow rejects the explicit sentinel in `release/chronos.version` rather than silently consuming an arbitrary local sibling checkout.
+
+### Consolidated verification
+
+Completed on 2026-09-18:
+
+```text
+chronos:      go test ./... -race -count=1
+chronos-code: go test ./... -race -count=1
+chronos-code: make build
+chronos-code: go test -tags lsp ./internal/lsp ./internal/orchestrator ./internal/tui
+docs:         npm run build
+evaluation:   go run ./cmd/chronos-code eval tasks --validate-only --manifest benchmark/tasks/manifest-v1.yaml
+```
+
+All commands passed. The docs build retained the existing non-fatal inline-author warning. The evaluation command validated four deterministic task manifests; it did not make an external-agent performance claim.

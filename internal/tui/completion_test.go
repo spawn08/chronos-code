@@ -77,7 +77,7 @@ func TestClosedStreamRetainsCancellation(t *testing.T) {
 	ch := make(chan *model.ChatResponse)
 	close(ch)
 	cancel()
-	msg := listenStream(ctx, 7, ch)().(streamDoneMsg)
+	msg := listenStream(ctx, 7, ch, nil)().(streamDoneMsg)
 	if msg.turnID != 7 || !errors.Is(msg.err, context.Canceled) {
 		t.Fatalf("completion = %+v", msg)
 	}

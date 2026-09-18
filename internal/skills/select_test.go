@@ -80,3 +80,26 @@ func TestRenderEmptySelectionReturnsEmptyString(t *testing.T) {
 		t.Errorf("Render(nil) = %q, want empty string", out)
 	}
 }
+
+func TestSelectWithCapabilitiesSeparatesRationaleFromContext(t *testing.T) {
+	catalog := []*Skill{
+		{Name: "accepted", Description: "review correctness", ToolsRequired: []string{"file_read"}, ModelHint: "sonnet", Body: "accepted body"},
+		{Name: "missing-tool", Description: "review correctness", ToolsRequired: []string{"shell"}, Body: "must not leak"},
+		{Name: "wrong-model", Description: "review correctness", ModelHint: "opus", Body: "must not leak either"},
+	}
+	result := SelectWithCapabilities("review correctness", catalog, 3, CapabilityManifest{
+		AgentID: "reviewer", ModelID: "claude-sonnet-4", Tools: map[string]struct{}{"file_read": {}},
+	})
+	if len(result.Selected) != 1 || result.Selected[0].Name != "accepted" {
+		t.Fatalf("selected = %+v", result.Selected)
+	}
+	if strings.Contains(result.Context, "missing required tools") || strings.Contains(result.Context, "does not satisfy") || strings.Contains(result.Context, "must not leak") {
+		t.Fatalf("selection rationale leaked into model context: %q", result.Context)
+	}
+	if len(result.Decisions) != 3 || result.Decisions[0].Score <= 0 {
+		t.Fatalf("decisions = %+v", result.Decisions)
+	}
+	if result.Decisions[1].Rejection == "" || result.Decisions[2].Rejection == "" {
+		t.Fatalf("rejection rationale missing: %+v", result.Decisions)
+	}
+}

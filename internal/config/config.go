@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -30,8 +31,10 @@ type Config struct {
 	Tools        ToolsConfig                 `yaml:"tools,omitempty"`
 	Learning     LearningConfig              `yaml:"learning,omitempty"`
 	Verification VerificationConfig          `yaml:"verification,omitempty"`
+	Repair       RepairConfig                `yaml:"repair,omitempty"`
 	RuntimeCaps  CapabilityManifest          `yaml:"runtime_capabilities,omitempty"`
 	Server       ServerConfig                `yaml:"server,omitempty"`
+	Retention    RetentionConfig             `yaml:"retention,omitempty"`
 	Hooks        HooksConfig                 `yaml:"hooks,omitempty"`
 	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
 
@@ -207,16 +210,56 @@ type ProviderOverride struct {
 
 // ServerConfig controls the HTTP server mode (PRD P3-004).
 type ServerConfig struct {
-	Enabled         bool   `yaml:"enabled,omitempty"`
-	Listen          string `yaml:"listen,omitempty"`
-	AuthType        string `yaml:"auth_type,omitempty"`
-	APIKey          string `yaml:"api_key,omitempty"`
-	TenantID        string `yaml:"tenant_id,omitempty"`
-	OIDCIssuer      string `yaml:"oidc_issuer,omitempty"`
-	OIDCClientID    string `yaml:"oidc_client_id,omitempty"`
-	CORSOrigins     string `yaml:"cors_origins,omitempty"`
-	MaxConcurrent   int    `yaml:"max_concurrent,omitempty"`
-	RateLimitPerMin int    `yaml:"rate_limit_per_min,omitempty"`
+	Enabled           bool     `yaml:"enabled,omitempty"`
+	Listen            string   `yaml:"listen,omitempty"`
+	AuthType          string   `yaml:"auth_type,omitempty"`
+	APIKey            string   `yaml:"api_key,omitempty"`
+	TenantID          string   `yaml:"tenant_id,omitempty"`
+	OIDCIssuer        string   `yaml:"oidc_issuer,omitempty"`
+	OIDCClientID      string   `yaml:"oidc_client_id,omitempty"`
+	CORSOrigins       string   `yaml:"cors_origins,omitempty"`
+	MaxConcurrent     int      `yaml:"max_concurrent,omitempty"`
+	RateLimitPerMin   int      `yaml:"rate_limit_per_min,omitempty"`
+	RequestTimeoutSec int      `yaml:"request_timeout_sec,omitempty"`
+	InstanceID        string   `yaml:"instance_id,omitempty"`
+	FleetInstances    []string `yaml:"fleet_instances,omitempty"`
+}
+
+// RetentionConfig controls bounded cleanup. A zero max_age_days, max_count, or
+// max_bytes independently disables that constraint. All-zero policies are off.
+// A zero periodic_interval_minutes disables server periodic cleanup.
+type RetentionConfig struct {
+	Enabled                 bool                             `yaml:"enabled,omitempty"`
+	BatchSize               int                              `yaml:"batch_size,omitempty"`
+	PeriodicIntervalMinutes int                              `yaml:"periodic_interval_minutes,omitempty"`
+	Policies                map[string]RetentionPolicyConfig `yaml:"policies,omitempty"`
+}
+
+type RetentionPolicyConfig struct {
+	MaxAgeDays int   `yaml:"max_age_days,omitempty"`
+	MaxCount   int   `yaml:"max_count,omitempty"`
+	MaxBytes   int64 `yaml:"max_bytes,omitempty"`
+}
+
+func (c *RetentionConfig) UnmarshalYAML(node *yaml.Node) error {
+	type raw RetentionConfig
+	var decoded raw
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.BatchSize < 0 || decoded.PeriodicIntervalMinutes < 0 {
+		return fmt.Errorf("retention batch size and periodic interval must be non-negative")
+	}
+	for scope, policy := range decoded.Policies {
+		if policy.MaxAgeDays < 0 || policy.MaxCount < 0 || policy.MaxBytes < 0 {
+			return fmt.Errorf("retention policy %q limits must be non-negative", scope)
+		}
+		if int64(policy.MaxAgeDays) > int64((1<<63-1)/(24*time.Hour)) {
+			return fmt.Errorf("retention policy %q max_age_days is too large", scope)
+		}
+	}
+	*c = RetentionConfig(decoded)
+	return nil
 }
 
 // WorkspaceConfig controls project-root detection and the code graph indexer.
@@ -237,6 +280,30 @@ type ToolsConfig struct {
 // are reported or enforced. It does not collect verification evidence.
 type VerificationConfig struct {
 	Mode verification.Mode `yaml:"mode,omitempty"`
+}
+
+// RepairConfig bounds verification-driven continuation across the complete
+// task. Zero disables a dimension; negative values are invalid.
+type RepairConfig struct {
+	MaxAttempts         int   `yaml:"max_attempts,omitempty"`
+	MaxModelCalls       int   `yaml:"max_model_calls,omitempty"`
+	MaxToolCalls        int   `yaml:"max_tool_calls,omitempty"`
+	WallTimeSec         int   `yaml:"wall_time_sec,omitempty"`
+	MaxTokens           int64 `yaml:"max_tokens,omitempty"`
+	MaxCostMicrodollars int64 `yaml:"max_cost_microdollars,omitempty"`
+}
+
+func (c *RepairConfig) UnmarshalYAML(node *yaml.Node) error {
+	type raw RepairConfig
+	var decoded raw
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.MaxAttempts < 0 || decoded.MaxModelCalls < 0 || decoded.MaxToolCalls < 0 || decoded.WallTimeSec < 0 || decoded.MaxTokens < 0 || decoded.MaxCostMicrodollars < 0 {
+		return fmt.Errorf("repair limits must be non-negative")
+	}
+	*c = RepairConfig(decoded)
+	return nil
 }
 
 func (c *VerificationConfig) UnmarshalYAML(node *yaml.Node) error {
@@ -618,8 +685,10 @@ func mergeConfig(base, overlay *Config, source string) {
 	mergeTypedSection(&base.Tools, overlay.Tools, overlay.set, "tools")
 	mergeTypedSection(&base.Learning, overlay.Learning, overlay.set, "learning")
 	mergeTypedSection(&base.Verification, overlay.Verification, overlay.set, "verification")
+	mergeTypedSection(&base.Repair, overlay.Repair, overlay.set, "repair")
 	mergeTypedSection(&base.RuntimeCaps, overlay.RuntimeCaps, overlay.set, "runtime_capabilities")
 	mergeTypedSection(&base.Server, overlay.Server, overlay.set, "server")
+	mergeTypedSection(&base.Retention, overlay.Retention, overlay.set, "retention")
 	if base.sources == nil {
 		base.sources = make(map[string]string)
 	}

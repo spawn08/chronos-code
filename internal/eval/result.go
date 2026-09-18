@@ -77,6 +77,11 @@ type TaskOutcome struct {
 	RunID              string                 `json:"run_id"`
 	RepositoryRevision string                 `json:"repository_revision"`
 	Model              ModelSettings          `json:"model"`
+	TerminalStatus     string                 `json:"terminal_status,omitempty"`
+	Patch              string                 `json:"patch,omitempty"`
+	CostMicrodollars   int64                  `json:"cost_microdollars"`
+	RetryAttempts      int                    `json:"retry_attempts"`
+	RepairAttempts     int                    `json:"repair_attempts"`
 	Calls              []Call                 `json:"calls"`
 	Verification       []VerificationEvidence `json:"verification"`
 	LatestChangeAt     time.Time              `json:"latest_change_at"`

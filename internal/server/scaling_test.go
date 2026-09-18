@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestSessionRouter_ClaimAndIsLocal(t *testing.T) {
 	r := NewSessionRouter("inst-1")
@@ -73,5 +77,37 @@ func TestSessionRouter_AutoGenerateInstanceID(t *testing.T) {
 	r := NewSessionRouter("")
 	if r.InstanceID() == "" {
 		t.Fatal("auto-generated instance id should not be empty")
+	}
+}
+
+func TestSessionRouterDeterministicFleetOwner(t *testing.T) {
+	first := NewSessionRouter("node-a", "node-b", "node-a")
+	second := NewSessionRouter("node-b", "node-a", "node-b")
+	for _, sessionID := range []string{"sess-a", "sess-b", "sess-c", "sess-d"} {
+		if first.Owner(sessionID) != second.Owner(sessionID) {
+			t.Fatalf("owner differs for %s: %q != %q", sessionID, first.Owner(sessionID), second.Owner(sessionID))
+		}
+		if first.IsLocal(sessionID) == second.IsLocal(sessionID) {
+			t.Fatalf("exactly one node must own %s", sessionID)
+		}
+	}
+}
+
+func TestOnlyDeterministicOwnerAcceptsSession(t *testing.T) {
+	first := New(nil, ServerConfig{AuthType: "none", InstanceID: "node-a", FleetInstances: []string{"node-a", "node-b"}})
+	second := New(nil, ServerConfig{AuthType: "none", InstanceID: "node-b", FleetInstances: []string{"node-b", "node-a"}})
+	firstResponse := httptest.NewRecorder()
+	secondResponse := httptest.NewRecorder()
+	firstAccepted := first.requireLocalSession(firstResponse, "shared-session")
+	secondAccepted := second.requireLocalSession(secondResponse, "shared-session")
+	if firstAccepted == secondAccepted {
+		t.Fatalf("accepted=(%t,%t), want exactly one owner", firstAccepted, secondAccepted)
+	}
+	rejected := firstResponse
+	if firstAccepted {
+		rejected = secondResponse
+	}
+	if rejected.Code != http.StatusConflict || rejected.Header().Get("X-Chronos-Session-Owner") == "" {
+		t.Fatalf("rejected status=%d owner=%q", rejected.Code, rejected.Header().Get("X-Chronos-Session-Owner"))
 	}
 }

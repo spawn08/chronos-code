@@ -44,6 +44,25 @@ skills:
 	}
 }
 
+func TestLoadBundledYAMLIsolatesInvalidEntry(t *testing.T) {
+	result, err := LoadBundledYAMLReport([]byte(`
+skills:
+  - name: valid
+    tags: [review]
+    manifest: valid body
+  - name: "bad<name"
+    manifest: invalid body
+  - name: sibling
+    manifest: sibling body
+`))
+	if err != nil || len(result.Skills) != 2 || len(result.Diagnostics) != 1 {
+		t.Fatalf("LoadBundledYAMLReport = %+v, %v", result, err)
+	}
+	if result.Skills[0].Name != "valid" || result.Skills[1].Name != "sibling" {
+		t.Fatalf("valid siblings were not retained: %+v", result.Skills)
+	}
+}
+
 func TestLoadDirParsesSkillMDFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	skillDir := filepath.Join(dir, "python-testing")
@@ -113,8 +132,50 @@ func TestLoadDirRejectsMissingFrontmatterName(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\ndescription: no name\n---\nbody"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadDir(dir); err == nil {
-		t.Fatal("LoadDir: want error for SKILL.md missing a name")
+	result, err := LoadDirReport(dir)
+	if err != nil || len(result.Skills) != 0 || len(result.Diagnostics) != 1 {
+		t.Fatalf("LoadDirReport = %+v, %v; want isolated diagnostic", result, err)
+	}
+}
+
+func TestLoadDirIsolatesMalformedAndOversizedSkills(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "healthy", "healthy")
+	badDir := filepath.Join(dir, "bad")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "SKILL.md"), []byte("---\nunknown: true\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	largeDir := filepath.Join(dir, "large")
+	if err := os.MkdirAll(largeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(largeDir, "SKILL.md"), []byte(strings.Repeat("x", MaxSkillFileBytes+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := LoadDirReport(dir)
+	if err != nil || len(result.Skills) != 1 || result.Skills[0].Name != "healthy" || len(result.Diagnostics) != 2 {
+		t.Fatalf("LoadDirReport = %+v, %v", result, err)
+	}
+}
+
+func TestDocumentedSkillFixtureParses(t *testing.T) {
+	result, err := LoadDirReport("testdata")
+	if err != nil || len(result.Diagnostics) != 0 || len(result.Skills) != 1 || result.Skills[0].Name != "focused-review" {
+		t.Fatalf("fixture discovery = %+v, %v", result, err)
+	}
+	fixture, err := os.ReadFile(filepath.Join("testdata", "review", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "docs", "subsystems", "skills.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), strings.TrimSpace(string(fixture))) {
+		t.Fatal("documented skill example drifted from parser fixture")
 	}
 }
 

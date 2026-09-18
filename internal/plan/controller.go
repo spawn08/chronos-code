@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/spawn08/chronos-code/internal/worktree"
 )
 
 // NodeExecutor runs one leased plan node. Implementations must make external
 // effects idempotent using the attempt identity supplied in the request.
 type NodeExecutor interface {
-	Execute(context.Context, NodeExecutionRequest) error
+	Execute(context.Context, NodeExecutionRequest) (NodeExecutionResult, error)
 }
 
 // NodeExecutionRequest contains only the persisted plan metadata and bounded
@@ -22,12 +24,47 @@ type NodeExecutionRequest struct {
 	Context RestartContext
 }
 
+type VerificationState string
+
+const (
+	VerificationPending VerificationState = "pending"
+	VerificationPassed  VerificationState = "passed"
+	VerificationFailed  VerificationState = "failed"
+)
+
+// NodeExecutionResult is the terminal, durable-planning outcome of one attempt.
+// A node is complete only when Status and Verification explicitly report success.
+type NodeExecutionResult struct {
+	NodeID              NodeID
+	AttemptID           AttemptID
+	Status              NodeState
+	StopReason          StopReason
+	Summary             string
+	ChangedPaths        []string
+	EvidenceIDs         []EvidenceID
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	CostMicrodollars    int64
+	Verification        VerificationState
+	Workspace           *worktree.Result
+}
+
 // ContextLoader resolves persisted context references without retaining prior
 // conversation content in the controller.
 type ContextLoader func(context.Context, Plan, Node) ([]ContextEntry, error)
 
 // NodeVerifier validates a completed execution before its node is committed.
 type NodeVerifier interface {
+	Verify(context.Context, Plan, Node, NodeExecutionResult) (NodeExecutionResult, error)
+}
+
+type legacyNodeExecutor interface {
+	Execute(context.Context, NodeExecutionRequest) error
+}
+
+type legacyNodeVerifier interface {
 	Verify(context.Context, Plan, Node) error
 }
 
@@ -70,23 +107,73 @@ type ControllerConfig struct {
 // Controller advances a durable plan generation until it completes or reaches
 // a persisted stop state.
 type Controller struct {
-	store        *SQLStore
-	scheduler    *Scheduler
-	executor     NodeExecutor
-	loadContext  ContextLoader
-	verifier     NodeVerifier
-	contextBytes int
+	store          *SQLStore
+	scheduler      *Scheduler
+	executor       NodeExecutor
+	accessProvider NodeAccessProvider
+	loadContext    ContextLoader
+	verifier       NodeVerifier
+	contextBytes   int
 }
 
-func NewController(store *SQLStore, executor NodeExecutor, loadContext ContextLoader, verifier NodeVerifier, config ControllerConfig) *Controller {
+func NewController(store *SQLStore, executor any, loadContext ContextLoader, verifier any, config ControllerConfig) *Controller {
 	return &Controller{
-		store:        store,
-		scheduler:    NewScheduler(store, config.Scheduler),
-		executor:     executor,
-		loadContext:  loadContext,
-		verifier:     verifier,
-		contextBytes: config.ContextBytes,
+		store:          store,
+		scheduler:      NewScheduler(store, config.Scheduler),
+		executor:       adaptNodeExecutor(executor),
+		accessProvider: adaptNodeAccessProvider(executor),
+		loadContext:    loadContext,
+		verifier:       adaptNodeVerifier(verifier),
+		contextBytes:   config.ContextBytes,
 	}
+}
+
+func adaptNodeAccessProvider(executor any) NodeAccessProvider {
+	provider, _ := executor.(NodeAccessProvider)
+	return provider
+}
+
+func adaptNodeExecutor(executor any) NodeExecutor {
+	if current, ok := executor.(NodeExecutor); ok {
+		return current
+	}
+	if legacy, ok := executor.(legacyNodeExecutor); ok {
+		return nodeExecutorFunc(func(ctx context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
+			err := legacy.Execute(ctx, request)
+			return NodeExecutionResult{NodeID: request.Node.ID, AttemptID: request.Attempt, Status: NodeCompleted, Verification: VerificationPassed}, err
+		})
+	}
+	return nil
+}
+
+func adaptNodeVerifier(verifier any) NodeVerifier {
+	if current, ok := verifier.(NodeVerifier); ok {
+		return current
+	}
+	if legacy, ok := verifier.(legacyNodeVerifier); ok {
+		return nodeVerifierFunc(func(ctx context.Context, p Plan, node Node, result NodeExecutionResult) (NodeExecutionResult, error) {
+			err := legacy.Verify(ctx, p, node)
+			if err != nil {
+				result.Verification = VerificationFailed
+			} else {
+				result.Verification = VerificationPassed
+			}
+			return result, err
+		})
+	}
+	return nil
+}
+
+type nodeExecutorFunc func(context.Context, NodeExecutionRequest) (NodeExecutionResult, error)
+
+func (f nodeExecutorFunc) Execute(ctx context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
+	return f(ctx, request)
+}
+
+type nodeVerifierFunc func(context.Context, Plan, Node, NodeExecutionResult) (NodeExecutionResult, error)
+
+func (f nodeVerifierFunc) Verify(ctx context.Context, p Plan, node Node, result NodeExecutionResult) (NodeExecutionResult, error) {
+	return f(ctx, p, node, result)
 }
 
 // Decompose persists a draft using the controller's durable store.
@@ -145,8 +232,8 @@ func (c *Controller) Run(ctx context.Context, p Plan) (Plan, error) {
 }
 
 func (c *Controller) batches(ctx context.Context, p Plan, nodes []Node) [][]Node {
-	provider, ok := c.executor.(NodeAccessProvider)
-	if !ok {
+	provider := c.accessProvider
+	if provider == nil {
 		batches := make([][]Node, len(nodes))
 		for i, node := range nodes {
 			batches[i] = []Node{node}
@@ -188,6 +275,12 @@ func (c *Controller) batches(ctx context.Context, p Plan, nodes []Node) [][]Node
 }
 
 func overlaps(first, second map[string]struct{}) bool {
+	if _, wildcard := first[""]; wildcard {
+		return len(second) > 0
+	}
+	if _, wildcard := second[""]; wildcard {
+		return len(first) > 0
+	}
 	for path := range first {
 		if _, ok := second[path]; ok {
 			return true
@@ -263,36 +356,84 @@ func (c *Controller) runClaimed(ctx context.Context, p Plan, claimed Node, reque
 	if c.loadContext != nil {
 		entries, err = c.loadContext(ctx, p, claimed)
 		if err != nil {
-			return c.stop(ctx, p, StopAmbiguity)
+			return c.stopClaimed(ctx, p, claimed.ID, request, StopAmbiguity)
 		}
 	}
 	restart, err := BuildRestartContext(entries, c.contextBytes, "")
+	var result NodeExecutionResult
 	if err == nil {
-		err = c.executor.Execute(ctx, NodeExecutionRequest{Plan: p, Node: claimed, Attempt: request.AttemptID, Context: restart})
+		result, err = c.executor.Execute(ctx, NodeExecutionRequest{Plan: p, Node: claimed, Attempt: request.AttemptID, Context: restart})
 	}
 	var stopped *StopError
 	if errors.As(err, &stopped) {
-		return c.stop(ctx, p, stopped.Reason)
+		return c.stopClaimed(ctx, p, claimed.ID, request, stopped.Reason)
 	}
 	if err != nil {
-		if retryErr := c.scheduler.Retry(ctx, p, claimed.ID, request.LeaseID, EventID("retry-"+string(request.AttemptID)), IdempotencyKey("retry-"+string(request.AttemptID))); retryErr != nil {
-			return retryErr
-		}
-		loaded, loadErr := c.store.Load(ctx, p)
-		if loadErr != nil {
-			return loadErr
-		}
-		if loaded.State == PlanFailed {
-			return c.stop(ctx, p, StopRetryExhausted)
-		}
-		return nil
+		return c.retry(ctx, p, claimed.ID, request)
+	}
+	if err := validateNodeExecutionResult(result, claimed.ID, request.AttemptID); err != nil {
+		return c.stopClaimed(ctx, p, claimed.ID, request, StopAmbiguity)
+	}
+	if result.Status != NodeCompleted {
+		return c.persistTerminalResult(ctx, p, claimed.ID, request, result)
 	}
 	if c.verifier != nil {
-		if err := c.verifier.Verify(ctx, p, claimed); err != nil {
-			return c.stop(ctx, p, StopVerificationFailed)
+		result, err = c.verifier.Verify(ctx, p, claimed, result)
+		if err != nil {
+			return c.stopClaimed(ctx, p, claimed.ID, request, StopVerificationFailed)
+		}
+		if err := validateNodeExecutionResult(result, claimed.ID, request.AttemptID); err != nil {
+			return c.stopClaimed(ctx, p, claimed.ID, request, StopVerificationFailed)
+		}
+		if result.Status != NodeCompleted {
+			return c.persistTerminalResult(ctx, p, claimed.ID, request, result)
 		}
 	}
-	return c.scheduler.Complete(ctx, p, claimed.ID, request.LeaseID, EventID("complete-"+string(request.AttemptID)), IdempotencyKey("complete-"+string(request.AttemptID)))
+	if result.Status != NodeCompleted || result.StopReason != "" || result.Verification != VerificationPassed {
+		return c.stopClaimed(ctx, p, claimed.ID, request, StopVerificationFailed)
+	}
+	return c.scheduler.CompleteWithEvidence(ctx, p, claimed.ID, request.LeaseID, EventID("complete-"+string(request.AttemptID)), IdempotencyKey("complete-"+string(request.AttemptID)), result.EvidenceIDs)
+}
+
+func validateNodeExecutionResult(result NodeExecutionResult, nodeID NodeID, attemptID AttemptID) error {
+	if result.NodeID != nodeID || result.AttemptID != attemptID {
+		return fmt.Errorf("node execution result identity mismatch")
+	}
+	switch result.Status {
+	case NodeCompleted, NodeFailed, NodeBlocked, NodeCanceled:
+		return nil
+	default:
+		return fmt.Errorf("node execution result is not terminal")
+	}
+}
+
+func (c *Controller) retry(ctx context.Context, p Plan, nodeID NodeID, request ClaimRequest) error {
+	if err := c.scheduler.Retry(ctx, p, nodeID, request.LeaseID, EventID("retry-"+string(request.AttemptID)), IdempotencyKey("retry-"+string(request.AttemptID))); err != nil {
+		return err
+	}
+	loaded, err := c.store.Load(ctx, p)
+	if err != nil {
+		return err
+	}
+	if loaded.State == PlanFailed {
+		return c.stop(ctx, p, StopRetryExhausted)
+	}
+	return nil
+}
+
+func (c *Controller) persistTerminalResult(ctx context.Context, p Plan, nodeID NodeID, request ClaimRequest, result NodeExecutionResult) error {
+	if result.StopReason == "" {
+		return c.stopClaimed(ctx, p, nodeID, request, StopAmbiguity)
+	}
+	return c.scheduler.Stop(ctx, p, nodeID, request.LeaseID, EventID("stop-"+string(request.AttemptID)), IdempotencyKey("stop-"+string(request.AttemptID)), result.Status, result.StopReason)
+}
+
+func (c *Controller) stopClaimed(ctx context.Context, p Plan, nodeID NodeID, request ClaimRequest, reason StopReason) error {
+	status := NodeBlocked
+	if reason == StopVerificationFailed || reason == StopRetryExhausted {
+		status = NodeFailed
+	}
+	return c.scheduler.Stop(ctx, p, nodeID, request.LeaseID, EventID("stop-"+string(request.AttemptID)), IdempotencyKey("stop-"+string(request.AttemptID)), status, reason)
 }
 
 func (c *Controller) stop(ctx context.Context, p Plan, reason StopReason) error {

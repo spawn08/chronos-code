@@ -207,13 +207,17 @@ func assertFreshVerificationEvidence(t *testing.T) {
 	events := []execution.Event{
 		{ID: "write", TaskID: "recovery-task", Sequence: 1, Type: execution.EventWrite, Paths: []string{path}},
 		{ID: "verify", TaskID: "recovery-task", Sequence: 2, Type: execution.EventVerification, EvidenceID: "verify", Paths: []string{path}, Detail: "go test ./internal/example", Passed: true},
-		{ID: "later-write", TaskID: "recovery-task", Sequence: 3, Type: execution.EventWrite, Paths: []string{path}},
+		{ID: "diff", TaskID: "recovery-task", Sequence: 3, Type: execution.EventVerification, EvidenceID: "diff", Paths: []string{path}, CommandClass: execution.CommandDiff, Passed: true},
+		{ID: "later-write", TaskID: "recovery-task", Sequence: 4, Type: execution.EventWrite, Paths: []string{path}},
 	}
 	if decision := verification.Assess(verification.ModeEnforce, true, obligations, events); decision.Allowed || !decision.Disagreement {
 		t.Fatalf("stale verification completion = %#v, want rejected disagreement", decision)
 	}
 
-	events = append(events, execution.Event{ID: "fresh-verify", TaskID: "recovery-task", Sequence: 4, Type: execution.EventVerification, EvidenceID: "fresh-verify", Paths: []string{path}, Detail: "go test ./internal/example", Passed: true})
+	events = append(events,
+		execution.Event{ID: "fresh-verify", TaskID: "recovery-task", Sequence: 5, Type: execution.EventVerification, EvidenceID: "fresh-verify", Paths: []string{path}, Detail: "go test ./internal/example", Passed: true},
+		execution.Event{ID: "fresh-diff", TaskID: "recovery-task", Sequence: 6, Type: execution.EventVerification, EvidenceID: "fresh-diff", Paths: []string{path}, CommandClass: execution.CommandDiff, Passed: true},
+	)
 	if decision := verification.Assess(verification.ModeEnforce, true, obligations, events); !decision.Allowed || decision.Disagreement {
 		t.Fatalf("fresh verification completion = %#v, want allowed completion", decision)
 	}

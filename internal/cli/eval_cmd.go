@@ -25,6 +25,9 @@ const (
 // internal/eval's package doc) — so it deliberately does not go through
 // loadAndBuild.
 func runEval() error {
+	if len(os.Args) >= 3 && os.Args[2] == "tasks" {
+		return runEvalTasks(os.Args[3:])
+	}
 	if len(os.Args) >= 3 && os.Args[2] == "ppd" {
 		if len(os.Args) >= 4 && os.Args[3] == "--report" {
 			rest := os.Args[4:]

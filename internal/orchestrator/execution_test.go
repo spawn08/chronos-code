@@ -16,6 +16,7 @@ import (
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
 	storagememory "github.com/spawn08/chronos/storage/adapters/memory"
@@ -29,6 +30,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/verification"
+	"github.com/spawn08/chronos-code/internal/workspace"
 )
 
 type executionTestProvider struct {
@@ -95,6 +97,22 @@ func newExecutionTestAgent(id string, provider model.Provider) *agent.Agent {
 	}
 }
 
+func TestExecuteAttachesAndPreservesRequestWorkspaceRoot(t *testing.T) {
+	provider := &executionTestProvider{name: "coder", modelID: "test-model"}
+	configuredRoot := t.TempDir()
+	requestRoot := t.TempDir()
+	orch := &Orchestrator{
+		agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)},
+		active: "coder", workspace: &workspace.Info{Root: configuredRoot},
+	}
+	if _, err := orch.Execute(builtins.WithWorkspaceRoot(context.Background(), requestRoot), ExecutionRequest{Message: "inspect", RequestedAgent: "coder"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := builtins.WorkspaceRootFromContext(provider.executionContext(0)); !ok || got != requestRoot {
+		t.Fatalf("provider workspace root = %q, %v; want %q", got, ok, requestRoot)
+	}
+}
+
 func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 	coder := &executionTestProvider{name: "coder", modelID: "coder-model"}
 	debugger := &executionTestProvider{name: "debugger", modelID: "debugger-model"}
@@ -118,7 +136,6 @@ func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 		primary:        "coder",
 		router:         rt,
 		routingConfig:  cfg,
-		routingState:   make(map[string]router.Classification),
 		modelOverrides: make(map[string]bool),
 		buildProvider: func(agent.ModelConfig) (model.Provider, error) {
 			return routed, nil
@@ -135,12 +152,16 @@ func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 	if len(debugger.requests) != 0 {
 		t.Fatalf("debugger requests = %d, want 0 (specialists are advisory)", len(debugger.requests))
 	}
-	if got := orch.agents["coder"].Model; got.Name() != "routed" || got.Model() != "high-debug" {
-		t.Fatalf("primary model = (%q, %q), want (routed, high-debug)", got.Name(), got.Model())
+	if got := orch.agents["coder"].Model; got.Name() != "coder" || got.Model() != "coder-model" {
+		t.Fatalf("primary model = (%q, %q), want unchanged configured model", got.Name(), got.Model())
 	}
 	req := routed.request(0)
 	if req == nil {
 		t.Fatal("expected a model request on the routed primary provider")
+	}
+	selected, ok := agent.ModelProviderFromContext(routed.executionContext(0))
+	if !ok || selected != routed {
+		t.Fatalf("provider context = (%v, %v), want routed provider", selected, ok)
 	}
 	joined := ""
 	for _, msg := range req.Messages {
@@ -148,6 +169,88 @@ func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 	}
 	if !strings.Contains(joined, "spawn_subagent debugger") || !strings.Contains(joined, "Path: complexity=") {
 		t.Fatalf("prompt missing specialist or path hint: %q", joined)
+	}
+}
+
+type routingRaceProvider struct {
+	name    string
+	started chan string
+	release <-chan struct{}
+}
+
+func (p *routingRaceProvider) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
+	p.started <- req.Model
+	select {
+	case <-p.release:
+		return &model.ChatResponse{Role: model.RoleAssistant, Content: p.name}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *routingRaceProvider) StreamChat(context.Context, *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	return nil, errors.New("unexpected stream call")
+}
+
+func (p *routingRaceProvider) Name() string  { return p.name }
+func (p *routingRaceProvider) Model() string { return p.name + "-model" }
+
+func TestExecuteUsesConcurrentRequestScopedProviders(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	low := &routingRaceProvider{name: "low", started: started, release: release}
+	high := &routingRaceProvider{name: "high", started: started, release: release}
+	configured := &executionTestProvider{name: "configured", modelID: "configured-model"}
+	orch := &Orchestrator{
+		agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", configured)},
+		active: "coder",
+		routingConfig: &router.Config{ModelRouting: router.ModelRouting{Models: map[router.Complexity]map[router.TaskKind]router.ModelSpec{
+			router.ComplexityLow:  {router.TaskKindExplain: {Provider: "low", Model: "low-model"}},
+			router.ComplexityHigh: {router.TaskKindExplain: {Provider: "high", Model: "high-model"}},
+		}}},
+		modelOverrides: make(map[string]bool),
+	}
+	orch.buildProvider = func(cfg agent.ModelConfig) (model.Provider, error) {
+		if cfg.Provider == "high" {
+			return high, nil
+		}
+		return low, nil
+	}
+
+	type outcome struct {
+		result ExecutionResult
+		err    error
+	}
+	outcomes := make(chan outcome, 2)
+	for _, message := range []string{"explain this", "explain all files"} {
+		message := message
+		go func() {
+			result, err := orch.Execute(context.Background(), ExecutionRequest{Message: message, RequestedAgent: "coder"})
+			outcomes <- outcome{result: result, err: err}
+		}()
+	}
+
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case modelID := <-started:
+			seen[modelID] = true
+		case <-time.After(time.Second):
+			t.Fatal("concurrent provider calls did not overlap")
+		}
+	}
+	close(release)
+	for range 2 {
+		outcome := <-outcomes
+		if outcome.err != nil {
+			t.Fatal(outcome.err)
+		}
+	}
+	if !seen["low-model"] || !seen["high-model"] {
+		t.Fatalf("request models = %v, want low-model and high-model", seen)
+	}
+	if orch.agents["coder"].Model != configured {
+		t.Fatal("automatic routing mutated Agent.Model")
 	}
 }
 
@@ -369,8 +472,8 @@ func newPPDExecutionTestOrchestrator(config router.PPDConfig, coder, planner *ex
 	}
 	return &Orchestrator{
 		agents: agents, active: "coder",
-		routingConfig: &router.Config{PPD: config},
-		routingState:  make(map[string]router.Classification), modelOverrides: make(map[string]bool),
+		routingConfig:  &router.Config{PPD: config},
+		modelOverrides: make(map[string]bool),
 	}
 }
 
@@ -386,7 +489,7 @@ func TestExecuteRejectsUnsupportedVerifiedCompletion(t *testing.T) {
 		TestCommands: []string{"go test ./..."},
 	})
 
-	_, err := orch.Execute(context.Background(), ExecutionRequest{
+	blocking, err := orch.Execute(context.Background(), ExecutionRequest{
 		Message:                 "fix the bug",
 		VerificationMode:        verification.ModeEnforce,
 		VerificationObligations: obligations,
@@ -396,6 +499,9 @@ func TestExecuteRejectsUnsupportedVerifiedCompletion(t *testing.T) {
 	})
 	if err == nil || !contains(err.Error(), "verification does not support") {
 		t.Fatalf("Execute() error = %v, want unsupported verification error", err)
+	}
+	if blocking.Verification.Allowed || !blocking.Verification.Disagreement {
+		t.Fatalf("blocking verification = %#v, want visible disagreement", blocking.Verification)
 	}
 
 	result, err := orch.Execute(context.Background(), ExecutionRequest{
@@ -418,6 +524,28 @@ func TestExecuteRejectsUnsupportedVerifiedCompletion(t *testing.T) {
 	}
 	if streamErr == nil || !contains(streamErr.Error(), "verification does not support") {
 		t.Fatalf("streaming verification error = %v, want unsupported verification error", streamErr)
+	}
+	completion, ok := <-result.Completion
+	if !ok || completion.Verification.Allowed || !completion.Verification.Disagreement {
+		t.Fatalf("streaming verification = %#v, open=%v", completion, ok)
+	}
+}
+
+func TestExecuteReportModeExposesVerificationDisagreement(t *testing.T) {
+	provider := &executionTestProvider{name: "coder", modelID: "test"}
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)}, active: "coder"}
+	result, err := orch.Execute(context.Background(), ExecutionRequest{
+		Message:          "fix the bug",
+		VerificationMode: verification.ModeReport,
+		VerificationObligations: []verification.Obligation{{
+			ID: "test", Kind: verification.KindTest, CommandClass: execution.CommandTest, Paths: []string{"main.go"}, Status: verification.StatusPending,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Verification.Allowed || !result.Verification.Disagreement || len(result.Verification.Obligations) != 1 {
+		t.Fatalf("report verification = %#v", result.Verification)
 	}
 }
 

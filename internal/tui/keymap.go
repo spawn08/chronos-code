@@ -53,8 +53,10 @@ Commands:
   /stream            Toggle streaming on/off
   /session           Show current session and recent history
   /session list      Search sessions; Enter resumes, Tab inspects metadata
-  /inspect [context|changes]
+  /inspect [context|changes|operational]
                      Inspect captured tool/context/edit details; Esc closes
+  /status            Show immutable operational state and VCS changes
+  /task retry|resume Continue an eligible stopped task without replaying its request
   /resume [id]       Resume the latest (or given) session
   /compact           Summarize session history and reset the token budget
   /rewind            Undo the last file_write (alias: /undo)

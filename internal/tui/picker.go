@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos/storage"
@@ -209,7 +210,7 @@ func mergeLiveModelPickerItems(items []wizardItem, provider string, live []model
 // same order, for Ctrl+/'s fuzzy-filtered palette.
 var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/think", "/login", "/logout", "/whoami",
-	"/context", "/usage", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace",
+	"/context", "/usage", "/status", "/task", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace",
 	"/skills", "/mcp", "/subagent", "/copy", "/mouse", "/clear", "/perf", "/help", "/quit",
 	"/session list", "/inspect",
 }
@@ -359,6 +360,7 @@ func (m *appModel) pickerVisibleRows() int {
 	if m.picker != nil && m.picker.isSessionPicker {
 		chrome++
 	}
+	chrome += lipgloss.Height(m.renderOperationalBar())
 	budget := m.height - chrome
 	return max(1, budget)
 }

@@ -2,6 +2,7 @@
 package verification
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -51,11 +52,12 @@ type Input struct {
 
 // Obligation identifies one check and its current evidence-derived state.
 type Obligation struct {
-	ID      string
-	Kind    Kind
-	Command string
-	Paths   []string
-	Status  Status
+	ID           string
+	Kind         Kind
+	Command      string
+	CommandClass execution.CommandClass
+	Paths        []string
+	Status       Status
 }
 
 // Decision describes whether the policy agrees with a caller's proposed
@@ -67,33 +69,43 @@ type Decision struct {
 	Obligations  []Obligation
 }
 
-// Derive selects required repository checks. Read-only tasks and tasks with
-// no writes have no edit-specific verification requirements.
+// Derive selects required repository checks. Observed mutation, rather than
+// the requested task classification, is authoritative.
 func Derive(input Input) []Obligation {
-	if !isEditTask(input.TaskKind) || len(input.ChangedPaths) == 0 {
+	if len(input.ChangedPaths) == 0 {
 		return nil
 	}
 
 	paths := unique(append(append([]string(nil), input.ChangedPaths...), input.ImpactPaths...))
 	testCommands := append([]string(nil), input.TestCommands...)
-	for _, commands := range input.TestMap {
-		testCommands = append(testCommands, commands...)
+	for path, commands := range input.TestMap {
+		if overlap(paths, []string{path}) {
+			testCommands = append(testCommands, commands...)
+		}
 	}
 	obligations := make([]Obligation, 0, 3+len(testCommands))
-	add := func(kind Kind, command string) {
-		if command == "" {
-			return
+	add := func(kind Kind, command string, class execution.CommandClass) {
+		id := string(kind)
+		if command != "" {
+			id += ":" + command
 		}
 		obligations = append(obligations, Obligation{
-			ID: string(kind) + ":" + command, Kind: kind, Command: command, Paths: paths, Status: StatusPending,
+			ID: id, Kind: kind, Command: command, CommandClass: class, Paths: paths, Status: StatusPending,
 		})
 	}
-	add(KindBuild, input.BuildCommand)
-	add(KindDiagnostics, input.Diagnostics)
-	for _, command := range unique(testCommands) {
-		add(KindTest, command)
+	if input.BuildCommand != "" {
+		add(KindBuild, input.BuildCommand, execution.CommandBuild)
 	}
-	add(KindDiff, input.DiffCommand)
+	if input.Diagnostics != "" {
+		add(KindDiagnostics, input.Diagnostics, execution.CommandDiagnostics)
+	}
+	for _, command := range unique(testCommands) {
+		add(KindTest, command, execution.CommandTest)
+	}
+	if len(testCommands) == 0 && containsCode(paths) {
+		add(KindTest, "", execution.CommandTest)
+	}
+	add(KindDiff, input.DiffCommand, execution.CommandDiff)
 	return obligations
 }
 
@@ -117,7 +129,7 @@ func Reduce(obligations []Obligation, events []execution.Event) []Obligation {
 					obligation.Status = StatusStale
 				}
 			case execution.EventVerification:
-				if !matches(*obligation, event.Detail) {
+				if !matches(*obligation, event) {
 					continue
 				}
 				if event.Passed {
@@ -126,13 +138,17 @@ func Reduce(obligations []Obligation, events []execution.Event) []Obligation {
 					obligation.Status = StatusFailed
 				}
 			case execution.EventUncertainty:
-				if matches(*obligation, strings.TrimPrefix(event.Detail, "cancelled:")) && strings.HasPrefix(event.Detail, "cancelled:") {
+				if matchesDetail(*obligation, strings.TrimPrefix(event.Detail, "cancelled:")) && strings.HasPrefix(event.Detail, "cancelled:") {
 					obligation.Status = StatusCancelled
 				}
 			}
 		}
 	}
 	return current
+}
+
+func matchesDetail(obligation Obligation, detail string) bool {
+	return detail == obligation.ID || obligation.Command != "" && detail == obligation.Command
 }
 
 // Assess derives the current obligation result and records a measurable
@@ -150,12 +166,21 @@ func Assess(mode Mode, proposedSuccess bool, obligations []Obligation, events []
 	return Decision{Allowed: !disagreement || mode == ModeReport, Disagreement: disagreement, Obligations: current}
 }
 
-func isEditTask(kind string) bool {
-	return kind == "edit" || kind == "refactor" || kind == "debug"
+func matches(obligation Obligation, event execution.Event) bool {
+	if obligation.Command != "" {
+		return event.Command == obligation.Command || event.Detail == obligation.ID || event.Detail == obligation.Command
+	}
+	return event.CommandClass == obligation.CommandClass
 }
 
-func matches(obligation Obligation, detail string) bool {
-	return detail == obligation.ID || detail == obligation.Command
+func containsCode(paths []string) bool {
+	for _, path := range paths {
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx":
+			return true
+		}
+	}
+	return false
 }
 
 func overlap(left, right []string) bool {

@@ -112,6 +112,53 @@ Supported capability namespaces are `tool:<name>`, `graph:code`, `lsp:tools`, `m
 
 Export-only examples such as `tools.yaml` and `mcp-servers.yaml` do not count as runtime capability evidence.
 
+### Bounded Repair
+
+Verification-driven repair continues in the same task and session. Limits are cumulative across the original attempt, output continuation, and repair attempts. A value of `0` disables that limit.
+
+```yaml
+repair:
+  max_attempts: 1
+  max_model_calls: 12
+  max_tool_calls: 100
+  wall_time_sec: 1800
+  max_tokens: 500000
+  max_cost_microdollars: 5000000
+```
+
+Repair prompts contain only unmet obligations, affected paths, and remaining limits. Repeated identical verification failures stop without another model call.
+
+### Retention And Cleanup
+
+Retention policies independently enforce age, count, and estimated byte limits. A value of `0` disables only that dimension; an all-zero policy is disabled. Cleanup is bounded to `batch_size` candidates per scope and periodic server cleanup is opt-in.
+
+```yaml
+retention:
+  enabled: true
+  batch_size: 100
+  periodic_interval_minutes: 0
+  policies:
+    sessions: {max_age_days: 90, max_count: 500, max_bytes: 0}
+    input_artifacts: {max_age_days: 7, max_count: 500, max_bytes: 268435456}
+```
+
+Use `chronos-code cleanup status`, `chronos-code cleanup run --dry-run`, or `chronos-code cleanup prune <scope>`. Plan records have no retention timestamps, so plan cleanup is intentionally explicit and tenant/repository scoped: `chronos-code cleanup prune plan_db --tenant <id> --repository <id> --dry-run`.
+
+### Server and Fleet Affinity
+
+```yaml
+server:
+  listen: ":8430"
+  auth_type: api_key
+  tenant_id: team-a
+  max_concurrent: 1
+  request_timeout_sec: 300
+  instance_id: node-a
+  fleet_instances: [node-a, node-b]
+```
+
+Set the API key through `CHRONOS_CODE_API_KEY`, not in committed YAML. For a multi-instance deployment, every node must use the same `fleet_instances` values and a distinct `instance_id`. `CHRONOS_CODE_INSTANCE_ID` and comma-separated `CHRONOS_CODE_FLEET_INSTANCES` override the YAML values. See [Deployment and Fleet Operations](./deployment.md) for probe, affinity, metrics, and permission semantics.
+
 ### Native Thinking
 
 Off by default. Enable in YAML or with `/think` in the TUI:
@@ -163,24 +210,23 @@ MCP servers are defined in `.mcp.json` in the project root. Use `${ENV_VAR}` ref
 
 ```json
 {
-  "servers": [
-    {
-      "name": "my-server",
+  "mcpServers": {
+    "local-files": {
       "transport": "stdio",
-      "command": "my-mcp-server",
-      "args": ["--token", "${MY_API_TOKEN}"]
+      "command": "mcp-files",
+      "args": ["--token", "${MCP_FILES_TOKEN}"]
     },
-    {
-      "name": "remote-server",
+    "remote-search": {
       "transport": "sse",
-      "url": "https://api.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${REMOTE_API_KEY}"
-      }
+      "url": "https://mcp.example.com/events?token=${MCP_SEARCH_TOKEN}"
     }
-  ]
+  }
 }
 ```
+
+This example is validated by `internal/mcpdiscover/testdata/mcp.json`.
+
+Discovery parses `.mcp.json`, Cursor, VS Code, Claude, `package.json`, and the user config independently. A malformed source is reported without suppressing healthy siblings. During file watching, only the malformed source falls back to its last-known-good entries.
 
 :::warning Credential requirement
 All credential-like arguments and header values **must** use `${ENV_VAR}` references. Hardcoded credentials are rejected. `mcp list` and `mcp test` output redacts credential values.

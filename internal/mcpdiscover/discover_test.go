@@ -299,6 +299,43 @@ func TestLoad_MalformedFileHasPathContext(t *testing.T) {
 	}
 }
 
+func TestLoadIsolatesMalformedSources(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".mcp.json"), `{bad`)
+	if err := os.MkdirAll(filepath.Join(root, ".cursor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, ".cursor", "mcp.json"), `{"mcpServers":{"healthy":{"command":"healthy"}}}`)
+
+	snapshot := Load(root)
+	if snapshot.Err == nil || len(snapshot.Servers) != 1 || snapshot.Servers[0].Name != "healthy" {
+		t.Fatalf("snapshot = %+v, want healthy sibling and malformed diagnostic", snapshot)
+	}
+	if len(snapshot.Sources) != len(projectConfigPaths)+1 || snapshot.Sources[0].State != SourceInvalid {
+		t.Fatalf("source statuses = %+v", snapshot.Sources)
+	}
+}
+
+func TestDocumentedMCPFixtureParses(t *testing.T) {
+	fixturePath := filepath.Join("testdata", "mcp.json")
+	servers, err := DiscoverFromFile(fixturePath)
+	if err != nil || len(servers) != 2 {
+		t.Fatalf("fixture servers = %v, error = %v", servers, err)
+	}
+	fixture, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "docs", "subsystems", "mcp.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), strings.TrimSpace(string(fixture))) {
+		t.Fatal("documented MCP example drifted from parser fixture")
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

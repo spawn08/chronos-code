@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -19,7 +20,21 @@ var (
 	ErrInvalidPlanRef     = errors.New("invalid plan reference")
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
+
+const (
+	schemaV1Checksum = "c6f8c0da8c42f04a"
+	schemaV2Checksum = "7436d0a91d7f9b52"
+)
+
+var planMigrations = []struct {
+	version  int
+	checksum string
+	sql      string
+}{
+	{version: 1, checksum: schemaV1Checksum, sql: schemaV1SQL},
+	{version: 2, checksum: schemaV2Checksum, sql: schemaV2SQL},
+}
 
 // SQLStore is the SQLite-backed durable plan repository.
 type SQLStore struct {
@@ -107,6 +122,9 @@ type PlanExport struct {
 type PruneRequest struct {
 	Scope  PlanScope
 	DryRun bool
+	// Limit bounds plans removed in one transaction. Zero preserves the
+	// explicit all-scope behavior used by the plan CLI.
+	Limit int
 }
 
 type PruneResult struct {
@@ -136,7 +154,7 @@ type RetryRequest struct {
 const redactedIdempotencyKey IdempotencyKey = "[REDACTED]"
 
 // OpenSQLStore opens path, refuses schemas newer than this binary understands,
-// and applies the initial schema transactionally.
+// and applies pending schema migrations transactionally.
 func OpenSQLStore(ctx context.Context, path string) (*SQLStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -178,23 +196,27 @@ func (s *SQLStore) Migrate(ctx context.Context) error {
 	if latestVersion > schemaVersion {
 		return ErrUnsupportedSchema
 	}
-	var checksum string
-	err = tx.QueryRowContext(ctx, `SELECT checksum FROM plan_schema_migrations WHERE version = ?`, schemaVersion).Scan(&checksum)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("read plan migration: %w", err)
-	}
-	const migrationChecksum = "c6f8c0da8c42f04a"
-	if err == nil {
-		if checksum != migrationChecksum {
+	for _, migration := range planMigrations {
+		var checksum string
+		err := tx.QueryRowContext(ctx, `SELECT checksum FROM plan_schema_migrations WHERE version = ?`, migration.version).Scan(&checksum)
+		if err == nil {
+			if checksum != migration.checksum {
+				return ErrIncompatibleSchema
+			}
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read plan migration %d: %w", migration.version, err)
+		}
+		if migration.version <= latestVersion {
 			return ErrIncompatibleSchema
 		}
-		return tx.Commit()
-	}
-	if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("apply plan migration: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO plan_schema_migrations (version, checksum) VALUES (?, ?)`, schemaVersion, migrationChecksum); err != nil {
-		return fmt.Errorf("record plan migration: %w", err)
+		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+			return fmt.Errorf("apply plan migration %d: %w", migration.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_schema_migrations (version, checksum) VALUES (?, ?)`, migration.version, migration.checksum); err != nil {
+			return fmt.Errorf("record plan migration %d: %w", migration.version, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit plan migration: %w", err)
@@ -234,7 +256,11 @@ func (s *SQLStore) Create(ctx context.Context, p Plan) error {
 		return fmt.Errorf("insert plan: %w", err)
 	}
 	for _, node := range p.Nodes {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_nodes (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, state) VALUES (?, ?, ?, ?, ?, ?, ?)`, p.TenantID, p.RepositoryID, p.TaskID, p.ID, p.Generation, node.ID, node.State); err != nil {
+		risks, err := json.Marshal(node.Risks)
+		if err != nil {
+			return fmt.Errorf("encode node risks: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_nodes (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, state, scope, risks, verification) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.TenantID, p.RepositoryID, p.TaskID, p.ID, p.Generation, node.ID, node.State, node.Scope, string(risks), node.Verification); err != nil {
 			return fmt.Errorf("insert node: %w", err)
 		}
 	}
@@ -304,15 +330,19 @@ func (s *SQLStore) Load(ctx context.Context, p Plan) (Plan, error) {
 }
 
 func (s *SQLStore) loadNodes(ctx context.Context, p *Plan) error {
-	rows, err := s.db.QueryContext(ctx, planWhere(`SELECT node_id, state FROM plan_nodes`)+` ORDER BY node_id`, planArgs(*p)...)
+	rows, err := s.db.QueryContext(ctx, planWhere(`SELECT node_id, state, scope, risks, verification FROM plan_nodes`)+` ORDER BY node_id`, planArgs(*p)...)
 	if err != nil {
 		return fmt.Errorf("load nodes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var node Node
-		if err := rows.Scan(&node.ID, &node.State); err != nil {
+		var risks string
+		if err := rows.Scan(&node.ID, &node.State, &node.Scope, &risks, &node.Verification); err != nil {
 			return fmt.Errorf("scan node: %w", err)
+		}
+		if err := json.Unmarshal([]byte(risks), &node.Risks); err != nil {
+			return fmt.Errorf("decode node risks: %w", err)
 		}
 		p.Nodes = append(p.Nodes, node)
 	}
@@ -692,10 +722,14 @@ func (s *SQLStore) Export(ctx context.Context, scope PlanScope) (PlanExport, err
 	return exported, nil
 }
 
-// Prune removes every plan record within an explicit scope, or reports its effect.
+// Prune removes plan records within an explicit scope, or reports its effect.
+// Limit bounds the deterministic task/plan/generation prefix when non-zero.
 func (s *SQLStore) Prune(ctx context.Context, request PruneRequest) (PruneResult, error) {
 	if err := request.Scope.Validate(); err != nil {
 		return PruneResult{}, err
+	}
+	if request.Limit < 0 {
+		return PruneResult{}, fmt.Errorf("plan prune limit must be non-negative")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -703,17 +737,26 @@ func (s *SQLStore) Prune(ctx context.Context, request PruneRequest) (PruneResult
 	}
 	defer tx.Rollback()
 	result := PruneResult{DryRun: request.DryRun}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plans WHERE tenant_id = ? AND repository_id = ?`, request.Scope.TenantID, request.Scope.RepositoryID).Scan(&result.Plans); err != nil {
+	filter := `tenant_id = ? AND repository_id = ?`
+	args := []any{request.Scope.TenantID, request.Scope.RepositoryID}
+	if request.Limit > 0 {
+		filter += ` AND (task_id, plan_id, generation_id) IN (
+			SELECT task_id, plan_id, generation_id FROM plans
+			WHERE tenant_id = ? AND repository_id = ?
+			ORDER BY task_id, plan_id, generation_id LIMIT ?)`
+		args = append(args, request.Scope.TenantID, request.Scope.RepositoryID, request.Limit)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plans WHERE `+filter, args...).Scan(&result.Plans); err != nil {
 		return PruneResult{}, fmt.Errorf("count pruned plans: %w", err)
 	}
 	for _, table := range []string{"plan_leases", "plan_events", "plan_evidence", "plan_context_refs", "plan_attempts", "plan_edges", "plan_nodes", "plans"} {
 		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE tenant_id = ? AND repository_id = ?`, request.Scope.TenantID, request.Scope.RepositoryID).Scan(&count); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE `+filter, args...).Scan(&count); err != nil {
 			return PruneResult{}, fmt.Errorf("count pruned %s: %w", table, err)
 		}
 		result.Rows += count
 		if !request.DryRun {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE tenant_id = ? AND repository_id = ?`, request.Scope.TenantID, request.Scope.RepositoryID); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+filter, args...); err != nil {
 				return PruneResult{}, fmt.Errorf("prune %s: %w", table, err)
 			}
 		}
@@ -781,7 +824,7 @@ func validatePlanDatabase(ctx context.Context, db *sql.DB) (int, error) {
 	if version > schemaVersion {
 		return 0, ErrUnsupportedSchema
 	}
-	if version != schemaVersion || checksum != "c6f8c0da8c42f04a" {
+	if version != schemaVersion || checksum != schemaV2Checksum {
 		return 0, ErrIncompatibleSchema
 	}
 	for _, table := range []string{"plans", "plan_nodes", "plan_edges", "plan_attempts", "plan_context_refs", "plan_evidence", "plan_events", "plan_leases"} {
@@ -807,7 +850,7 @@ func planWhere(prefix string) string {
 }
 func planArgs(p Plan) []any { return []any{p.TenantID, p.RepositoryID, p.TaskID, p.ID, p.Generation} }
 
-const schemaSQL = `
+const schemaV1SQL = `
 CREATE TABLE plans (tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, task_id TEXT NOT NULL, plan_id TEXT NOT NULL, generation_id TEXT NOT NULL, state TEXT NOT NULL, stop_reason TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (tenant_id, repository_id, task_id, plan_id, generation_id));
 CREATE TABLE plan_nodes (tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, task_id TEXT NOT NULL, plan_id TEXT NOT NULL, generation_id TEXT NOT NULL, node_id TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id), FOREIGN KEY (tenant_id, repository_id, task_id, plan_id, generation_id) REFERENCES plans);
 CREATE TABLE plan_edges (tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, task_id TEXT NOT NULL, plan_id TEXT NOT NULL, generation_id TEXT NOT NULL, node_id TEXT NOT NULL, depends_on TEXT NOT NULL, PRIMARY KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, depends_on), FOREIGN KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id) REFERENCES plan_nodes, FOREIGN KEY (tenant_id, repository_id, task_id, plan_id, generation_id, depends_on) REFERENCES plan_nodes);
@@ -818,3 +861,8 @@ CREATE TABLE plan_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, tenant_id 
 CREATE TABLE plan_leases (tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, task_id TEXT NOT NULL, plan_id TEXT NOT NULL, generation_id TEXT NOT NULL, lease_id TEXT NOT NULL, attempt_id TEXT NOT NULL, PRIMARY KEY (tenant_id, repository_id, task_id, plan_id, generation_id, lease_id), FOREIGN KEY (tenant_id, repository_id, task_id, plan_id, generation_id, attempt_id) REFERENCES plan_attempts);
 CREATE INDEX idx_plan_nodes_state ON plan_nodes (tenant_id, repository_id, state);
 CREATE INDEX idx_plan_edges_dependency ON plan_edges (tenant_id, repository_id, task_id, plan_id, generation_id, depends_on);`
+
+const schemaV2SQL = `
+ALTER TABLE plan_nodes ADD COLUMN scope TEXT NOT NULL DEFAULT '';
+ALTER TABLE plan_nodes ADD COLUMN risks TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plan_nodes ADD COLUMN verification TEXT NOT NULL DEFAULT '';`

@@ -705,7 +705,6 @@ func newRoutingTestOrchestrator(t *testing.T, models map[router.Complexity]map[r
 		active:         "coder",
 		router:         rt,
 		routingConfig:  cfg,
-		routingState:   make(map[string]router.Classification),
 		modelOverrides: make(map[string]bool),
 	}
 	orch.buildProvider = func(cfg agent.ModelConfig) (model.Provider, error) {
@@ -714,7 +713,7 @@ func newRoutingTestOrchestrator(t *testing.T, models map[router.Complexity]map[r
 	return orch
 }
 
-func TestRouteAppliesResolvedModelWithoutChangingSelectedAgent(t *testing.T) {
+func TestRouteSelectsAgentWithoutMutatingItsModel(t *testing.T) {
 	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
 		router.ComplexityHigh: {
 			router.TaskKindDebug: {Provider: "routed", Model: "high-debug"},
@@ -732,8 +731,17 @@ func TestRouteAppliesResolvedModelWithoutChangingSelectedAgent(t *testing.T) {
 		t.Fatalf("ActiveID() = %q, want Route to leave active agent unchanged", orch.ActiveID())
 	}
 	selected := orch.agents[agentID].Model
-	if selected.Name() != "routed" || selected.Model() != "high-debug" {
-		t.Fatalf("selected agent model = (%q, %q), want (routed, high-debug)", selected.Name(), selected.Model())
+	if selected.Name() != "old" || selected.Model() != "old-debugger" {
+		t.Fatalf("selected agent model = (%q, %q), want unchanged default", selected.Name(), selected.Model())
+	}
+	ctx := orch.applyResolvedModel(context.Background(), agentID, "fix this bug across multiple files")
+	routed := agent.ModelProvider(ctx, selected)
+	if routed.Name() != "routed" || routed.Model() != "high-debug" {
+		t.Fatalf("request model = (%q, %q), want (routed, high-debug)", routed.Name(), routed.Model())
+	}
+	metadata, ok := requestRoutingFromContext(ctx)
+	if !ok || metadata.AgentID != "debugger" || metadata.Classification.Complexity != router.ComplexityHigh || metadata.Classification.Kind != router.TaskKindDebug {
+		t.Fatalf("request routing metadata = %#v, ok=%v", metadata, ok)
 	}
 }
 
@@ -774,11 +782,9 @@ func TestFormatRoutingHintStaysAdvisory(t *testing.T) {
 	}
 }
 
-func TestModelEscalationIsCapped(t *testing.T) {
+func TestResolvedModelPreservesExplicitOverride(t *testing.T) {
 	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
-		router.ComplexityLow:    {router.TaskKindEdit: {Provider: "routed", Model: "low"}},
-		router.ComplexityMedium: {router.TaskKindEdit: {Provider: "routed", Model: "medium"}},
-		router.ComplexityHigh:   {router.TaskKindEdit: {Provider: "routed", Model: "high"}},
+		router.ComplexityLow: {router.TaskKindEdit: {Provider: "routed", Model: "low"}},
 	})
 	builds := 0
 	orch.buildProvider = func(cfg agent.ModelConfig) (model.Provider, error) {
@@ -786,50 +792,14 @@ func TestModelEscalationIsCapped(t *testing.T) {
 		return &routingTestProvider{provider: cfg.Provider, model: cfg.Model}, nil
 	}
 
-	orch.Route(context.Background(), "change this")
-	hook := modelEscalationHook{orchestrator: orch, agentID: "coder"}
-	failedTool := &hooks.Event{Type: hooks.EventToolCallAfter, Error: errors.New("recoverable tool failure")}
-	for range 3 {
-		if err := hook.After(context.Background(), failedTool); err != nil {
-			t.Fatalf("After() error = %v", err)
-		}
+	orch.modelOverrides["coder"] = true
+	ctx := orch.applyResolvedModel(context.Background(), "coder", "change this")
+	selected := agent.ModelProvider(ctx, orch.agents["coder"].Model)
+	if selected.Name() != "old" || selected.Model() != "old-coder" {
+		t.Fatalf("request model = (%q, %q), want explicit default", selected.Name(), selected.Model())
 	}
-	if provider, modelID := orch.ActiveModelInfo(); provider != "routed" || modelID != "high" {
-		t.Fatalf("ActiveModelInfo() = (%q, %q), want capped model (routed, high)", provider, modelID)
-	}
-	if builds != 3 {
-		t.Fatalf("provider builds = %d, want 3 (route plus two escalations)", builds)
-	}
-}
-
-func TestEscalationProviderFailurePreservesExistingModelAndLevel(t *testing.T) {
-	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
-		router.ComplexityLow:    {router.TaskKindEdit: {Provider: "routed", Model: "low"}},
-		router.ComplexityMedium: {router.TaskKindEdit: {Provider: "routed", Model: "medium"}},
-	})
-	orch.Route(context.Background(), "change this")
-	original := orch.agents["coder"].Model
-	orch.buildProvider = func(agent.ModelConfig) (model.Provider, error) {
-		return nil, errors.New("provider construction failed")
-	}
-	hook := modelEscalationHook{orchestrator: orch, agentID: "coder"}
-	failedTool := &hooks.Event{Type: hooks.EventToolCallAfter, Error: errors.New("recoverable tool failure")}
-
-	if err := hook.After(context.Background(), failedTool); err != nil {
-		t.Fatalf("After() error = %v", err)
-	}
-	if orch.agents["coder"].Model != original {
-		t.Fatal("failed provider construction replaced the existing provider")
-	}
-
-	orch.buildProvider = func(cfg agent.ModelConfig) (model.Provider, error) {
-		return &routingTestProvider{provider: cfg.Provider, model: cfg.Model}, nil
-	}
-	if err := hook.After(context.Background(), failedTool); err != nil {
-		t.Fatalf("After() retry error = %v", err)
-	}
-	if provider, modelID := orch.ActiveModelInfo(); provider != "routed" || modelID != "medium" {
-		t.Fatalf("ActiveModelInfo() after retry = (%q, %q), want unchanged escalation target (routed, medium)", provider, modelID)
+	if builds != 0 {
+		t.Fatalf("provider builds = %d, want 0", builds)
 	}
 }
 
@@ -1326,6 +1296,29 @@ func TestWithSkillPinsExactSkill(t *testing.T) {
 	}
 	if _, err := orch.WithSkill(context.Background(), "missing"); err == nil {
 		t.Fatal("WithSkill() accepted an unknown skill")
+	}
+}
+
+func TestSkillInjectionRequiresAgentCapabilities(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	dir := filepath.Join(root, ".chronos-code", "skills", "capability-skill")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: capability-skill\ndescription: capabilitytoken\ntriggers: [capabilitytoken]\nmodel_hint: sonnet\ntools_required: [file_read]\n---\ncapability body"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &agent.Agent{ID: "coder", Model: &routingTestProvider{model: "claude-sonnet"}, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	setupSkills(&config.Config{}, root, map[string]*agent.Agent{"coder": a})
+	ctx := context.WithValue(context.Background(), messageKey{}, "capabilitytoken")
+	if got := strings.Join(systemContents(&model.ChatRequest{Messages: a.ContextPinsFn(ctx)}), "\n"); strings.Contains(got, "capability body") {
+		t.Fatalf("skill injected without required tool: %q", got)
+	}
+	a.Tools.Register(&tool.Definition{Name: "file_read", Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
+	if got := strings.Join(systemContents(&model.ChatRequest{Messages: a.ContextPinsFn(ctx)}), "\n"); !strings.Contains(got, "capability body") {
+		t.Fatalf("eligible skill was not injected: %q", got)
 	}
 }
 

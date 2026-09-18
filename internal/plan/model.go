@@ -81,8 +81,11 @@ type Plan struct {
 }
 
 type Node struct {
-	ID    NodeID
-	State NodeState
+	ID           NodeID
+	State        NodeState
+	Scope        string
+	Risks        []string
+	Verification string
 }
 
 // Dependency declares that NodeID cannot run until DependsOn is complete.

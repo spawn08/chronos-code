@@ -18,7 +18,7 @@ func TestPlanCommandInspectionJSON(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"status", []string{"status", "--db", database}, `{"schema_version":1,"healthy":true}`},
+		{"status", []string{"status", "--db", database}, `{"schema_version":2,"healthy":true}`},
 		{"list", planScopeArgs(database, "list"), `[{"task_id":"task-1","plan_id":"plan-1","generation_id":"generation-1","state":"active","stop_reason":"","version":1}]`},
 		{"show", planRefArgs(database, "show"), `"idempotency_key":"[REDACTED]"`},
 		{"graph", planRefArgs(database, "graph"), `"dependencies":[{"NodeID":"node-2","DependsOn":"node-1"}]`},

@@ -3,6 +3,7 @@ package mcpdiscover
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,11 @@ import (
 )
 
 const DefaultConnectTimeout = 10 * time.Second
+
+const (
+	defaultReloadAttempts = 3
+	defaultReloadBackoff  = 100 * time.Millisecond
+)
 
 type RuntimeClient interface {
 	Connect(context.Context) error
@@ -36,24 +42,47 @@ const (
 	StateLimitReached     ServerState = "connection_limit_reached"
 	StateConnectFailed    ServerState = "connection_failed"
 	StateToolsFailed      ServerState = "tool_registration_failed"
+	StateReloadFailed     ServerState = "reload_failed"
 )
 
 // ServerStatus excludes commands, arguments, URLs, and raw errors so startup
 // diagnostics cannot disclose credentials.
 type ServerStatus struct {
-	Name  string
-	State ServerState
-	Tools int
+	Name     string
+	Agent    string
+	Source   string
+	State    ServerState
+	Tools    int
+	Retained bool
+	Attempts int
 }
 
+type activeServer struct {
+	config    mcp.ServerConfig
+	client    RuntimeClient
+	toolNames []string
+}
+
+type ToolTransform func([]*tool.Definition) []*tool.Definition
+
 type Runtime struct {
-	mu        sync.Mutex
-	servers   []mcp.ServerConfig
-	clients   []RuntimeClient
-	statuses  []ServerStatus
-	connected int
-	closeOnce sync.Once
-	closeErr  error
+	mu         sync.Mutex
+	servers    []mcp.ServerConfig
+	configured map[string]mcp.ServerConfig
+	discovered map[string]mcp.ServerConfig
+	sources    map[string]string
+	active     map[string]*activeServer
+	registry   *tool.Registry
+	policy     *security.Policy
+	timeout    time.Duration
+	factory    ClientFactory
+	transform  ToolTransform
+	agent      string
+	statuses   []ServerStatus
+	connected  int
+	closed     bool
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func (r *Runtime) Statuses() []ServerStatus {
@@ -90,7 +119,18 @@ func (r *Runtime) Close() error {
 	}
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
-		clients := append([]RuntimeClient(nil), r.clients...)
+		clients := make([]RuntimeClient, 0, len(r.active))
+		var toolNames []string
+		for _, active := range r.active {
+			clients = append(clients, active.client)
+			toolNames = append(toolNames, active.toolNames...)
+		}
+		if r.registry != nil {
+			_ = r.registry.Replace(toolNames, nil)
+		}
+		r.active = make(map[string]*activeServer)
+		r.connected = 0
+		r.closed = true
 		r.mu.Unlock()
 		var errs []error
 		for _, client := range clients {
@@ -113,11 +153,55 @@ func Start(ctx context.Context, configured, discovered []mcp.ServerConfig, regis
 	if factory == nil {
 		factory = NewClient
 	}
-	runtime := &Runtime{servers: mergeServerConfigs(configured, discovered)}
+	runtime := &Runtime{
+		configured: configMap(configured), discovered: configMap(discovered), sources: make(map[string]string),
+		active: make(map[string]*activeServer), registry: registry, policy: policy, timeout: timeout, factory: factory,
+	}
+	runtime.servers = mergeServerConfigs(configured, discovered)
 	for _, cfg := range runtime.servers {
 		runtime.connectLocked(ctx, cfg, registry, policy, timeout, factory)
 	}
 	return runtime
+}
+
+// SetAgent labels subsequent statuses with the owning agent.
+func (r *Runtime) SetAgent(agent string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return
+	}
+	r.agent = agent
+	for i := range r.statuses {
+		r.statuses[i].Agent = agent
+	}
+}
+
+// SetDiscoveryMetadata labels discovered servers and configures wrapping for
+// definitions prepared by future reloads.
+func (r *Runtime) SetDiscoveryMetadata(snapshot Snapshot, transform ToolTransform) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return
+	}
+	r.sources = make(map[string]string, len(snapshot.Servers))
+	for _, cfg := range snapshot.Servers {
+		r.sources[cfg.Name] = snapshot.SourceForServer(cfg.Name)
+	}
+	for name := range r.configured {
+		r.sources[name] = "agent-config"
+	}
+	r.transform = transform
+	for i := range r.statuses {
+		r.statuses[i].Source = r.sources[r.statuses[i].Name]
+	}
 }
 
 // RememberServer records a definition so a later ConnectServer call can find it.
@@ -148,6 +232,9 @@ func (r *Runtime) ConnectServer(ctx context.Context, cfg mcp.ServerConfig, regis
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return ServerStatus{Name: cfg.Name, Agent: r.agent, State: StateConnectFailed}
+	}
 	if stored, ok := r.serverLocked(cfg.Name); ok && cfg.Command == "" && cfg.URL == "" {
 		cfg = stored
 	} else {
@@ -172,7 +259,7 @@ func (r *Runtime) connectLocked(ctx context.Context, cfg mcp.ServerConfig, regis
 		return status
 	}
 
-	status := ServerStatus{Name: cfg.Name, State: StateApprovalRequired}
+	status := ServerStatus{Name: cfg.Name, Agent: r.agent, Source: r.sources[cfg.Name], State: StateApprovalRequired}
 	if policy == nil {
 		return r.setStatusLocked(status)
 	}
@@ -213,16 +300,150 @@ func (r *Runtime) connectLocked(ctx context.Context, cfg mcp.ServerConfig, regis
 	callCtx, cancel = context.WithTimeout(ctx, timeout)
 	tools, err := client.ListTools(callCtx)
 	cancel()
-	if err != nil || !registerTools(registry, cfg.Name, client, tools) {
+	definitions, names, definitionsOK := toolDefinitions(cfg.Name, client, tools)
+	if err != nil || !definitionsOK || registry == nil || registry.Replace(nil, definitions) != nil {
 		_ = client.Close()
 		status.State = StateToolsFailed
 		return r.setStatusLocked(status)
 	}
-	r.clients = append(r.clients, client)
+	r.active[cfg.Name] = &activeServer{config: cloneServerConfig(cfg), client: client, toolNames: names}
 	r.connected++
 	status.State = StateConnected
 	status.Tools = len(tools)
 	return r.setStatusLocked(status)
+}
+
+// ReloadDiscovery transactionally applies a discovery snapshot. Each changed
+// server is connected and listed before its namespace is atomically replaced;
+// failed reloads leave the previous client and tools active. Removed discovery
+// servers are unregistered unless shadowed by configured agent MCP settings.
+func (r *Runtime) ReloadDiscovery(ctx context.Context, snapshot Snapshot) []ServerStatus {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return append([]ServerStatus(nil), r.statuses...)
+	}
+	r.discovered = configMap(snapshot.Servers)
+	r.sources = make(map[string]string, len(snapshot.Servers))
+	for _, cfg := range snapshot.Servers {
+		r.sources[cfg.Name] = snapshot.SourceForServer(cfg.Name)
+	}
+	for name := range r.configured {
+		r.sources[name] = "agent-config"
+	}
+	next := mergeServerConfigs(mapConfigs(r.configured), snapshot.Servers)
+	nextByName := configMap(next)
+
+	for name, active := range r.active {
+		if _, keep := nextByName[name]; keep {
+			continue
+		}
+		if r.registry != nil && r.registry.Replace(active.toolNames, nil) == nil {
+			_ = active.client.Close()
+			delete(r.active, name)
+			r.connected--
+			r.removeStatusLocked(name)
+		}
+	}
+	for _, cfg := range next {
+		if active := r.active[cfg.Name]; active != nil && reflect.DeepEqual(active.config, cfg) {
+			if status, ok := r.statusLocked(cfg.Name); ok {
+				status.Source = r.sources[cfg.Name]
+				r.setStatusLocked(status)
+			}
+			continue
+		}
+		r.reloadServerLocked(ctx, cfg)
+	}
+	effective := cloneServers(next)
+	for i := range effective {
+		if active := r.active[effective[i].Name]; active != nil {
+			effective[i] = cloneServerConfig(active.config)
+		}
+	}
+	r.servers = effective
+	return append([]ServerStatus(nil), r.statuses...)
+}
+
+func (r *Runtime) reloadServerLocked(ctx context.Context, cfg mcp.ServerConfig) ServerStatus {
+	old := r.active[cfg.Name]
+	status := ServerStatus{Name: cfg.Name, Agent: r.agent, Source: r.sources[cfg.Name], State: StateReloadFailed, Retained: old != nil}
+	if r.policy == nil || r.policy.DecideMCPServer(cfg.Name).Permission != security.MCPAllow || validateRuntimeConfig(cfg) != nil {
+		return r.setStatusLocked(status)
+	}
+	if old == nil && r.policy.MaxMCPConnections > 0 && r.connected >= r.policy.MaxMCPConnections {
+		status.State = StateLimitReached
+		return r.setStatusLocked(status)
+	}
+	for attempt := 1; attempt <= defaultReloadAttempts; attempt++ {
+		status.Attempts = attempt
+		client, definitions, names, err := r.prepareServerLocked(ctx, cfg)
+		if err == nil {
+			var remove []string
+			if old != nil {
+				remove = old.toolNames
+			}
+			if r.registry != nil {
+				err = r.registry.Replace(remove, definitions)
+			} else {
+				err = errors.New("tool registry is unavailable")
+			}
+			if err == nil {
+				r.active[cfg.Name] = &activeServer{config: cloneServerConfig(cfg), client: client, toolNames: names}
+				if old == nil {
+					r.connected++
+				} else {
+					_ = old.client.Close()
+				}
+				status.State, status.Tools, status.Retained = StateConnected, len(names), false
+				return r.setStatusLocked(status)
+			}
+			_ = client.Close()
+		}
+		if attempt < defaultReloadAttempts {
+			timer := time.NewTimer(defaultReloadBackoff << (attempt - 1))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return r.setStatusLocked(status)
+			case <-timer.C:
+			}
+		}
+	}
+	return r.setStatusLocked(status)
+}
+
+func (r *Runtime) prepareServerLocked(ctx context.Context, cfg mcp.ServerConfig) (RuntimeClient, []*tool.Definition, []string, error) {
+	cfg.Permission = string(tool.PermRequireApproval)
+	client, err := r.factory(cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, r.timeout)
+	err = client.Connect(callCtx)
+	cancel()
+	if err != nil {
+		_ = client.Close()
+		return nil, nil, nil, err
+	}
+	callCtx, cancel = context.WithTimeout(ctx, r.timeout)
+	tools, err := client.ListTools(callCtx)
+	cancel()
+	definitions, names, ok := toolDefinitions(cfg.Name, client, tools)
+	if err != nil || !ok {
+		_ = client.Close()
+		if err == nil {
+			err = errors.New("invalid MCP tool definitions")
+		}
+		return nil, nil, nil, err
+	}
+	if r.transform != nil {
+		definitions = r.transform(definitions)
+	}
+	return client, definitions, names, nil
 }
 
 func (r *Runtime) statusLocked(name string) (ServerStatus, bool) {
@@ -235,6 +456,10 @@ func (r *Runtime) statusLocked(name string) (ServerStatus, bool) {
 }
 
 func (r *Runtime) setStatusLocked(status ServerStatus) ServerStatus {
+	status.Agent = r.agent
+	if status.Source == "" {
+		status.Source = r.sources[status.Name]
+	}
 	for i, existing := range r.statuses {
 		if existing.Name == status.Name {
 			r.statuses[i] = status
@@ -244,6 +469,31 @@ func (r *Runtime) setStatusLocked(status ServerStatus) ServerStatus {
 	r.statuses = append(r.statuses, status)
 	sort.Slice(r.statuses, func(i, j int) bool { return r.statuses[i].Name < r.statuses[j].Name })
 	return status
+}
+
+func (r *Runtime) removeStatusLocked(name string) {
+	for i, status := range r.statuses {
+		if status.Name == name {
+			r.statuses = append(r.statuses[:i], r.statuses[i+1:]...)
+			return
+		}
+	}
+}
+
+func configMap(configs []mcp.ServerConfig) map[string]mcp.ServerConfig {
+	out := make(map[string]mcp.ServerConfig, len(configs))
+	for _, cfg := range configs {
+		out[cfg.Name] = cloneServerConfig(cfg)
+	}
+	return out
+}
+
+func mapConfigs(configs map[string]mcp.ServerConfig) []mcp.ServerConfig {
+	out := make([]mcp.ServerConfig, 0, len(configs))
+	for _, cfg := range configs {
+		out = append(out, cloneServerConfig(cfg))
+	}
+	return out
 }
 
 func mergeServerConfigs(configured, discovered []mcp.ServerConfig) []mcp.ServerConfig {
@@ -279,14 +529,7 @@ func validateRuntimeConfig(cfg mcp.ServerConfig) error {
 	})
 }
 
-func registerTools(registry *tool.Registry, server string, client RuntimeClient, tools []mcp.ToolInfo) bool {
-	if registry == nil {
-		return false
-	}
-	existing := make(map[string]struct{})
-	for _, definition := range registry.List() {
-		existing[definition.Name] = struct{}{}
-	}
+func toolDefinitions(server string, client RuntimeClient, tools []mcp.ToolInfo) ([]*tool.Definition, []string, bool) {
 	type pendingTool struct {
 		name string
 		info mcp.ToolInfo
@@ -294,23 +537,30 @@ func registerTools(registry *tool.Registry, server string, client RuntimeClient,
 	pending := make([]pendingTool, 0, len(tools))
 	for _, info := range tools {
 		name := ToolName(server, info.Name)
-		if _, collision := existing[name]; collision || info.Name == "" {
-			return false
+		for _, item := range pending {
+			if item.name == name {
+				return nil, nil, false
+			}
 		}
-		existing[name] = struct{}{}
+		if info.Name == "" {
+			return nil, nil, false
+		}
 		pending = append(pending, pendingTool{name: name, info: info})
 	}
+	definitions := make([]*tool.Definition, 0, len(pending))
+	names := make([]string, 0, len(pending))
 	for _, item := range pending {
 		remoteName := item.info.Name
-		registry.Register(&tool.Definition{
+		definitions = append(definitions, &tool.Definition{
 			Name: item.name, Description: item.info.Description,
 			Parameters: item.info.InputSchema, Permission: tool.PermRequireApproval,
 			Handler: func(ctx context.Context, args map[string]any) (any, error) {
 				return client.CallTool(ctx, remoteName, args)
 			},
 		})
+		names = append(names, item.name)
 	}
-	return true
+	return definitions, names, true
 }
 
 func ToolName(server, remote string) string {

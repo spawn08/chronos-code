@@ -114,6 +114,47 @@ func TestTaskRunnerTimeoutAndCancellationPreserveArtifacts(t *testing.T) {
 	}
 }
 
+func TestTaskRunnerCopiesLocalFixtureAndGradesAfterAgentCompletion(t *testing.T) {
+	fixture := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fixture, "go.mod"), []byte("module fixture/local\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture, "answer.go"), []byte("package answer\n\nconst Value = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exists := true
+	runner := TaskRunner{Adapter: fakeTaskAdapter{run: func(_ context.Context, execution TaskExecution) (TaskExecutionResult, error) {
+		if execution.Instructions != "set Value to 2" || len(execution.Permissions) != 2 {
+			t.Fatalf("agent input = %+v", execution)
+		}
+		if err := os.WriteFile(filepath.Join(execution.Workspace, "answer.go"), []byte("package answer\n\nconst Value = 2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return TaskExecutionResult{TerminalStatus: "succeeded", LatestChangeAt: time.Now().UTC(), Grader: GraderOutcome{Passed: true}}, nil
+	}}}
+	result, err := runner.Run(context.Background(), TaskRun{
+		TaskID: "local", RunID: "local-1", Fixture: fixture, FixtureType: "local", Revision: "fixture-v1",
+		Model: ModelSettings{Provider: "test", Name: "fake"}, Prompt: "set Value to 2", Permissions: []string{"read", "write"},
+		Grading: HiddenGraderSpec{
+			Commands:  []HiddenCommand{{ID: "compile", Command: []string{"go", "test", "./..."}}},
+			Artifacts: []ArtifactAssertion{{Path: "answer.go", Exists: &exists, Contains: "Value = 2"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Outcome.Grader.Passed || result.Outcome.Grader.Name != "deterministic-v1" || !strings.Contains(result.Patch, "+const Value = 2") {
+		t.Fatalf("result = %+v", result)
+	}
+	original, err := os.ReadFile(filepath.Join(fixture, "answer.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(original), "Value = 2") {
+		t.Fatal("agent mutation leaked into local fixture")
+	}
+}
+
 func taskRunnerFixture(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()

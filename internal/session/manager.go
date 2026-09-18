@@ -163,12 +163,38 @@ func (m *Manager) Export(ctx context.Context, sessionID, path string) error {
 	}
 
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("mkdir %q: %w", dir, err)
 		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("secure %q: %w", dir, err)
+		}
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write %q: %w", path, err)
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	tmp, err := os.CreateTemp(dir, ".session-export-*")
+	if err != nil {
+		return fmt.Errorf("create temporary export: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, path)
+	}
+	if err != nil {
+		return fmt.Errorf("write %q atomically: %w", path, err)
 	}
 	return nil
 }

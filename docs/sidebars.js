@@ -27,6 +27,7 @@ const sidebars = {
         { type: 'doc', id: 'use-cases',        label: 'Use Cases' },
         { type: 'doc', id: 'best-practices',   label: 'Best Practices' },
         { type: 'doc', id: 'production-readiness', label: 'Production Readiness' },
+		{ type: 'doc', id: 'deployment', label: 'Deployment' },
       ],
     },
 

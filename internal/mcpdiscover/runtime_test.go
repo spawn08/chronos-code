@@ -136,6 +136,9 @@ func TestStartIsolatesFailuresAndClosesEveryCreatedClientOnce(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
+	if _, ok := registry.Get(ToolName("healthy", "read")); ok {
+		t.Fatal("Close retained an MCP namespace")
+	}
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
 	}
@@ -191,5 +194,56 @@ func TestConnectServerApprovesPreviouslyPendingServer(t *testing.T) {
 	}
 	if _, err := registry.Execute(context.Background(), ToolName("filesystem", "read"), nil); err == nil {
 		t.Fatal("MCP tool executed without approval")
+	}
+}
+
+func TestReloadDiscoveryAtomicallyReplacesRemovesAndRetainsOnFailure(t *testing.T) {
+	registry := tool.NewRegistry()
+	policy := &security.Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: security.MCPRequireApproval}
+	oldClient := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "old"}}}
+	newClient := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "new"}}}
+	failingClient := &fakeRuntimeClient{connectErr: errors.New("unavailable")}
+	clients := []RuntimeClient{oldClient, failingClient, failingClient, failingClient, newClient}
+	factory := func(mcp.ServerConfig) (RuntimeClient, error) {
+		client := clients[0]
+		clients = clients[1:]
+		return client, nil
+	}
+	initial := mcp.ServerConfig{Name: "filesystem", Transport: mcp.TransportStdio, Command: "v1", Permission: "require_approval"}
+	runtime := Start(context.Background(), nil, []mcp.ServerConfig{initial}, registry, policy, time.Second, factory)
+	runtime.SetAgent("coder")
+	runtime.SetDiscoveryMetadata(Snapshot{
+		Servers: []mcp.ServerConfig{initial},
+		Sources: []SourceStatus{{Path: "/project/.mcp.json", State: SourceHealthy, Servers: []mcp.ServerConfig{initial}}},
+	}, nil)
+
+	failed := initial
+	failed.Command = "broken"
+	statuses := runtime.ReloadDiscovery(context.Background(), Snapshot{
+		Servers: []mcp.ServerConfig{failed},
+		Sources: []SourceStatus{{Path: "/project/.mcp.json", State: SourceHealthy, Servers: []mcp.ServerConfig{failed}}},
+	})
+	if statuses[0].State != StateReloadFailed || !statuses[0].Retained || statuses[0].Agent != "coder" || statuses[0].Source != "/project/.mcp.json" {
+		t.Fatalf("failed reload status = %+v", statuses)
+	}
+	if _, ok := registry.Get(ToolName("filesystem", "old")); !ok {
+		t.Fatal("failed reload removed healthy namespace")
+	}
+
+	replacement := initial
+	replacement.Command = "v2"
+	runtime.ReloadDiscovery(context.Background(), Snapshot{
+		Servers: []mcp.ServerConfig{replacement},
+		Sources: []SourceStatus{{Path: "/project/.mcp.json", State: SourceHealthy, Servers: []mcp.ServerConfig{replacement}}},
+	})
+	if _, ok := registry.Get(ToolName("filesystem", "old")); ok {
+		t.Fatal("successful reload retained old tool")
+	}
+	if _, ok := registry.Get(ToolName("filesystem", "new")); !ok {
+		t.Fatal("successful reload did not install replacement tool")
+	}
+	runtime.ReloadDiscovery(context.Background(), Snapshot{})
+	if _, ok := registry.Get(ToolName("filesystem", "new")); ok {
+		t.Fatal("removed server retained namespace")
 	}
 }

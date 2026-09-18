@@ -15,16 +15,24 @@ type TaskRun struct {
 	TaskID      string
 	RunID       string
 	Fixture     string
+	FixtureType string
 	Revision    string
 	Model       ModelSettings
 	Timeout     time.Duration
 	Environment []string
+	Prompt      string
+	Permissions []string
+	Grading     HiddenGraderSpec
+	Ablation    Ablation
 }
 
 // TaskExecution is the isolated workspace made available to an adapter.
 type TaskExecution struct {
-	Workspace   string
-	Environment []string
+	Workspace    string
+	Environment  []string
+	Instructions string
+	Permissions  []string
+	Ablation     Ablation
 }
 
 // TaskEvent is an adapter event correlated with a task execution.
@@ -35,13 +43,18 @@ type TaskEvent struct {
 
 // TaskExecutionResult contains the data the adapter produces during a run.
 type TaskExecutionResult struct {
-	Calls          []Call
-	Verification   []VerificationEvidence
-	Events         []TaskEvent
-	ExitCode       int
-	LatestChangeAt time.Time
-	Grader         GraderOutcome
-	Failure        *Failure
+	Calls            []Call
+	Verification     []VerificationEvidence
+	Events           []TaskEvent
+	Patch            string
+	ExitCode         int
+	TerminalStatus   string
+	CostMicrodollars int64
+	RetryAttempts    int
+	RepairAttempts   int
+	LatestChangeAt   time.Time
+	Grader           GraderOutcome
+	Failure          *Failure
 }
 
 // TaskAdapter executes an agent in the supplied isolated workspace.
@@ -80,11 +93,20 @@ func (r TaskRunner) Run(ctx context.Context, run TaskRun) (TaskRunResult, error)
 		return TaskRunResult{}, fmt.Errorf("eval: create task workspace: %w", err)
 	}
 	defer os.RemoveAll(workspace)
-	if err := runGit(ctx, "clone", "--quiet", run.Fixture, workspace); err != nil {
-		return TaskRunResult{}, fmt.Errorf("eval: clone fixture: %w", err)
-	}
-	if err := runGit(ctx, "-C", workspace, "checkout", "--quiet", "--detach", run.Revision); err != nil {
-		return TaskRunResult{}, fmt.Errorf("eval: checkout fixture revision: %w", err)
+	if run.FixtureType == "local" {
+		if err := copyFixture(run.Fixture, workspace); err != nil {
+			return TaskRunResult{}, fmt.Errorf("eval: copy fixture: %w", err)
+		}
+		if err := initializeFixtureRepository(ctx, workspace); err != nil {
+			return TaskRunResult{}, fmt.Errorf("eval: initialize copied fixture: %w", err)
+		}
+	} else {
+		if err := runGit(ctx, "clone", "--quiet", run.Fixture, workspace); err != nil {
+			return TaskRunResult{}, fmt.Errorf("eval: clone fixture: %w", err)
+		}
+		if err := runGit(ctx, "-C", workspace, "checkout", "--quiet", "--detach", run.Revision); err != nil {
+			return TaskRunResult{}, fmt.Errorf("eval: checkout fixture revision: %w", err)
+		}
 	}
 
 	runCtx := ctx
@@ -94,11 +116,14 @@ func (r TaskRunner) Run(ctx context.Context, run TaskRun) (TaskRunResult, error)
 	}
 	defer cancel()
 	execution, adapterErr := r.Adapter.Run(runCtx, TaskExecution{
-		Workspace:   workspace,
-		Environment: append([]string(nil), run.Environment...),
+		Workspace:    workspace,
+		Environment:  append([]string(nil), run.Environment...),
+		Instructions: run.Prompt,
+		Permissions:  append([]string(nil), run.Permissions...),
+		Ablation:     run.Ablation,
 	})
 	// Capture the partial patch even when the task context was cancelled.
-	patch, diffErr := gitDiff(context.Background(), workspace)
+	patch, diffErr := workspaceDiff(context.Background(), workspace, run.FixtureType)
 	if diffErr != nil {
 		return TaskRunResult{}, fmt.Errorf("eval: capture task patch: %w", diffErr)
 	}
@@ -114,10 +139,31 @@ func (r TaskRunner) Run(ctx context.Context, run TaskRun) (TaskRunResult, error)
 		RepositoryRevision: run.Revision,
 		Model:              run.Model,
 		Calls:              execution.Calls,
+		TerminalStatus:     execution.TerminalStatus,
+		Patch:              patch,
+		CostMicrodollars:   execution.CostMicrodollars,
+		RetryAttempts:      execution.RetryAttempts,
+		RepairAttempts:     execution.RepairAttempts,
 		Verification:       execution.Verification,
 		LatestChangeAt:     execution.LatestChangeAt,
 		Grader:             execution.Grader,
 		Failure:            execution.Failure,
+	}
+	if adapterErr == nil && (len(run.Grading.Commands) > 0 || len(run.Grading.Artifacts) > 0) {
+		graderCtx := context.Background()
+		graderCancel := func() {}
+		if run.Timeout > 0 {
+			graderCtx, graderCancel = context.WithTimeout(graderCtx, run.Timeout)
+		}
+		grade := runHiddenGrader(graderCtx, workspace, run.Environment, run.Grading)
+		graderCancel()
+		outcome.Grader = GraderOutcome{Passed: grade.Passed && execution.Grader.Passed, Name: "deterministic-v1"}
+		outcome.Verification = append(outcome.Verification, grade.Evidence...)
+		if !grade.Passed {
+			outcome.Failure = &Failure{Class: FailureGrader, Message: strings.Join(grade.Failures, "; ")}
+		} else if outcome.Grader.Passed {
+			outcome.Failure = nil
+		}
 	}
 	if adapterErr != nil {
 		outcome.Grader.Passed = false
@@ -126,6 +172,50 @@ func (r TaskRunner) Run(ctx context.Context, run TaskRun) (TaskRunResult, error)
 		outcome.Failure = &Failure{Class: FailureGrader, Message: "task did not pass grading"}
 	}
 	return TaskRunResult{Outcome: outcome, Patch: patch, Events: execution.Events, ExitCode: execution.ExitCode}, nil
+}
+
+func copyFixture(source, destination string) error {
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlink %s is not allowed", relative)
+		}
+		target := filepath.Join(destination, relative)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+}
+
+func workspaceDiff(ctx context.Context, workspace, _ string) (string, error) {
+	return gitDiff(ctx, workspace)
+}
+
+func initializeFixtureRepository(ctx context.Context, workspace string) error {
+	for _, args := range [][]string{
+		{"-C", workspace, "init", "--quiet"},
+		{"-C", workspace, "add", "."},
+		{"-C", workspace, "-c", "user.name=chronos-eval", "-c", "user.email=eval@invalid", "commit", "--quiet", "-m", "fixture"},
+	} {
+		if err := runGit(ctx, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runGit(ctx context.Context, args ...string) error {

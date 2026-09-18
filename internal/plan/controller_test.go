@@ -51,6 +51,15 @@ func TestControllerSerializesOverlappingWritesAndRunsReadOnlyNodesTogether(t *te
 	}
 }
 
+func TestNodeAccessWildcardOverlapsEveryDeclaredWrite(t *testing.T) {
+	wildcard := make(map[string]struct{})
+	wildcard[""] = struct{}{}
+	declared := map[string]struct{}{"internal/plan/controller.go": {}}
+	if !overlaps(wildcard, declared) || !overlaps(declared, wildcard) {
+		t.Fatal("unknown write scope must serialize with every declared write")
+	}
+}
+
 func TestControllerPersistsVerificationAndBudgetStops(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -78,6 +87,94 @@ func TestControllerPersistsVerificationAndBudgetStops(t *testing.T) {
 				t.Fatalf("stop = %#v, want %q / %q", got, test.state, test.reason)
 			}
 		})
+	}
+}
+
+func TestControllerCompletesOnlyVerifiedResultAndPersistsEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	p := Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanActive, Nodes: []Node{{ID: "node", State: NodePending}}}
+	if err := store.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	controller := NewController(store, nodeExecutorFunc(func(_ context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
+		return NodeExecutionResult{NodeID: request.Node.ID, AttemptID: request.Attempt, Status: NodeCompleted, Summary: "implemented", ChangedPaths: []string{"internal/plan/controller.go"}, EvidenceIDs: []EvidenceID{"verification-log"}, InputTokens: 10, OutputTokens: 5, CostMicrodollars: 3, Verification: VerificationPending}, nil
+	}), nil, nodeVerifierFunc(func(_ context.Context, _ Plan, _ Node, result NodeExecutionResult) (NodeExecutionResult, error) {
+		result.Verification = VerificationPassed
+		return result, nil
+	}), ControllerConfig{})
+
+	got, err := controller.Run(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != PlanCompleted || len(got.Evidence) != 1 || got.Evidence[0] != (Evidence{ID: "verification-log", NodeID: "node"}) {
+		t.Fatalf("completed plan = %#v", got)
+	}
+}
+
+func TestControllerPersistsStructuredTerminalFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	p := Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanActive, Nodes: []Node{{ID: "node", State: NodePending}}}
+	if err := store.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	controller := NewController(store, nodeExecutorFunc(func(_ context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
+		return NodeExecutionResult{NodeID: request.Node.ID, AttemptID: request.Attempt, Status: NodeBlocked, StopReason: StopBudgetExhausted, Summary: "budget reached", Verification: VerificationPending}, nil
+	}), nil, nil, ControllerConfig{})
+
+	got, err := controller.Run(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != PlanPaused || got.StopReason != StopBudgetExhausted || got.Nodes[0].State != NodeBlocked || len(got.Leases) != 0 {
+		t.Fatalf("terminal result = %#v", got)
+	}
+}
+
+func TestControllerDoesNotCompleteUnverifiedResult(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	p := Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanActive, Nodes: []Node{{ID: "node", State: NodePending}}}
+	if err := store.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	controller := NewController(store, nodeExecutorFunc(func(_ context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
+		return NodeExecutionResult{NodeID: request.Node.ID, AttemptID: request.Attempt, Status: NodeCompleted, Verification: VerificationPending}, nil
+	}), nil, nil, ControllerConfig{})
+
+	got, err := controller.Run(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != PlanFailed || got.StopReason != StopVerificationFailed || got.Nodes[0].State != NodeFailed {
+		t.Fatalf("unverified result = %#v", got)
+	}
+}
+
+func TestControllerRetriesExecutionErrors(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	p := Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanActive, Nodes: []Node{{ID: "node", State: NodePending}}}
+	if err := store.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	controller := NewController(store, nodeExecutorFunc(func(_ context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
+		calls++
+		if calls == 1 {
+			return NodeExecutionResult{}, errors.New("retryable")
+		}
+		return NodeExecutionResult{NodeID: request.Node.ID, AttemptID: request.Attempt, Status: NodeCompleted, Verification: VerificationPassed}, nil
+	}), nil, nil, ControllerConfig{Scheduler: SchedulerConfig{MaxAttempts: 2}})
+
+	got, err := controller.Run(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != PlanCompleted || calls != 2 || len(got.Attempts) != 2 {
+		t.Fatalf("retry result = %#v, calls = %d", got, calls)
 	}
 }
 

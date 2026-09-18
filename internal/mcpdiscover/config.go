@@ -2,7 +2,9 @@ package mcpdiscover
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,8 +16,9 @@ import (
 )
 
 const (
-	ScopeProject = "project"
-	ScopeUser    = "user"
+	ScopeProject   = "project"
+	ScopeUser      = "user"
+	MaxConfigBytes = 1 << 20
 )
 
 // CanonicalPath returns the MCP file managed by the CLI for a scope.
@@ -201,7 +204,7 @@ func RedactedEndpoint(server ManagedServer) string {
 }
 
 func readDocument(path string) (map[string]json.RawMessage, map[string]json.RawMessage, error) {
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, MaxConfigBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]json.RawMessage), make(map[string]json.RawMessage), nil
@@ -224,7 +227,26 @@ func readDocument(path string) (map[string]json.RawMessage, map[string]json.RawM
 			return nil, nil, fmt.Errorf("parse MCP config %s: mcpServers must be an object", path)
 		}
 	}
+	if len(servers) > MaxServersPerSource {
+		return nil, nil, fmt.Errorf("parse MCP config %s: %d servers exceeds limit %d", path, len(servers), MaxServersPerSource)
+	}
 	return doc, servers, nil
+}
+
+func readBoundedFile(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file exceeds %d bytes", limit)
+	}
+	return data, nil
 }
 
 func decodeManagedServer(name string, raw json.RawMessage) (ManagedServer, error) {

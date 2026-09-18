@@ -60,6 +60,7 @@ func TestProjectPathsIdentity(t *testing.T) {
 			dir := filepath.Join(dataHome, "projects", id)
 			want := ProjectPaths{Root: root, ID: id, Dir: dir,
 				SessionsDB: filepath.Join(dir, "sessions.db"), GraphDB: filepath.Join(dir, "graph.db"),
+				PlansDB:     filepath.Join(dir, "plans.db"),
 				TelemetryDB: filepath.Join(dir, "telemetry.db"), MemoryDB: filepath.Join(dir, "memory.db"),
 				LegacyDir: filepath.Join(root, ConfigDirName)}
 			if got != want {

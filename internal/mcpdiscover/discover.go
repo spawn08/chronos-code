@@ -6,6 +6,7 @@ package mcpdiscover
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,10 +25,32 @@ var projectConfigPaths = []string{
 	".claude/mcp.json",
 }
 
-// Snapshot is an immutable discovery result. Err reports a source that could
-// not be read or parsed; Servers is populated only when every source is valid.
+const MaxServersPerSource = 128
+
+type SourceState string
+
+const (
+	SourceHealthy SourceState = "healthy"
+	SourceMissing SourceState = "missing"
+	SourceInvalid SourceState = "invalid"
+)
+
+// SourceStatus reports one independently parsed discovery source. Servers is
+// retained by Watch when a later version of that source is malformed.
+type SourceStatus struct {
+	Path          string
+	State         SourceState
+	Servers       []mcp.ServerConfig
+	Diagnostic    string
+	LastKnownGood bool
+}
+
+// Snapshot is an immutable discovery result. Healthy sources remain available
+// when a sibling source is malformed; Err joins source diagnostics for callers
+// that only need aggregate compatibility.
 type Snapshot struct {
 	Servers []mcp.ServerConfig
+	Sources []SourceStatus
 	Err     error
 }
 
@@ -39,7 +62,7 @@ func Discover(root string) []mcp.ServerConfig {
 	if err != nil {
 		paths = projectFilePaths(root)
 	}
-	return discover(paths, false).Servers
+	return discover(paths).Servers
 }
 
 // Load discovers all project and user MCP configs. Unlike Discover, Load
@@ -50,29 +73,53 @@ func Load(root string) Snapshot {
 	if err != nil {
 		return Snapshot{Err: fmt.Errorf("resolve user MCP config: %w", err)}
 	}
-	return discover(paths, true)
+	return discover(paths)
 }
 
-func discover(paths []string, strict bool) Snapshot {
-	seen := make(map[string]bool)
-	var out []mcp.ServerConfig
+func discover(paths []string) Snapshot {
+	snapshot := Snapshot{Sources: make([]SourceStatus, 0, len(paths))}
 	for _, path := range paths {
 		servers, err := DiscoverFromFile(path)
 		if err != nil {
-			if strict {
-				return Snapshot{Err: err}
-			}
+			snapshot.Sources = append(snapshot.Sources, SourceStatus{Path: path, State: SourceInvalid, Diagnostic: err.Error()})
+			snapshot.Err = errors.Join(snapshot.Err, err)
 			continue
 		}
-		for _, s := range servers {
-			if !seen[s.Name] {
-				seen[s.Name] = true
-				out = append(out, s)
+		state := SourceHealthy
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			state = SourceMissing
+		}
+		snapshot.Sources = append(snapshot.Sources, SourceStatus{Path: path, State: state, Servers: servers})
+	}
+	snapshot.Servers = mergeSources(snapshot.Sources)
+	return snapshot
+}
+
+func mergeSources(sources []SourceStatus) []mcp.ServerConfig {
+	seen := make(map[string]bool)
+	var out []mcp.ServerConfig
+	for _, source := range sources {
+		for _, server := range source.Servers {
+			if !seen[server.Name] {
+				seen[server.Name] = true
+				out = append(out, cloneServerConfig(server))
 			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return Snapshot{Servers: out}
+	return out
+}
+
+// SourceForServer returns the highest-priority source contributing name.
+func (s Snapshot) SourceForServer(name string) string {
+	for _, source := range s.Sources {
+		for _, server := range source.Servers {
+			if server.Name == name {
+				return source.Path
+			}
+		}
+	}
+	return ""
 }
 
 func configFilePaths(root string) ([]string, error) {
@@ -109,7 +156,7 @@ type serverEntry struct {
 // DiscoverFromFile parses a single config file and returns the MCP servers
 // found. Returns an empty slice (not an error) for missing files.
 func DiscoverFromFile(path string) ([]mcp.ServerConfig, error) {
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, MaxConfigBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -126,6 +173,9 @@ func DiscoverFromFile(path string) ([]mcp.ServerConfig, error) {
 	}
 	if len(cf.MCPServers) == 0 {
 		return nil, nil
+	}
+	if len(cf.MCPServers) > MaxServersPerSource {
+		return nil, fmt.Errorf("parse MCP config %s: %d servers exceeds limit %d", path, len(cf.MCPServers), MaxServersPerSource)
 	}
 
 	var out []mcp.ServerConfig

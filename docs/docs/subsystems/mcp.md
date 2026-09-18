@@ -9,6 +9,8 @@ description: ManagedServer lifecycle, Discover/Load/Runtime phases, and credenti
 The MCP subsystem (`internal/mcpdiscover`) manages external tool servers defined in `.mcp.json`.
 It handles discovery, validation, startup, namespacing, and cleanup.
 
+Each discovery file is limited to 1 MiB and 128 server entries. Files are parsed independently and source status reports `healthy`, `missing`, or `invalid` plus whether watched data came from the last-known-good version.
+
 ## Supported Transports
 
 | Transport | Description |
@@ -37,7 +39,7 @@ type ManagedServer struct {
 
 ## Discover / Load / Runtime Phases
 
-Each `.mcp.json` entry progresses through three gates. Failure at any gate stops further progress.
+Each MCP entry progresses through three gates. Sources are parsed independently, so failure in one file does not stop healthy sibling sources.
 
 ### 1. Discover Phase
 
@@ -83,16 +85,21 @@ All credential-like values in `.mcp.json` must use `${ENV_VAR}` references:
 
 ```json
 {
-  "servers": [
-    {
-      "name": "my-server",
+  "mcpServers": {
+    "local-files": {
       "transport": "stdio",
-      "command": "my-mcp-server",
-      "args": ["--token", "${MY_SECRET_TOKEN}"]
+      "command": "mcp-files",
+      "args": ["--token", "${MCP_FILES_TOKEN}"]
+    },
+    "remote-search": {
+      "transport": "sse",
+      "url": "https://mcp.example.com/events?token=${MCP_SEARCH_TOKEN}"
     }
-  ]
+  }
 }
 ```
+
+The parser fixture for this example is `internal/mcpdiscover/testdata/mcp.json`.
 
 Hardcoded credentials are rejected at the Discover phase. The `mcp list` and `mcp test` commands
 redact credential values in their output.
@@ -110,6 +117,7 @@ Each server progresses through these states:
 | `connection_limit_reached` | `MaxMCPConnections` exceeded |
 | `connection_failed` | Startup or connect error |
 | `tool_registration_failed` | Tools collided or failed to register |
+| `reload_failed` | A bounded reload failed; the prior healthy client and namespace remain active |
 
 ## Failure Isolation
 
@@ -119,6 +127,9 @@ The MCP subsystem is designed to be non-blocking:
 - **Unavailable** servers → excluded, warning logged
 - **Failed** servers → excluded, other servers continue
 - **Healthy** servers → registered and available
+- **Malformed source reload** → source-local last-known-good entries remain active
+- **Changed server reload** → connect/list succeeds before one atomic namespace replacement
+- **Removed server** → its complete namespace is removed atomically
 
 A complete failure of all MCP servers does not block chat or non-MCP tools.
 
@@ -131,14 +142,6 @@ chronos-code mcp test    # test connectivity for each server
 chronos-code mcp remove  # remove a server entry
 ```
 
-## Atomic Backup
-
-Every `.mcp.json` mutation writes a backup file (`.mcp.json.bak`) before applying changes:
-
-```bash
-cp .mcp.json.bak .mcp.json  # revert a mutation
-```
-
 ## Disabling MCP Discovery
 
 ```yaml
@@ -147,7 +150,7 @@ mcp:
   discovery_enabled: false
 ```
 
-Restart required. When disabled, `.mcp.json` is not read and no MCP tools are registered.
+When disabled, discovery files are not read or watched and no discovered MCP tools are registered. Agent-configured MCP servers are unaffected.
 
 ## See Also
 

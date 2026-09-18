@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -25,6 +26,9 @@ func TestSQLRoundTrip(t *testing.T) {
 	}
 	if got.Nodes[0].ID != "a" || got.Dependencies[0].NodeID != "b" || got.Events[0].ID != "event" {
 		t.Fatalf("loaded identities = %#v", got)
+	}
+	if got.Nodes[0].Scope != p.Nodes[0].Scope || !reflect.DeepEqual(got.Nodes[0].Risks, p.Nodes[0].Risks) || got.Nodes[0].Verification != p.Nodes[0].Verification {
+		t.Fatalf("loaded node metadata = %#v, want %#v", got.Nodes[0], p.Nodes[0])
 	}
 }
 
@@ -62,6 +66,33 @@ func TestSQLStaleTransitionHasOneWinner(t *testing.T) {
 	}
 }
 
+func TestCompleteWithEvidenceRollsBackTogether(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLStore(t)
+	p := Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanActive, Nodes: []Node{{ID: "a", State: NodePending}, {ID: "b", State: NodePending}}, Evidence: []Evidence{{ID: "duplicate", NodeID: "b"}}}
+	if err := store.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewScheduler(store, SchedulerConfig{})
+	claimed, err := scheduler.Claim(ctx, p, ClaimRequest{AttemptID: "attempt", LeaseID: "lease", EventID: "claim", IdempotencyKey: "claim"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Start(ctx, p, claimed.ID, "lease"); err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.CompleteWithEvidence(ctx, p, claimed.ID, "lease", "complete", "complete", []EvidenceID{"duplicate"}); err == nil {
+		t.Fatal("CompleteWithEvidence() error = nil, want duplicate evidence failure")
+	}
+	loaded, err := store.Load(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Nodes[0].State != NodeRunning || len(loaded.Leases) != 1 || len(loaded.Evidence) != 1 {
+		t.Fatalf("completion transaction partially persisted: %#v", loaded)
+	}
+}
+
 func TestSQLMigrationIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "plans.db")
@@ -78,8 +109,51 @@ func TestSQLMigrationIsIdempotent(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM plan_schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 1 {
-		t.Fatalf("migration rows = %d, want 1", versions)
+	if versions != schemaVersion {
+		t.Fatalf("migration rows = %d, want %d", versions, schemaVersion)
+	}
+}
+
+func TestSQLMigratesVersionOneAndPreservesPlans(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "plans.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE plan_schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV1SQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan_schema_migrations (version, checksum) VALUES (1, ?)`, schemaV1Checksum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plans (tenant_id, repository_id, task_id, plan_id, generation_id, state) VALUES ('tenant', 'repo', 'task', 'plan', 'one', 'draft')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan_nodes (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, state) VALUES ('tenant', 'repo', 'task', 'plan', 'one', 'node', 'pending')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openTestSQLStorePath(t, path)
+	loaded, err := store.Load(ctx, Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Nodes) != 1 || loaded.Nodes[0].Scope != "" || len(loaded.Nodes[0].Risks) != 0 || loaded.Nodes[0].Verification != "" {
+		t.Fatalf("migrated plan = %#v", loaded)
+	}
+	var versions int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM plan_schema_migrations`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != schemaVersion {
+		t.Fatalf("migration rows = %d, want %d", versions, schemaVersion)
 	}
 }
 
@@ -87,7 +161,7 @@ func TestSQLRefusesNewerSchemaWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "plans.db")
 	store := openTestSQLStorePath(t, path)
-	if _, err := store.db.Exec(`INSERT INTO plan_schema_migrations (version, checksum) VALUES (2, 'future')`); err != nil {
+	if _, err := store.db.Exec(`INSERT INTO plan_schema_migrations (version, checksum) VALUES (?, 'future')`, schemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -105,8 +179,8 @@ func TestSQLRefusesNewerSchemaWithoutMutation(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM plan_schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 2 {
-		t.Fatalf("migration rows = %d, want 2", versions)
+	if versions != schemaVersion+1 {
+		t.Fatalf("migration rows = %d, want %d", versions, schemaVersion+1)
 	}
 }
 
@@ -273,9 +347,9 @@ func TestSQLOperationsIntegrityBackupAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	backupStore := openTestSQLStorePath(t, backupPath)
-	backupPlans, err := backupStore.List(ctx, PlanScope{TenantID: target.TenantID, RepositoryID: target.RepositoryID})
-	if err != nil || len(backupPlans) != 1 {
-		t.Fatalf("backup plans = %#v, %v", backupPlans, err)
+	backedUp, err := backupStore.Load(ctx, target)
+	if err != nil || !reflect.DeepEqual(backedUp.Nodes, target.Nodes) || !reflect.DeepEqual(backedUp.ContextRefs, target.ContextRefs) {
+		t.Fatalf("backup plan = %#v, %v", backedUp, err)
 	}
 
 	sourcePath := filepath.Join(t.TempDir(), "source.db")
@@ -295,6 +369,10 @@ func TestSQLOperationsIntegrityBackupAndRestore(t *testing.T) {
 	restored, err := store.List(ctx, PlanScope{TenantID: source.TenantID, RepositoryID: source.RepositoryID})
 	if err != nil || len(restored) != 1 || restored[0].PlanID != source.ID {
 		t.Fatalf("restored plans = %#v, %v", restored, err)
+	}
+	restoredPlan, err := store.Load(ctx, source)
+	if err != nil || !reflect.DeepEqual(restoredPlan.Nodes, source.Nodes) || !reflect.DeepEqual(restoredPlan.ContextRefs, source.ContextRefs) {
+		t.Fatalf("restored plan = %#v, %v", restoredPlan, err)
 	}
 	previousStore := openTestSQLStorePath(t, restoreBackupPath)
 	previous, err := previousStore.List(ctx, PlanScope{TenantID: target.TenantID, RepositoryID: target.RepositoryID})
@@ -342,5 +420,5 @@ func openTestSQLStorePath(t *testing.T, path string) *SQLStore {
 }
 
 func testPlan() Plan {
-	return Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanDraft, Nodes: []Node{{ID: "a", State: NodePending}, {ID: "b", State: NodeProposed}}, Dependencies: []Dependency{{NodeID: "b", DependsOn: "a"}}, Attempts: []Attempt{{ID: "attempt", NodeID: "a", IdempotencyKey: "attempt-key"}}, ContextRefs: []ContextRef{{ID: "context", NodeID: "a"}}, Evidence: []Evidence{{ID: "evidence", NodeID: "a"}}, Leases: []Lease{{ID: "lease", AttemptID: "attempt"}}, Events: []Event{{ID: "event", NodeID: "a", IdempotencyKey: "event-key"}}}
+	return Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanDraft, Nodes: []Node{{ID: "a", State: NodePending, Scope: "internal/plan", Risks: []string{"migration risk"}, Verification: "go test ./internal/plan"}, {ID: "b", State: NodeProposed, Scope: "internal/plan tests", Risks: []string{"regression risk"}, Verification: "go test ./internal/plan"}}, Dependencies: []Dependency{{NodeID: "b", DependsOn: "a"}}, Attempts: []Attempt{{ID: "attempt", NodeID: "a", IdempotencyKey: "attempt-key"}}, ContextRefs: []ContextRef{{ID: "context", NodeID: "a"}}, Evidence: []Evidence{{ID: "evidence", NodeID: "a"}}, Leases: []Lease{{ID: "lease", AttemptID: "attempt"}}, Events: []Event{{ID: "event", NodeID: "a", IdempotencyKey: "event-key"}}}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/sdk/harness"
 )
@@ -69,6 +70,22 @@ func resourceReceive[T any](t *testing.T, ctx context.Context, ch <-chan T) T {
 		t.Fatalf("waiting for delegated run: %v", ctx.Err())
 		var zero T
 		return zero
+	}
+}
+
+func TestConfiguredSubagentInheritsIsolatedWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	var observed string
+	child := resourceAgent(t, "child", resourceProvider{chat: func(ctx context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+		observed, _ = builtins.WorkspaceRootFromContext(ctx)
+		return resourceReply("done"), nil
+	}})
+	runner := &configuredAgentRunner{agents: map[string]*agent.Agent{"child": child}}
+	if _, err := runner.Run(builtins.WithWorkspaceRoot(context.Background(), root), harness.SubAgentSpec{Name: "child"}, "inspect"); err != nil {
+		t.Fatal(err)
+	}
+	if observed != root {
+		t.Fatalf("subagent workspace root = %q, want %q", observed, root)
 	}
 }
 

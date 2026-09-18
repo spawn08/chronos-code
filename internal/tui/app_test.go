@@ -18,9 +18,11 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
+	"github.com/spawn08/chronos-code/internal/verification"
 )
 
 type approvalInstallerStub struct {
@@ -104,6 +106,42 @@ func TestFrameTiming_Stats_Empty(t *testing.T) {
 	got := ft.stats()
 	if !strings.Contains(got, "no frame timing data") {
 		t.Errorf("empty frameTiming.stats() = %q, want 'no frame timing data' message", got)
+	}
+}
+
+func TestExecutionControlsAreTypedAndNeverReuseOriginalRequest(t *testing.T) {
+	if !controlEligible(controlRetry, execution.StopProviderRetryable) || !controlEligible(controlRetry, execution.StopTimeout) {
+		t.Fatal("transient stop reasons must permit retry")
+	}
+	if controlEligible(controlRetry, execution.StopVerificationFailed) || controlEligible(controlResume, execution.StopPolicyDenied) {
+		t.Fatal("unsafe stop reasons permitted an automatic control")
+	}
+	control := executionControl{Kind: controlResume, TaskID: "task-7", StopReason: execution.StopVerificationFailed}
+	prompt := control.prompt()
+	if !strings.Contains(prompt, "task-7") || !strings.Contains(prompt, "Do not repeat completed tool calls or committed side effects") {
+		t.Fatalf("safe resume prompt = %q", prompt)
+	}
+}
+
+func TestOperationalStatusBoundsSpecialistsAndWorktrees(t *testing.T) {
+	m := &appModel{width: 120, operational: orchestrator.OperationalSnapshot{
+		PermissionMode: "prompt", VerificationMode: verification.ModeEnforce,
+		ActiveSpecialists: []orchestrator.SpecialistSnapshot{{AgentID: "one"}, {AgentID: "two"}, {AgentID: "three"}, {AgentID: "four"}},
+		WorktreeIDs:       []string{"1234567890", "abcdefghij", "klmnopqrst", "uvwxyz1234"},
+	}}
+	got := m.renderOperationalBar()
+	if strings.Contains(got, "@four") || strings.Contains(got, "uvwxyz") || !strings.Contains(got, "+1") {
+		t.Fatalf("operational status was not bounded: %q", got)
+	}
+}
+
+func TestVerificationBlockedCompletionIsAnError(t *testing.T) {
+	err := completionError(orchestrator.ExecutionCompletion{
+		StopReason:   execution.StopSuccess,
+		Verification: verification.Decision{Allowed: false, Disagreement: true},
+	})
+	if err == nil || !strings.Contains(err.Error(), string(execution.StopVerificationFailed)) {
+		t.Fatalf("completionError() = %v", err)
 	}
 }
 
@@ -1469,37 +1507,63 @@ func TestModelPickerLiveMsgIgnoredWhenPickerDismissed(t *testing.T) {
 	}
 }
 
-func TestShellEscapeCapturesOutputInTranscript(t *testing.T) {
+func TestShellEscapeUsesRegisteredShellWithoutDirectExecution(t *testing.T) {
 	m := newTestAppModel(t)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	command := "chronos-test-command-that-does-not-exist"
+	called := false
+	m.orch.ActiveAgent().Tools.Register(&tool.Definition{
+		Name:       "shell",
+		Permission: tool.PermAllow,
+		Handler: func(_ context.Context, args map[string]any) (any, error) {
+			called = true
+			if args["command"] != command {
+				t.Fatalf("shell command = %q", args["command"])
+			}
+			return map[string]any{"stdout": "shell-ok\n", "stderr": "", "exit_code": 0}, nil
+		},
+	})
 
-	_, cmd := m.handleSubmit("!echo shell-ok")
+	_, cmd := m.handleSubmit("!" + command)
 	if cmd == nil {
 		t.Fatal("!command did not return a run command")
 	}
 	if m.sending {
 		t.Fatal("!command started an agent turn")
 	}
-	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "$ echo shell-ok") {
+	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "$ "+command) {
 		t.Fatalf("transcript missing shell command: %q", got)
 	}
-	if prev, ok := m.history.Prev(""); !ok || prev != "!echo shell-ok" {
-		t.Fatalf("history = %q, want !echo shell-ok", prev)
+	if prev, ok := m.history.Prev(""); !ok || prev != "!"+command {
+		t.Fatalf("history = %q, want !%s", prev, command)
 	}
 
 	_, _ = m.Update(cmd())
+	if !called {
+		t.Fatal("!command did not use the active agent shell tool")
+	}
 	got := strings.Join(m.blocks, "\n")
 	if !strings.Contains(got, "shell-ok") {
 		t.Fatalf("transcript missing command output: %q", got)
 	}
 }
 
-func TestShellEscapeRunsInWorkspace(t *testing.T) {
+func TestShellEscapePassesWorkspaceToRegisteredShell(t *testing.T) {
 	m := newTestAppModel(t)
 	root := m.workspaceRoot()
 	if root == "" {
 		t.Fatal("test workspace root is empty")
 	}
+	m.orch.ActiveAgent().Tools.Register(&tool.Definition{
+		Name:       "shell",
+		Permission: tool.PermAllow,
+		Handler: func(_ context.Context, args map[string]any) (any, error) {
+			if args["working_dir"] != root {
+				t.Fatalf("working_dir = %q, want %q", args["working_dir"], root)
+			}
+			return map[string]any{"stdout": root + "\n", "stderr": "", "exit_code": 0}, nil
+		},
+	})
 
 	_, cmd := m.handleSubmit("!pwd")
 	if cmd == nil {

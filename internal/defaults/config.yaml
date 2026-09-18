@@ -24,10 +24,39 @@ session:
   auto_resume: false
   max_history_turns: 0
 
-# Applies report/enforce policy to supplied or runtime-derived obligations;
-# verification evidence is not collected automatically.
+# Each zero limit independently disables that constraint. Periodic cleanup is
+# opt-in; explicit cleanup commands use these conservative defaults.
+retention:
+  enabled: true
+  batch_size: 100
+  periodic_interval_minutes: 0
+  policies:
+    sessions: {max_age_days: 90, max_count: 500, max_bytes: 0}
+    events: {max_age_days: 90, max_count: 50000, max_bytes: 536870912}
+    traces: {max_age_days: 30, max_count: 20000, max_bytes: 268435456}
+    audit: {max_age_days: 365, max_count: 100000, max_bytes: 536870912}
+    checkpoints: {max_age_days: 30, max_count: 10000, max_bytes: 268435456}
+    session_files: {max_age_days: 30, max_count: 10000, max_bytes: 536870912}
+    telemetry: {max_age_days: 90, max_count: 10000, max_bytes: 268435456}
+    layered_memory: {max_age_days: 365, max_count: 50000, max_bytes: 268435456}
+    edit_checkpoints: {max_age_days: 30, max_count: 1000, max_bytes: 1073741824}
+    input_artifacts: {max_age_days: 7, max_count: 500, max_bytes: 268435456}
+    worktrees: {max_age_days: 1, max_count: 100, max_bytes: 0}
+    tui_logs: {max_age_days: 14, max_count: 20, max_bytes: 67108864}
+    limiter_entries: {max_age_days: 1, max_count: 10000, max_bytes: 16777216}
+
+# Applies report/enforce policy to runtime-derived obligations and explicitly
+# trusted adapter fixtures.
 verification:
   mode: "report"
+
+repair:
+  max_attempts: 1
+  max_model_calls: 12
+  max_tool_calls: 100
+  wall_time_sec: 1800
+  max_tokens: 500000
+  max_cost_microdollars: 5000000
 
 defaults:
   model:

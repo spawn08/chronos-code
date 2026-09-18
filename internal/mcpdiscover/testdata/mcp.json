@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "local-files": {
+      "transport": "stdio",
+      "command": "mcp-files",
+      "args": ["--token", "${MCP_FILES_TOKEN}"]
+    },
+    "remote-search": {
+      "transport": "sse",
+      "url": "https://mcp.example.com/events?token=${MCP_SEARCH_TOKEN}"
+    }
+  }
+}

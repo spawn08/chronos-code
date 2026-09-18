@@ -1,0 +1,55 @@
+version: chronos.eval.tasks.v1
+tasks:
+  - id: go-bugfix-divide
+    kind: bugfix
+    fixture: {type: local, source: ../fixtures/go-bugfix, revision: fixture-v1}
+    prompt: {reference: ../prompts/go-bugfix.md}
+    language: go
+    timeout: 2m
+    permissions: [read, write, shell]
+    hidden_grader:
+      commands:
+        - {id: hidden-go-test, command: [go, test, ./...]}
+      artifacts:
+        - {path: calc.go, exists: true, contains: "return a / b"}
+    ablation: {graph: true, skills: true, specialists: true, repair: true, worktrees: true}
+  - id: go-multifile-feature
+    kind: multi_file_feature
+    fixture: {type: local, source: ../fixtures/go-feature, revision: fixture-v1}
+    prompt: {reference: ../prompts/go-feature.md}
+    language: go
+    timeout: 3m
+    permissions: [read, write, shell]
+    hidden_grader:
+      commands:
+        - {id: hidden-go-test, command: [go, test, ./...]}
+      artifacts:
+        - {path: store.go, exists: true, contains: "func (s *Store) Delete"}
+        - {path: service.go, exists: true, contains: "func (s *Service) Delete"}
+    ablation: {graph: true, skills: true, specialists: true, repair: true, worktrees: true}
+  - id: go-refactor-parser
+    kind: refactor
+    fixture: {type: local, source: ../fixtures/go-refactor, revision: fixture-v1}
+    prompt: {reference: ../prompts/go-refactor.md}
+    language: go
+    timeout: 2m
+    permissions: [read, write, shell]
+    hidden_grader:
+      commands:
+        - {id: hidden-go-test, command: [go, test, ./...]}
+      artifacts:
+        - {path: parser.go, exists: true, contains: "func parseFields"}
+    ablation: {graph: true, skills: true, specialists: true, repair: true, worktrees: true}
+  - id: go-test-generation
+    kind: test_generation
+    fixture: {type: local, source: ../fixtures/go-testgen, revision: fixture-v1}
+    prompt: {reference: ../prompts/go-testgen.md}
+    language: go
+    timeout: 2m
+    permissions: [read, write, shell]
+    hidden_grader:
+      commands:
+        - {id: hidden-go-test, command: [go, test, ./...]}
+      artifacts:
+        - {path: slug_test.go, exists: true, contains: "func TestSlug"}
+    ablation: {graph: true, skills: true, specialists: true, repair: true, worktrees: true}

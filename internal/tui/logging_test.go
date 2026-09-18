@@ -46,3 +46,51 @@ func TestTUILogsStayOffTerminalAndRestoreWriter(t *testing.T) {
 		t.Fatal("previous log writer was not restored")
 	}
 }
+
+func TestRotateTUILogKeepsBoundedPrivateGenerations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tui.log")
+	if err := os.WriteFile(path, []byte("old-current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".1", []byte("older"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rotateTUILog(path, 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{path + ".1": "old-current", path + ".2": "older"} {
+		got, err := os.ReadFile(name)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("current log still exists after rotation: %v", err)
+	}
+}
+
+func TestRotatingLogWriterRotatesDuringSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tui.log")
+	w, err := openRotatingLog(path, 5, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("1234")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("5678")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil || string(rotated) != "1234" {
+		t.Fatalf("rotated log = %q, %v", rotated, err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || string(current) != "5678" {
+		t.Fatalf("current log = %q, %v", current, err)
+	}
+}

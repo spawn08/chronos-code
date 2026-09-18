@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -83,12 +84,16 @@ func (s *Scheduler) Claim(ctx context.Context, p Plan, request ClaimRequest) (No
 		}
 	}
 	var node Node
-	err = tx.QueryRowContext(ctx, planWhere(`SELECT node_id, state FROM plan_nodes`)+` AND state = 'ready' ORDER BY node_id LIMIT 1`, planArgs(p)...).Scan(&node.ID, &node.State)
+	var risks string
+	err = tx.QueryRowContext(ctx, planWhere(`SELECT node_id, state, scope, risks, verification FROM plan_nodes`)+` AND state = 'ready' ORDER BY node_id LIMIT 1`, planArgs(p)...).Scan(&node.ID, &node.State, &node.Scope, &risks, &node.Verification)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNoReadyNode
 	}
 	if err != nil {
 		return Node{}, fmt.Errorf("select ready plan node: %w", err)
+	}
+	if err := json.Unmarshal([]byte(risks), &node.Risks); err != nil {
+		return Node{}, fmt.Errorf("decode ready plan node risks: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, planWhere(`UPDATE plan_nodes SET state = 'leased'`)+` AND node_id = ? AND state = 'ready'`, append(planArgs(p), node.ID)...); err != nil {
 		return Node{}, fmt.Errorf("lease plan node: %w", err)
@@ -132,19 +137,70 @@ func (s *Scheduler) Start(ctx context.Context, p Plan, nodeID NodeID, leaseID Le
 }
 
 func (s *Scheduler) Complete(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCompleted, "complete")
+	return s.CompleteWithEvidence(ctx, p, nodeID, leaseID, eventID, key, nil)
+}
+
+// CompleteWithEvidence commits evidence references and node completion in one transaction.
+func (s *Scheduler) CompleteWithEvidence(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, evidenceIDs []EvidenceID) error {
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCompleted, "complete", evidenceIDs)
 }
 
 func (s *Scheduler) Block(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeBlocked, "block")
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeBlocked, "block", nil)
 }
 
 func (s *Scheduler) Fail(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeFailed, "fail")
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeFailed, "fail", nil)
 }
 
 func (s *Scheduler) Cancel(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCanceled, "cancel")
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCanceled, "cancel", nil)
+}
+
+// Stop atomically persists a typed terminal result and its plan stop state.
+func (s *Scheduler) Stop(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, status NodeState, reason StopReason) error {
+	if reason == "" || (status != NodeFailed && status != NodeBlocked && status != NodeCanceled) {
+		return fmt.Errorf("stop node: invalid terminal result")
+	}
+	tx, err := s.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin stop node: %w", err)
+	}
+	defer tx.Rollback()
+	if err := leasedNode(ctx, tx, p, nodeID, leaseID, NodeLeased, NodeRunning); err != nil {
+		return err
+	}
+	if err := releaseLease(ctx, tx, p, leaseID); err != nil {
+		return err
+	}
+	if err := updateNode(ctx, tx, p, nodeID, status); err != nil {
+		return err
+	}
+	if err := appendEvent(ctx, tx, p, eventID, nodeID, key); err != nil {
+		return err
+	}
+	state := PlanPaused
+	if status == NodeFailed {
+		state = PlanFailed
+		if err := blockDependents(ctx, tx, p, nodeID); err != nil {
+			return err
+		}
+	} else if status == NodeCanceled {
+		state = PlanCanceled
+		if err := cancelRemaining(ctx, tx, p); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, planWhere(`UPDATE plans SET state = ?, stop_reason = ?`), append([]any{state, reason}, planArgs(p)...)...); err != nil {
+		return fmt.Errorf("persist plan stop: %w", err)
+	}
+	if err := bumpVersion(ctx, tx, p); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit stop node: %w", err)
+	}
+	return nil
 }
 
 // Retry records a failed attempt. Exhaustion fails the node and plan instead.
@@ -212,7 +268,7 @@ func (s *Scheduler) transitionLeased(ctx context.Context, p Plan, nodeID NodeID,
 	return nil
 }
 
-func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, next NodeState, operation string) error {
+func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, next NodeState, operation string, evidenceIDs []EvidenceID) error {
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin %s node: %w", operation, err)
@@ -223,6 +279,14 @@ func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID L
 	}
 	if err := releaseLease(ctx, tx, p, leaseID); err != nil {
 		return err
+	}
+	for _, evidenceID := range evidenceIDs {
+		if evidenceID == "" {
+			return fmt.Errorf("insert plan evidence: missing evidence identity")
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_evidence (tenant_id, repository_id, task_id, plan_id, generation_id, evidence_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), evidenceID, nodeID)...); err != nil {
+			return fmt.Errorf("insert plan evidence: %w", err)
+		}
 	}
 	if err := updateNode(ctx, tx, p, nodeID, next); err != nil {
 		return err
@@ -277,7 +341,7 @@ func promoteReady(ctx context.Context, tx *sql.Tx, p Plan) error {
 }
 
 func readyNodes(ctx context.Context, tx *sql.Tx, p Plan) ([]Node, error) {
-	rows, err := tx.QueryContext(ctx, planWhere(`SELECT node_id, state FROM plan_nodes`)+` AND state = 'ready' ORDER BY node_id`, planArgs(p)...)
+	rows, err := tx.QueryContext(ctx, planWhere(`SELECT node_id, state, scope, risks, verification FROM plan_nodes`)+` AND state = 'ready' ORDER BY node_id`, planArgs(p)...)
 	if err != nil {
 		return nil, fmt.Errorf("query ready plan nodes: %w", err)
 	}
@@ -285,8 +349,12 @@ func readyNodes(ctx context.Context, tx *sql.Tx, p Plan) ([]Node, error) {
 	var nodes []Node
 	for rows.Next() {
 		var node Node
-		if err := rows.Scan(&node.ID, &node.State); err != nil {
+		var risks string
+		if err := rows.Scan(&node.ID, &node.State, &node.Scope, &risks, &node.Verification); err != nil {
 			return nil, fmt.Errorf("scan ready plan node: %w", err)
+		}
+		if err := json.Unmarshal([]byte(risks), &node.Risks); err != nil {
+			return nil, fmt.Errorf("decode ready plan node risks: %w", err)
 		}
 		nodes = append(nodes, node)
 	}

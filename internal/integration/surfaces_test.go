@@ -255,6 +255,7 @@ func verifiedRequest(fixture verifiedBugfixFixture, mode orchestrator.ExecutionM
 		VerificationEvents: []execution.Event{
 			{ID: "write", TaskID: execution.TaskID(fixture.TaskID), Sequence: 1, Type: execution.EventWrite, Paths: fixture.ChangedPaths},
 			{ID: "verify", TaskID: execution.TaskID(fixture.TaskID), Sequence: 2, Type: execution.EventVerification, EvidenceID: "hidden-grader", Paths: fixture.ChangedPaths, Detail: fixture.TestCommand, Passed: true},
+			{ID: "diff", TaskID: execution.TaskID(fixture.TaskID), Sequence: 3, Type: execution.EventVerification, EvidenceID: "hidden-diff", Paths: fixture.ChangedPaths, CommandClass: execution.CommandDiff, Passed: true},
 		},
 	}
 }

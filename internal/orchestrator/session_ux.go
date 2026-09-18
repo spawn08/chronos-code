@@ -203,7 +203,7 @@ func (o *Orchestrator) SandboxStatus() string {
 	if _, err := security.NewOSSandbox(root, false); err != nil {
 		return "sandbox: unavailable (" + err.Error() + ")"
 	}
-	return "sandbox: helper ready (opt-in; shell still uses host policy until a runtime bind ships)"
+	return "sandbox: helper ready (opt-in); shell uses workspace-bound process isolation"
 }
 
 func (o *Orchestrator) ListPendingSuggestions() ([]*learning.Suggestion, error) {

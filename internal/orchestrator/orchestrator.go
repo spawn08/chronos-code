@@ -18,6 +18,7 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	chronostrace "github.com/spawn08/chronos/os/trace"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/sdk/harness"
@@ -40,7 +41,9 @@ import (
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
+	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/projectdocs"
+	"github.com/spawn08/chronos-code/internal/retention"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/session"
@@ -49,6 +52,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/toolcompress"
 	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos-code/internal/workspace"
+	"github.com/spawn08/chronos-code/internal/worktree"
 
 	"github.com/spawn08/chronos/sdk/team"
 )
@@ -70,7 +74,6 @@ type Orchestrator struct {
 	router             *router.Router
 	routingConfig      *router.Config
 	routingMu          sync.Mutex
-	routingState       map[string]router.Classification
 	modelOverrides     map[string]bool
 	buildProvider      func(agent.ModelConfig) (model.Provider, error)
 	budget             *budget.Tracker
@@ -90,18 +93,27 @@ type Orchestrator struct {
 	learningStore      *learning.SQLStore
 	telemetryRecorders []*learning.TelemetryRecorder
 	runtimeMemory      *runtimeMemory
+	planStore          *plan.SQLStore
+	planController     *plan.Controller
+	worktreeManager    *worktree.Manager
 	planMode           atomic.Bool
 	editsMu            sync.Mutex
 	edits              []fileCheckpoint
 	lastExecMu         sync.Mutex
 	lastExecRoute      router.Classification
 	lastExecAgent      string
+	operationalMu      sync.RWMutex
+	operationalActive  map[string]*operationalExecution
+	operationalLast    ExecutionSnapshot
+	operationalPlan    *PlanRuntimeIdentity
 	lspManager         interface{ Close() error }
 	broker             *chronosstream.Broker
 	policy             *security.Policy
 	mcpFactory         mcpdiscover.ClientFactory
 	mcpTimeout         time.Duration
 	mcpRuntimes        []*mcpdiscover.Runtime
+	mcpWatcher         *mcpdiscover.Watcher
+	mcpDiscovery       mcpdiscover.Snapshot
 	mcpMu              sync.Mutex
 	mcpClosed          bool
 	capabilities       RuntimeCapabilityManifest
@@ -135,24 +147,45 @@ type ExecutionRequest struct {
 	// classifier-derived risk are always calculated from Message.
 	PPD           *router.PPDRequest
 	PolicyContext map[string]any
-	// VerificationMode applies policy to the supplied or runtime-derived
-	// obligations and events; execution does not collect evidence automatically.
+	// VerificationMode applies policy to runtime-derived obligations and events.
+	// Supplied values are retained as explicitly trusted adapter input.
 	VerificationMode        verification.Mode
 	VerificationObligations []verification.Obligation
 	VerificationEvents      []execution.Event
+	// BoundedContext prevents ambient prompt augmentation for durable plan nodes.
+	BoundedContext bool
 }
 
 // ExecutionResult carries the common identity and either a blocking response
 // or a streaming response channel, according to the request mode.
 type ExecutionResult struct {
-	AgentID       string
-	SessionID     string
-	TaskID        string
-	PPDDecision   *router.PPDDecision
-	MemoryIntent  *memory.IntentResult
-	ContextReport ContextReport
-	Response      *model.ChatResponse
-	Stream        <-chan *model.ChatResponse
+	AgentID          string
+	SessionID        string
+	TaskID           string
+	PPDDecision      *router.PPDDecision
+	MemoryIntent     *memory.IntentResult
+	ContextReport    ContextReport
+	Response         *model.ChatResponse
+	Stream           <-chan *model.ChatResponse
+	Verification     verification.Decision
+	Completion       <-chan ExecutionCompletion
+	Budget           execution.BudgetSnapshot
+	StopReason       execution.StopReason
+	ChangedPaths     []string
+	EvidenceIDs      []execution.EvidenceID
+	Usage            model.Usage
+	CostMicrodollars int64
+}
+
+type ExecutionCompletion struct {
+	Verification     verification.Decision
+	Budget           execution.BudgetSnapshot
+	StopReason       execution.StopReason
+	ChangedPaths     []string
+	EvidenceIDs      []execution.EvidenceID
+	Usage            model.Usage
+	CostMicrodollars int64
+	Err              error
 }
 
 type taskIDKey struct{}
@@ -199,6 +232,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime paths: %w", err)
 	}
+	if err := retention.Recover(paths.Dir, 100); err != nil {
+		return nil, fmt.Errorf("recover interrupted cleanup: %w", err)
+	}
 	// Keep caller configuration (including embedded-path provenance) intact.
 	configuredGraphDB := cfg.Workspace.GraphDB
 	runtimeConfig := *cfg
@@ -210,12 +246,21 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		return nil, fmt.Errorf("open storage: %w", err)
 	}
 	if err := writeProjectMetadata(paths); err != nil {
-		fmt.Printf("warning: write project data metadata: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: write project data metadata: %v\n", err)
 	}
 	var learningStore *learning.SQLStore
 	var languageServerManager *lsp.Manager
 	var mcpRuntimes []*mcpdiscover.Runtime
-	orch := &Orchestrator{store: store}
+	worktreeManager, err := worktree.New(paths.Dir, nil)
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("configure worktree manager: %w", err)
+	}
+	if err := worktreeManager.Prune(ctx); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("recover worktrees: %w", err)
+	}
+	orch := &Orchestrator{store: store, worktreeManager: worktreeManager}
 	defer func() {
 		if err == nil {
 			return
@@ -243,7 +288,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	projectDir, userDir, discoverErr := config.Discover()
 	if discoverErr != nil {
-		fmt.Printf("warning: discover project config dir: %v (falling back to embedded defaults)\n", discoverErr)
+		fmt.Fprintf(os.Stderr, "warning: discover project config dir: %v (falling back to embedded defaults)\n", discoverErr)
 	}
 	projectDir = paths.LegacyDir
 
@@ -296,6 +341,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if err != nil {
 		return nil, fmt.Errorf("configure security: %w", err)
 	}
+	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second)
 	grCfg := setupGuardrails(cfg, projectDir, agents, policy.SecretPatterns)
 
 	maxTokens, _ := grCfg.TokenBudget()
@@ -322,16 +368,15 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 			return nil, fmt.Errorf("configure user hooks: %w", err)
 		}
 	}
-	var discoveredServers []mcp.ServerConfig
+	var discovered mcpdiscover.Snapshot
 	if cfg.MCP.DiscoveryEnabled() {
-		discovered := mcpdiscover.Load(root)
+		discovered = mcpdiscover.Load(root)
 		if discovered.Err != nil {
-			fmt.Printf("warning: MCP discovery failed; configured servers remain available\n")
+			fmt.Fprintln(os.Stderr, "warning: one or more MCP discovery sources failed; healthy sources remain available")
 		}
-		discoveredServers = discovered.Servers
 	}
 	mcpPool := mcpdiscover.NewSharedClientFactory(nil)
-	mcpRuntimes = setupMCPRuntimes(ctx, agents, discoveredServers, policy, mcpdiscover.DefaultConnectTimeout, mcpPool.NewClient)
+	mcpRuntimes = setupMCPRuntimes(ctx, agents, discovered.Servers, policy, mcpdiscover.DefaultConnectTimeout, mcpPool.NewClient)
 	orch.mcpRuntimes = mcpRuntimes
 	for _, a := range agents {
 		// Finish logical implementations before adding cross-cutting wrappers:
@@ -352,8 +397,13 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		return nil, err
 	}
 	for _, warning := range capabilityWarnings {
-		fmt.Printf("warning: %s\n", warning)
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 	}
+	planStore, err := plan.OpenSQLStore(ctx, paths.PlansDB)
+	if err != nil {
+		return nil, fmt.Errorf("open plan store: %w", err)
+	}
+	orch.planStore = planStore
 
 	// Project-document compression can invoke a model. Keep it behind the
 	// capability contract so invalid runtime prompts fail before any model call.
@@ -375,7 +425,6 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		sessions:           sessions,
 		router:             rt,
 		routingConfig:      routingConfig,
-		routingState:       make(map[string]router.Classification),
 		modelOverrides:     make(map[string]bool),
 		budget:             tracker,
 		usdBudget:          budget.NewTrackerWithUSDCap(0, 0, 0),
@@ -392,14 +441,34 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		learningStore:      learningStore,
 		telemetryRecorders: orch.telemetryRecorders,
 		runtimeMemory:      orch.runtimeMemory,
+		planStore:          planStore,
+		worktreeManager:    worktreeManager,
 		lspManager:         languageServerManager,
 		broker:             broker,
 		policy:             policy,
 		mcpFactory:         mcpPool.NewClient,
 		mcpTimeout:         mcpdiscover.DefaultConnectTimeout,
 		mcpRuntimes:        mcpRuntimes,
+		mcpDiscovery:       discovered,
 		capabilities:       capabilityManifest,
 	}
+	for i, id := range sortedAgentIDs(agents) {
+		if i < len(orch.mcpRuntimes) {
+			orch.mcpRuntimes[i].SetAgent(id)
+			orch.mcpRuntimes[i].SetDiscoveryMetadata(discovered, orch.mcpToolTransform(agents[id]))
+		}
+	}
+	implementationAgent := "coder"
+	if _, ok := agents[implementationAgent]; !ok {
+		if routingConfig == nil || active != routingConfig.PPD.Specialist {
+			implementationAgent = active
+		} else {
+			implementationAgent = ""
+		}
+	}
+	orch.planController = plan.NewController(planStore, &planNodeExecutor{
+		runner: orch, worktrees: worktreeManager, repositoryRoot: root, implementationAgent: implementationAgent,
+	}, nil, nil, plan.ControllerConfig{})
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
 		// Context guard runs before budget: it trims messages that would exceed
@@ -409,12 +478,37 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List()), contextGuardOptions{
 			ContextLimit: a.ContextCfg.MaxContextTokens,
 		}))
-		a.Hooks = append(a.Hooks, modelEscalationHook{orchestrator: orch, agentID: a.ID})
 		// Keep the budget hook last: if it reserves, no later Before hook can
 		// abort the call and strand the reservation.
 		a.Hooks = append(a.Hooks, budgetHook{tracker: tracker, orchestrator: orch, agentID: a.ID})
 	}
+	if cfg.MCP.DiscoveryEnabled() {
+		orch.mcpWatcher, err = mcpdiscover.Watch(ctx, root, orch.reloadMCPDiscovery)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: watch MCP discovery sources: %v\n", err)
+		}
+	}
 	return orch, nil
+}
+
+func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout time.Duration) {
+	for _, a := range agents {
+		if a == nil || a.Tools == nil {
+			continue
+		}
+		for _, name := range []string{"shell", "shell_auto"} {
+			current, ok := a.Tools.Get(name)
+			if !ok {
+				continue
+			}
+			replacement := security.NewWorkspaceShellTool(root, timeout)
+			replacement.Name = name
+			replacement.Permission = current.Permission
+			replacement.RequiresConfirmation = current.RequiresConfirmation
+			replacement.RequiresUserInput = current.RequiresUserInput
+			a.Tools.Register(replacement)
+		}
+	}
 }
 
 // applyStoredCredentials fills in ModelConfig.APIKey from each provider's
@@ -689,7 +783,7 @@ func setupSessions(ctx context.Context, cfg *config.Config, mgr *session.Manager
 			sid = session.NewSessionID()
 		}
 		if err := mgr.Ensure(ctx, sid, a.ID); err != nil {
-			fmt.Printf("warning: ensure session for %s: %v\n", a.ID, err)
+			fmt.Fprintf(os.Stderr, "warning: ensure session for %s: %v\n", a.ID, err)
 		}
 		sessions[id] = sid
 	}
@@ -751,7 +845,7 @@ func setupTracing(store storage.Storage, agents map[string]*agent.Agent) {
 func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info {
 	info, err := workspace.Detect(root)
 	if err != nil {
-		fmt.Printf("warning: detect workspace: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: detect workspace: %v\n", err)
 		return nil
 	}
 	banner := info.Banner()
@@ -1129,7 +1223,7 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 	}
 	bundle, err := projectdocs.Load(root, cwd)
 	if err != nil {
-		fmt.Printf("warning: load project instructions: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: load project instructions: %v\n", err)
 		return nil
 	}
 	if bundle.Empty() {
@@ -1147,7 +1241,7 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 	render := func(b *projectdocs.Bundle) string {
 		out, err := projectdocs.Render(ctx, b, modelID, cachePath, summarize)
 		if err != nil {
-			fmt.Printf("warning: render project instructions: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: render project instructions: %v\n", err)
 			return ""
 		}
 		return out
@@ -1191,7 +1285,7 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 		mu.Unlock()
 	})
 	if err != nil {
-		fmt.Printf("warning: watch project instructions: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: watch project instructions: %v\n", err)
 		return nil
 	}
 	return watcher
@@ -1241,26 +1335,28 @@ func projectDocsSummarizer(cfg *config.Config) projectdocs.Summarizer {
 func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent) []*skills.Skill {
 	bundledData, err := defaults.ReadFile("skills/default-skills.yaml")
 	if err != nil {
-		fmt.Printf("warning: read bundled skill catalog: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: read bundled skill catalog: %v\n", err)
 		return nil
 	}
-	bundled, err := skills.LoadBundledYAML(bundledData)
+	bundledDiscovery, err := skills.LoadBundledYAMLReport(bundledData)
 	if err != nil {
-		fmt.Printf("warning: parse bundled skill catalog: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: parse bundled skill catalog: %v\n", err)
 		return nil
 	}
-	catalog, err := skills.Discover(root, bundled)
+	for _, diagnostic := range bundledDiscovery.Diagnostics {
+		fmt.Fprintf(os.Stderr, "warning: skill %s: %s\n", diagnostic.Source, diagnostic.Message)
+	}
+	discovery, err := skills.DiscoverReport(root, bundledDiscovery.Skills)
 	if err != nil {
-		fmt.Printf("warning: discover skills: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: discover skills: %v\n", err)
 		return nil
 	}
+	for _, diagnostic := range discovery.Diagnostics {
+		fmt.Fprintf(os.Stderr, "warning: skill %s: %s\n", diagnostic.Source, diagnostic.Message)
+	}
+	catalog := discovery.Skills
 	if len(catalog) == 0 {
 		return nil
-	}
-
-	modelID := ""
-	if cfg.Defaults != nil {
-		modelID = cfg.Defaults.Model.Model
 	}
 
 	for _, a := range agents {
@@ -1277,6 +1373,7 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
 				return msgs
 			}
+			manifest := skillCapabilityManifest(a)
 			if selected, _ := ctx.Value(explicitSkillKey{}).(*skills.Skill); selected != nil {
 				content := skills.Render([]*skills.Skill{selected})
 				contextSourceSelected(ctx, ContextSourceSkills, 1, len(content), false)
@@ -1284,10 +1381,10 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 				return msgs
 			}
 			query := history.query(ctx, msg)
-			selected := skills.Select(query, catalog, skills.DefaultTopK, modelID)
-			if rendered := skills.Render(selected); rendered != "" {
-				contextSourceSelected(ctx, ContextSourceSkills, len(selected), len(rendered), false)
-				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: rendered})
+			selection := skills.SelectWithCapabilities(query, catalog, skills.DefaultTopK, manifest)
+			if selection.Context != "" {
+				contextSourceSelected(ctx, ContextSourceSkills, len(selection.Selected), len(selection.Context), false)
+				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: selection.Context})
 			} else {
 				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
 			}
@@ -1295,6 +1392,25 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 		}
 	}
 	return catalog
+}
+
+func skillCapabilityManifest(a *agent.Agent) skills.CapabilityManifest {
+	manifest := skills.CapabilityManifest{Tools: make(map[string]struct{})}
+	if a == nil {
+		return manifest
+	}
+	manifest.AgentID = a.ID
+	if a.Model != nil {
+		manifest.ModelID = a.Model.Model()
+	}
+	if a.Tools != nil {
+		for _, definition := range a.Tools.List() {
+			if definition != nil && definition.Handler != nil && definition.Permission != tool.PermDeny {
+				manifest.Tools[definition.Name] = struct{}{}
+			}
+		}
+	}
+	return manifest
 }
 
 // setupRouter loads routing.yaml (project override at
@@ -1314,12 +1430,12 @@ func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*r
 	}
 	data, err := readOverridableFile(projectDir, "routing.yaml", "routing.yaml")
 	if err != nil {
-		fmt.Printf("warning: load routing.yaml: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: load routing.yaml: %v\n", err)
 		return nil, nil
 	}
 	rcfg, err := router.Parse(data)
 	if err != nil {
-		fmt.Printf("warning: parse routing.yaml: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: parse routing.yaml: %v\n", err)
 		return nil, nil
 	}
 	if defaultAgent == "" {
@@ -1327,7 +1443,7 @@ func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*r
 	}
 	rt, err := router.New(rcfg, defaultAgent)
 	if err != nil {
-		fmt.Printf("warning: build router: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: build router: %v\n", err)
 		return nil, nil
 	}
 	if rcfg.Router.Model.Provider != "" && rcfg.Router.Model.Model != "" {
@@ -1336,7 +1452,7 @@ func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*r
 			Model:    rcfg.Router.Model.Model,
 		})
 		if err != nil {
-			fmt.Printf("warning: build T1 router classifier: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: build T1 router classifier: %v\n", err)
 		} else if t1 := router.NewT1Classifier(provider, rcfg); t1 != nil {
 			rt.SetT1(t1)
 		}
@@ -1355,18 +1471,18 @@ func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*r
 func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*agent.Agent, secretPatterns []string) *guardrail.Config {
 	data, err := readOverridableFile(projectDir, "guardrails/default.yaml", "guardrails/default.yaml")
 	if err != nil {
-		fmt.Printf("warning: load guardrails config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: load guardrails config: %v\n", err)
 		return &guardrail.Config{}
 	}
 	grCfg, err := guardrail.ParseConfig(data)
 	if err != nil {
-		fmt.Printf("warning: parse guardrails config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: parse guardrails config: %v\n", err)
 		return &guardrail.Config{}
 	}
 
 	rules, err := guardrail.BuildRules(grCfg, secretPatterns)
 	if err != nil {
-		fmt.Printf("warning: build guardrail rules: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: build guardrail rules: %v\n", err)
 		return grCfg
 	}
 	for _, a := range agents {
@@ -1450,14 +1566,14 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 	}
 	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			fmt.Printf("warning: create graph db dir %s: %v\n", dir, err)
+			fmt.Fprintf(os.Stderr, "warning: create graph db dir %s: %v\n", dir, err)
 			return nil, nil
 		}
 	}
 
 	graphStore, err := graph.OpenStore(dbPath)
 	if err != nil {
-		fmt.Printf("warning: open graph store: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: open graph store: %v\n", err)
 		return nil, nil
 	}
 
@@ -1466,9 +1582,9 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 	if indexOnStart {
 		stats, err := ix.IndexAll(ctx)
 		if err != nil {
-			fmt.Printf("warning: index code graph: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: index code graph: %v\n", err)
 		} else {
-			fmt.Printf("code graph: indexed %d files, %d symbols, %d edges in %s\n",
+			fmt.Fprintf(os.Stderr, "code graph: indexed %d files, %d symbols, %d edges in %s\n",
 				stats.Files, stats.Symbols, stats.Edges, stats.Elapsed.Round(1e6))
 		}
 	}
@@ -1486,7 +1602,7 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 	if indexOnStart {
 		watcher, err = graph.Watch(ctx, ix)
 		if err != nil {
-			fmt.Printf("warning: start graph watcher: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: start graph watcher: %v\n", err)
 			watcher = nil
 		}
 	}
@@ -1508,10 +1624,9 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	var ppdDecision *router.PPDDecision
 	var routeIntent, routeSpecialist string
 	var routeMatched bool
-	var classification router.Classification
+	classification := router.ClassifyTask(request.Message)
 	if agentID == "" {
 		agentID = o.active
-		classification = router.ClassifyTask(request.Message)
 		o.recordRoute(classification, agentID)
 		if o.router != nil {
 			routeIntent, routeSpecialist, routeMatched = o.router.ClassifyWithFallback(ctx, request.Message)
@@ -1519,7 +1634,6 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 				routeMatched = false
 				routeSpecialist = ""
 			}
-			o.applyResolvedModel(ctx, agentID, request.Message)
 		}
 		if o.routingConfig != nil {
 			ppdRequest := router.PPDRequest{}
@@ -1542,6 +1656,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		}
 		return ExecutionResult{}, fmt.Errorf("agent %q not found", agentID)
 	}
+	ctx = o.applyResolvedModel(ctx, agentID, request.Message)
 	sessionID := request.SessionID
 	if sessionID == "" {
 		sessionID = o.sessionID(agentID)
@@ -1551,10 +1666,31 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		taskID = session.NewSessionID()
 	}
 	ctx = context.WithValue(ctx, taskIDKey{}, taskID)
+	workspaceRoot := ""
+	if requestRoot, ok := builtins.WorkspaceRootFromContext(ctx); ok {
+		workspaceRoot = requestRoot
+	} else if o.workspace != nil {
+		workspaceRoot = o.workspace.Root
+	} else if o.cfg != nil {
+		workspaceRoot = o.cfg.Workspace.Root
+	}
+	ctx = builtins.WithWorkspaceRoot(ctx, workspaceRoot)
+	taskRuntime, err := newTaskRuntimeWithLimits(taskID, workspaceRoot, taskLimits(o.cfg))
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	ctx = withTaskRuntime(ctx, taskRuntime)
 	if request.PolicyContext != nil {
 		ctx = context.WithValue(ctx, executionPolicyContextKey{}, request.PolicyContext)
 	}
 	result := ExecutionResult{AgentID: agentID, SessionID: sessionID, TaskID: taskID, PPDDecision: ppdDecision}
+	o.beginOperationalExecution(result, request.VerificationMode, taskRuntime)
+	streamHandedOff := false
+	defer func() {
+		if !streamHandedOff {
+			o.finishOperationalExecution(result, err)
+		}
+	}()
 	collector := newContextReportCollector()
 	ctx = withContextReportCollector(ctx, collector)
 	result.ContextReport = o.contextReport(collector)
@@ -1571,12 +1707,17 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			contextSourceOmitted(ctx, ContextSourceMemory, result.MemoryIntent.Reason)
 		}
 	}
-	ctx, message, err := o.preparePrompt(ctx, request.Message, agentID, sessionID)
-	if err != nil {
-		result.ContextReport = o.contextReport(collector)
-		return result, err
+	message := request.Message
+	if request.BoundedContext {
+		ctx = o.turnContextFor(ctx, message, agentID, sessionID)
+	} else {
+		ctx, message, err = o.preparePrompt(ctx, message, agentID, sessionID)
+		if err != nil {
+			result.ContextReport = o.contextReport(collector)
+			return result, err
+		}
 	}
-	if !hasIntent {
+	if !request.BoundedContext && !hasIntent {
 		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, classification, o.implementationPath(classification.Complexity), ppdDecision); hint != "" {
 			message = hint + "\n\n" + message
 		}
@@ -1585,7 +1726,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		ctx = context.WithValue(ctx, messageKey{}, intent.Payload)
 	}
 	// Predictive context is part of preparation, not a blocking-only feature.
-	if o.graphStore != nil && o.actBuf != nil {
+	if !request.BoundedContext && o.graphStore != nil && o.actBuf != nil {
 		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
 			contextSourceSelected(ctx, ContextSourceGraphPrediction, strings.Count(preloaded, "\n"), len(preloaded), false)
 			message += "\n\n" + preloaded
@@ -1593,11 +1734,19 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			contextSourceOmitted(ctx, ContextSourceGraphPrediction, ContextOmittedNotSelected)
 		}
 	}
+	var taskCancel context.CancelFunc
+	if o.cfg != nil && o.cfg.Repair.WallTimeSec > 0 {
+		ctx, taskCancel = context.WithTimeout(ctx, time.Duration(o.cfg.Repair.WallTimeSec)*time.Second)
+	}
 	if request.Mode == ExecutionStreaming {
 		if o.runtimeMemory == nil {
 			result.Stream, err = o.executeStreamWithRecovery(ctx, a, sessionID, message)
 			if err == nil {
-				result.Stream = assessStream(ctx, result.Stream, request)
+				result.Stream, result.Completion = o.assessStreamWithRepair(ctx, result.Stream, a, sessionID, request, classification, taskRuntime, taskCancel)
+				result.Completion = o.observeOperationalCompletion(result, result.Completion)
+				streamHandedOff = true
+			} else if taskCancel != nil {
+				taskCancel()
 			}
 			result.ContextReport = o.contextReport(collector)
 			return result, err
@@ -1605,24 +1754,44 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		streamCtx, cancel := context.WithCancel(ctx)
 		result.Stream, err = o.executeStreamWithRecovery(streamCtx, a, sessionID, message)
 		if err == nil {
-			result.Stream = assessStream(streamCtx, result.Stream, request)
+			result.Stream, result.Completion = o.assessStreamWithRepair(streamCtx, result.Stream, a, sessionID, request, classification, taskRuntime, taskCancel)
+			result.Completion = o.observeOperationalCompletion(result, result.Completion)
+			streamHandedOff = true
 			result.Stream = o.runtimeMemory.observeStream(streamCtx, result.Stream, request.Message, cancel)
 		} else {
 			cancel()
+			if taskCancel != nil {
+				taskCancel()
+			}
 			o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
 		}
 		result.ContextReport = o.contextReport(collector)
 		return result, err
 	}
+	if taskCancel != nil {
+		defer taskCancel()
+	}
 	result.Response, err = o.executeBlockingWithRecovery(ctx, a, sessionID, message)
 	result.ContextReport = o.contextReport(collector)
+	if err != nil {
+		populateRuntimeResult(&result, taskRuntime)
+		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
+		return result, err
+	}
+	result.Response, result.Verification, result.StopReason, err = o.repairBlocking(ctx, a, sessionID, request, classification, taskRuntime, result.Response)
+	result.Budget = taskRuntime.budget.Snapshot()
+	populateRuntimeResult(&result, taskRuntime)
 	if err != nil {
 		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
 		return result, err
 	}
-	decision := verification.Assess(request.VerificationMode, true, request.VerificationObligations, request.VerificationEvents)
+	decision := result.Verification
+	result.Verification = decision
 	if !decision.Allowed {
-		err := fmt.Errorf("verification does not support successful completion")
+		if result.StopReason == execution.StopSuccess {
+			result.StopReason = execution.StopVerificationFailed
+		}
+		err := &execution.TerminalError{Reason: result.StopReason, Err: fmt.Errorf("verification does not support successful completion")}
 		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
 		return result, err
 	}
@@ -1653,9 +1822,21 @@ func canContinueOutput(a *agent.Agent, sessionID string) bool {
 	return a != nil && a.Storage != nil && sessionID != ""
 }
 
+func requestModelProvider(ctx context.Context, a *agent.Agent) model.Provider {
+	if provider, ok := agent.ModelProviderFromContext(ctx); ok {
+		return provider
+	}
+	return a.Model
+}
+
 // Recovery belongs to the SDK's model-request boundary. Resubmitting a chat
 // would append the user message again and could repeat already committed tools.
 func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.Agent, sessionID, message string) (<-chan *model.ChatResponse, error) {
+	if runtime, ok := taskRuntimeFromContext(ctx); ok {
+		if err := runtime.beforeModelCall(); err != nil {
+			return nil, err
+		}
+	}
 	var stream <-chan *model.ChatResponse
 	var err error
 	if canContinueOutput(a, sessionID) {
@@ -1676,6 +1857,12 @@ func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.A
 		for attempt := 0; ; attempt++ {
 			maxTokens := false
 			for response := range stream {
+				if runtime, ok := taskRuntimeFromContext(ctx); ok && response != nil {
+					if usageErr := runtime.recordModelUsage(requestModelProvider(ctx, a).Model(), response.Usage); usageErr != nil {
+						out <- &model.ChatResponse{Err: usageErr}
+						return
+					}
+				}
 				isOutputLimit := response != nil && !response.Delta && response.StopReason == model.StopReasonMaxTokens
 				if isOutputLimit {
 					maxTokens = true
@@ -1695,6 +1882,12 @@ func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.A
 			if !maxTokens || attempt >= maxOutputSegments-1 || ctx.Err() != nil {
 				return
 			}
+			if runtime, ok := taskRuntimeFromContext(ctx); ok {
+				if err := runtime.beforeModelCall(); err != nil {
+					out <- &model.ChatResponse{Err: err}
+					return
+				}
+			}
 			stream, err = a.ChatStreamWithSession(ctx, sessionID, continuationPrompt)
 			if err != nil {
 				select {
@@ -1709,6 +1902,11 @@ func (o *Orchestrator) executeStreamWithRecovery(ctx context.Context, a *agent.A
 }
 
 func (o *Orchestrator) executeBlockingWithRecovery(ctx context.Context, a *agent.Agent, sessionID, message string) (*model.ChatResponse, error) {
+	if runtime, ok := taskRuntimeFromContext(ctx); ok {
+		if err := runtime.beforeModelCall(); err != nil {
+			return nil, err
+		}
+	}
 	var response *model.ChatResponse
 	var err error
 	if canContinueOutput(a, sessionID) {
@@ -1719,17 +1917,32 @@ func (o *Orchestrator) executeBlockingWithRecovery(ctx context.Context, a *agent
 	if err != nil {
 		return nil, apierror.Classify(err)
 	}
+	if runtime, ok := taskRuntimeFromContext(ctx); ok && response != nil {
+		if err := runtime.recordModelUsage(requestModelProvider(ctx, a).Model(), response.Usage); err != nil {
+			return response, err
+		}
+	}
 	if !canContinueOutput(a, sessionID) {
 		return response, nil
 	}
 
 	for attempt := 0; response != nil && response.StopReason == model.StopReasonMaxTokens && attempt < maxOutputSegments-1; attempt++ {
 		partial := response.Content
+		if runtime, ok := taskRuntimeFromContext(ctx); ok {
+			if err := runtime.beforeModelCall(); err != nil {
+				return response, err
+			}
+		}
 		response, err = a.ChatWithSession(ctx, sessionID, continuationPrompt)
 		if err != nil {
 			return nil, apierror.Classify(err)
 		}
 		if response != nil {
+			if runtime, ok := taskRuntimeFromContext(ctx); ok {
+				if err := runtime.recordModelUsage(requestModelProvider(ctx, a).Model(), response.Usage); err != nil {
+					return response, err
+				}
+			}
 			response.Content = partial + response.Content
 		}
 	}
@@ -1775,26 +1988,65 @@ func (o *Orchestrator) VerificationMode() verification.Mode {
 	return o.cfg.Verification.Mode
 }
 
-// assessStream preserves the streaming adapter while withholding successful
-// completion when its supplied verification evidence is insufficient.
-func assessStream(ctx context.Context, stream <-chan *model.ChatResponse, request ExecutionRequest) <-chan *model.ChatResponse {
+// assessStreamWithRepair preserves streaming content across bounded repair
+// continuations and publishes exactly one authoritative terminal completion.
+func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan *model.ChatResponse, a *agent.Agent, sessionID string, request ExecutionRequest, classification router.Classification, runtime *taskRuntime, cancel context.CancelFunc) (<-chan *model.ChatResponse, <-chan ExecutionCompletion) {
 	assessed := make(chan *model.ChatResponse)
+	completed := make(chan ExecutionCompletion, 1)
 	go func() {
 		defer close(assessed)
+		defer close(completed)
+		if cancel != nil {
+			defer cancel()
+		}
+		seen := make(map[string]struct{})
+		complete := func(decision verification.Decision, reason execution.StopReason, err error) {
+			result := ExecutionResult{Verification: decision, Budget: runtime.budget.Snapshot(), StopReason: reason}
+			populateRuntimeResult(&result, runtime)
+			completed <- ExecutionCompletion{
+				Verification: result.Verification, Budget: result.Budget, StopReason: result.StopReason,
+				ChangedPaths: result.ChangedPaths, EvidenceIDs: result.EvidenceIDs,
+				Usage: result.Usage, CostMicrodollars: result.CostMicrodollars, Err: err,
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
+				complete(verification.Decision{}, execution.StopReasonForError(ctx.Err()), ctx.Err())
 				return
 			case response, ok := <-stream:
 				if !ok {
-					decision := verification.Assess(request.VerificationMode, true, request.VerificationObligations, request.VerificationEvents)
-					if !decision.Allowed {
-						select {
-						case assessed <- &model.ChatResponse{Err: fmt.Errorf("verification does not support successful completion")}:
-						case <-ctx.Done():
-						}
+					decision := assessRuntimeVerification(request, classification, runtime)
+					if !decision.Disagreement {
+						complete(decision, execution.StopSuccess, nil)
+						return
 					}
-					return
+					fingerprint := verificationFailureFingerprint(decision)
+					if _, repeated := seen[fingerprint]; repeated {
+						reason := execution.StopRepeatedFailure
+						completionErr := error(nil)
+						if request.VerificationMode == verification.ModeEnforce {
+							completionErr = &execution.TerminalError{Reason: reason, Err: fmt.Errorf("verification does not support successful completion")}
+							assessed <- &model.ChatResponse{Err: completionErr}
+						}
+						complete(decision, reason, completionErr)
+						return
+					}
+					seen[fingerprint] = struct{}{}
+					if err := runtime.budget.ConsumeRepairAttempt(); err != nil {
+						terminal := &execution.TerminalError{Reason: execution.StopBudgetExhausted, Err: err}
+						assessed <- &model.ChatResponse{Err: terminal}
+						complete(decision, execution.StopBudgetExhausted, terminal)
+						return
+					}
+					var err error
+					stream, err = o.executeStreamWithRecovery(ctx, a, sessionID, buildRepairPrompt(decision, runtime))
+					if err != nil {
+						assessed <- &model.ChatResponse{Err: err}
+						complete(decision, execution.StopReasonForError(err), err)
+						return
+					}
+					continue
 				}
 				if response != nil && response.Err != nil {
 					classified := *response
@@ -1806,10 +2058,41 @@ func assessStream(ctx context.Context, stream <-chan *model.ChatResponse, reques
 				case <-ctx.Done():
 					return
 				}
+				if response != nil && response.Err != nil {
+					complete(verification.Decision{}, execution.StopReasonForError(response.Err), response.Err)
+					return
+				}
 			}
 		}
 	}()
-	return assessed
+	return assessed, completed
+}
+
+func assessRuntimeVerification(request ExecutionRequest, classification router.Classification, runtime *taskRuntime) verification.Decision {
+	events := append([]execution.Event(nil), request.VerificationEvents...)
+	for i := range events {
+		if events[i].Provenance == "" {
+			events[i].Provenance = execution.ProvenanceTrustedAdapter
+		}
+	}
+	changedPaths := make([]string, 0)
+	if runtime != nil {
+		if state, err := runtime.snapshot(); err == nil {
+			events = append(events, state.Events...)
+			for _, write := range state.Writes {
+				if len(write.Paths) == 0 {
+					changedPaths = append(changedPaths, ".")
+				} else {
+					changedPaths = append(changedPaths, write.Paths...)
+				}
+			}
+		}
+	}
+	obligations := append([]verification.Obligation(nil), request.VerificationObligations...)
+	obligations = append(obligations, verification.Derive(verification.Input{
+		TaskKind: string(classification.Kind), ChangedPaths: changedPaths,
+	})...)
+	return verification.Assess(request.VerificationMode, true, obligations, events)
 }
 
 // Chat preserves the blocking public API while delegating to Execute.
@@ -1929,8 +2212,8 @@ func formatRoutingHint(agentID, intent, specialist string, matched bool, class r
 // cheap-model classifier when configured (PRD P2-006), and returns the
 // specialist the classifier would pick. Execute keeps the active Chronos
 // Code conversation unless the caller requested an agent or PPD delegates.
-// Model routing is applied to the classified agent for Route callers and
-// tests; Execute applies it to the agent that actually runs.
+// Model routing is applied by Execute after the final agent is known; Route is
+// classification-only and never mutates an agent's configured model.
 func (o *Orchestrator) Route(ctx context.Context, message string) (agentID string, matched bool) {
 	if o.router == nil {
 		return o.active, false
@@ -1942,65 +2225,47 @@ func (o *Orchestrator) Route(ctx context.Context, message string) (agentID strin
 	if !matched {
 		agentID = o.active
 	}
-	o.applyResolvedModel(ctx, agentID, message)
 	return agentID, matched
 }
 
-func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message string) {
+type requestRouting struct {
+	AgentID        string
+	Classification router.Classification
+	Provider       string
+	Model          string
+}
+
+type requestRoutingKey struct{}
+
+func requestRoutingFromContext(ctx context.Context) (requestRouting, bool) {
+	routing, ok := ctx.Value(requestRoutingKey{}).(requestRouting)
+	return routing, ok
+}
+
+func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message string) context.Context {
+	if agent.ModelProvider(ctx, nil) != nil {
+		return ctx
+	}
 	classification := router.ClassifyTask(message)
 	o.routingMu.Lock()
-	defer o.routingMu.Unlock()
-	if o.routingConfig == nil || o.modelOverrides[agentID] {
-		return
+	routingConfig := o.routingConfig
+	overridden := o.modelOverrides[agentID]
+	selected := o.agents[agentID].Model
+	o.routingMu.Unlock()
+	if routingConfig != nil && !overridden {
+		if spec, ok := routingConfig.ResolveModel(classification.Complexity, classification.Kind); ok {
+			if provider, err := o.buildModelProvider(ctx, spec.Provider, spec.Model); err == nil {
+				selected = provider
+			}
+		}
 	}
-	delete(o.routingState, agentID)
-	spec, ok := o.routingConfig.ResolveModel(classification.Complexity, classification.Kind)
-	if !ok {
-		return
+	if selected == nil {
+		return ctx
 	}
-	if err := o.switchModel(ctx, agentID, spec.Provider, spec.Model); err == nil {
-		o.routingState[agentID] = classification
-	}
-}
-
-type modelEscalationHook struct {
-	orchestrator *Orchestrator
-	agentID      string
-}
-
-func (h modelEscalationHook) Before(context.Context, *hooks.Event) error { return nil }
-
-func (h modelEscalationHook) After(ctx context.Context, evt *hooks.Event) error {
-	if evt.Type == hooks.EventToolCallAfter && evt.Error != nil {
-		_ = h.orchestrator.escalateModel(ctx, h.agentID)
-	}
-	return nil
-}
-
-func (o *Orchestrator) escalateModel(ctx context.Context, agentID string) error {
-	o.routingMu.Lock()
-	defer o.routingMu.Unlock()
-	if o.routingConfig == nil || o.modelOverrides[agentID] {
-		return nil
-	}
-	classification, ok := o.routingState[agentID]
-	if !ok || classification.Complexity == router.ComplexityHigh {
-		return nil
-	}
-	next := router.ComplexityMedium
-	if classification.Complexity == router.ComplexityMedium {
-		next = router.ComplexityHigh
-	}
-	spec, ok := o.routingConfig.ResolveModel(next, classification.Kind)
-	if !ok {
-		return nil
-	}
-	if err := o.switchModel(ctx, agentID, spec.Provider, spec.Model); err != nil {
-		return err
-	}
-	classification.Complexity = next
-	o.routingState[agentID] = classification
-	return nil
+	ctx = agent.WithModelProvider(ctx, selected)
+	return context.WithValue(ctx, requestRoutingKey{}, requestRouting{
+		AgentID: agentID, Classification: classification, Provider: selected.Name(), Model: selected.Model(),
+	})
 }
 
 // SetApprovalHandler installs handler behind the policy checker on every agent
@@ -2134,11 +2399,17 @@ func (o *Orchestrator) AgentModelInfo(agentID string) (provider, modelID string,
 // immediately and is treated as an explicit per-agent override of automatic
 // model routing; there is no need to restart or rebuild the Orchestrator.
 func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string) error {
-	o.routingMu.Lock()
-	defer o.routingMu.Unlock()
-	if err := o.switchModel(ctx, o.active, provider, modelID); err != nil {
+	p, err := o.buildModelProvider(ctx, provider, modelID)
+	if err != nil {
 		return err
 	}
+	o.routingMu.Lock()
+	defer o.routingMu.Unlock()
+	a := o.agents[o.active]
+	if a == nil {
+		return fmt.Errorf("no active agent")
+	}
+	a.Model = p
 	if o.modelOverrides == nil {
 		o.modelOverrides = make(map[string]bool)
 	}
@@ -2146,11 +2417,7 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 	return nil
 }
 
-func (o *Orchestrator) switchModel(ctx context.Context, agentID, provider, modelID string) error {
-	a := o.agents[agentID]
-	if a == nil {
-		return fmt.Errorf("no active agent")
-	}
+func (o *Orchestrator) buildModelProvider(ctx context.Context, provider, modelID string) (model.Provider, error) {
 	mc := agent.ModelConfig{Provider: provider, Model: modelID}
 	if key := auth.Resolve(ctx, auth.NewStore(), provider).Token; key != "" {
 		mc.APIKey = key
@@ -2166,10 +2433,9 @@ func (o *Orchestrator) switchModel(ctx context.Context, agentID, provider, model
 	}
 	p, err := buildProvider(mc)
 	if err != nil {
-		return fmt.Errorf("build provider for %s/%s: %w", provider, modelID, err)
+		return nil, fmt.Errorf("build provider for %s/%s: %w", provider, modelID, err)
 	}
-	a.Model = p
-	return nil
+	return p, nil
 }
 
 func thinkingBudgetForEffort(effort string) int {
@@ -2261,9 +2527,17 @@ func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error
 		return err
 	}
 	if activeProvider, modelID := o.ActiveModelInfo(); activeProvider == provider && modelID != "" {
+		p, err := o.buildModelProvider(ctx, provider, modelID)
+		if err != nil {
+			return err
+		}
 		o.routingMu.Lock()
 		defer o.routingMu.Unlock()
-		return o.switchModel(ctx, o.active, provider, modelID)
+		a := o.agents[o.active]
+		if a == nil {
+			return fmt.Errorf("no active agent")
+		}
+		a.Model = p
 	}
 	return nil
 }
@@ -2397,30 +2671,30 @@ func (o *Orchestrator) ListSubagents() []string {
 func (o *Orchestrator) MCPStatuses() []mcpdiscover.ServerStatus {
 	o.mcpMu.Lock()
 	defer o.mcpMu.Unlock()
-	byName := make(map[string]mcpdiscover.ServerStatus)
+	var out []mcpdiscover.ServerStatus
 	for _, runtime := range o.mcpRuntimes {
-		for _, status := range runtime.Statuses() {
-			byName[status.Name] = status
+		out = append(out, runtime.Statuses()...)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Agent != out[j].Agent {
+			return out[i].Agent < out[j].Agent
 		}
-	}
-	if o.workspace != nil && o.cfg != nil && o.cfg.MCP.DiscoveryEnabled() {
-		for _, cfg := range mcpdiscover.Load(o.workspace.Root).Servers {
-			if _, ok := byName[cfg.Name]; ok {
-				continue
-			}
-			byName[cfg.Name] = mcpdiscover.ServerStatus{Name: cfg.Name, State: mcpdiscover.StateApprovalRequired}
-		}
-	}
-	names := make([]string, 0, len(byName))
-	for name := range byName {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	out := make([]mcpdiscover.ServerStatus, 0, len(names))
-	for _, name := range names {
-		out = append(out, byName[name])
-	}
+		return out[i].Name < out[j].Name
+	})
 	return out
+}
+
+func (o *Orchestrator) MCPSourceStatuses() []mcpdiscover.SourceStatus {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+	statuses := append([]mcpdiscover.SourceStatus(nil), o.mcpDiscovery.Sources...)
+	for i := range statuses {
+		statuses[i].Servers = append([]mcp.ServerConfig(nil), statuses[i].Servers...)
+		for j := range statuses[i].Servers {
+			statuses[i].Servers[j].Args = append([]string(nil), statuses[i].Servers[j].Args...)
+		}
+	}
+	return statuses
 }
 
 func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover.ServerStatus, error) {
@@ -2551,6 +2825,7 @@ func wrapLateTools(a *agent.Agent, before map[string]struct{}, o *Orchestrator) 
 func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config.HooksConfig, runner *security.HookRunner, activity *hookActivityTracker) {
 	toolcompress.RegisterReader(a)
 	wrapUserToolHooks(a, configured, runner, activity)
+	wrapVerificationEvidence(a)
 	toolcompress.WrapDynamicForTool(a, func(ctx context.Context, name string, args map[string]any) int {
 		base := toolcompress.DefaultThresholdTokens
 		if tracker != nil {
@@ -2585,6 +2860,60 @@ func (o *Orchestrator) WithSkill(ctx context.Context, name string) (context.Cont
 		}
 	}
 	return ctx, fmt.Errorf("skill %q not found", name)
+}
+
+func sortedAgentIDs(agents map[string]*agent.Agent) []string {
+	ids := make([]string, 0, len(agents))
+	for id := range agents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (o *Orchestrator) mcpToolTransform(a *agent.Agent) mcpdiscover.ToolTransform {
+	return func(definitions []*tool.Definition) []*tool.Definition {
+		if a == nil || len(definitions) == 0 {
+			return definitions
+		}
+		partial := &agent.Agent{ID: a.ID, Model: a.Model, Storage: a.Storage, Tools: tool.NewRegistry()}
+		for _, definition := range definitions {
+			partial.Tools.Register(definition)
+		}
+		var configured config.HooksConfig
+		if o.cfg != nil {
+			configured = o.cfg.Hooks
+		}
+		wrapUserToolHooks(partial, configured, o.hookRunner, o.hookActivity)
+		wrapVerificationEvidence(partial)
+		toolcompress.WrapDynamicForTool(partial, func(ctx context.Context, name string, args map[string]any) int {
+			threshold := toolcompress.DefaultThresholdTokens
+			if o.budget != nil {
+				threshold = o.budget.CompressionThreshold(sessionOrAgentKey(ctx, a.ID))
+			}
+			return attention.AdjustThreshold(threshold, attention.Weight(attention.Classify(name, args)))
+		})
+		wrapToolResultCap(partial)
+		return partial.Tools.List()
+	}
+}
+
+func (o *Orchestrator) reloadMCPDiscovery(snapshot mcpdiscover.Snapshot) {
+	o.mcpMu.Lock()
+	defer o.mcpMu.Unlock()
+	if o.mcpClosed {
+		return
+	}
+	o.mcpDiscovery = snapshot
+	for i, id := range sortedAgentIDs(o.agents) {
+		if i >= len(o.mcpRuntimes) || o.mcpRuntimes[i] == nil {
+			continue
+		}
+		o.mcpRuntimes[i].SetDiscoveryMetadata(snapshot, o.mcpToolTransform(o.agents[id]))
+		reloadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		o.mcpRuntimes[i].ReloadDiscovery(reloadCtx, snapshot)
+		cancel()
+	}
 }
 
 // RunSubagent invokes the active agent's spawn_subagent tool directly. The
@@ -2637,6 +2966,23 @@ func (o *Orchestrator) SessionManager() *session.Manager {
 // agent.
 func (o *Orchestrator) CurrentSessionID() string {
 	return o.sessionID(o.active)
+}
+
+// ActiveSessionIDs returns a snapshot used to exclude live resources from
+// retention. The returned slice does not alias orchestrator state.
+func (o *Orchestrator) ActiveSessionIDs() []string {
+	o.sessionMu.RLock()
+	defer o.sessionMu.RUnlock()
+	ids := make([]string, 0, len(o.sessions))
+	seen := make(map[string]bool, len(o.sessions))
+	for _, id := range o.sessions {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (o *Orchestrator) sessionID(agentID string) string {
@@ -2810,7 +3156,7 @@ func setupTeams(cfg *config.Config, agents map[string]*agent.Agent) map[string]*
 	}
 	teams, err := teambuilder.BuildAll(cfg.Teams, agents)
 	if err != nil {
-		fmt.Printf("warning: build teams: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: build teams: %v\n", err)
 		return nil
 	}
 	if len(teams) > 0 {
@@ -2818,7 +3164,7 @@ func setupTeams(cfg *config.Config, agents map[string]*agent.Agent) map[string]*
 		for id := range teams {
 			ids = append(ids, id)
 		}
-		fmt.Printf("teams: built %d (%v)\n", len(teams), ids)
+		fmt.Fprintf(os.Stderr, "teams: built %d (%v)\n", len(teams), ids)
 	}
 	return teams
 }
@@ -2844,10 +3190,11 @@ func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, disco
 		}
 		a.MCPClients = nil
 		runtime := mcpdiscover.Start(ctx, configured, discovered, a.Tools, policy, timeout, factory)
+		runtime.SetAgent(id)
 		runtimes = append(runtimes, runtime)
 		for _, status := range runtime.Statuses() {
 			if status.State != mcpdiscover.StateConnected {
-				fmt.Printf("warning: MCP server for %s: %s\n", a.ID, status.State)
+				fmt.Fprintf(os.Stderr, "warning: MCP server for %s: %s\n", a.ID, status.State)
 			}
 		}
 	}
@@ -2869,6 +3216,11 @@ func (o *Orchestrator) Close() error {
 		for _, runtime := range runtimes {
 			if err := runtime.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close MCP runtime: %w", err))
+			}
+		}
+		if o.mcpWatcher != nil {
+			if err := o.mcpWatcher.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close MCP watcher: %w", err))
 			}
 		}
 		if o.watcher != nil {
@@ -2909,6 +3261,16 @@ func (o *Orchestrator) Close() error {
 		if o.broker != nil {
 			if err := o.broker.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close activity broker: %w", err))
+			}
+		}
+		if o.planStore != nil {
+			if err := o.planStore.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close plan store: %w", err))
+			}
+		}
+		if o.worktreeManager != nil {
+			if err := o.worktreeManager.Close(context.Background()); err != nil {
+				errs = append(errs, fmt.Errorf("close worktree manager: %w", err))
 			}
 		}
 		stores := map[storage.Storage]bool{}

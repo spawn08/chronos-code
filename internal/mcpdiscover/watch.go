@@ -23,6 +23,7 @@ type Watcher struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	onChange func(Snapshot)
+	updates  chan Snapshot
 
 	mu       sync.RWMutex
 	snapshot Snapshot
@@ -69,11 +70,13 @@ func Watch(ctx context.Context, root string, onChange func(Snapshot)) (*Watcher,
 		cancel:   cancel,
 		done:     make(chan struct{}),
 		onChange: onChange,
+		updates:  make(chan Snapshot, 1),
 		snapshot: Load(root),
 	}
 	for _, path := range paths {
 		w.paths[filepath.Clean(path)] = struct{}{}
 	}
+	go w.publishLoop(wctx)
 	go w.loop(wctx, watched)
 	return w, nil
 }
@@ -156,15 +159,24 @@ func (w *Watcher) loop(ctx context.Context, watched map[string]struct{}) {
 func (w *Watcher) reload() {
 	next := Load(w.root)
 	w.mu.Lock()
-	if next.Err != nil {
-		next.Servers = cloneServers(w.snapshot.Servers)
+	previous := make(map[string]SourceStatus, len(w.snapshot.Sources))
+	for _, source := range w.snapshot.Sources {
+		previous[source.Path] = source
 	}
+	for i := range next.Sources {
+		if next.Sources[i].State != SourceInvalid {
+			continue
+		}
+		if old, ok := previous[next.Sources[i].Path]; ok && len(old.Servers) > 0 {
+			next.Sources[i].Servers = cloneServers(old.Servers)
+			next.Sources[i].LastKnownGood = true
+		}
+	}
+	next.Servers = mergeSources(next.Sources)
 	w.snapshot = cloneSnapshot(next)
 	published := cloneSnapshot(w.snapshot)
 	w.mu.Unlock()
-	if w.onChange != nil {
-		w.onChange(published)
-	}
+	w.enqueue(published)
 }
 
 func (w *Watcher) publishError(err error) {
@@ -172,8 +184,35 @@ func (w *Watcher) publishError(err error) {
 	w.snapshot.Err = err
 	published := cloneSnapshot(w.snapshot)
 	w.mu.Unlock()
-	if w.onChange != nil {
-		w.onChange(published)
+	w.enqueue(published)
+}
+
+func (w *Watcher) enqueue(snapshot Snapshot) {
+	if w.onChange == nil {
+		return
+	}
+	select {
+	case w.updates <- snapshot:
+	default:
+		select {
+		case <-w.updates:
+		default:
+		}
+		select {
+		case w.updates <- snapshot:
+		default:
+		}
+	}
+}
+
+func (w *Watcher) publishLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case snapshot := <-w.updates:
+			w.onChange(snapshot)
+		}
 	}
 }
 
@@ -209,7 +248,12 @@ func pathContains(target, candidate string) bool {
 }
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
-	return Snapshot{Servers: cloneServers(snapshot.Servers), Err: snapshot.Err}
+	clone := Snapshot{Servers: cloneServers(snapshot.Servers), Err: snapshot.Err, Sources: make([]SourceStatus, len(snapshot.Sources))}
+	copy(clone.Sources, snapshot.Sources)
+	for i := range clone.Sources {
+		clone.Sources[i].Servers = cloneServers(snapshot.Sources[i].Servers)
+	}
+	return clone
 }
 
 func cloneServers(servers []mcp.ServerConfig) []mcp.ServerConfig {

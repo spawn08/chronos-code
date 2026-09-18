@@ -66,6 +66,23 @@ func TestEmbeddedDefaultsUseReportVerification(t *testing.T) {
 	}
 }
 
+func TestServerRequestTimeoutDecodes(t *testing.T) {
+	cfg := mustConfig(t, "server:\n  request_timeout_sec: 45\n")
+	if cfg.Server.RequestTimeoutSec != 45 {
+		t.Fatalf("server.request_timeout_sec = %d, want 45", cfg.Server.RequestTimeoutSec)
+	}
+}
+
+func TestServerFleetConfigurationDecodes(t *testing.T) {
+	cfg := mustConfig(t, `server:
+  instance_id: node-a
+  fleet_instances: [node-a, node-b]
+`)
+	if cfg.Server.InstanceID != "node-a" || len(cfg.Server.FleetInstances) != 2 {
+		t.Fatalf("server fleet = %+v", cfg.Server)
+	}
+}
+
 func TestAdaptiveConsumerRollbackControlsDefaultToEnabledAndDecodeFalse(t *testing.T) {
 	defaults := Config{}
 	if !defaults.Session.RecallPriorSummariesEnabled() || !defaults.Session.ContextReportEnabled() || !defaults.Learning.PatternInjectionEnabled() || !defaults.MCP.DiscoveryEnabled() {
@@ -95,6 +112,16 @@ func TestVerificationModeValidation(t *testing.T) {
 	err := yaml.Unmarshal([]byte("verification:\n  mode: ignore\n"), &cfg)
 	if err == nil || !strings.Contains(err.Error(), "verification.mode") || !strings.Contains(err.Error(), "report") || !strings.Contains(err.Error(), "enforce") {
 		t.Fatalf("unmarshal error = %v, want verification.mode report|enforce validation", err)
+	}
+}
+
+func TestRepairConfigRejectsNegativeLimits(t *testing.T) {
+	for _, field := range []string{"max_attempts", "max_model_calls", "max_tool_calls", "wall_time_sec", "max_tokens", "max_cost_microdollars"} {
+		var cfg Config
+		err := yaml.Unmarshal([]byte("repair:\n  "+field+": -1\n"), &cfg)
+		if err == nil || !strings.Contains(err.Error(), "repair limits must be non-negative") {
+			t.Fatalf("%s error = %v, want non-negative validation", field, err)
+		}
 	}
 }
 

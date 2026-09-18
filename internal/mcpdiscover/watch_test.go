@@ -101,6 +101,39 @@ func TestWatch_RetainsLastKnownGoodAndSurfacesError(t *testing.T) {
 	assertUpdate(t, updates, "recovered", nil)
 }
 
+func TestWatchRetainsOnlyMalformedSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	project := filepath.Join(root, ".mcp.json")
+	cursorDir := filepath.Join(root, ".cursor")
+	if err := os.MkdirAll(cursorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cursor := filepath.Join(cursorDir, "mcp.json")
+	writeFile(t, project, `{"mcpServers":{"project-old":{"command":"old"}}}`)
+	writeFile(t, cursor, `{"mcpServers":{"cursor-old":{"command":"old"}}}`)
+	updates := make(chan Snapshot, 10)
+	w, err := Watch(context.Background(), root, func(snapshot Snapshot) { updates <- snapshot })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	writeFile(t, project, `{bad`)
+	writeFile(t, cursor, `{"mcpServers":{"cursor-new":{"command":"new"}}}`)
+	update := receiveUpdate(t, updates)
+	names := map[string]bool{}
+	for _, server := range update.Servers {
+		names[server.Name] = true
+	}
+	if !names["project-old"] || !names["cursor-new"] || names["cursor-old"] {
+		t.Fatalf("source-local last-known-good failed: %+v", update)
+	}
+	if len(update.Sources) == 0 || update.Sources[0].State != SourceInvalid || !update.Sources[0].LastKnownGood || update.Sources[0].Diagnostic == "" {
+		t.Fatalf("malformed source status = %+v", update.Sources)
+	}
+}
+
 func TestWatch_CreatesMissingParentConfigDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -24,11 +24,28 @@ func TestDeriveIncludesConfiguredChecksForEdits(t *testing.T) {
 	}
 }
 
-func TestDeriveSkipsEditObligationsForReadOnlyTasks(t *testing.T) {
+func TestDeriveUsesObservedMutationInsteadOfRequestedTaskKind(t *testing.T) {
 	for _, kind := range []string{"explain", "architect"} {
-		if got := Derive(Input{TaskKind: kind, ChangedPaths: []string{"main.go"}, BuildCommand: "go build ./..."}); len(got) != 0 {
-			t.Fatalf("%s obligations = %#v, want none", kind, got)
+		if got := Derive(Input{TaskKind: kind}); len(got) != 0 {
+			t.Fatalf("%s without mutation obligations = %#v, want none", kind, got)
 		}
+		got := Derive(Input{TaskKind: kind, ChangedPaths: []string{"main.go"}})
+		if len(got) != 2 || got[0].Kind != KindTest || got[1].Kind != KindDiff {
+			t.Fatalf("%s mutated obligations = %#v, want generic test and diff", kind, got)
+		}
+	}
+}
+
+func TestReduceMatchesGenericObligationByCommandClass(t *testing.T) {
+	obligations := Derive(Input{ChangedPaths: []string{"main.go"}})
+	exitCode := 0
+	events := []execution.Event{
+		{ID: "test", TaskID: "task", Sequence: 1, Type: execution.EventVerification, EvidenceID: "test", Paths: []string{"main.go"}, CommandClass: execution.CommandTest, ExitCode: &exitCode, TerminalState: execution.TerminalExited, Passed: true},
+		{ID: "diff", TaskID: "task", Sequence: 2, Type: execution.EventVerification, EvidenceID: "diff", Paths: []string{"main.go"}, CommandClass: execution.CommandDiff, ExitCode: &exitCode, TerminalState: execution.TerminalExited, Passed: true},
+	}
+	decision := Assess(ModeEnforce, true, obligations, events)
+	if !decision.Allowed || decision.Disagreement {
+		t.Fatalf("class-matched decision = %#v", decision)
 	}
 }
 

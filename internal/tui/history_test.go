@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestHistory_PrevNext_RoundTrip(t *testing.T) {
 	h := NewHistory()
@@ -105,5 +109,31 @@ func TestHistory_Search(t *testing.T) {
 
 	if got := h.Search("nonexistent"); got != nil {
 		t.Fatalf("Search(%q) = %v, want nil", "nonexistent", got)
+	}
+}
+
+func TestPersistentHistoryIsPrivateBoundedAndReloaded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "history.json")
+	history, err := newHistoryAt(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history.Add("first")
+	history.Add("second")
+	history.Add("third")
+
+	reloaded, err := newHistoryAt(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.entries) != 2 || reloaded.entries[0] != "second" || reloaded.entries[1] != "third" {
+		t.Fatalf("reloaded entries = %#v", reloaded.entries)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("history mode = %o, want 600", info.Mode().Perm())
 	}
 }

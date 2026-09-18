@@ -49,7 +49,15 @@ type inspectionEntry struct{ title, content string }
 func (m *appModel) openInspection(title, content string) {
 	m.inspection = &inspectionOverlay{title: title, content: limitInspection(content), viewport: viewport.New(), entry: -1}
 	m.inspection.overview = m.inspection.content
-	m.inspection.resize(m.width, m.height)
+	m.inspection.resize(m.width, m.inspectionHeight())
+}
+
+func (m *appModel) inspectionHeight() int {
+	height := m.height
+	if operational := m.renderOperationalBar(); operational != "" {
+		height -= lipgloss.Height(operational)
+	}
+	return max(1, height)
 }
 
 func (v *inspectionOverlay) resize(width, height int) {
@@ -104,7 +112,7 @@ func (m *appModel) handleInspectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			v.content = limitInspection(v.entries[v.entry].content)
 		}
 		v.width = 0
-		v.resize(m.width, m.height)
+		v.resize(m.width, m.inspectionHeight())
 		v.viewport.GotoTop()
 		return m, nil
 	}

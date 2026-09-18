@@ -61,14 +61,17 @@ All credential-like values in `.mcp.json` must use `${ENV_VAR}` references:
 
 ```json
 {
-  "servers": [
-    {
-      "name": "my-server",
+  "mcpServers": {
+    "local-files": {
       "transport": "stdio",
-      "command": "my-mcp-server",
-      "args": ["--token", "${MY_SECRET_TOKEN}"]
+      "command": "mcp-files",
+      "args": ["--token", "${MCP_FILES_TOKEN}"]
+    },
+    "remote-search": {
+      "transport": "sse",
+      "url": "https://mcp.example.com/events?token=${MCP_SEARCH_TOKEN}"
     }
-  ]
+  }
 }
 ```
 
@@ -82,6 +85,8 @@ The MCP subsystem is designed to be non-blocking:
 - **Unavailable** servers (runtime credential failure) → excluded, warning logged
 - **Failed** servers (startup crash) → excluded, other servers continue
 - **Healthy** servers → registered and available
+- **Malformed source** → healthy sibling sources continue; watched sources retain only that source's last-known-good entries
+- **Failed reload** → the old client and namespace remain active after bounded reconnect attempts
 
 A complete failure of all MCP servers does not block chat or non-MCP tools.
 

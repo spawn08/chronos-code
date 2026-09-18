@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -33,6 +32,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
@@ -83,18 +83,26 @@ type streamStartedMsg struct {
 	contextReport orchestrator.ContextReport
 	memoryIntent  *memory.IntentResult
 	attachments   string
+	completion    <-chan orchestrator.ExecutionCompletion
+	execution     orchestrator.ExecutionResult
 }
 
 type streamDeltaMsg struct {
-	turnID uint64
-	ctx    context.Context
-	resp   *model.ChatResponse
-	ch     <-chan *model.ChatResponse
+	turnID     uint64
+	ctx        context.Context
+	resp       *model.ChatResponse
+	ch         <-chan *model.ChatResponse
+	completion <-chan orchestrator.ExecutionCompletion
 }
 
 type streamDoneMsg struct {
-	turnID uint64
-	err    error
+	turnID     uint64
+	err        error
+	completion *orchestrator.ExecutionCompletion
+}
+
+type operationalSnapshotMsg struct {
+	snapshot orchestrator.OperationalSnapshot
 }
 
 type streamRenderTickMsg struct{}
@@ -166,6 +174,7 @@ type chatDoneMsg struct {
 	memoryIntent  *memory.IntentResult
 	attachments   string
 	err           error
+	result        orchestrator.ExecutionResult
 }
 
 type maintenanceDoneMsg struct {
@@ -357,6 +366,7 @@ type appModel struct {
 	lastTurnItems       []turnItem
 	lastTurnErr         error
 	lastTurnInterrupted bool
+	lastExecution       orchestrator.ExecutionSnapshot
 	lastTurnBlockIdx    int
 	hasLastTurn         bool
 	toolsExpanded       bool
@@ -427,6 +437,7 @@ type appModel struct {
 	authModelID   string
 	authCatalog   []string
 	authCatalogAt time.Time
+	operational   orchestrator.OperationalSnapshot
 
 	quitting bool
 }
@@ -451,6 +462,10 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	wd, _ := os.Getwd()
 	home, _ := os.UserHomeDir()
 
+	history, historyErr := newPersistentHistory()
+	if historyErr != nil {
+		history = NewHistory()
+	}
 	m := &appModel{
 		orch:           orch,
 		stream:         stream,
@@ -458,7 +473,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		cancel:         cancel,
 		input:          ta,
 		spin:           spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		history:        NewHistory(),
+		history:        history,
 		clipboardRead:  clipboard.ReadAll,
 		clipboardWrite: clipboard.WriteAll,
 		mouseCapture:   true,
@@ -466,6 +481,9 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 		homeDir:        home,
 		followOutput:   true,
 		statusMsg:      orch.StartupHints(ctx),
+	}
+	if historyErr != nil {
+		m.statusMsg = "command history unavailable: " + historyErr.Error()
 	}
 
 	p := tea.NewProgram(m)
@@ -498,7 +516,7 @@ func installApprovalHandlers(installer approvalHandlerInstaller, handler tool.Ap
 }
 
 func (m *appModel) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.input.Focus())
+	return tea.Batch(textarea.Blink, m.input.Focus(), m.operationalSnapshotCmd(0))
 }
 
 func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -515,7 +533,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.invalidateRenderCache()
 		}
 		if m.inspection != nil {
-			m.inspection.resize(msg.Width, msg.Height)
+			m.inspection.resize(msg.Width, m.inspectionHeight())
 		}
 		if !m.ready {
 			m.viewport = viewport.New()
@@ -581,7 +599,8 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.finalizeTurn(msg.ctx.Err())
 		}
 		m.captureExecutionMetadata(msg.contextReport, msg.memoryIntent)
-		return m, listenStream(msg.ctx, msg.turnID, msg.ch)
+		m.lastExecution = executionSnapshot(msg.execution, true)
+		return m, listenStream(msg.ctx, msg.turnID, msg.ch, msg.completion)
 
 	case streamDeltaMsg:
 		return m.handleStreamDelta(msg)
@@ -605,6 +624,13 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.turnID != m.turnID || !m.sending {
 			return m, nil
 		}
+		if msg.completion != nil {
+			m.lastExecution = completionSnapshot(m.lastExecution, *msg.completion)
+			m.operational.Execution = m.lastExecution
+			if msg.err == nil {
+				msg.err = completionError(*msg.completion)
+			}
+		}
 		if msg.err == nil {
 			if m.turnCtx != nil && m.turnCtx.Err() != nil {
 				msg.err = m.turnCtx.Err()
@@ -614,6 +640,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.err = responseStopError(m.streamStopReason)
 			}
 		}
+		if msg.err != nil && m.lastExecution.Running {
+			m.lastExecution.Running = false
+			m.lastExecution.StopReason = execution.StopReasonForError(msg.err)
+			m.operational.Execution = m.lastExecution
+		}
 		return m, m.finalizeTurn(msg.err)
 
 	case chatDoneMsg:
@@ -621,10 +652,16 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.captureAttachmentReceipt(msg.attachments)
+		m.lastExecution = executionSnapshot(msg.result, false)
+		m.operational.Execution = m.lastExecution
 		if m.turnCtx != nil && m.turnCtx.Err() != nil {
+			m.lastExecution.StopReason = execution.StopCancelled
 			return m, m.finalizeTurn(m.turnCtx.Err())
 		}
 		m.captureExecutionMetadata(msg.contextReport, msg.memoryIntent)
+		if msg.err == nil {
+			msg.err = resultError(msg.result)
+		}
 		if msg.resp != nil {
 			if m.activityCh == nil {
 				for _, tc := range msg.resp.ToolCalls {
@@ -642,6 +679,14 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.finalizeTurn(msg.err)
+
+	case operationalSnapshotMsg:
+		m.operational = msg.snapshot
+		if m.inspection != nil {
+			m.inspection.resize(m.width, m.inspectionHeight())
+		}
+		m.resizeViewport()
+		return m, m.operationalSnapshotCmd(time.Second)
 
 	case maintenanceDoneMsg:
 		if msg.turnID != m.turnID || !m.sending {
@@ -955,7 +1000,11 @@ func (m *appModel) interruptTurn() {
 
 func (m *appModel) viewportHeight() int {
 	bottomHeight := lipgloss.Height(m.bottomView)
-	height := m.height - headerHeight - bottomHeight - statusHeight
+	operationalHeight := 0
+	if operational := m.renderOperationalBar(); operational != "" {
+		operationalHeight = lipgloss.Height(operational)
+	}
+	height := m.height - headerHeight - bottomHeight - statusHeight - operationalHeight
 	if height < 0 {
 		return 0
 	}
@@ -1292,14 +1341,14 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 				VerificationMode: orch.VerificationMode(),
 			})
 			if err != nil {
-				return chatDoneMsg{turnID: turnID, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, err: err}
+				return chatDoneMsg{turnID: turnID, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, result: result, err: err}
 			}
-			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt}
+			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream, completion: result.Completion, execution: result, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt}
 		}
 		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
 			Message: input.Message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
 		})
-		return chatDoneMsg{turnID: turnID, resp: result.Response, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, err: err}
+		return chatDoneMsg{turnID: turnID, resp: result.Response, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, result: result, err: err}
 	}
 }
 
@@ -1340,18 +1389,125 @@ func StartExecution(ctx context.Context, orch *orchestrator.Orchestrator, reques
 	return orch.Execute(ctx, request)
 }
 
-func listenStream(ctx context.Context, turnID uint64, ch <-chan *model.ChatResponse) tea.Cmd {
+func (m *appModel) operationalSnapshotCmd(delay time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-m.ctx.Done():
+				return nil
+			}
+		}
+		return operationalSnapshotMsg{snapshot: m.orch.OperationalState(m.ctx)}
+	}
+}
+
+func executionSnapshot(result orchestrator.ExecutionResult, running bool) orchestrator.ExecutionSnapshot {
+	return orchestrator.ExecutionSnapshot{
+		TaskID: result.TaskID, AgentID: result.AgentID, Running: running,
+		StopReason: result.StopReason, Verification: result.Verification, Budget: result.Budget,
+	}
+}
+
+func completionSnapshot(previous orchestrator.ExecutionSnapshot, completion orchestrator.ExecutionCompletion) orchestrator.ExecutionSnapshot {
+	previous.Running = false
+	previous.StopReason = completion.StopReason
+	previous.Verification = completion.Verification
+	previous.Budget = completion.Budget
+	return previous
+}
+
+func resultError(result orchestrator.ExecutionResult) error {
+	if result.TaskID == "" && result.StopReason == "" {
+		return nil
+	}
+	return terminalExecutionError(result.StopReason, result.Verification.Allowed, result.Verification.Disagreement)
+}
+
+func completionError(completion orchestrator.ExecutionCompletion) error {
+	if completion.Err != nil {
+		return completion.Err
+	}
+	return terminalExecutionError(completion.StopReason, completion.Verification.Allowed, completion.Verification.Disagreement)
+}
+
+func terminalExecutionError(reason execution.StopReason, allowed, disagreement bool) error {
+	if reason == "" && (!allowed || disagreement) {
+		reason = execution.StopVerificationFailed
+	}
+	if reason == "" {
+		return nil
+	}
+	if reason == execution.StopSuccess && allowed {
+		return nil
+	}
+	if reason == execution.StopSuccess && !allowed {
+		reason = execution.StopVerificationFailed
+	}
+	message := string(reason)
+	if !allowed || disagreement {
+		message = "verification does not support successful completion"
+	}
+	return &execution.TerminalError{Reason: reason, Retryable: controlEligible(controlResume, reason) || controlEligible(controlRetry, reason), Err: errors.New(message)}
+}
+
+type controlKind string
+
+const (
+	controlRetry  controlKind = "retry"
+	controlResume controlKind = "resume"
+)
+
+type executionControl struct {
+	Kind       controlKind
+	TaskID     string
+	StopReason execution.StopReason
+}
+
+func controlEligible(kind controlKind, reason execution.StopReason) bool {
+	switch kind {
+	case controlRetry:
+		return reason == execution.StopProviderRetryable || reason == execution.StopTimeout
+	case controlResume:
+		return reason == execution.StopCancelled || reason == execution.StopBudgetExhausted || reason == execution.StopVerificationFailed || reason == execution.StopRepeatedFailure
+	default:
+		return false
+	}
+}
+
+func (c executionControl) prompt() string {
+	action := "Continue"
+	if c.Kind == controlRetry {
+		action = "Retry only the unfinished portion of"
+	}
+	return fmt.Sprintf("%s task %s after stop reason %s. Inspect the current session and workspace first. Do not repeat completed tool calls or committed side effects.", action, c.TaskID, c.StopReason)
+}
+
+func listenStream(ctx context.Context, turnID uint64, ch <-chan *model.ChatResponse, completion <-chan orchestrator.ExecutionCompletion) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case resp, ok := <-ch:
 			if !ok {
-				return streamDoneMsg{turnID: turnID, err: ctx.Err()}
+				return completedStreamMsg(ctx, turnID, completion)
 			}
-			return streamDeltaMsg{turnID: turnID, ctx: ctx, resp: resp, ch: ch}
+			return streamDeltaMsg{turnID: turnID, ctx: ctx, resp: resp, ch: ch, completion: completion}
 		case <-ctx.Done():
 			return streamDoneMsg{turnID: turnID, err: ctx.Err()}
 		}
 	}
+}
+
+func completedStreamMsg(ctx context.Context, turnID uint64, completion <-chan orchestrator.ExecutionCompletion) tea.Msg {
+	if completion == nil {
+		return streamDoneMsg{turnID: turnID, err: ctx.Err()}
+	}
+	value, ok := <-completion
+	if !ok {
+		return streamDoneMsg{turnID: turnID, err: fmt.Errorf("execution completion unavailable")}
+	}
+	return streamDoneMsg{turnID: turnID, completion: &value}
 }
 
 func listenActivity(ctx context.Context, turnID uint64, ch <-chan chronosstream.Event) tea.Cmd {
@@ -1379,7 +1535,7 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	}
 	resp := msg.resp
 	if resp == nil {
-		return m, listenStream(msg.ctx, msg.turnID, msg.ch)
+		return m, listenStream(msg.ctx, msg.turnID, msg.ch, msg.completion)
 	}
 	if !resp.Delta {
 		m.streamFinalReceived = true
@@ -1427,7 +1583,7 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 	if resp.Err != nil {
 		return m, m.finalizeTurn(resp.Err)
 	}
-	cmds := []tea.Cmd{listenStream(msg.ctx, msg.turnID, msg.ch)}
+	cmds := []tea.Cmd{listenStream(msg.ctx, msg.turnID, msg.ch, msg.completion)}
 	if !m.renderScheduled {
 		m.renderScheduled = true
 		cmds = append(cmds, tea.Tick(time.Second/30, func(time.Time) tea.Msg { return streamRenderTickMsg{} }))
@@ -1742,27 +1898,44 @@ func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
 	m.appendSystem("$ " + cmdStr)
 	m.statusMsg = "running shell"
 	m.refreshViewport()
+	orch := m.orch
 	dir := m.workspaceRoot()
 	ctx := m.ctx
 	return m, func() tea.Msg {
-		return runShellEscape(ctx, dir, cmdStr)
+		return runShellEscape(ctx, orch, dir, cmdStr)
 	}
 }
 
-func runShellEscape(ctx context.Context, dir, cmdStr string) tea.Msg {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "bash"
+func runShellEscape(ctx context.Context, orch *orchestrator.Orchestrator, dir, cmdStr string) tea.Msg {
+	if orch == nil {
+		return shellDoneMsg{err: fmt.Errorf("shell: orchestrator is unavailable")}
 	}
-	c := exec.CommandContext(ctx, shell, "-c", cmdStr)
-	if dir != "" {
-		c.Dir = dir
+	result, err := orch.ExecuteTool(ctx, "shell", map[string]any{
+		"command":     cmdStr,
+		"working_dir": dir,
+	})
+	output, exitCode := shellToolOutput(result)
+	if err == nil && exitCode != 0 {
+		err = fmt.Errorf("exit status %d", exitCode)
 	}
-	out, err := c.CombinedOutput()
 	if err != nil {
 		err = fmt.Errorf("shell: %w", err)
 	}
-	return shellDoneMsg{output: string(out), err: err}
+	return shellDoneMsg{output: output, err: err}
+}
+
+func shellToolOutput(result any) (string, int) {
+	values, ok := result.(map[string]any)
+	if !ok {
+		if text, ok := result.(string); ok {
+			return text, 0
+		}
+		return "", 0
+	}
+	stdout, _ := values["stdout"].(string)
+	stderr, _ := values["stderr"].(string)
+	exitCode, _ := values["exit_code"].(int)
+	return stdout + stderr, exitCode
 }
 
 func truncateShellOutput(output string) string {
@@ -1948,14 +2121,33 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	case "/context":
 		m.handleContextCommand()
 	case "/inspect":
+		if arg == "operational" {
+			m.openInspection("Operational state · read-only", RenderOperationalSnapshot(m.operational, 0))
+			return m, nil
+		}
 		if arg != "" && arg != "context" && arg != "changes" {
-			m.appendError(fmt.Errorf("usage: /inspect [context|changes]"))
+			m.appendError(fmt.Errorf("usage: /inspect [context|changes|operational]"))
 			break
 		}
 		m.inspectTurn(arg)
 		return m, nil
 	case "/usage":
 		m.appendSystem(m.usageSummary())
+	case "/status":
+		m.appendSystem(RenderOperationalSnapshot(m.operational, m.viewport.Width()))
+	case "/task":
+		kind := controlKind(strings.ToLower(arg))
+		if kind != controlRetry && kind != controlResume {
+			m.appendError(fmt.Errorf("usage: /task retry|resume"))
+			break
+		}
+		control := executionControl{Kind: kind, TaskID: m.lastExecution.TaskID, StopReason: m.lastExecution.StopReason}
+		if control.TaskID == "" || !controlEligible(kind, control.StopReason) {
+			m.appendError(fmt.Errorf("task %s is not eligible after stop reason %q", kind, control.StopReason))
+			break
+		}
+		m.appendSystem(fmt.Sprintf("%s task %s without replaying its original request", kind, control.TaskID))
+		return m.handleSubmit(control.prompt())
 	case "/stream":
 		m.stream = !m.stream
 		m.appendSystem(fmt.Sprintf("streaming: %v", m.stream))
@@ -1984,6 +2176,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.lastTurnItems = nil
 		m.lastTurnErr = nil
 		m.lastTurnInterrupted = false
+		m.lastExecution = orchestrator.ExecutionSnapshot{}
 		m.hasLastTurn = false
 		m.lastTurnBlockIdx = -1
 		m.queuedMessages = nil
@@ -3293,17 +3486,131 @@ func (m *appModel) View() tea.View {
 		return tea.View{AltScreen: true}
 	}
 
+	parts := []string{m.renderHeaderBar(), m.transcriptView(), m.bottomView}
+	if operational := m.renderOperationalBar(); operational != "" {
+		parts = append(parts, operational)
+	}
+	parts = append(parts, m.renderStatusBar())
 	view := tea.View{
-		Content:   joinLayout(m.renderHeaderBar(), m.transcriptView(), m.bottomView, m.renderStatusBar()),
+		Content:   joinLayout(parts...),
 		AltScreen: true,
 	}
 	if m.inspection != nil && m.approval == nil {
-		view.Content = joinLayout(m.renderHeaderBar(), m.inspection.View(), m.renderStatusBar())
+		parts = []string{m.renderHeaderBar(), m.inspection.View()}
+		if operational := m.renderOperationalBar(); operational != "" {
+			parts = append(parts, operational)
+		}
+		parts = append(parts, m.renderStatusBar())
+		view.Content = joinLayout(parts...)
 	}
 	if m.mouseCapture {
 		view.MouseMode = tea.MouseModeCellMotion
 	}
 	return view
+}
+
+func (m *appModel) renderOperationalBar() string {
+	if m.width <= 0 || (m.height > 0 && m.height < 16) || (m.picker == nil && m.wizard == nil && m.approval == nil && !m.searching && len(m.inputCompletions()) > 0) {
+		return ""
+	}
+	snapshot := m.operational
+	if snapshot.Execution.TaskID == "" && m.lastExecution.TaskID != "" {
+		snapshot.Execution = m.lastExecution
+	}
+	text := fmt.Sprintf(" safety:%s · plan-only:%t · verify:%s/%s",
+		emptyLabel(snapshot.PermissionMode), snapshot.PlanOnly, emptyLabel(string(snapshot.VerificationMode)), operationalVerification(snapshot.Execution))
+	overlay := m.picker != nil || m.wizard != nil || m.approval != nil || m.searching || m.inspection != nil
+	if specialists := m.activeSpecialists(snapshot.ActiveSpecialists); !overlay && len(specialists) > 0 {
+		text = appendOperationalSegment(text, "specialists:"+strings.Join(boundedStatusValues(specialists, 3), ","), m.width)
+	}
+	if !overlay && len(snapshot.WorktreeIDs) > 0 {
+		ids := make([]string, len(snapshot.WorktreeIDs))
+		for i, id := range snapshot.WorktreeIDs {
+			ids[i] = shortOperationalID(id)
+		}
+		text = appendOperationalSegment(text, "worktrees:"+strings.Join(boundedStatusValues(ids, 3), ","), m.width)
+	}
+	text = appendOperationalSegment(text, "limits:"+renderRemainingLimits(snapshot.Execution), m.width)
+	text = appendOperationalSegment(text, "plan:"+renderPlanState(snapshot.Plan), m.width)
+	return styleDim.Render(truncateToWidth(text, m.width))
+}
+
+func appendOperationalSegment(text, segment string, width int) string {
+	candidate := text + " · " + segment
+	if lipgloss.Width(candidate) <= width {
+		return candidate
+	}
+	return text
+}
+
+func boundedStatusValues(values []string, limit int) []string {
+	if len(values) <= limit {
+		return values
+	}
+	result := append([]string(nil), values[:limit]...)
+	return append(result, fmt.Sprintf("+%d", len(values)-limit))
+}
+
+func shortOperationalID(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[:8]
+}
+
+func (m *appModel) activeSpecialists(snapshot []orchestrator.SpecialistSnapshot) []string {
+	unique := make(map[string]struct{})
+	result := make([]string, 0, len(snapshot))
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		name = "@" + name
+		if _, exists := unique[name]; exists {
+			return
+		}
+		unique[name] = struct{}{}
+		result = append(result, name)
+	}
+	for _, specialist := range snapshot {
+		add(specialist.AgentID)
+	}
+	if m.pendingSubagents > 0 {
+		var pending []string
+		for _, value := range m.activityArgs {
+			args, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if name, _ := args["agent"].(string); name != "" {
+				pending = append(pending, name)
+			}
+		}
+		sort.Strings(pending)
+		for _, name := range pending {
+			add(name)
+		}
+	}
+	if len(result) > 8 {
+		result = result[:8]
+	}
+	return result
+}
+
+func operationalVerification(snapshot orchestrator.ExecutionSnapshot) string {
+	if snapshot.TaskID == "" {
+		return "idle"
+	}
+	if snapshot.Running {
+		return "pending"
+	}
+	if snapshot.Verification.Disagreement {
+		return "failed"
+	}
+	if !snapshot.Verification.Allowed {
+		return "blocked"
+	}
+	return "satisfied"
 }
 
 func (m *appModel) renderCommandCompletions(completions []string) string {

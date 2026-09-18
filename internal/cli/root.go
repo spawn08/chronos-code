@@ -17,9 +17,11 @@ import (
 	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
+	"github.com/spawn08/chronos-code/internal/retention"
 	"github.com/spawn08/chronos-code/internal/server"
 	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos-code/internal/tui"
@@ -96,6 +98,8 @@ func Execute() error {
 		return runPlan()
 	case "skills":
 		return runSkills()
+	case "cleanup":
+		return runCleanup()
 	case "serve":
 		return runServe()
 	case "version":
@@ -297,7 +301,10 @@ Usage:
   chronos-code plan <operation> --db <path> ...             Inspect or operate a durable plan database
   chronos-code skills list                                  List discovered skills (project + user + bundled)
   chronos-code skills show <name>                           Show a skill's metadata and body
-  chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>]  Start HTTP server for team deployment
+  chronos-code cleanup status [scope]                       Inventory retention-managed resources
+  chronos-code cleanup run [--dry-run] [--scope <scope>]    Apply one bounded cleanup batch per scope
+  chronos-code cleanup prune <scope> [--dry-run]             Prune one scope (plan_db also requires tenant/repository)
+  chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>] [--request-timeout 5m] [--instance-id <id>]  Start HTTP server for team deployment
   chronos-code version            Print version information
   chronos-code help               Show this help
 
@@ -373,12 +380,19 @@ func runREPL() error {
 
 func runHeadless() error {
 	if len(os.Args) < 3 {
+		if jsonMode {
+			return writeInvalidJSONResult(os.Stdout, "usage: chronos-code run <message>")
+		}
 		return fmt.Errorf("usage: chronos-code run <message>")
 	}
 	message := strings.Join(os.Args[2:], " ")
 
 	orch, err := loadAndBuild()
 	if err != nil {
+		if jsonMode {
+			envelope := orchestrator.ExecutionEnvelope(orchestrator.ExecutionResult{}, err, orchestrator.EnvelopeMetadata{})
+			return writeJSONResult(os.Stdout, envelope, err)
+		}
 		return err
 	}
 	defer orch.Close()
@@ -387,6 +401,9 @@ func runHeadless() error {
 		parts := strings.SplitN(message[1:], " ", 2)
 		if len(parts) == 2 {
 			if err := orch.SwitchAgent(parts[0]); err != nil {
+				if jsonMode {
+					return writeInvalidJSONResult(os.Stdout, err.Error())
+				}
 				return err
 			}
 			message = parts[1]
@@ -396,31 +413,90 @@ func runHeadless() error {
 	request := orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode()}
 	if jsonMode {
 		request.Mode = orchestrator.ExecutionBlocking
-		result, err := orch.Execute(context.Background(), request)
-		payload := map[string]any{
-			"agent":   result.AgentID,
-			"session": result.SessionID,
-			"verify":  string(orch.VerificationMode()),
-			"route":   orch.LastRouteStatus(),
-		}
-		if result.Response != nil {
-			payload["content"] = result.Response.Content
-		}
-		if err != nil {
-			payload["error"] = err.Error()
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetEscapeHTML(false)
-		if encodeErr := enc.Encode(payload); encodeErr != nil {
-			return encodeErr
-		}
-		return err
+		return RunJSONExecution(context.Background(), orch, request, os.Stdout)
 	}
 	if streamMode {
 		request.Mode = orchestrator.ExecutionStreaming
 	}
 	_, err = RunExecution(context.Background(), orch, request, os.Stdout, os.Stderr)
 	return err
+}
+
+// ExitError carries the stable process status for autonomous callers.
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+const (
+	ExitSuccess             = 0
+	ExitFailure             = 1
+	ExitInvalidRequest      = 2
+	ExitApprovalBlocked     = 3
+	ExitRetryableProvider   = 4
+	ExitTimeout             = 5
+	ExitBudgetExhausted     = 6
+	ExitVerificationFailure = 7
+)
+
+func (e *ExitError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("execution exited with status %d", e.Code)
+	}
+	return e.Err.Error()
+}
+
+func (e *ExitError) Unwrap() error { return e.Err }
+func (e *ExitError) ExitCode() int { return e.Code }
+
+// RunJSONExecution emits exactly one ExecutionEnvelope document.
+func RunJSONExecution(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, stdout io.Writer) error {
+	request.Mode = orchestrator.ExecutionBlocking
+	result, err := orch.Execute(ctx, request)
+	envelope := orchestrator.ExecutionEnvelope(result, err, orchestrator.EnvelopeMetadata{})
+	return writeJSONResult(stdout, envelope, err)
+}
+
+func writeInvalidJSONResult(stdout io.Writer, message string) error {
+	envelope := execution.ExecutionEnvelope{
+		SchemaVersion: execution.SchemaVersionV1, Status: execution.StatusInvalidRequest, StopReason: execution.StopInvalidRequest,
+		Content: "", ChangedPaths: []string{}, Verification: execution.EnvelopeVerification{Status: execution.VerificationPending, Obligations: []execution.VerificationObligation{}},
+		Error: &execution.Error{Code: execution.ErrorInvalidRequest, Category: execution.ErrorCategoryRequest, Message: message},
+	}
+	return writeJSONResult(stdout, envelope, fmt.Errorf("%s", message))
+}
+
+func writeJSONResult(stdout io.Writer, envelope execution.ExecutionEnvelope, executionErr error) error {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(envelope); err != nil {
+		return fmt.Errorf("encode execution result: %w", err)
+	}
+	if envelope.Status == execution.StatusSucceeded {
+		return nil
+	}
+	return &ExitError{Code: ExitCodeForStatus(envelope.Status), Err: executionErr}
+}
+
+func ExitCodeForStatus(status execution.Status) int {
+	switch status {
+	case execution.StatusSucceeded:
+		return ExitSuccess
+	case execution.StatusInvalidRequest:
+		return ExitInvalidRequest
+	case execution.StatusApprovalBlocked:
+		return ExitApprovalBlocked
+	case execution.StatusRetryableProvider:
+		return ExitRetryableProvider
+	case execution.StatusTimedOut:
+		return ExitTimeout
+	case execution.StatusBudgetExhausted:
+		return ExitBudgetExhausted
+	case execution.StatusVerificationFailed:
+		return ExitVerificationFailure
+	default:
+		return ExitFailure
+	}
 }
 
 // RunExecution executes and renders one headless CLI request. It is kept
@@ -433,8 +509,15 @@ func RunExecution(ctx context.Context, orch *orchestrator.Orchestrator, request 
 	}
 	if request.Mode == orchestrator.ExecutionStreaming {
 		usage, streamErr := tui.StreamResponse(result.Stream, stdout)
+		completion, completed := <-result.Completion
+		if completed {
+			result = orchestrator.ApplyCompletion(result, completion)
+		}
 		if streamErr != nil {
 			return result, streamErr
+		}
+		if completed && completion.Err != nil {
+			return result, completion.Err
 		}
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -1287,6 +1370,12 @@ func runServe() error {
 		CORSOrigins:     flagValue(args, "cors-origins", firstNonEmpty(serverDefaults.CORSOrigins, "*")),
 		MaxConcurrent:   serverDefaults.MaxConcurrent,
 		RateLimitPerMin: serverDefaults.RateLimitPerMin,
+		RequestTimeout:  time.Duration(serverDefaults.RequestTimeoutSec) * time.Second,
+		InstanceID:      flagValue(args, "instance-id", firstNonEmpty(os.Getenv("CHRONOS_CODE_INSTANCE_ID"), serverDefaults.InstanceID)),
+		FleetInstances:  splitNonEmpty(firstNonEmpty(os.Getenv("CHRONOS_CODE_FLEET_INSTANCES"), strings.Join(serverDefaults.FleetInstances, ","))),
+	}
+	if paths, pathErr := appCfg.ResolveProjectPaths(""); pathErr == nil {
+		cfg.DiskPaths = []string{paths.Dir}
 	}
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 1
@@ -1308,6 +1397,13 @@ func runServe() error {
 		}
 		cfg.RateLimitPerMin = rate
 	}
+	if timeoutStr := flagValue(args, "request-timeout", ""); timeoutStr != "" {
+		timeout, parseErr := time.ParseDuration(timeoutStr)
+		if parseErr != nil || timeout <= 0 {
+			return fmt.Errorf("serve: --request-timeout must be a positive duration")
+		}
+		cfg.RequestTimeout = timeout
+	}
 	if cfg.AuthType == "api_key" && cfg.APIKey == "" {
 		return fmt.Errorf("serve: --api-key or CHRONOS_CODE_API_KEY required when --auth=api_key; use --auth=none to disable")
 	}
@@ -1319,6 +1415,34 @@ func runServe() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if appCfg.Retention.Enabled && appCfg.Retention.PeriodicIntervalMinutes > 0 {
+		paths, pathErr := appCfg.ResolveProjectPaths("")
+		if pathErr != nil {
+			return fmt.Errorf("resolve cleanup paths: %w", pathErr)
+		}
+		manager := cleanupManager(appCfg, paths, orch.ActiveSessionIDs())
+		// Automatic server cleanup is intentionally limited to process-local
+		// registries. Persistent stores may be shared by multiple instances and
+		// are pruned only by an explicit operator command.
+		manager.Adapters = []retention.Adapter{srv.RetentionAdapter()}
+		interval := time.Duration(appCfg.Retention.PeriodicIntervalMinutes) * time.Minute
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					result, cleanupErr := manager.Run(ctx, false)
+					srv.ObserveCleanup(result, cleanupErr)
+					if cleanupErr != nil && ctx.Err() == nil {
+						fmt.Fprintf(os.Stderr, "warning: periodic cleanup: %v\n", cleanupErr)
+					}
+				}
+			}
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Start() }()
@@ -1341,4 +1465,14 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitNonEmpty(value string) []string {
+	var result []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			result = append(result, item)
+		}
+	}
+	return result
 }

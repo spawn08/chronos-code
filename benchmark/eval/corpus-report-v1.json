@@ -1,0 +1,39 @@
+{
+  "version": "chronos.eval.report.v1",
+  "runs": [
+    {
+      "task_id": "go-bugfix-divide",
+      "run_id": "example-failed-1",
+      "ablation": {"graph": true, "skills": true, "specialists": true, "repair": true, "worktrees": true},
+      "outcome": {
+        "version": "v1",
+        "task_id": "go-bugfix-divide",
+        "run_id": "example-failed-1",
+        "repository_revision": "fixture-v1",
+        "model": {"provider": "example", "name": "not-executed"},
+        "terminal_status": "succeeded",
+        "cost_microdollars": 0,
+        "retry_attempts": 0,
+        "repair_attempts": 0,
+        "calls": [{"id": "model-1", "kind": "model", "usage": {"input_tokens": 100, "output_tokens": 20, "cache_tokens": 0, "cost_usd": 0}, "duration_ns": 0}],
+        "verification": [{"id": "hidden-go-test", "command": "go test ./...", "passed": false, "executed_at": "2026-01-01T00:00:00Z"}],
+        "latest_change_at": "2026-01-01T00:00:00Z",
+        "grader": {"passed": false, "name": "deterministic-v1"},
+        "failure": {"class": "grader", "message": "hidden-go-test failed"}
+      }
+    }
+  ],
+  "stats": [
+    {
+      "task_id": "go-bugfix-divide",
+      "ablation": {"graph": true, "skills": true, "specialists": true, "repair": true, "worktrees": true},
+      "runs": 1,
+      "verified_success_rate": 0,
+      "mean_tokens": 120,
+      "token_sample_variance": 0,
+      "token_confidence_95_lower": 120,
+      "token_confidence_95_upper": 120,
+      "failures": [{"class": "grader", "message": "hidden-go-test failed"}]
+    }
+  ]
+}

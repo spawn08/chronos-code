@@ -212,11 +212,46 @@ func (g *Guard) audit(ctx context.Context, resource, reason string, args map[str
 		Resource:  resource,
 		Detail: map[string]any{
 			"reason": reason,
-			"args":   args,
+			"args":   RedactValue(args, g.policy.SecretPatterns),
 		},
 		CreatedAt: time.Now(),
 	}
 	_ = g.store.AppendAuditLog(ctx, log)
+}
+
+// RedactValue returns a deep redacted copy of JSON-like values. Secret
+// patterns are applied before values enter audit or operator output.
+func RedactValue(value any, patterns []string) any {
+	compiled, err := compilePatterns("secrets.patterns", patterns)
+	if err != nil {
+		return "[REDACTED: invalid secret policy]"
+	}
+	var redact func(any) any
+	redact = func(value any) any {
+		switch typed := value.(type) {
+		case string:
+			result := typed
+			for _, pattern := range compiled {
+				result = pattern.ReplaceAllString(result, "[REDACTED]")
+			}
+			return result
+		case map[string]any:
+			result := make(map[string]any, len(typed))
+			for key, item := range typed {
+				result[key] = redact(item)
+			}
+			return result
+		case []any:
+			result := make([]any, len(typed))
+			for i, item := range typed {
+				result[i] = redact(item)
+			}
+			return result
+		default:
+			return value
+		}
+	}
+	return redact(value)
 }
 
 // newAuditID generates a random hex identifier for an audit log entry.

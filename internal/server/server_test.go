@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -9,9 +10,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +38,210 @@ func TestHealthEndpoint(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), `"ok"`) {
 		t.Fatalf("health body=%s, want ok", body)
+	}
+}
+
+func TestMetricsEndpointAndStructuredLogsExcludeRequestBody(t *testing.T) {
+	var logs bytes.Buffer
+	s := New(nil, ServerConfig{AuthType: "none", Logger: slog.New(slog.NewJSONHandler(&logs, nil))})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(`{"message":"do-not-log-this"}`))
+	request.Header.Set(correlationIDHeader, "request-123")
+	s.Handler().ServeHTTP(recorder, request)
+	if !strings.Contains(logs.String(), `"correlation_id":"request-123"`) {
+		t.Fatalf("log missing correlation: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "do-not-log-this") {
+		t.Fatalf("log disclosed request body: %s", logs.String())
+	}
+
+	metrics := httptest.NewRecorder()
+	s.Handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "chronos_code_work_active") {
+		t.Fatalf("metrics status=%d body=%q", metrics.Code, metrics.Body.String())
+	}
+}
+
+func TestRequestDeadlineDefaultsAndPropagates(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none"})
+	if s.cfg.RequestTimeout != defaultRequestTimeout {
+		t.Fatalf("RequestTimeout=%s, want %s", s.cfg.RequestTimeout, defaultRequestTimeout)
+	}
+
+	want := 30 * time.Second
+	handler := requestDeadlineMiddleware(want)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadline, ok := r.Context().Deadline()
+		if !ok {
+			t.Fatal("request context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > want {
+			t.Fatalf("deadline remaining=%s, want within (0, %s]", remaining, want)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status=%d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
+func TestJSONRequestsRejectUnknownFieldsAndTrailingValues(t *testing.T) {
+	handler := New(nil, ServerConfig{AuthType: "none"}).Handler()
+	for _, body := range []string{
+		`{"message":"hello","unexpected":true}`,
+		`{"message":"hello"} {"message":"again"}`,
+	} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(body))
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("body=%q status=%d, want %d", body, recorder.Code, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestJSONRequestBodyLimit(t *testing.T) {
+	handler := New(nil, ServerConfig{AuthType: "none"}).Handler()
+	body := `{"message":"` + strings.Repeat("x", maxRequestBodyBytes) + `"}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(body))
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
+	if !strings.Contains(recorder.Body.String(), "request body too large") {
+		t.Fatalf("body=%q, want body limit error", recorder.Body.String())
+	}
+}
+
+func TestCorrelationIDAcceptedGeneratedAndPropagated(t *testing.T) {
+	handler := correlationIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := CorrelationIDFromContext(r.Context())
+		if !ok {
+			t.Fatal("correlation ID missing from context")
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"id": id})
+	}))
+
+	accepted := httptest.NewRecorder()
+	acceptedRequest := httptest.NewRequest(http.MethodGet, "/health", nil)
+	acceptedRequest.Header.Set(correlationIDHeader, "caller-id")
+	handler.ServeHTTP(accepted, acceptedRequest)
+	if got := accepted.Header().Get(correlationIDHeader); got != "caller-id" {
+		t.Fatalf("accepted correlation ID=%q, want caller-id", got)
+	}
+	if !strings.Contains(accepted.Body.String(), `"id":"caller-id"`) {
+		t.Fatalf("body=%q, want propagated caller-id", accepted.Body.String())
+	}
+
+	generated := httptest.NewRecorder()
+	handler.ServeHTTP(generated, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if got := generated.Header().Get(correlationIDHeader); got == "" {
+		t.Fatal("generated correlation ID is empty")
+	}
+}
+
+func TestCorrelationIDRejectsUnsafeCallerValue(t *testing.T) {
+	handler := correlationIDMiddleware(echoHandler())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	request.Header.Set(correlationIDHeader, "unsafe value")
+	handler.ServeHTTP(recorder, request)
+	if got := recorder.Header().Get(correlationIDHeader); got == "" || got == "unsafe value" {
+		t.Fatalf("generated correlation ID=%q", got)
+	}
+}
+
+func TestRecoveryMiddlewareReturnsStructuredJSON(t *testing.T) {
+	handler := recoveryMiddleware(correlationIDMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})))
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panic", nil))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if recorder.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("Content-Type=%q, want application/json", recorder.Header().Get("Content-Type"))
+	}
+	if recorder.Header().Get(correlationIDHeader) == "" {
+		t.Fatal("panic response is missing correlation ID")
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil || payload["error"] != "internal server error" {
+		t.Fatalf("panic response=%q, want structured internal error", recorder.Body.String())
+	}
+}
+
+func TestDrainingKeepsHealthLiveAndFailsReadiness(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none"})
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if !s.draining.Load() {
+		t.Fatal("Shutdown() did not mark the server draining")
+	}
+
+	health := httptest.NewRecorder()
+	s.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status=%d, want %d", health.Code, http.StatusOK)
+	}
+	ready := httptest.NewRecorder()
+	s.Handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if ready.Code != http.StatusServiceUnavailable || !strings.Contains(ready.Body.String(), "draining") {
+		t.Fatalf("ready status=%d body=%q, want draining 503", ready.Code, ready.Body.String())
+	}
+}
+
+func TestDrainingRejectsNewExecution(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none"})
+	s.draining.Store(true)
+	recorder := httptest.NewRecorder()
+	s.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(`{"message":"hello"}`)))
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") == "" {
+		t.Fatalf("status=%d retry-after=%q", recorder.Code, recorder.Header().Get("Retry-After"))
+	}
+}
+
+func TestFleetRejectsRequestOnNonOwnerBeforeExecution(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none", InstanceID: "node-a", FleetInstances: []string{"node-a", "node-b"}})
+	sessionID := "sess-a"
+	for s.router.IsLocal(sessionID) {
+		sessionID += "x"
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(`{"message":"secret prompt","session_id":"`+sessionID+`"}`))
+	s.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want %d", recorder.Code, http.StatusConflict)
+	}
+	if got, want := recorder.Header().Get("X-Chronos-Session-Owner"), s.router.Owner(sessionID); got != want {
+		t.Fatalf("owner=%q, want %q", got, want)
+	}
+}
+
+func TestFleetConfigurationRequiresNamedMember(t *testing.T) {
+	for _, cfg := range []ServerConfig{
+		{AuthType: "none", FleetInstances: []string{"node-a", "node-b"}},
+		{AuthType: "none", InstanceID: "node-c", FleetInstances: []string{"node-a", "node-b"}},
+	} {
+		if New(nil, cfg).configErr == nil {
+			t.Fatalf("config %+v unexpectedly accepted", cfg)
+		}
+	}
+}
+
+func TestMaxConcurrencyDefaultsToOne(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none"})
+	if s.cfg.MaxConcurrent != 1 || cap(s.executions) != 1 {
+		t.Fatalf("MaxConcurrent=%d capacity=%d, want 1", s.cfg.MaxConcurrent, cap(s.executions))
 	}
 }
 
@@ -189,6 +396,45 @@ func TestExecutionConcurrencyLimit(t *testing.T) {
 	close(release)
 	if first := <-firstDone; first.Code != http.StatusNoContent {
 		t.Fatalf("first status=%d, want %d", first.Code, http.StatusNoContent)
+	}
+}
+
+func TestIdempotencyKeyPreventsDuplicateExecution(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none"})
+	var calls atomic.Int32
+	handler := s.idempotentExecution(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat", nil)
+		req.Header.Set("Idempotency-Key", "same-task")
+		return req
+	}
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, request())
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, request())
+	if first.Code != http.StatusNoContent || second.Code != http.StatusConflict || calls.Load() != 1 {
+		t.Fatalf("statuses=(%d,%d) calls=%d", first.Code, second.Code, calls.Load())
+	}
+}
+
+func TestIdempotencyKeyIsTenantScoped(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "none"})
+	var calls atomic.Int32
+	handler := s.idempotentExecution(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tenant := range []string{"tenant-a", "tenant-b"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat", nil)
+		req.Header.Set("Idempotency-Key", "same-task")
+		req = req.WithContext(context.WithValue(req.Context(), tenantContextKey{}, tenant))
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("tenant-scoped calls = %d, want 2", calls.Load())
 	}
 }
 

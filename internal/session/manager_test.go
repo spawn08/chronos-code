@@ -219,6 +219,12 @@ func TestManagerExport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("export permissions = %v, %v; want 0600", info, err)
+	}
+	if info, err := os.Stat(filepath.Dir(path)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("export directory permissions = %v, %v; want 0700", info, err)
+	}
 	var exported ExportedSession
 	if err := json.Unmarshal(data, &exported); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)

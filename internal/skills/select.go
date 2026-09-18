@@ -19,6 +19,25 @@ const DefaultTopK = 3
 // tokens total per turn; oldest drops first").
 const TokenBudget = 8000
 
+type CapabilityManifest struct {
+	AgentID string
+	ModelID string
+	Tools   map[string]struct{}
+}
+
+type SelectionDecision struct {
+	Skill     *Skill
+	Score     float64
+	Accepted  bool
+	Rejection string
+}
+
+type SelectionResult struct {
+	Selected  []*Skill
+	Decisions []SelectionDecision
+	Context   string
+}
+
 // bm25K1 and bm25B are the standard Okapi BM25 tuning constants.
 const (
 	bm25K1 = 1.2
@@ -34,23 +53,68 @@ const (
 // An empty or all-zero-score result returns nil, not an error — "nothing
 // relevant enough to inject" is the common case, not a failure.
 func Select(message string, all []*Skill, topK int, modelID string) []*Skill {
+	return SelectWithCapabilities(message, all, topK, CapabilityManifest{ModelID: modelID}).Selected
+}
+
+// SelectWithCapabilities keeps ranking and rejection rationale out of the
+// rendered model context while enforcing each skill's runtime requirements.
+func SelectWithCapabilities(message string, all []*Skill, topK int, manifest CapabilityManifest) SelectionResult {
 	if topK <= 0 {
 		topK = DefaultTopK
 	}
 	scored := bm25Rank(message, all)
-	if len(scored) > topK {
-		scored = scored[:topK]
+	result := SelectionResult{Decisions: make([]SelectionDecision, 0, len(scored))}
+	for _, candidate := range scored {
+		decision := SelectionDecision{Skill: candidate.skill, Score: candidate.score}
+		decision.Rejection = capabilityRejection(candidate.skill, manifest)
+		if decision.Rejection == "" && len(result.Selected) < topK {
+			decision.Accepted = true
+			result.Selected = append(result.Selected, candidate.skill)
+		} else if decision.Rejection == "" {
+			decision.Rejection = "outside top-k limit"
+		}
+		result.Decisions = append(result.Decisions, decision)
 	}
+	counter := model.NewTokenCounter(manifest.ModelID)
+	for len(result.Selected) > 0 && counter.CountString(Render(result.Selected)) > TokenBudget {
+		rejected := result.Selected[len(result.Selected)-1]
+		result.Selected = result.Selected[:len(result.Selected)-1]
+		for i := range result.Decisions {
+			if result.Decisions[i].Skill == rejected {
+				result.Decisions[i].Accepted = false
+				result.Decisions[i].Rejection = "token budget exceeded"
+				break
+			}
+		}
+	}
+	result.Context = Render(result.Selected)
+	return result
+}
 
-	counter := model.NewTokenCounter(modelID)
-	selected := make([]*Skill, len(scored))
-	for i, sc := range scored {
-		selected[i] = sc.skill
+func capabilityRejection(skill *Skill, manifest CapabilityManifest) string {
+	if skill == nil {
+		return "invalid skill"
 	}
-	for len(selected) > 0 && counter.CountString(Render(selected)) > TokenBudget {
-		selected = selected[:len(selected)-1] // drop the lowest-scored (last) skill first.
+	if hint := strings.TrimSpace(strings.ToLower(skill.ModelHint)); hint != "" &&
+		!strings.Contains(strings.ToLower(manifest.ModelID), hint) {
+		return fmt.Sprintf("model %q does not satisfy hint %q", manifest.ModelID, skill.ModelHint)
 	}
-	return selected
+	var missing []string
+	for _, required := range skill.ToolsRequired {
+		if _, ok := manifest.Tools[required]; !ok {
+			missing = append(missing, required)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return "missing required tools: " + strings.Join(missing, ", ")
+	}
+	return ""
+}
+
+// CapabilityRejection returns an empty string when skill can run in manifest.
+func CapabilityRejection(skill *Skill, manifest CapabilityManifest) string {
+	return capabilityRejection(skill, manifest)
 }
 
 // Render formats selected skills as ROADMAP.md §5.1's
