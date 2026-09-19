@@ -2,11 +2,15 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/spawn08/chronos/engine/model"
+
+	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/execution"
 )
 
@@ -96,5 +100,32 @@ func TestEvidenceRecorderConcurrentIsolationAndSnapshots(t *testing.T) {
 	fresh, err := first.snapshot()
 	if err != nil || fresh.Events[0].Paths[0] == "mutated.go" {
 		t.Fatalf("snapshot mutated ledger: %#v, %v", fresh.Events[0], err)
+	}
+}
+
+func TestTaskRuntimeUnknownModelRequiresExplicitCostLimit(t *testing.T) {
+	usage := model.Usage{PromptTokens: 10, CompletionTokens: 5}
+	for _, test := range []struct {
+		name      string
+		costLimit int64
+		wantErr   bool
+	}{
+		{name: "disabled", costLimit: 0},
+		{name: "enabled", costLimit: 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, err := newTaskRuntime("task-1", t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.budget = execution.NewTaskBudget(execution.TaskLimits{CostMicrodollars: test.costLimit}, time.Now())
+			err = runtime.recordModelUsage("private-azure-deployment", usage)
+			if test.wantErr && !errors.Is(err, budget.ErrUnknownModel) {
+				t.Fatalf("recordModelUsage() error = %v, want ErrUnknownModel", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("recordModelUsage() error = %v, want unpriced model allowed without a cost limit", err)
+			}
+		})
 	}
 }

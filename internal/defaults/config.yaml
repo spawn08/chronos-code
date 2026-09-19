@@ -56,7 +56,10 @@ repair:
   max_tool_calls: 100
   wall_time_sec: 1800
   max_tokens: 500000
-  max_cost_microdollars: 5000000
+  # Provider model-list APIs do not expose authoritative pricing, and Azure
+  # deployment aliases cannot be safely mapped to a billed model. Keep USD
+  # enforcement opt-in; the other cumulative repair limits remain active.
+  max_cost_microdollars: 0
 
 defaults:
   model:

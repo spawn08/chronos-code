@@ -123,10 +123,12 @@ repair:
   max_tool_calls: 100
   wall_time_sec: 1800
   max_tokens: 500000
-  max_cost_microdollars: 5000000
+  max_cost_microdollars: 0       # opt in only when every model has known pricing
 ```
 
 Repair prompts contain only unmet obligations, affected paths, and remaining limits. Repeated identical verification failures stop without another model call.
+
+Provider model-list APIs expose model or deployment identifiers, not authoritative prices. This is especially important for Azure deployment aliases and negotiated enterprise pricing. Consequently, the default USD repair limit is disabled while model-call, tool-call, wall-time, token, and repair-attempt limits remain enforced. Configuring a positive USD limit continues to fail closed if any selected model has no known price.
 
 ### Retention And Cleanup
 

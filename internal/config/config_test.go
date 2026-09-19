@@ -64,6 +64,9 @@ func TestEmbeddedDefaultsUseReportVerification(t *testing.T) {
 	if cfg.Verification.Mode != verification.ModeReport {
 		t.Fatalf("verification.mode = %q, want %q", cfg.Verification.Mode, verification.ModeReport)
 	}
+	if cfg.Repair.MaxCostMicrodollars != 0 {
+		t.Fatalf("repair.max_cost_microdollars = %d, want opt-in USD enforcement", cfg.Repair.MaxCostMicrodollars)
+	}
 }
 
 func TestServerRequestTimeoutDecodes(t *testing.T) {
