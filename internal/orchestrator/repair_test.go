@@ -63,7 +63,7 @@ func TestRepairBlockingContinuesSessionWithBoundedProjection(t *testing.T) {
 	}
 }
 
-func TestRepairBlockingStopsRepeatedFailure(t *testing.T) {
+func TestRepairBlockingAllowsRepeatedFailureInReportMode(t *testing.T) {
 	runtime, err := newTaskRuntimeWithLimits("task", t.TempDir(), execution.TaskLimits{RepairAttempts: 3, ModelCalls: 3})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestRepairBlockingStopsRepeatedFailure(t *testing.T) {
 	provider := &repairEvidenceProvider{}
 	a := newExecutionTestAgent("coder", provider)
 	_, decision, reason, err := (&Orchestrator{}).repairBlocking(withTaskRuntime(context.Background(), runtime), a, "", ExecutionRequest{VerificationMode: verification.ModeReport}, router.Classification{Kind: router.TaskKindEdit}, runtime, nil)
-	if err != nil || !decision.Disagreement || reason != execution.StopRepeatedFailure || len(provider.requests) != 1 {
+	if err != nil || !decision.Allowed || !decision.Disagreement || reason != execution.StopSuccess || len(provider.requests) != 1 {
 		t.Fatalf("repeated repair = (%#v, %q, %v), calls=%d", decision, reason, err, len(provider.requests))
 	}
 }

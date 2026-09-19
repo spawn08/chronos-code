@@ -534,18 +534,36 @@ func TestExecuteRejectsUnsupportedVerifiedCompletion(t *testing.T) {
 func TestExecuteReportModeExposesVerificationDisagreement(t *testing.T) {
 	provider := &executionTestProvider{name: "coder", modelID: "test"}
 	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)}, active: "coder"}
+	obligations := []verification.Obligation{{
+		ID: "test", Kind: verification.KindTest, CommandClass: execution.CommandTest, Paths: []string{"main.go"}, Status: verification.StatusPending,
+	}}
 	result, err := orch.Execute(context.Background(), ExecutionRequest{
-		Message:          "fix the bug",
-		VerificationMode: verification.ModeReport,
-		VerificationObligations: []verification.Obligation{{
-			ID: "test", Kind: verification.KindTest, CommandClass: execution.CommandTest, Paths: []string{"main.go"}, Status: verification.StatusPending,
-		}},
+		Message: "fix the bug", VerificationMode: verification.ModeReport, VerificationObligations: obligations,
 	})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if !result.Verification.Allowed || !result.Verification.Disagreement || len(result.Verification.Obligations) != 1 {
 		t.Fatalf("report verification = %#v", result.Verification)
+	}
+	if result.StopReason != execution.StopSuccess {
+		t.Fatalf("report stop reason = %q, want success", result.StopReason)
+	}
+
+	streaming, err := orch.Execute(context.Background(), ExecutionRequest{
+		Message: "fix the bug", Mode: ExecutionStreaming, VerificationMode: verification.ModeReport, VerificationObligations: obligations,
+	})
+	if err != nil {
+		t.Fatalf("streaming Execute() error = %v", err)
+	}
+	for response := range streaming.Stream {
+		if response.Err != nil {
+			t.Fatalf("streaming response error = %v", response.Err)
+		}
+	}
+	completion, ok := <-streaming.Completion
+	if !ok || completion.Err != nil || completion.StopReason != execution.StopSuccess || !completion.Verification.Allowed || !completion.Verification.Disagreement {
+		t.Fatalf("streaming report completion = %#v, open=%v", completion, ok)
 	}
 }
 

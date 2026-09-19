@@ -2023,6 +2023,10 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 					}
 					fingerprint := verificationFailureFingerprint(decision)
 					if _, repeated := seen[fingerprint]; repeated {
+						if decision.Allowed {
+							complete(decision, execution.StopSuccess, nil)
+							return
+						}
 						reason := execution.StopRepeatedFailure
 						completionErr := error(nil)
 						if request.VerificationMode == verification.ModeEnforce {

@@ -22,6 +22,9 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 	for decision.Disagreement {
 		fingerprint := verificationFailureFingerprint(decision)
 		if _, repeated := seen[fingerprint]; repeated {
+			if decision.Allowed {
+				return response, decision, execution.StopSuccess, nil
+			}
 			return response, decision, execution.StopRepeatedFailure, nil
 		}
 		seen[fingerprint] = struct{}{}
