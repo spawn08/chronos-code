@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spawn08/chronos/engine/hooks"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/learning"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/storage"
 )
 
 func TestResumeSessionUsesLatestWhenIDOmitted(t *testing.T) {
@@ -21,13 +23,19 @@ func TestResumeSessionUsesLatestWhenIDOmitted(t *testing.T) {
 	if first == "" {
 		t.Fatal("expected an initial session")
 	}
+	if err := orch.store.AppendEvent(context.Background(), &storage.Event{ID: "first-message", SessionID: first, SeqNum: 1, Type: "chat_message", Payload: map[string]any{"content": "previous task"}, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := orch.ResetSession(context.Background()); err != nil {
 		t.Fatalf("ResetSession: %v", err)
 	}
 	if orch.CurrentSessionID() == first {
 		t.Fatal("ResetSession did not change session id")
 	}
-	got, err := orch.ResumeSession(context.Background(), first)
+	if hint := orch.StartupHints(context.Background()); !strings.Contains(hint, "/resume continues") {
+		t.Fatalf("missing prior conversation hint: %q", hint)
+	}
+	got, err := orch.ResumeSession(context.Background(), "")
 	if err != nil {
 		t.Fatalf("ResumeSession: %v", err)
 	}

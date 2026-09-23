@@ -53,8 +53,6 @@ tools:
   permission: allow
 - name: shell
   permission: require_approval
-- name: semantic_search
-  permission: allow
 sub_agents:
 - reviewer
 - planner

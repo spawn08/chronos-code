@@ -841,6 +841,71 @@ func TestRouteRespectsExplicitModelOverride(t *testing.T) {
 	}
 }
 
+func TestSwitchModelKeepsAzureConnectionSettings(t *testing.T) {
+	a, err := agent.New("coder", "Coder").Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{FileConfig: agent.FileConfig{Agents: []agent.AgentConfig{{
+		ID: "coder", Model: agent.ModelConfig{Provider: "azure", Model: "old-deployment", Deployment: "old-deployment", Endpoint: "https://example.openai.azure.com", APIVersion: "preview"},
+	}}}}
+	var built agent.ModelConfig
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", cfg: cfg,
+		buildProvider: func(mc agent.ModelConfig) (model.Provider, error) {
+			built = mc
+			return &routingTestProvider{provider: mc.Provider, model: mc.Model}, nil
+		},
+	}
+	for _, deployment := range []string{"gpt-6-sol", "gpt-5.6-sol"} {
+		if err := orch.SwitchModel(context.Background(), "azure", deployment); err != nil {
+			t.Fatal(err)
+		}
+		if built.Endpoint != "https://example.openai.azure.com" || built.APIVersion != "preview" || built.Model != deployment || built.Deployment != deployment {
+			t.Fatalf("switched Azure config = %+v", built)
+		}
+	}
+	if err := orch.SwitchModel(context.Background(), "openai", "gpt-5"); err != nil {
+		t.Fatal(err)
+	}
+	if built.Endpoint != "" || built.APIVersion != "" || built.Deployment != "" {
+		t.Fatalf("Azure settings leaked to another provider: %+v", built)
+	}
+}
+
+func TestConversationPinsKeepFollowupInCurrentSession(t *testing.T) {
+	store := storagememory.New()
+	ctx := context.Background()
+	for _, id := range []string{"current", "other"} {
+		if err := store.CreateSession(ctx, &storage.Session{ID: id, AgentID: "coder", CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, entry := range []struct{ session, role, content string }{
+		{"other", model.RoleUser, "unrelated AB-47 task"},
+		{"current", model.RoleUser, "fix Azure gpt-6-sol reasoning and tools"},
+		{"current", model.RoleAssistant, "investigating"},
+		{"current", model.RoleUser, "I already shared the error above"},
+		{"current", model.RoleUser, "yes, fix it"},
+	} {
+		if err := store.AppendEvent(ctx, &storage.Event{ID: fmt.Sprintf("event-%d", i), SessionID: entry.session, SeqNum: int64(i + 1), Type: "chat_message", Payload: map[string]any{"role": entry.role, "content": entry.content}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &agent.Agent{ContextPinsFn: func(context.Context) []model.Message {
+		return []model.Message{{Role: model.RoleSystem, Content: "existing pin"}}
+	}}
+	setupConversationPins(store, map[string]*agent.Agent{"coder": a})
+	ctx = storage.WithSession(ctx, "current")
+	ctx = context.WithValue(ctx, messageKey{}, "yes, fix it")
+	pins := a.ContextPinsFn(ctx)
+	if len(pins) != 2 || !strings.Contains(pins[1].Content, "fix Azure gpt-6-sol") || !strings.Contains(pins[1].Content, "already shared") || strings.Contains(pins[1].Content, "AB-47") {
+		t.Fatalf("follow-up pins = %#v", pins)
+	}
+	if pins := a.ContextPinsFn(context.WithValue(ctx, messageKey{}, "start a new task")); len(pins) != 1 {
+		t.Fatalf("new topic inherited follow-up pin: %#v", pins)
+	}
+}
+
 func TestSkillContextParityPreservesExistingPins(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())

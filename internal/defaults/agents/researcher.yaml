@@ -67,5 +67,3 @@ tools:
   permission: allow
 - name: file_grep
   permission: allow
-- name: semantic_search
-  permission: allow

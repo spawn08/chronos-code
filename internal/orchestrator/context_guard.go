@@ -212,6 +212,17 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 	for protectedPrefix < len(msgs) && msgs[protectedPrefix].Role == model.RoleSystem {
 		protectedPrefix++
 	}
+	// A brief follow-up often depends on the user's earlier request. Tool
+	// output can exhaust the window and force whole turns out of the request;
+	// retain a few small user prompts even when their assistant/tool turns go.
+	keepUserPrompts := false
+	for i := len(msgs) - 1; i >= protectedPrefix; i-- {
+		if msgs[i].Role == model.RoleUser {
+			keepUserPrompts = len(msgs[i].Content) <= 256
+			break
+		}
+	}
+	var droppedUserPrompts []model.Message
 	for total > limit {
 		nextUser := -1
 		for i := protectedPrefix + 1; i < len(msgs); i++ {
@@ -223,6 +234,16 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 		if nextUser < 0 {
 			break
 		}
+		if keepUserPrompts {
+			for _, m := range msgs[protectedPrefix:nextUser] {
+				if m.Role == model.RoleUser && len(m.Content) <= 4096 {
+					droppedUserPrompts = append(droppedUserPrompts, m)
+					if len(droppedUserPrompts) > 4 {
+						droppedUserPrompts = droppedUserPrompts[1:]
+					}
+				}
+			}
+		}
 		kept := append([]model.Message(nil), msgs[:protectedPrefix]...)
 		for _, m := range msgs[protectedPrefix:nextUser] {
 			if m.Role == model.RoleSystem {
@@ -232,6 +253,17 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 		protectedPrefix = len(kept)
 		msgs = append(kept, msgs[nextUser:]...)
 		total = counter.CountTokens(msgs)
+	}
+	if total <= limit && len(droppedUserPrompts) > 0 {
+		// Do not trade the live task or tool progress for an old prompt.
+		for i := len(droppedUserPrompts) - 1; i >= 0 && i >= len(droppedUserPrompts)-4; i-- {
+			prompt := droppedUserPrompts[i]
+			if total+counter.CountTokens([]model.Message{prompt}) > limit {
+				continue
+			}
+			msgs = append(msgs[:protectedPrefix], append([]model.Message{prompt}, msgs[protectedPrefix:]...)...)
+			total = counter.CountTokens(msgs)
+		}
 	}
 	return msgs, dropped
 }

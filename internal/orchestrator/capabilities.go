@@ -120,6 +120,9 @@ func validateRuntimeCapabilities(cfg *config.Config, agents map[string]*agent.Ag
 		for _, configuredTool := range agentConfig.Tools {
 			if configuredTool.Name != "" {
 				if !isConfiguredToolSupported(configuredTool.Name) {
+					if configuredTool.Name == "semantic_search" {
+						return manifest, nil, fmt.Errorf("validate runtime capabilities: required capability %q is not available for agent %q; remove the legacy semantic_search entry from its agent YAML (use codebase_search for indexed code search when the graph is enabled)", capabilityToolPrefix+configuredTool.Name, agentConfig.ID)
+					}
 					return manifest, nil, fmt.Errorf("validate runtime capabilities: required capability %q is not available for agent %q", capabilityToolPrefix+configuredTool.Name, agentConfig.ID)
 				}
 				required = append(required, config.Capability{Name: capabilityToolPrefix + configuredTool.Name, Agent: agentConfig.ID})

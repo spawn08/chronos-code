@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"io/fs"
 	"reflect"
 	"sort"
 	"strings"
@@ -9,8 +10,10 @@ import (
 
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
+	"gopkg.in/yaml.v3"
 
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/defaults"
 	"github.com/spawn08/chronos-code/internal/router"
 )
 
@@ -61,6 +64,41 @@ func TestValidateRuntimeCapabilitiesRejectsUninstalledConfiguredTool(t *testing.
 	_, _, err := validateRuntimeCapabilities(cfg, agents, false, nil)
 	if err == nil || !strings.Contains(err.Error(), `"tool:update_plan"`) {
 		t.Fatalf("validateRuntimeCapabilities() error = %v, want unavailable configured tool", err)
+	}
+}
+
+func TestEmbeddedAgentTemplatesOnlyDeclareSupportedTools(t *testing.T) {
+	entries, err := fs.ReadDir(defaults.FS, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := defaults.ReadFile("agents/" + entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg agent.AgentConfig
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		for _, configuredTool := range cfg.Tools {
+			if !isConfiguredToolSupported(configuredTool.Name) {
+				t.Errorf("agents/%s declares unavailable tool %q", entry.Name(), configuredTool.Name)
+			}
+		}
+	}
+}
+
+func TestLegacySemanticSearchConfigExplainsMigration(t *testing.T) {
+	cfg := &config.Config{FileConfig: agent.FileConfig{Agents: []agent.AgentConfig{{
+		ID: "chronos-code", Tools: []agent.ToolConfig{{Name: "semantic_search"}},
+	}}}}
+	_, _, err := validateRuntimeCapabilities(cfg, nil, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "remove the legacy semantic_search entry") {
+		t.Fatalf("legacy configuration error = %v", err)
 	}
 }
 

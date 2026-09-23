@@ -291,12 +291,12 @@ shell_tools:
 # ── Search Tools ───────────────────────────────────────────────────
 
 search_tools:
-  tier: "T0 (embedding lookup, no LLM call)"
-  description: "Semantic code search using vector embeddings."
+  tier: "T0 (indexed symbol and full-text lookup, no LLM call)"
+  description: "Search indexed code symbols by name and full-text relevance when the code graph is available."
 
   tools:
-    - name: "semantic_search"
-      description: "Search codebase by meaning, not just text. Returns ranked code snippets."
+    - name: "codebase_search"
+      description: "Search indexed symbols by exact name and full-text relevance."
       permission: "allow"
       token_cost_estimate: "~100-500 tokens result"
       parameters:
@@ -304,11 +304,11 @@ search_tools:
         properties:
           query:
             type: "string"
-            description: "Natural language query"
+            description: "Symbol name or full-text search query"
           top_k:
             type: "integer"
-            description: "Number of results"
-            default: 5
+            description: "Maximum FTS results (default 10, max 100)"
+            default: 10
         required: ["query"]
 
 # ── Harness Tools ──────────────────────────────────────────────────

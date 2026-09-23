@@ -409,6 +409,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	// capability contract so invalid runtime prompts fail before any model call.
 	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
 	orch.projectDocsWatcher = pdWatcher
+	setupConversationPins(store, agents)
 
 	active := selectPrimaryAgent(agents, order)
 
@@ -897,6 +898,68 @@ func setupSessionSummaries(manager *session.Manager, agents map[string]*agent.Ag
 			return append(messages, model.Message{Role: model.RoleSystem, Content: content})
 		}
 	}
+}
+
+// Keep short follow-ups grounded when the SDK compacts or trims old turns
+// before the per-call context guard can see them. Only the current session's
+// recent user requests are eligible; the latest one is already the live task.
+func setupConversationPins(store storage.Storage, agents map[string]*agent.Agent) {
+	for _, a := range agents {
+		previous := a.ContextPinsFn
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var pins []model.Message
+			if previous != nil {
+				pins = previous(ctx)
+			}
+			query, _ := ctx.Value(messageKey{}).(string)
+			sessionID := storage.SessionFromContext(ctx)
+			if len(query) == 0 || len(query) > 256 || sessionID == "" || !refersToPreviousTurn(query) {
+				return pins
+			}
+			events, err := store.ListEvents(ctx, sessionID, 0)
+			if err != nil {
+				return pins
+			}
+			var recent []string
+			skipCurrent := true
+			for i := len(events) - 1; i >= 0 && len(recent) < 4; i-- {
+				if events[i].Type != "chat_message" {
+					continue
+				}
+				payload, ok := events[i].Payload.(map[string]any)
+				if !ok || payload["role"] != model.RoleUser {
+					continue
+				}
+				if skipCurrent {
+					skipCurrent = false
+					continue
+				}
+				text, _ := payload["content"].(string)
+				if text != "" {
+					recent = append(recent, boundedMemoryText(text, 2048))
+				}
+			}
+			if len(recent) == 0 {
+				return pins
+			}
+			var content strings.Builder
+			content.WriteString("Recent user requests in this session (context only; follow the latest user request):")
+			for i := len(recent) - 1; i >= 0; i-- {
+				fmt.Fprintf(&content, "\n- %s", recent[i])
+			}
+			return append(pins, model.Message{Role: model.RoleSystem, Content: content.String()})
+		}
+	}
+}
+
+func refersToPreviousTurn(query string) bool {
+	for _, word := range strings.Fields(strings.ToLower(query)) {
+		switch strings.Trim(word, "`'\"()[]{}<>,:;!?.") {
+		case "this", "that", "it", "above", "previous", "same", "continue", "already", "again", "also", "aswell", "yes", "yea":
+			return true
+		}
+	}
+	return false
 }
 
 // setupLSP registers the build-tag-dependent tools before runtime wrappers are
@@ -2423,6 +2486,21 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 
 func (o *Orchestrator) buildModelProvider(ctx context.Context, provider, modelID string) (model.Provider, error) {
 	mc := agent.ModelConfig{Provider: provider, Model: modelID}
+	if o.cfg != nil {
+		if o.cfg.Defaults != nil && o.cfg.Defaults.Model.Provider == provider {
+			mc = o.cfg.Defaults.Model
+		}
+		for _, configured := range o.cfg.Agents {
+			if configured.ID == o.active && configured.Model.Provider == provider {
+				mc = configured.Model
+				break
+			}
+		}
+		mc.Model = modelID
+		if provider == "azure" {
+			mc.Deployment = modelID
+		}
+	}
 	if key := auth.Resolve(ctx, auth.NewStore(), provider).Token; key != "" {
 		mc.APIKey = key
 	}

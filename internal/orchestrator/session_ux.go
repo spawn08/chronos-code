@@ -126,7 +126,7 @@ func (o *Orchestrator) ResumeSession(ctx context.Context, sessionID string) (str
 	agentID := o.active
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		latest, err := o.sessionMgr.Latest(ctx, agentID)
+		latest, err := o.latestPriorSession(ctx, agentID)
 		if err != nil {
 			return "", fmt.Errorf("find latest session: %w", err)
 		}
@@ -144,13 +144,40 @@ func (o *Orchestrator) ResumeSession(ctx context.Context, sessionID string) (str
 	return sessionID, nil
 }
 
+// A fresh startup creates an empty current session, which may be the newest
+// row. Bare /resume must pick a previous conversation rather than that row.
+func (o *Orchestrator) latestPriorSession(ctx context.Context, agentID string) (*storage.Session, error) {
+	const pageSize = 20
+	for offset := 0; ; offset += pageSize {
+		sessions, err := o.sessionMgr.List(ctx, agentID, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range sessions {
+			if candidate.ID == o.sessionID(agentID) {
+				continue
+			}
+			events, err := o.store.ListEvents(ctx, candidate.ID, 0)
+			if err != nil {
+				return nil, fmt.Errorf("load session %s events: %w", candidate.ID, err)
+			}
+			if len(events) > 0 {
+				return candidate, nil
+			}
+		}
+		if len(sessions) < pageSize {
+			return nil, nil
+		}
+	}
+}
+
 func (o *Orchestrator) StartupHints(ctx context.Context) string {
 	if o == nil {
 		return ""
 	}
 	var parts []string
 	if o.sessionMgr != nil {
-		if latest, err := o.sessionMgr.Latest(ctx, o.active); err == nil && latest != nil && latest.ID != o.CurrentSessionID() {
+		if latest, err := o.latestPriorSession(ctx, o.active); err == nil && latest != nil {
 			parts = append(parts, "/resume continues "+shortSessionID(latest.ID))
 		}
 	}

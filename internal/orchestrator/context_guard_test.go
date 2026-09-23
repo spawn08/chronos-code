@@ -60,6 +60,36 @@ func TestContextGuardTrimsMessagesOverLimit(t *testing.T) {
 	}
 }
 
+func TestTrimMessagesKeepsRecentUserRequestsForShortFollowup(t *testing.T) {
+	counter := model.NewTokenCounter("gpt-4")
+	for _, toolRound := range []bool{false, true} {
+		messages := []model.Message{{Role: model.RoleSystem, Content: "system"}}
+		for _, request := range []string{"fix Azure gpt-6-sol reasoning and tools", "fix this issue", "I already shared the error above", "make it work for other models too"} {
+			messages = append(messages, model.Message{Role: model.RoleUser, Content: request})
+			messages = append(messages, model.Message{Role: model.RoleAssistant, Content: strings.Repeat("tool investigation ", 1500)})
+		}
+		messages = append(messages, model.Message{Role: model.RoleUser, Content: "yes, fix it"})
+		if toolRound {
+			messages = append(messages, model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "call-1", Name: "read", Arguments: "{}"}}})
+			messages = append(messages, model.Message{Role: model.RoleTool, ToolCallID: "call-1", Content: "result"})
+		}
+		trimmed, _ := trimMessages(counter, messages, 1, 400)
+		var prompts []string
+		for _, m := range trimmed {
+			if m.Role == model.RoleUser {
+				prompts = append(prompts, m.Content)
+			}
+		}
+		want := []string{"fix Azure gpt-6-sol reasoning and tools", "fix this issue", "I already shared the error above", "make it work for other models too", "yes, fix it"}
+		if !reflect.DeepEqual(prompts, want) {
+			t.Fatalf("toolRound=%v retained user requests = %q, want %q", toolRound, prompts, want)
+		}
+		if got := counter.CountTokens(trimmed); got > 400 {
+			t.Fatalf("retained requests exceeded budget: %d", got)
+		}
+	}
+}
+
 func TestContextGuardSkipsSmallRequests(t *testing.T) {
 	guard := newContextGuardHook("claude-haiku-4-5", 5)
 
