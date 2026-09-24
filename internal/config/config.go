@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -40,9 +41,10 @@ type Config struct {
 	Hooks        HooksConfig                 `yaml:"hooks,omitempty"`
 	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
 
-	set               map[string]struct{}
-	sources           map[string]string
-	agentModelSources map[string]map[string]string
+	set                  map[string]struct{}
+	sources              map[string]string
+	agentModelSources    map[string]map[string]string
+	primaryModelSelected bool
 }
 
 // EffectiveConfig is a safe representation of the resolved configuration.
@@ -243,6 +245,46 @@ type ServerConfig struct {
 	RequestTimeoutSec int      `yaml:"request_timeout_sec,omitempty"`
 	InstanceID        string   `yaml:"instance_id,omitempty"`
 	FleetInstances    []string `yaml:"fleet_instances,omitempty"`
+
+	DeliverySandbox DeliverySandboxConfig `yaml:"delivery_sandbox,omitempty"`
+}
+
+// DeliverySandboxConfig is the host-owned sandbox admission profile. The image
+// must be pinned; mutable tags and remote Docker endpoints are not accepted.
+type DeliverySandboxConfig struct {
+	Image        string `yaml:"image"`
+	SocketPath   string `yaml:"socket_path,omitempty"`
+	AllowNetwork bool   `yaml:"allow_network,omitempty"`
+}
+
+func (s *DeliverySandboxConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("server.delivery_sandbox: expected mapping")
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		switch node.Content[i].Value {
+		case "image", "socket_path", "allow_network":
+		default:
+			return fmt.Errorf("server.delivery_sandbox: unsupported field %q", node.Content[i].Value)
+		}
+	}
+	type raw DeliverySandboxConfig
+	var value raw
+	if err := node.Decode(&value); err != nil {
+		return fmt.Errorf("decode delivery sandbox: %w", err)
+	}
+	marker := strings.LastIndex(value.Image, "@sha256:")
+	if marker <= 0 || len(value.Image[marker+len("@sha256:"):]) != 64 {
+		return fmt.Errorf("server.delivery_sandbox.image must be pinned to a sha256 digest")
+	}
+	if _, err := hex.DecodeString(value.Image[marker+len("@sha256:"):]); err != nil {
+		return fmt.Errorf("server.delivery_sandbox.image digest: %w", err)
+	}
+	if value.SocketPath != "" && !filepath.IsAbs(value.SocketPath) {
+		return fmt.Errorf("server.delivery_sandbox.socket_path must be an absolute Unix socket path")
+	}
+	*s = DeliverySandboxConfig(value)
+	return nil
 }
 
 // RetentionConfig controls bounded cleanup. A zero max_age_days, max_count, or
@@ -768,6 +810,10 @@ func firstSource(source string) string {
 	return source
 }
 
+// PrimaryModelSelected reports a process-local selection that should not be
+// replaced by the bundled request-time model router.
+func (c *Config) PrimaryModelSelected() bool { return c != nil && c.primaryModelSelected }
+
 // OverridePrimaryModel applies process-local CLI/environment selection after
 // YAML resolution and records the source shown by config show.
 func (c *Config) OverridePrimaryModel(provider, model, providerSource, modelSource string) error {
@@ -798,6 +844,7 @@ func (c *Config) OverridePrimaryModel(provider, model, providerSource, modelSour
 			}
 		}
 		c.Agents[i].Model = current
+		c.primaryModelSelected = true
 		if c.agentModelSources == nil {
 			c.agentModelSources = make(map[string]map[string]string)
 		}

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
@@ -24,6 +25,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 	"github.com/spawn08/chronos-code/internal/retention"
+	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/server"
 	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos-code/internal/tui"
@@ -105,6 +107,8 @@ func Execute() error {
 		return runTeam()
 	case "plan":
 		return runPlan()
+	case "delivery":
+		return runDeliveryDB()
 	case "skills":
 		return runSkills()
 	case "cleanup":
@@ -345,12 +349,14 @@ Usage:
   chronos-code team list                                   List configured teams
   chronos-code team run <team_id> <message>                Run a team on a task
   chronos-code plan <operation> --db <path> ...             Inspect or operate a durable plan database
+  chronos-code delivery backup <path> | restore <source> <new-path>  Offline delivery database snapshots
   chronos-code skills list                                  List discovered skills (project + user + bundled)
   chronos-code skills show <name>                           Show a skill's metadata and body
   chronos-code cleanup status [scope]                       Inventory retention-managed resources
   chronos-code cleanup run [--dry-run] [--scope <scope>]    Apply one bounded cleanup batch per scope
   chronos-code cleanup prune <scope> [--dry-run]             Prune one scope (plan_db also requires tenant/repository)
   chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>] [--request-timeout 5m] [--instance-id <id>]  Start HTTP server for team deployment
+  chronos-code serve --delivery-read-only-worker            Process explicitly queued deliveries as read-only, then park for verification
   chronos-code version            Print version information
   chronos-code help               Show this help
 
@@ -434,12 +440,30 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 	}
 	provider = auth.CanonicalProvider(provider)
 	if provider == "" && modelID == "" {
-		return cfg, nil
+		_, current, _, _ := cfg.PrimaryAgentModel()
+		store := auth.NewStore()
+		provider = credentialProvider(cfg, current, func(provider string) bool {
+			return auth.Resolve(context.Background(), store, provider).Token != ""
+		})
+		if provider == "" {
+			return cfg, nil
+		}
+		providerSource = "auto:only authorized provider"
 	}
 	_, current, _, _ := cfg.PrimaryAgentModel()
 	if provider == "" {
-		provider = auth.CanonicalProvider(current.Provider)
-		providerSource = ""
+		if info, ok := modelinfo.LookupByModel(modelID); ok {
+			provider = info.Provider
+			providerSource = "model:catalog"
+		} else {
+			provider = auth.CanonicalProvider(current.Provider)
+			providerSource = ""
+			for _, info := range modelinfo.All() {
+				if info.Model == modelID && info.Provider != provider {
+					return nil, fmt.Errorf("model %q is not unique to a provider; supply --provider or CHRONOS_CODE_PROVIDER", modelID)
+				}
+			}
+		}
 	}
 	if modelID == "" && provider != auth.CanonicalProvider(current.Provider) {
 		for _, configured := range cfg.Agents {
@@ -450,13 +474,68 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 			}
 		}
 		if modelID == "" {
-			return nil, fmt.Errorf("provider %q does not have a configured model; supply --model or CHRONOS_CODE_MODEL", provider)
+			modelID = defaultProviderModel(provider)
+			if modelID == "" {
+				return nil, fmt.Errorf("provider %q does not have a configured model; supply --model or CHRONOS_CODE_MODEL (see chronos-code models %s)", provider, provider)
+			}
+			modelSource = "provider default"
 		}
 	}
 	if err := cfg.OverridePrimaryModel(provider, modelID, providerSource, modelSource); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// Credentials select a provider only when the configured primary has no usable
+// credential and exactly one other provider is authorized. An explicit model
+// or provider flag/env always wins; multiple credentials leave YAML in charge.
+func credentialProvider(cfg *config.Config, current agent.ModelConfig, authorized func(string) bool) string {
+	if current.APIKey != "" || authorized(current.Provider) {
+		return ""
+	}
+	providers := configuredProviders(cfg)
+	seen := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		seen[provider] = true
+	}
+	for _, info := range modelinfo.All() {
+		if !seen[info.Provider] {
+			providers = append(providers, info.Provider)
+			seen[info.Provider] = true
+		}
+	}
+	selected := ""
+	for _, provider := range providers {
+		if provider == "" || provider == auth.CanonicalProvider(current.Provider) || !authorized(provider) {
+			continue
+		}
+		if selected != "" {
+			return ""
+		}
+		selected = provider
+	}
+	return selected
+}
+
+// Provider-only selection uses a known API default, not the arbitrary first
+// result of a live model list (which has no portable ranking or availability
+// guarantee). Other providers need a configured model or an explicit ID.
+func defaultProviderModel(provider string) string {
+	switch provider {
+	case "anthropic":
+		return "claude-sonnet-4-6"
+	case "openai":
+		return "gpt-4o"
+	case "gemini", "google":
+		return "gemini-2.0-flash"
+	case "mistral":
+		return "mistral-large-latest"
+	case "azure":
+		return strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT"))
+	default:
+		return ""
+	}
 }
 
 func effectivePermissionMode() string {
@@ -719,7 +798,11 @@ func runModels() error {
 				Endpoint: modelCfg.Endpoint,
 			})
 			if err == nil {
-				status = "live"
+				if len(list) > 0 {
+					status = "live"
+				} else {
+					status = "static (live unavailable: no models returned)"
+				}
 			} else {
 				status = "static (live unavailable: " + err.Error() + ")"
 			}
@@ -1623,6 +1706,7 @@ func runServe() error {
 	if cfg.AuthType == "api_key" && cfg.TenantID == "" {
 		return fmt.Errorf("serve: --tenant-id or CHRONOS_CODE_TENANT_ID required when --auth=api_key")
 	}
+	var deliveryPaths config.ProjectPaths
 	if cfg.AuthType == "api_key" || cfg.AuthType == "oidc" {
 		paths, err := appCfg.ResolveProjectPaths("")
 		if err != nil {
@@ -1636,6 +1720,43 @@ func runServe() error {
 			return fmt.Errorf("serve: open delivery store: %w", err)
 		}
 		defer cfg.DeliveryStore.Close()
+		deliveryPaths = paths
+	}
+	readOnlyWorker := false
+	for _, arg := range args {
+		if arg == "--delivery-read-only-worker" {
+			readOnlyWorker = true
+		} else if strings.HasPrefix(arg, "--delivery-read-only-worker=") {
+			return fmt.Errorf("serve: --delivery-read-only-worker takes no value")
+		}
+	}
+	if readOnlyWorker {
+		if cfg.DeliveryStore == nil {
+			return fmt.Errorf("serve: delivery read-only worker requires authenticated delivery storage")
+		}
+		authorizer := authorization.RepositoryAuthorizer{RepositoryID: cfg.RepositoryID, AllowedActions: map[string]struct{}{"delivery.execute": {}}}
+		sandboxPolicy := security.SandboxPolicy{
+			Image: appCfg.Server.DeliverySandbox.Image, SocketPath: appCfg.Server.DeliverySandbox.SocketPath,
+			AllowNetwork: appCfg.Server.DeliverySandbox.AllowNetwork,
+		}
+		if sandboxPolicy.Image != "" {
+			sandbox, err := security.NewContainerShellSandbox(context.Background(), deliveryPaths.Root, sandboxPolicy)
+			if err != nil {
+				return fmt.Errorf("serve: delivery sandbox preflight: %w", err)
+			}
+			_ = sandbox.Close()
+		}
+		executor, err := orchestrator.NewReadOnlyDeliveryExecutor(orch, authorizer, sandboxPolicy)
+		if err != nil {
+			return fmt.Errorf("serve: create delivery read-only executor: %w", err)
+		}
+		cfg.DeliveryWorker, err = execution.NewWorker(cfg.DeliveryStore, executor, execution.WorkerConfig{
+			OwnerID: "serve:" + session.NewSessionID(), Concurrency: 1,
+			LeaseDuration: time.Minute, HeartbeatEvery: 15 * time.Second, PollEvery: time.Second,
+		})
+		if err != nil {
+			return fmt.Errorf("serve: create delivery read-only worker: %w", err)
+		}
 	}
 
 	srv := server.New(orch, cfg)

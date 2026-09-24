@@ -3,6 +3,7 @@ package security
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,12 +22,35 @@ const (
 	defaultSandboxTimeout = 2 * time.Minute
 )
 
+var ErrMandatorySandboxUnavailable = errors.New("complete filesystem read isolation is not available for unattended execution")
+
 // OSSandbox executes commands using the host's mandatory OS sandbox helper.
 type OSSandbox struct {
 	workspace    string
 	helper       string
 	platform     string
 	allowNetwork bool
+}
+
+type mandatorySandboxKey struct{}
+
+// SandboxPolicy is host-supplied; an unattended shell cannot choose its image,
+// socket, or network grant through model tool arguments.
+type SandboxPolicy struct {
+	Image        string
+	SocketPath   string
+	AllowNetwork bool
+}
+
+// WithMandatorySandbox marks unattended execution. Until full read isolation
+// is configured and preflighted, shell commands fail before any effect.
+func WithMandatorySandbox(ctx context.Context, policy SandboxPolicy) context.Context {
+	return context.WithValue(ctx, mandatorySandboxKey{}, policy)
+}
+
+func mandatorySandbox(ctx context.Context) (SandboxPolicy, bool) {
+	policy, ok := ctx.Value(mandatorySandboxKey{}).(SandboxPolicy)
+	return policy, ok
 }
 
 var _ chronossandbox.Sandbox = (*OSSandbox)(nil)
@@ -105,6 +129,9 @@ func (s *OSSandbox) Execute(ctx context.Context, command string, args []string, 
 	}
 	cmd := exec.CommandContext(ctx, s.helper, helperArgs...)
 	cmd.Dir = s.workspace
+	// Do not pass provider credentials, cloud tokens or host secret-bearing
+	// environment variables into a model-controlled process.
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + s.workspace, "TMPDIR=" + s.workspace}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -117,6 +144,9 @@ func (s *OSSandbox) Execute(ctx context.Context, command string, args []string, 
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
+			if result.ExitCode < 0 && result.Stderr == "" {
+				result.Stderr = exitErr.Error()
+			}
 			return result, nil
 		}
 		return result, fmt.Errorf("security: execute sandbox helper: %w", err)
@@ -161,6 +191,9 @@ func macOSSandboxProfile(workspace string, allowNetwork bool) string {
 		"(allow process*)",
 		"(allow signal (target self))",
 		"(allow file-read*)",
+		`(deny file-read* (subpath "/private/var/folders"))`,
+		`(deny file-read* (subpath "/Users"))`,
+		"(allow file-read* (subpath " + quotedWorkspace + "))",
 		"(allow file-write* (subpath " + quotedWorkspace + "))",
 		"(allow sysctl-read)",
 		"(allow mach-lookup)",

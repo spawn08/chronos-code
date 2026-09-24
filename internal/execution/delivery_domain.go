@@ -59,12 +59,16 @@ const (
 )
 
 const (
-	DeliveryEventAdmitted           DeliveryEventType = "admitted"
-	DeliveryEventTransitioned       DeliveryEventType = "transitioned"
-	DeliveryEventGoalRevised        DeliveryEventType = "goal_revised"
-	DeliveryEventRequirementUpdated DeliveryEventType = "requirement_updated"
-	DeliveryEventDecisionRequested  DeliveryEventType = "decision_requested"
-	DeliveryEventDecisionResolved   DeliveryEventType = "decision_resolved"
+	DeliveryEventAdmitted            DeliveryEventType = "admitted"
+	DeliveryEventTransitioned        DeliveryEventType = "transitioned"
+	DeliveryEventGoalRevised         DeliveryEventType = "goal_revised"
+	DeliveryEventRequirementUpdated  DeliveryEventType = "requirement_updated"
+	DeliveryEventDecisionRequested   DeliveryEventType = "decision_requested"
+	DeliveryEventDecisionResolved    DeliveryEventType = "decision_resolved"
+	DeliveryEventOperationPrepared   DeliveryEventType = "operation_prepared"
+	DeliveryEventOperationRunning    DeliveryEventType = "operation_running"
+	DeliveryEventOperationObserved   DeliveryEventType = "operation_observed"
+	DeliveryEventOperationReconciled DeliveryEventType = "operation_reconciled"
 )
 
 // DeliveryScope is the mandatory tenant and repository boundary for every query.
@@ -133,6 +137,7 @@ type Delivery struct {
 	Version             int64         `json:"version"`
 	CurrentGoalRevision GoalRevision  `json:"current_goal_revision"`
 	PolicyReference     string        `json:"policy_reference"`
+	MaxCostMicrodollars int64         `json:"max_cost_microdollars,omitempty"`
 	CreatedAt           time.Time     `json:"created_at"`
 	UpdatedAt           time.Time     `json:"updated_at"`
 	Goals               []Goal        `json:"goals"`
@@ -171,6 +176,7 @@ type Admission struct {
 	Goal            Goal
 	Requirements    []Requirement
 	PolicyReference string
+	MaxCostMicrodollars int64
 	Event           EventIdentity
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/spawn08/chronos-code/internal/worktree"
 )
@@ -214,7 +215,7 @@ func (c *Controller) Run(ctx context.Context, p Plan) (Plan, error) {
 			return Plan{}, err
 		}
 		if len(ready) == 0 {
-			return current, nil
+			return c.store.Load(ctx, current)
 		}
 		for _, batch := range c.batches(ctx, current, ready) {
 			if err := c.runBatch(ctx, current, batch); err != nil {
@@ -351,10 +352,35 @@ func (c *Controller) runClaimed(ctx context.Context, p Plan, claimed Node, reque
 	if err := c.scheduler.Start(ctx, p, claimed.ID, request.LeaseID); err != nil {
 		return err
 	}
+	executionCtx, cancelExecution := context.WithCancel(ctx)
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		defer close(heartbeatDone)
+		interval := c.scheduler.leaseDuration() / 3
+		if interval < time.Millisecond {
+			interval = time.Millisecond
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-executionCtx.Done():
+				heartbeatDone <- nil
+				return
+			case <-ticker.C:
+				if err := c.scheduler.Heartbeat(executionCtx, p, claimed.ID, request.LeaseID); err != nil {
+					heartbeatDone <- err
+					cancelExecution()
+					return
+				}
+			}
+		}
+	}()
+	defer func() { cancelExecution(); <-heartbeatDone }()
 	var entries []ContextEntry
 	var err error
 	if c.loadContext != nil {
-		entries, err = c.loadContext(ctx, p, claimed)
+		entries, err = c.loadContext(executionCtx, p, claimed)
 		if err != nil {
 			return c.stopClaimed(ctx, p, claimed.ID, request, StopAmbiguity)
 		}
@@ -362,7 +388,14 @@ func (c *Controller) runClaimed(ctx context.Context, p Plan, claimed Node, reque
 	restart, err := BuildRestartContext(entries, c.contextBytes, "")
 	var result NodeExecutionResult
 	if err == nil {
-		result, err = c.executor.Execute(ctx, NodeExecutionRequest{Plan: p, Node: claimed, Attempt: request.AttemptID, Context: restart})
+		result, err = c.executor.Execute(executionCtx, NodeExecutionRequest{Plan: p, Node: claimed, Attempt: request.AttemptID, Context: restart})
+	}
+	select {
+	case heartbeatErr := <-heartbeatDone:
+		if heartbeatErr != nil {
+			return fmt.Errorf("plan node lease renewal: %w", heartbeatErr)
+		}
+	default:
 	}
 	var stopped *StopError
 	if errors.As(err, &stopped) {
@@ -378,7 +411,7 @@ func (c *Controller) runClaimed(ctx context.Context, p Plan, claimed Node, reque
 		return c.persistTerminalResult(ctx, p, claimed.ID, request, result)
 	}
 	if c.verifier != nil {
-		result, err = c.verifier.Verify(ctx, p, claimed, result)
+		result, err = c.verifier.Verify(executionCtx, p, claimed, result)
 		if err != nil {
 			return c.stopClaimed(ctx, p, claimed.ID, request, StopVerificationFailed)
 		}

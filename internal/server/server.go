@@ -6,6 +6,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,7 +34,6 @@ type ServerConfig struct {
 	TenantID        string // required when AuthType is "api_key"
 	RepositoryID    string // trusted repository identity for all non-probe routes
 	Authorizer      authorization.Authorizer
-	DeliveryStore   *execution.DeliveryStore // durable admission/inspection; owned by the caller
 	OIDCIssuer      string       // required when AuthType is "oidc"
 	OIDCClientID    string       // required when AuthType is "oidc"
 	CORSOrigins     string       // comma-separated allowed origins; "*" for all
@@ -45,6 +45,9 @@ type ServerConfig struct {
 	Logger          *slog.Logger // JSON logger; defaults to stderr
 	Metrics         *observability.Registry
 	RequestTimeout  time.Duration // request execution deadline; defaults to 5 minutes
+
+	DeliveryStore  *execution.DeliveryStore // durable admission/inspection; owned by the caller
+	DeliveryWorker *execution.Worker        // optional read-only worker, owned by this server while running
 }
 
 const (
@@ -293,6 +296,43 @@ func (s *Server) Start() error {
 	if s.configErr != nil {
 		return fmt.Errorf("server: invalid configuration: %w", s.configErr)
 	}
+	if s.cfg.DeliveryWorker != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		if err := s.cfg.DeliveryWorker.Start(ctx); err != nil {
+			cancel()
+			return fmt.Errorf("server: start delivery worker: %w", err)
+		}
+		defer func() {
+			cancel()
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer stopCancel()
+			if err := s.cfg.DeliveryWorker.Stop(stopCtx); err != nil {
+				s.logger.Error("delivery_worker_stop_failed", "error", err)
+			}
+		}()
+	}
+	if s.orch != nil {
+		reapCtx, stopReaper := context.WithCancel(context.Background())
+		reaperDone := make(chan struct{})
+		go func() {
+			defer close(reaperDone)
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				if count, err := s.orch.ReapExpiredPlans(reapCtx); err != nil && reapCtx.Err() == nil {
+					s.logger.Error("plan_lease_recovery_failed", "error", err)
+				} else if count > 0 {
+					s.logger.Info("plan_leases_parked", "generations", count)
+				}
+				select {
+				case <-reapCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		defer func() { stopReaper(); <-reaperDone }()
+	}
 	fmt.Printf("chronos-code server listening on %s\n", s.cfg.Listen)
 	err := s.srv.ListenAndServe()
 	if err == http.ErrServerClosed {
@@ -305,7 +345,13 @@ func (s *Server) Start() error {
 // to complete.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.draining.Store(true)
-	return s.srv.Shutdown(ctx)
+	err := s.srv.Shutdown(ctx)
+	if s.cfg.DeliveryWorker != nil {
+		if stopErr := s.cfg.DeliveryWorker.Stop(ctx); stopErr != nil {
+			return errors.Join(err, fmt.Errorf("stop delivery worker: %w", stopErr))
+		}
+	}
+	return err
 }
 
 func (s *Server) sampleDiskUse() {

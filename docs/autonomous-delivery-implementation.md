@@ -728,13 +728,12 @@ This section is implementation progress, not runtime application data. Update it
 
 ### Current checkpoint
 
-- Active task: F04 has a verified standalone durable delivery domain/store; production admission and F05 worker wiring are next. F03 remains deferred only at production sandbox/environment isolation.
+- Active task: F04 has durable authenticated HTTP admission/inspection wired into `serve`, with admitted records intentionally parked until F05 production executor wiring. F03 remains deferred at production sandbox/environment isolation.
 - Completed tasks: F00, F01, F02.
 - Runtime budget continuation implemented: no.
 - Immediate hardening: verified truthful bundled routing, role-aware model floors, tester role, structured specialist handoffs, and prompt/runtime contract tests.
-- Next action: wire F04 admission into the production construction path, then implement F05 timed leases, fencing, reclaim, detach, and the common worker executor while keeping production shell sandbox wiring and complete environment/secret isolation as an explicit F03 release blocker.
-- Known local integration work: the documented plan HTTP handler source is absent from
-  this checkout; only `docs/plan-http-api.md` remains as untracked user work.
+- Next action: finish F04 backup/restore and rollback checks; connect F05 production executor and atomically promote admitted records to the existing SQLite queue. Then wire worker lifecycle while retaining the F03 sandbox/environment release blocker.
+- Known local integration work: the documented plan HTTP handler source is absent from this checkout; `docs/plan-http-api.md` is documentation for a separate unfinished surface.
 - Blocking decisions: none for baseline investigation; paid evaluation, publication, or consequential changes require existing host/user authority.
 
 ### 2026-09-24 — F00 baseline reconciliation
@@ -855,6 +854,23 @@ Evidence / artifact references: delivery migration/admission/scope/CAS/replay/en
 Failure or remaining uncertainty: F04 is not complete until production admission, backup/restore/rollback operations, and the queue/store boundary are wired; F05-F14 are not implemented by this increment; tester shell is approval-gated but not an OS-enforced read-only sandbox; F08 lacks persisted per-delivery reservations/accounting; runtime budget continuation remains unavailable
 Capabilities: implemented: hardening and standalone F04 storage foundation / enabled: hardening only; autonomous delivery remains unavailable / evaluated: deterministic race suite, vet, and build / released: no
 Next exact action: connect authenticated delivery admission to this store, define the atomic queue handoff, and implement F05 expiring leases with owner epochs and stale-worker fencing
+
+### 2026-09-24 — F04 authenticated admission slice
+
+Date / implementing agent: 2026-09-24 / OpenCode
+Task / substep: F04 / production SQLite construction, scoped HTTP admission and inspection
+State: verified increment; F04 remains in progress
+Chronos Code revision + relevant working-tree changes: started at `949af96`; HEAD advanced externally to `8c95ad5` during verification, incorporating the initial admission wiring; response redaction, tests, API documentation and this checkpoint remain uncommitted
+Chronos revision + relevant working-tree changes: sibling checkout retains its existing F00-F03 work; no edits made for this increment
+User work preserved / integration constraints: existing staged/committed changes were not staged, reset or overwritten by this agent
+Decision / hypothesis being resolved: an authenticated request may safely persist a scoped delivery before a worker exists, provided the response says `admitted`, not `queued` or `succeeded`
+Files changed: `internal/cli/root.go`, `internal/server/server.go`, `middleware.go`, `delivery_handlers.go`, `delivery_handlers_test.go`, `docs/delivery-admission-http.md`
+Production path wired: authenticated `serve` opens `ProjectPaths.DeliveriesDB`; POST admission binds tenant/repository/actor to validated authority, enforces a stable idempotency key and persists before HTTP 201; GET reads only the same scope without exposing the admission key. The existing `AdmitRunnable`/queue use one SQLite database transaction; no production caller promotes admitted records yet.
+Checks executed (exact commands, cwd, actual result): Chronos Code `go test ./internal/server ./internal/cli ./internal/execution -count=1` passed; `go test -race ./internal/server ./internal/cli ./internal/execution -count=1` passed; `make build` passed; `make test` passed; `git diff --check` passed
+Evidence / artifact references: `TestDeliveryAdmissionPersistsWithoutWorkerAndIsScoped` exercises replay after restart, idempotency, conflict, scoping and no runnable queue; `TestDeliveryAdmissionRequiresAuthenticatedAuthorizedStorage` exercises authentication, authorization and fail-closed cases
+Failure or remaining uncertainty: F04 backup/restore and rollback acceptance, production executor, queue promotion, detached work and autonomous completion are not yet wired; server startup was build-checked but not exercised against a live HTTP listener in this increment
+Capabilities: implemented: authenticated durable admission/inspection / enabled: authenticated HTTP admission only / evaluated: deterministic and race tests / released: no autonomous execution
+Next exact action: verify F04 backup/restore and transactional rollback, then promote admitted records into the SQLite queue only with an F05 production executor and worker startup
 
 ### Per-increment record template
 

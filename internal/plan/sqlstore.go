@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,7 +21,7 @@ var (
 	ErrInvalidPlanRef     = errors.New("invalid plan reference")
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const (
 	schemaV1Checksum = "c6f8c0da8c42f04a"
@@ -36,6 +37,7 @@ var planMigrations = []struct {
 	{version: 1, checksum: schemaV1Checksum, sql: schemaV1SQL},
 	{version: 2, checksum: schemaV2Checksum, sql: schemaV2SQL},
 	{version: 3, checksum: schemaV3Checksum, sql: schemaV3SQL},
+	{version: 4, checksum: planSchemaChecksum(schemaV4SQL), sql: schemaV4SQL},
 }
 
 // SQLStore is the SQLite-backed durable plan repository.
@@ -834,7 +836,7 @@ func validatePlanDatabase(ctx context.Context, db *sql.DB) (int, error) {
 	if version > schemaVersion {
 		return 0, ErrUnsupportedSchema
 	}
-	if version != schemaVersion || checksum != schemaV3Checksum {
+	if version != schemaVersion || checksum != planSchemaChecksum(schemaV4SQL) {
 		return 0, ErrIncompatibleSchema
 	}
 	for _, table := range []string{"plans", "plan_nodes", "plan_edges", "plan_attempts", "plan_context_refs", "plan_evidence", "plan_events", "plan_leases"} {
@@ -885,3 +887,10 @@ ALTER TABLE plan_nodes ADD COLUMN assumptions TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE plan_nodes ADD COLUMN invalidation_triggers TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE plan_nodes ADD COLUMN recovery_class TEXT NOT NULL DEFAULT '';
 UPDATE plan_nodes SET kind = 'implement', objective = scope, expected_artifacts = '["legacy node result"]', recovery_class = 'replan';`
+
+const schemaV4SQL = `ALTER TABLE plan_leases ADD COLUMN expires_at TEXT NOT NULL DEFAULT '';`
+
+func planSchemaChecksum(schema string) string {
+	checksum := sha256.Sum256([]byte(schema))
+	return fmt.Sprintf("%x", checksum[:8])
+}

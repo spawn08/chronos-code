@@ -65,6 +65,41 @@ type Outcome struct {
 	Signal    string
 }
 
+// QueueAdmitted promotes an already persisted admission only after a worker
+// service has been installed. State, queue record, and ordered event commit in
+// the same SQLite transaction; a crash cannot leave a falsely queued record.
+func (s *DeliveryStore) QueueAdmitted(ctx context.Context, scope DeliveryScope, id DeliveryID, expectedVersion int64) (Delivery, error) {
+	if err := validateDeliveryRef(scope, id); err != nil || expectedVersion < 1 {
+		return Delivery{}, ErrInvalidDelivery
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Delivery{}, fmt.Errorf("begin delivery queue promotion: %w", err)
+	}
+	defer tx.Rollback()
+	delivery, err := loadDelivery(ctx, tx, scope, id)
+	if err != nil {
+		return Delivery{}, err
+	}
+	if delivery.Version != expectedVersion {
+		return Delivery{}, ErrStaleDeliveryVersion
+	}
+	if delivery.State != DeliveryAdmitted {
+		return Delivery{}, ErrInvalidDeliveryTransition
+	}
+	now := s.clock.Now().UTC()
+	if err := transitionInTx(ctx, tx, &delivery, DeliveryQueued, queueEventIdentity(id, "promote", expectedVersion, now)); err != nil {
+		return Delivery{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_queue (tenant_id, repository_id, delivery_id, status, available_at, created_at, updated_at) VALUES (?, ?, ?, 'ready', ?, ?, ?)`, scope.TenantID, scope.RepositoryID, id, timestamp(now), timestamp(delivery.CreatedAt), timestamp(now)); err != nil {
+		return Delivery{}, fmt.Errorf("insert promoted delivery queue record: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Delivery{}, fmt.Errorf("commit delivery queue promotion: %w", err)
+	}
+	return delivery, nil
+}
+
 // Claim atomically selects one due queue record, fences its previous owner,
 // records an attempt, and moves the delivery projection to running.
 func (s *DeliveryStore) Claim(ctx context.Context, ownerID string, leaseDuration time.Duration) (Lease, error) {

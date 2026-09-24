@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/budget"
+	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos/engine/mcp"
+	"github.com/spawn08/chronos/sdk/agent"
 )
 
 func TestStripGlobalFlagsJSON(t *testing.T) {
@@ -69,6 +71,104 @@ func TestLoadConfigModelSelectionPrecedence(t *testing.T) {
 	if selected.Provider != "anthropic" || selected.Model != "cli-model" || providerSource != "flag:--provider" || modelSource != "flag:--model" {
 		t.Fatalf("selected = %+v, sources=(%q,%q)", selected, providerSource, modelSource)
 	}
+	if !cfg.PrimaryModelSelected() {
+		t.Fatal("explicit selection must bypass bundled model routing")
+	}
+}
+
+func TestCredentialProviderSelectsOnlyUnambiguousAlternative(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Agents = []agent.AgentConfig{
+		{ID: "chronos-code", Model: agent.ModelConfig{Provider: "azure", Model: "deployment"}},
+		{ID: "worker", Model: agent.ModelConfig{Provider: "openai", Model: "gpt-5"}},
+	}
+	current := cfg.Agents[0].Model
+	for _, tc := range []struct {
+		name       string
+		authorized map[string]bool
+		model      agent.ModelConfig
+		want       string
+	}{
+		{"only anthropic key", map[string]bool{"anthropic": true}, current, "anthropic"},
+		{"configured key wins", map[string]bool{"azure": true, "anthropic": true}, current, ""},
+		{"ambiguous keys", map[string]bool{"anthropic": true, "openai": true}, current, ""},
+		{"yaml key wins", map[string]bool{"anthropic": true}, agent.ModelConfig{Provider: "azure", APIKey: "configured-key"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := credentialProvider(cfg, tc.model, func(provider string) bool { return tc.authorized[provider] })
+			if got != tc.want {
+				t.Fatalf("credentialProvider() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigProviderOnlyUsesKnownDefault(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "--provider", "openai", "config", "show"})
+	t.Setenv("CHRONOS_CODE_PROVIDER", "")
+	t.Setenv("CHRONOS_CODE_MODEL", "")
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigWithModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, selected, _, source := cfg.PrimaryAgentModel()
+	if selected.Provider != "openai" || selected.Model != "gpt-4o" || source != "provider default" {
+		t.Fatalf("selection = (%s/%s, %s)", selected.Provider, selected.Model, source)
+	}
+}
+
+func TestLoadConfigSelectsSoleAuthorizedProvider(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "config", "show"})
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CHRONOS_CODE_PROVIDER", "")
+	t.Setenv("CHRONOS_CODE_MODEL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	for _, name := range []string{"CODEX_ACCESS_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY", "MISTRAL_API_KEY", "AZURE_OPENAI_API_KEY", "GROQ_API_KEY", "TOGETHER_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "FIREWORKS_API_KEY", "PERPLEXITY_API_KEY", "ANYSCALE_API_KEY"} {
+		t.Setenv(name, "")
+	}
+	cfg, err := loadConfigWithModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, selected, providerSource, modelSource := cfg.PrimaryAgentModel()
+	if selected.Provider != "openai" || selected.Model != "gpt-4o" || providerSource != "auto:only authorized provider" || modelSource != "provider default" || !cfg.PrimaryModelSelected() {
+		t.Fatalf("selection = (%s/%s, %s, %s, %t)", selected.Provider, selected.Model, providerSource, modelSource, cfg.PrimaryModelSelected())
+	}
+}
+
+func TestLoadConfigModelOnlyInfersKnownProvider(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "--model", "gpt-5-mini", "config", "show"})
+	t.Setenv("CHRONOS_CODE_PROVIDER", "")
+	t.Setenv("CHRONOS_CODE_MODEL", "")
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigWithModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, selected, providerSource, _ := cfg.PrimaryAgentModel()
+	if selected.Provider != "openai" || selected.Model != "gpt-5-mini" || providerSource != "model:catalog" {
+		t.Fatalf("selection = (%s/%s, %s)", selected.Provider, selected.Model, providerSource)
+	}
+}
+
+func TestLoadConfigAmbiguousModelRequiresProvider(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "--model", "gpt-4o", "config", "show"})
+	t.Setenv("CHRONOS_CODE_PROVIDER", "")
+	t.Setenv("CHRONOS_CODE_MODEL", "")
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfigWithModelSelection(); err == nil || !strings.Contains(err.Error(), "supply --provider") {
+		t.Fatalf("error = %v, want ambiguous-provider instruction", err)
+	}
 }
 
 func TestLoadConfigProviderOnlyUsesConfiguredModelOrErrors(t *testing.T) {
@@ -99,7 +199,7 @@ func TestLoadConfigProviderOnlyUsesConfiguredModelOrErrors(t *testing.T) {
 		t.Fatalf("selected = %+v, source=%q", selected, source)
 	}
 
-	resetGlobalFlags(t, []string{"chronos-code", "--provider", "mistral", "config", "show"})
+	resetGlobalFlags(t, []string{"chronos-code", "--provider", "openrouter", "config", "show"})
 	configPath = path
 	if err := stripGlobalFlags(); err != nil {
 		t.Fatal(err)

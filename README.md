@@ -262,6 +262,21 @@ defaults:
 
 `/model` lists models. Tab after `/model ` autocompletes authorized provider/model IDs.
 
+`chronos-code models [provider]` fetches live Anthropic, OpenAI, or Azure
+models when authorized, and labels static fallback results. In the TUI, the
+model picker refreshes authorized providers in the background. A key alone
+does not identify a preferred model: use `--provider <name> --model <id>` or
+`/model <provider> <id>` to choose one. At startup, if the configured primary
+provider has no credential and exactly one other provider is authorized,
+Chronos Code selects that provider with its configured model (or a known
+provider default). When multiple providers are authorized, the YAML selection
+is preserved; `chronos-code config show` reports the effective choice and its
+source. Flag and `CHRONOS_CODE_*` selections always take precedence over YAML
+and request-time model routing. Azure deployments require an endpoint and an
+actual deployment name (`AZURE_OPENAI_DEPLOYMENT` or `--model`).
+Azure's data-plane model catalog does not enumerate deployment names; use the
+configured deployment or query Azure's management-plane deployments API.
+
 ### Rollback
 
 Independent YAML switches. Sessions, memories, learned patterns, and `.mcp.json` stay on disk:

@@ -1,0 +1,40 @@
+package execution
+
+import (
+	"context"
+	"fmt"
+)
+
+type operationLeaseKey struct{}
+
+type OperationLease struct {
+	Store *DeliveryStore
+	Lease Lease
+}
+
+func (e *Execution) OperationContext(ctx context.Context) context.Context {
+	return WithOperationLease(ctx, e.store, e.Lease)
+}
+
+func (e *Execution) PriorOperations(ctx context.Context) ([]Operation, error) {
+	return e.store.Operations(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
+}
+
+// WithOperationLease is for host-owned workers and bounded integration tests;
+// model tool arguments cannot manufacture a worker lease.
+func WithOperationLease(ctx context.Context, store *DeliveryStore, lease Lease) context.Context {
+	return context.WithValue(ctx, operationLeaseKey{}, OperationLease{Store: store, Lease: lease})
+}
+
+func OperationLeaseFromContext(ctx context.Context) (OperationLease, bool) {
+	lease, ok := ctx.Value(operationLeaseKey{}).(OperationLease)
+	return lease, ok && lease.Store != nil && lease.Lease.Delivery.ID != ""
+}
+
+// EffectJournalError prevents the SDK from presenting an ambiguous effect as
+// a recoverable tool error that the model might retry.
+type EffectJournalError struct{ Err error }
+
+func (e EffectJournalError) Error() string { return fmt.Sprintf("effect journal: %v", e.Err) }
+func (e EffectJournalError) Unwrap() error { return e.Err }
+func (e EffectJournalError) FatalEffect()  {}

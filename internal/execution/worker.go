@@ -44,9 +44,18 @@ type Worker struct {
 	executor Executor
 	config   WorkerConfig
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	lastErr error
+}
+
+// LastError reports a non-idle worker failure without treating an empty queue
+// or a deliberate shutdown as a readiness failure.
+func (w *Worker) LastError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastErr
 }
 
 func NewWorker(store *DeliveryStore, executor Executor, config WorkerConfig) (*Worker, error) {
@@ -101,7 +110,15 @@ func (w *Worker) run(ctx context.Context, done chan<- struct{}) {
 			for {
 				err := w.RunOnce(ctx)
 				if err == nil {
+					w.mu.Lock()
+					w.lastErr = nil
+					w.mu.Unlock()
 					continue
+				}
+				if ctx.Err() == nil && !errors.Is(err, ErrNoRunnableDelivery) {
+					w.mu.Lock()
+					w.lastErr = err
+					w.mu.Unlock()
 				}
 				timer := time.NewTimer(w.config.PollEvery)
 				select {

@@ -468,6 +468,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		mcpDiscovery:       discovered,
 		capabilities:       capabilityManifest,
 	}
+	if cfg.PrimaryModelSelected() {
+		orch.modelOverrides[active] = true
+	}
 	for i, id := range sortedAgentIDs(agents) {
 		if i < len(orch.mcpRuntimes) {
 			orch.mcpRuntimes[i].SetAgent(id)
@@ -1542,11 +1545,13 @@ func setupRouter(ctx context.Context, cfg *config.Config, projectDir string, def
 	}
 	if rcfg.Router.Model.Provider != "" && rcfg.Router.Model.Model != "" {
 		modelConfig := resolveModelConfig(ctx, cfg, auth.NewStore(), defaultAgent, rcfg.Router.Model.Provider, rcfg.Router.Model.Model)
-		provider, err := agent.BuildProvider(modelConfig)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: build T1 router classifier: %v\n", err)
-		} else if t1 := router.NewT1Classifier(provider, rcfg); t1 != nil {
-			rt.SetT1(t1)
+		if modelConfig.APIKey != "" {
+			provider, err := agent.BuildProvider(modelConfig)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: build T1 router classifier: %v\n", err)
+			} else if t1 := router.NewT1Classifier(provider, rcfg); t1 != nil {
+				rt.SetT1(t1)
+			}
 		}
 	}
 	return rt, rcfg
@@ -2358,8 +2363,13 @@ func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message 
 	o.routingMu.Unlock()
 	if routingConfig != nil && !overridden {
 		if spec, ok := routingConfig.ResolveModelForRole(agentID, classification.Complexity, classification.Kind); ok {
-			if provider, err := o.buildModelProvider(ctx, agentID, spec.Provider, spec.Model); err == nil {
-				selected = provider
+			// A bundled route must not send an authorized agent to a provider
+			// for which no credential can be resolved.
+			if o.cfg == nil || selected == nil || auth.CanonicalProvider(spec.Provider) == auth.CanonicalProvider(selected.Name()) ||
+				resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, spec.Provider, spec.Model).APIKey != "" {
+				if provider, err := o.buildModelProvider(ctx, agentID, spec.Provider, spec.Model); err == nil {
+					selected = provider
+				}
 			}
 		}
 	}
@@ -2692,9 +2702,9 @@ func (o *Orchestrator) DetectedExternalLogins() []ExternalLogin {
 	return found
 }
 
-// AuthorizedProviders returns the subset of candidates that currently
-// resolve to a non-empty credential (env var, chronos-code's own login, or
-// an external CLI reuse) via auth.Resolve. It makes no network calls.
+// AuthorizedProviders returns candidates with a resolvable credential
+// (env var, stored login, external CLI reuse, or agent/default YAML API key).
+// It makes no network calls.
 // Keychain lookups are memoized by auth.Store for the process lifetime
 // (invalidated on login/logout), so repeating this for the TUI status bar
 // or /model completions stays cheap after the first scan.
@@ -2704,6 +2714,19 @@ func (o *Orchestrator) AuthorizedProviders(ctx context.Context, candidates []str
 	for _, p := range candidates {
 		if auth.Resolve(ctx, store, p).Token != "" {
 			out = append(out, p)
+			continue
+		}
+		if o.cfg != nil {
+			if o.cfg.Defaults != nil && auth.CanonicalProvider(o.cfg.Defaults.Model.Provider) == auth.CanonicalProvider(p) && o.cfg.Defaults.Model.APIKey != "" {
+				out = append(out, p)
+				continue
+			}
+			for _, configured := range o.cfg.Agents {
+				if auth.CanonicalProvider(configured.Model.Provider) == auth.CanonicalProvider(p) && configured.Model.APIKey != "" {
+					out = append(out, p)
+					break
+				}
+			}
 		}
 	}
 	return out
@@ -2745,7 +2768,7 @@ func (o *Orchestrator) ListProviderModels(ctx context.Context, provider string) 
 		return nil, false
 	}
 	list, err := modelinfo.FetchLive(ctx, provider, mc.APIKey, modelinfo.LiveConfig{BaseURL: mc.BaseURL, Endpoint: mc.Endpoint})
-	if err != nil {
+	if err != nil || len(list) == 0 {
 		return nil, false
 	}
 	return list, true
@@ -2960,6 +2983,7 @@ func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config
 	toolcompress.RegisterReader(a)
 	wrapUserToolHooks(a, configured, runner, activity)
 	wrapVerificationEvidence(a)
+	wrapDeliveryOperations(a)
 	toolcompress.WrapDynamicForTool(a, func(ctx context.Context, name string, args map[string]any) int {
 		base := toolcompress.DefaultThresholdTokens
 		if tracker != nil {

@@ -78,6 +78,65 @@ func TestAdmitEnqueueExecute(t *testing.T) {
 	}
 }
 
+func TestWorkerExposesPersistentExecutionFailures(t *testing.T) {
+	ctx := context.Background()
+	store := openQueueTestStore(t, filepath.Join(t.TempDir(), "deliveries.db"), newControlledClock())
+	if _, err := store.AdmitRunnable(ctx, testAdmission("tenant", "repo", "delivery", "key")); err != nil {
+		t.Fatal(err)
+	}
+	worker := newTestWorker(t, store, "worker", executorFunc(func(context.Context, *Execution) Outcome {
+		return Outcome{Kind: "invalid"}
+	}))
+	if err := worker.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Stop(context.Background())
+	deadline := time.After(time.Second)
+	for worker.LastError() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("worker hid its persistent finalization failure")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestQueueAdmittedCommitsQueueAndStateTogether(t *testing.T) {
+	ctx := context.Background()
+	store := openQueueTestStore(t, filepath.Join(t.TempDir(), "deliveries.db"), newControlledClock())
+	admission := testAdmission("tenant", "repo", "delivery", "key")
+	admitted, err := store.Admit(ctx, admission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER stop_queue BEFORE INSERT ON delivery_queue BEGIN SELECT RAISE(ABORT, 'injected queue failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.QueueAdmitted(ctx, admission.Scope, admitted.ID, admitted.Version); err == nil {
+		t.Fatal("injected queue failure was ignored")
+	}
+	loaded, err := store.Load(ctx, admission.Scope, admitted.ID)
+	if err != nil || loaded.State != DeliveryAdmitted || loaded.Version != admitted.Version {
+		t.Fatalf("partial queue promotion = %#v, error = %v", loaded, err)
+	}
+	if events, err := store.Events(ctx, admission.Scope, admitted.ID); err != nil || len(events) != 1 {
+		t.Fatalf("events after rollback = %v, error = %v", events, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DROP TRIGGER stop_queue`); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.QueueAdmitted(ctx, admission.Scope, admitted.ID, admitted.Version)
+	if err != nil || queued.State != DeliveryQueued || queued.Version != admitted.Version+1 {
+		t.Fatalf("promoted delivery = %#v, error = %v", queued, err)
+	}
+	if _, err := store.QueueAdmitted(ctx, admission.Scope, admitted.ID, admitted.Version); !errors.Is(err, ErrStaleDeliveryVersion) {
+		t.Fatalf("duplicate promotion = %v", err)
+	}
+	if _, err := store.Claim(ctx, "worker", time.Minute); err != nil {
+		t.Fatalf("promoted delivery is not runnable: %v", err)
+	}
+}
+
 func TestWorkerRestartReclaimsExpiredLease(t *testing.T) {
 	clock := newControlledClock()
 	path := filepath.Join(t.TempDir(), "deliveries.db")
@@ -88,6 +147,9 @@ func TestWorkerRestartReclaimsExpiredLease(t *testing.T) {
 	}
 	first, err := store.Claim(context.Background(), "crashed-worker", time.Minute)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Checkpoint(context.Background(), first, json.RawMessage(`{"step":"before-crash"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -105,7 +167,7 @@ func TestWorkerRestartReclaimsExpiredLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(attempts) != 2 || attempts[0].LeaseEpoch != first.Epoch || attempts[0].Outcome != "lease_expired" || attempts[1].LeaseEpoch <= first.Epoch || attempts[1].OwnerID != "replacement-worker" {
+	if len(attempts) != 2 || attempts[0].LeaseEpoch != first.Epoch || attempts[0].Outcome != "lease_expired" || string(attempts[0].Checkpoint) != `{"step":"before-crash"}` || attempts[1].LeaseEpoch <= first.Epoch || attempts[1].OwnerID != "replacement-worker" {
 		t.Fatalf("reclaimed attempts = %#v", attempts)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/tool"
@@ -256,10 +257,18 @@ func (o *Orchestrator) SandboxStatus() string {
 	if root == "" {
 		root = "."
 	}
-	if _, err := security.NewOSSandbox(root, false); err != nil {
-		return "sandbox: unavailable (" + err.Error() + ")"
+	if o == nil || o.cfg == nil || o.cfg.Server.DeliverySandbox.Image == "" {
+		return "sandbox: unattended container not configured; legacy shell uses approval"
 	}
-	return "sandbox: helper ready (opt-in); shell uses workspace-bound process isolation"
+	profile := o.cfg.Server.DeliverySandbox
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	sandbox, err := security.NewContainerShellSandbox(ctx, root, security.SandboxPolicy{Image: profile.Image, SocketPath: profile.SocketPath, AllowNetwork: profile.AllowNetwork})
+	if err != nil {
+		return "sandbox: unattended container unavailable (" + err.Error() + ")"
+	}
+	_ = sandbox.Close()
+	return "sandbox: pinned unattended container ready; legacy shell uses approval"
 }
 
 func (o *Orchestrator) ListPendingSuggestions() ([]*learning.Suggestion, error) {

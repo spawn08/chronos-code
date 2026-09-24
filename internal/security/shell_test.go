@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,5 +63,17 @@ func TestWorkspaceShellUsesRequestScopedRoot(t *testing.T) {
 	}
 	if got := filepath.Clean(strings.TrimSpace(result.(map[string]any)["stdout"].(string))); got != want {
 		t.Fatalf("pwd = %q, want request root %q", got, want)
+	}
+}
+
+func TestMandatorySandboxRefusesIncompleteReadIsolation(t *testing.T) {
+	root := t.TempDir()
+	ctx := WithMandatorySandbox(context.Background(), SandboxPolicy{})
+	_, err := NewWorkspaceShellTool(root, 5*time.Second).Handler(ctx, map[string]any{"command": "touch should-not-exist"})
+	if !errors.Is(err, ErrMandatorySandboxUnavailable) {
+		t.Fatalf("mandatory execution error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "should-not-exist")); !os.IsNotExist(err) {
+		t.Fatalf("mandatory execution ran an effect: %v", err)
 	}
 }

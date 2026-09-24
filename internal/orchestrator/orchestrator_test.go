@@ -846,6 +846,58 @@ func TestResolvedModelPreservesExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestResolvedModelSkipsUnauthenticatedCrossProviderRoute(t *testing.T) {
+	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
+		router.ComplexityLow: {router.TaskKindEdit: {Provider: "anthropic", Model: "claude-haiku-4-5"}},
+	})
+	orch.cfg = &config.Config{}
+	orch.cfg.Agents = []agent.AgentConfig{{ID: "coder", Model: agent.ModelConfig{Provider: "openai", Model: "gpt-4o", APIKey: "configured-key"}}}
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	ctx := orch.applyResolvedModel(context.Background(), "coder", "change this")
+	selected := agent.ModelProvider(ctx, orch.agents["coder"].Model)
+	if selected.Name() != "old" || selected.Model() != "old-coder" {
+		t.Fatalf("request model = %s/%s, want unchanged agent", selected.Name(), selected.Model())
+	}
+}
+
+func TestNewHonorsProcessModelSelectionAcrossRequests(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Chdir(root)
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexOnStart := false
+	cfg.Workspace.Root = root
+	cfg.Workspace.IndexOnStart = &indexOnStart
+	cfg.Learning.Enabled = false
+	cfg.Defaults.Storage = agent.StorageConfig{Backend: "sqlite", DSN: filepath.Join(root, "sessions.db")}
+	if err := cfg.OverridePrimaryModel("openai", "gpt-4o", "flag:--provider", "flag:--model"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	orch, err := New(context.Background(), cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = orch.Close() })
+	if !orch.modelOverrides[orch.primary] || orch.routingConfig == nil {
+		t.Fatal("process selection or request router not installed")
+	}
+	for _, message := range []string{"change this", "debug this across multiple packages"} {
+		ctx := orch.applyResolvedModel(context.Background(), orch.primary, message)
+		selected := agent.ModelProvider(ctx, orch.agents[orch.primary].Model)
+		if selected.Name() != "openai" || selected.Model() != "gpt-4o" {
+			t.Fatalf("message %q routed to %s/%s, want openai/gpt-4o", message, selected.Name(), selected.Model())
+		}
+	}
+}
+
 func TestResolvedModelHonorsRoleFloor(t *testing.T) {
 	low := router.ModelSpec{Provider: "anthropic", Model: "claude-haiku-4-5"}
 	medium := router.ModelSpec{Provider: "anthropic", Model: "claude-sonnet-4-6"}

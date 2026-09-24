@@ -50,6 +50,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
 		return
 	}
+	if s.cfg.DeliveryWorker != nil && s.cfg.DeliveryWorker.LastError() != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "delivery worker unavailable"})
+		return
+	}
 	if s.orch == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "orchestrator unavailable"})
 		return

@@ -3,6 +3,8 @@ package security
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -136,6 +138,50 @@ func TestSandboxMacOSWriteBoundary(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); !os.IsNotExist(err) {
 		t.Fatalf("outside path exists after denied write: %v", err)
+	}
+}
+
+func TestSandboxMacOSReadNetworkAndEnvironmentBoundary(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("sandbox-exec is only available on macOS")
+	}
+	workspace, outside := t.TempDir(), t.TempDir()
+	secretPath := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secretPath, []byte("secret-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "visible"), []byte("workspace-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CHRONOS_SANDBOX_SECRET", "secret-env-value")
+	sb, err := NewOSSandbox(workspace, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, command string
+		args          []string
+		wantSuccess   bool
+	}{
+		{"workspace read", "/bin/cat", []string{"visible"}, true},
+		{"outside read", "/bin/cat", []string{secretPath}, false},
+		{"environment", "/usr/bin/env", nil, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := sb.Execute(context.Background(), test.command, test.args, 5*time.Second)
+			if err != nil || (result.ExitCode == 0) != test.wantSuccess {
+				t.Fatalf("result = %+v, error = %v", result, err)
+			}
+			if strings.Contains(result.Stdout, "secret-env-value") {
+				t.Fatal("host environment leaked into sandbox")
+			}
+		})
+	}
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer endpoint.Close()
+	result, err := sb.Execute(context.Background(), "/usr/bin/curl", []string{"-sf", "--max-time", "2", endpoint.URL}, 5*time.Second)
+	if err != nil || result.ExitCode == 0 {
+		t.Fatalf("network request was not blocked: result = %+v, error = %v", result, err)
 	}
 }
 

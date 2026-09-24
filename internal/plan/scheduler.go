@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -17,6 +18,24 @@ var (
 type SchedulerConfig struct {
 	MaxConcurrent int
 	MaxAttempts   int
+	LeaseDuration time.Duration
+	Now           func() time.Time
+}
+
+const defaultPlanLeaseDuration = 15 * time.Minute
+
+func (s *Scheduler) now() time.Time {
+	if s.config.Now != nil {
+		return s.config.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Scheduler) leaseDuration() time.Duration {
+	if s.config.LeaseDuration > 0 {
+		return s.config.LeaseDuration
+	}
+	return defaultPlanLeaseDuration
 }
 
 // ClaimRequest supplies the durable identities created by a successful claim.
@@ -45,6 +64,16 @@ func (s *Scheduler) Ready(ctx context.Context, p Plan) ([]Node, error) {
 		return nil, fmt.Errorf("begin ready nodes: %w", err)
 	}
 	defer tx.Rollback()
+	expired, err := reapExpiredPlanLeases(ctx, tx, p, s.now())
+	if err != nil {
+		return nil, err
+	}
+	if expired {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit expired plan leases: %w", err)
+		}
+		return nil, nil
+	}
 	if err := promoteReady(ctx, tx, p); err != nil {
 		return nil, err
 	}
@@ -70,6 +99,16 @@ func (s *Scheduler) Claim(ctx context.Context, p Plan, request ClaimRequest) (No
 	defer tx.Rollback()
 	if err := activePlan(ctx, tx, p); err != nil {
 		return Node{}, err
+	}
+	expired, err := reapExpiredPlanLeases(ctx, tx, p, s.now())
+	if err != nil {
+		return Node{}, err
+	}
+	if expired {
+		if err := tx.Commit(); err != nil {
+			return Node{}, fmt.Errorf("commit expired plan leases: %w", err)
+		}
+		return Node{}, ErrNoReadyNode
 	}
 	if err := promoteReady(ctx, tx, p); err != nil {
 		return Node{}, err
@@ -101,7 +140,7 @@ func (s *Scheduler) Claim(ctx context.Context, p Plan, request ClaimRequest) (No
 	if _, err := tx.ExecContext(ctx, `INSERT INTO plan_attempts (tenant_id, repository_id, task_id, plan_id, generation_id, attempt_id, node_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), request.AttemptID, node.ID, request.IdempotencyKey)...); err != nil {
 		return Node{}, fmt.Errorf("insert plan attempt: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO plan_leases (tenant_id, repository_id, task_id, plan_id, generation_id, lease_id, attempt_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), request.LeaseID, request.AttemptID)...); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO plan_leases (tenant_id, repository_id, task_id, plan_id, generation_id, lease_id, attempt_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), request.LeaseID, request.AttemptID, s.now().Add(s.leaseDuration()).Format(time.RFC3339Nano))...); err != nil {
 		return Node{}, fmt.Errorf("insert plan lease: %w", err)
 	}
 	if err := appendEvent(ctx, tx, p, request.EventID, node.ID, request.IdempotencyKey); err != nil {
@@ -123,8 +162,16 @@ func (s *Scheduler) Heartbeat(ctx context.Context, p Plan, nodeID NodeID, leaseI
 		return fmt.Errorf("begin heartbeat: %w", err)
 	}
 	defer tx.Rollback()
-	if err := leasedNode(ctx, tx, p, nodeID, leaseID, NodeLeased, NodeRunning); err != nil {
+	now := s.now()
+	if err := leasedNode(ctx, tx, p, nodeID, leaseID, now, NodeLeased, NodeRunning); err != nil {
 		return err
+	}
+	result, err := tx.ExecContext(ctx, planWhere(`UPDATE plan_leases SET expires_at = ?`)+` AND lease_id = ? AND expires_at > ?`, append([]any{now.Add(s.leaseDuration()).Format(time.RFC3339Nano)}, append(planArgs(p), leaseID, now.Format(time.RFC3339Nano))...)...)
+	if err != nil {
+		return fmt.Errorf("renew plan lease: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return ErrLeaseLost
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit heartbeat: %w", err)
@@ -167,7 +214,7 @@ func (s *Scheduler) Stop(ctx context.Context, p Plan, nodeID NodeID, leaseID Lea
 		return fmt.Errorf("begin stop node: %w", err)
 	}
 	defer tx.Rollback()
-	if err := leasedNode(ctx, tx, p, nodeID, leaseID, NodeLeased, NodeRunning); err != nil {
+	if err := leasedNode(ctx, tx, p, nodeID, leaseID, s.now(), NodeLeased, NodeRunning); err != nil {
 		return err
 	}
 	if err := releaseLease(ctx, tx, p, leaseID); err != nil {
@@ -210,7 +257,7 @@ func (s *Scheduler) Retry(ctx context.Context, p Plan, nodeID NodeID, leaseID Le
 		return fmt.Errorf("begin retry node: %w", err)
 	}
 	defer tx.Rollback()
-	if err := leasedNode(ctx, tx, p, nodeID, leaseID, NodeLeased, NodeRunning); err != nil {
+	if err := leasedNode(ctx, tx, p, nodeID, leaseID, s.now(), NodeLeased, NodeRunning); err != nil {
 		return err
 	}
 	if err := releaseLease(ctx, tx, p, leaseID); err != nil {
@@ -253,7 +300,7 @@ func (s *Scheduler) transitionLeased(ctx context.Context, p Plan, nodeID NodeID,
 		return fmt.Errorf("begin %s node: %w", operation, err)
 	}
 	defer tx.Rollback()
-	if err := leasedNode(ctx, tx, p, nodeID, leaseID, NodeLeased); err != nil {
+	if err := leasedNode(ctx, tx, p, nodeID, leaseID, s.now(), NodeLeased); err != nil {
 		return err
 	}
 	if err := updateNode(ctx, tx, p, nodeID, next); err != nil {
@@ -274,7 +321,7 @@ func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID L
 		return fmt.Errorf("begin %s node: %w", operation, err)
 	}
 	defer tx.Rollback()
-	if err := leasedNode(ctx, tx, p, nodeID, leaseID, NodeLeased, NodeRunning); err != nil {
+	if err := leasedNode(ctx, tx, p, nodeID, leaseID, s.now(), NodeLeased, NodeRunning); err != nil {
 		return err
 	}
 	if err := releaseLease(ctx, tx, p, leaseID); err != nil {
@@ -361,10 +408,10 @@ func readyNodes(ctx context.Context, tx *sql.Tx, p Plan) ([]Node, error) {
 	return nodes, rows.Err()
 }
 
-func leasedNode(ctx context.Context, tx *sql.Tx, p Plan, nodeID NodeID, leaseID LeaseID, states ...NodeState) error {
-	query := `SELECT n.state FROM plan_nodes n JOIN plan_attempts a ON a.tenant_id = n.tenant_id AND a.repository_id = n.repository_id AND a.task_id = n.task_id AND a.plan_id = n.plan_id AND a.generation_id = n.generation_id AND a.node_id = n.node_id JOIN plan_leases l ON l.tenant_id = a.tenant_id AND l.repository_id = a.repository_id AND l.task_id = a.task_id AND l.plan_id = a.plan_id AND l.generation_id = a.generation_id AND l.attempt_id = a.attempt_id WHERE n.tenant_id = ? AND n.repository_id = ? AND n.task_id = ? AND n.plan_id = ? AND n.generation_id = ? AND n.node_id = ? AND l.lease_id = ?`
+func leasedNode(ctx context.Context, tx *sql.Tx, p Plan, nodeID NodeID, leaseID LeaseID, now time.Time, states ...NodeState) error {
+	query := `SELECT n.state FROM plan_nodes n JOIN plan_attempts a ON a.tenant_id = n.tenant_id AND a.repository_id = n.repository_id AND a.task_id = n.task_id AND a.plan_id = n.plan_id AND a.generation_id = n.generation_id AND a.node_id = n.node_id JOIN plan_leases l ON l.tenant_id = a.tenant_id AND l.repository_id = a.repository_id AND l.task_id = a.task_id AND l.plan_id = a.plan_id AND l.generation_id = a.generation_id AND l.attempt_id = a.attempt_id WHERE n.tenant_id = ? AND n.repository_id = ? AND n.task_id = ? AND n.plan_id = ? AND n.generation_id = ? AND n.node_id = ? AND l.lease_id = ? AND l.expires_at > ?`
 	var state NodeState
-	err := tx.QueryRowContext(ctx, query, append(append(planArgs(p), nodeID), leaseID)...).Scan(&state)
+	err := tx.QueryRowContext(ctx, query, append(append(planArgs(p), nodeID), leaseID, now.Format(time.RFC3339Nano))...).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrLeaseLost
 	}
@@ -377,6 +424,58 @@ func leasedNode(ctx context.Context, tx *sql.Tx, p Plan, nodeID NodeID, leaseID 
 		}
 	}
 	return ErrLeaseLost
+}
+
+// Expired plan leases have unknown effect outcomes. Park their nodes for
+// reconciliation instead of re-executing an arbitrary shell or API mutation.
+func reapExpiredPlanLeases(ctx context.Context, tx *sql.Tx, p Plan, now time.Time) (bool, error) {
+	query := `SELECT l.lease_id, a.node_id FROM plan_leases l JOIN plan_attempts a ON a.tenant_id = l.tenant_id AND a.repository_id = l.repository_id AND a.task_id = l.task_id AND a.plan_id = l.plan_id AND a.generation_id = l.generation_id AND a.attempt_id = l.attempt_id WHERE l.tenant_id = ? AND l.repository_id = ? AND l.task_id = ? AND l.plan_id = ? AND l.generation_id = ? AND l.expires_at <= ? ORDER BY l.lease_id`
+	rows, err := tx.QueryContext(ctx, query, append(planArgs(p), now.Format(time.RFC3339Nano))...)
+	if err != nil {
+		return false, fmt.Errorf("find expired plan leases: %w", err)
+	}
+	type expiredLease struct {
+		id   LeaseID
+		node NodeID
+	}
+	var expired []expiredLease
+	for rows.Next() {
+		var lease expiredLease
+		if err := rows.Scan(&lease.id, &lease.node); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("scan expired plan lease: %w", err)
+		}
+		expired = append(expired, lease)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, fmt.Errorf("read expired plan leases: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return false, fmt.Errorf("close expired plan leases: %w", err)
+	}
+	for _, lease := range expired {
+		if err := updateNode(ctx, tx, p, lease.node, NodeBlocked); err != nil {
+			return false, err
+		}
+		if err := releaseLease(ctx, tx, p, lease.id); err != nil {
+			return false, err
+		}
+		key := "lease-expired:" + string(lease.id)
+		if err := appendEvent(ctx, tx, p, EventID(key), lease.node, IdempotencyKey(key)); err != nil {
+			return false, err
+		}
+	}
+	if len(expired) == 0 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, planWhere(`UPDATE plans SET state = ?, stop_reason = ?`), append([]any{PlanPaused, StopAmbiguity}, planArgs(p)...)...); err != nil {
+		return false, fmt.Errorf("pause plan after expired lease: %w", err)
+	}
+	if err := bumpVersion(ctx, tx, p); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func updateNode(ctx context.Context, tx *sql.Tx, p Plan, nodeID NodeID, state NodeState) error {

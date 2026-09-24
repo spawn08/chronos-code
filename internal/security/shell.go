@@ -44,6 +44,23 @@ func NewWorkspaceShellTool(workspace string, timeout time.Duration) *tool.Defini
 			if err != nil {
 				return nil, err
 			}
+			if policy, mandatory := mandatorySandbox(ctx); mandatory {
+				sandbox, err := NewContainerShellSandbox(ctx, builtins.WorkspaceRoot(ctx, workspace), policy)
+				if err != nil {
+					return nil, fmt.Errorf("shell: mandatory sandbox: %w", err)
+				}
+				defer sandbox.Close()
+				relative, err := filepath.Rel(sandbox.Workspace, dir)
+				if err != nil {
+					return nil, fmt.Errorf("shell: sandbox working directory: %w", err)
+				}
+				sandbox.Container.WorkingDir = filepath.Join("/workspace", relative)
+				result, err := sandbox.Container.Execute(ctx, "/bin/sh", []string{"-c", command}, timeout)
+				if err != nil {
+					return nil, fmt.Errorf("shell: sandbox execution: %w", err)
+				}
+				return map[string]any{"stdout": result.Stdout, "stderr": result.Stderr, "exit_code": result.ExitCode}, nil
+			}
 			runCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 			cmd := exec.Command("sh", "-c", command)

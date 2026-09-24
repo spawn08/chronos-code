@@ -7,17 +7,41 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/execution"
 )
 
 type deliveryAdmissionRequest struct {
-	Goal         string `json:"goal"`
+	Goal                string `json:"goal"`
+	RunReadOnly         bool   `json:"run_read_only,omitempty"`
+	MaxCostMicrodollars int64  `json:"max_cost_microdollars,omitempty"`
 	Requirements []struct {
 		Statement string   `json:"statement"`
 		Checks    []string `json:"checks"`
 	} `json:"requirements,omitempty"`
+}
+
+type deliveryResponse struct {
+	ID                  execution.DeliveryID    `json:"id"`
+	State               execution.DeliveryState `json:"state"`
+	Version             int64                   `json:"version"`
+	CurrentGoalRevision execution.GoalRevision  `json:"current_goal_revision"`
+	MaxCostMicrodollars int64                   `json:"max_cost_microdollars,omitempty"`
+	Usage               execution.CumulativeUsage `json:"usage"`
+	Goal                execution.Goal          `json:"goal"`
+	Requirements        []execution.Requirement `json:"requirements"`
+	CreatedAt           time.Time               `json:"created_at"`
+}
+
+func responseForDelivery(delivery execution.Delivery) deliveryResponse {
+	return deliveryResponse{
+		ID: delivery.ID, State: delivery.State, Version: delivery.Version,
+		CurrentGoalRevision: delivery.CurrentGoalRevision, MaxCostMicrodollars: delivery.MaxCostMicrodollars,
+		Goal: delivery.Goals[len(delivery.Goals)-1],
+		Requirements: delivery.Requirements, CreatedAt: delivery.CreatedAt,
+	}
 }
 
 // Admission persists a goal for later scheduling. Until a production executor
@@ -45,6 +69,18 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "goal is required"})
 		return
 	}
+	if request.MaxCostMicrodollars < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_cost_microdollars must be non-negative"})
+		return
+	}
+	if request.RunReadOnly && request.MaxCostMicrodollars > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delivery spending caps require durable model-call admission"})
+		return
+	}
+	if request.RunReadOnly && s.cfg.DeliveryWorker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "read-only delivery worker is unavailable"})
+		return
+	}
 	scope := execution.DeliveryScope{TenantID: execution.TenantID(authority.TenantID), RepositoryID: execution.RepositoryID(authority.RepositoryID)}
 	digest := sha256.Sum256([]byte(authority.TenantID + "\x00" + authority.RepositoryID + "\x00" + key))
 	id := execution.DeliveryID(hex.EncodeToString(digest[:]))
@@ -67,12 +103,23 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 	if len(requirements) == 0 {
 		requirements = append(requirements, execution.Requirement{ID: "requirement-1", Statement: request.Goal, Status: execution.RequirementAccepted})
 	}
-	delivery, err := s.cfg.DeliveryStore.Admit(r.Context(), execution.Admission{
+	policyReference := "admission-v1"
+	if request.RunReadOnly {
+		policyReference = "admission-readonly-v1"
+	}
+	admission := execution.Admission{
 		Scope: scope, DeliveryID: id, AdmissionKey: execution.AdmissionKey(key),
-		Goal: execution.Goal{Statement: request.Goal, Actor: authority.PrincipalID},
-		Requirements: requirements, PolicyReference: "admission-v1",
+		Goal:         execution.Goal{Statement: request.Goal, Actor: authority.PrincipalID},
+		Requirements: requirements, PolicyReference: policyReference, MaxCostMicrodollars: request.MaxCostMicrodollars,
 		Event: execution.EventIdentity{ID: execution.DeliveryEventID("admit:" + string(id)), IdempotencyKey: execution.DeliveryIdempotencyKey("admit:" + string(id))},
-	})
+	}
+	var delivery execution.Delivery
+	var err error
+	if request.RunReadOnly {
+		delivery, err = s.cfg.DeliveryStore.AdmitRunnable(r.Context(), admission)
+	} else {
+		delivery, err = s.cfg.DeliveryStore.Admit(r.Context(), admission)
+	}
 	if err != nil {
 		if errors.Is(err, execution.ErrAdmissionConflict) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "Idempotency-Key was used for another admission"})
@@ -83,7 +130,19 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Location", "/v1/deliveries/"+string(delivery.ID))
-	writeJSON(w, http.StatusCreated, delivery)
+	usage, err := s.cfg.DeliveryStore.Usage(r.Context(), scope, delivery.ID)
+	if err != nil {
+		s.logger.Error("delivery_usage_inspection_failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delivery admission persisted; inspection unavailable"})
+		return
+	}
+	status := http.StatusCreated
+	if request.RunReadOnly {
+		status = http.StatusAccepted
+	}
+	response := responseForDelivery(delivery)
+	response.Usage = usage
+	writeJSON(w, status, response)
 }
 
 func (s *Server) handleInspectDelivery(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +171,15 @@ func (s *Server) handleInspectDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delivery inspection failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, delivery)
+	usage, err := s.cfg.DeliveryStore.Usage(r.Context(), delivery.DeliveryScope, delivery.ID)
+	if err != nil {
+		s.logger.Error("delivery_usage_inspection_failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delivery usage inspection failed"})
+		return
+	}
+	response := responseForDelivery(delivery)
+	response.Usage = usage
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) deliveryAvailable(w http.ResponseWriter) bool {

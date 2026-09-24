@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const deliverySchemaVersion = 3
+const deliverySchemaVersion = 5
 
 var deliveryMigrations = []struct {
 	version  int
@@ -23,12 +23,15 @@ var deliveryMigrations = []struct {
 	{version: 1, checksum: deliverySchemaChecksum(deliverySchemaV1), sql: deliverySchemaV1},
 	{version: 2, checksum: deliverySchemaChecksum(deliverySchemaV2), sql: deliverySchemaV2},
 	{version: 3, checksum: deliverySchemaChecksum(deliverySchemaV3), sql: deliverySchemaV3},
+	{version: 4, checksum: deliverySchemaChecksum(deliverySchemaV4), sql: deliverySchemaV4},
+	{version: 5, checksum: deliverySchemaChecksum(deliverySchemaV5), sql: deliverySchemaV5},
 }
 
 // DeliveryStore is the SQLite-backed durable delivery repository.
 type DeliveryStore struct {
 	db    *sql.DB
 	clock Clock
+	path  string
 }
 
 func OpenDeliveryStore(ctx context.Context, path string) (*DeliveryStore, error) {
@@ -44,7 +47,7 @@ func OpenDeliveryStoreWithClock(ctx context.Context, path string, clock Clock) (
 		return nil, fmt.Errorf("open delivery store: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &DeliveryStore{db: db, clock: clock}
+	store := &DeliveryStore{db: db, clock: clock, path: path}
 	if err := store.refuseNewerSchema(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -198,12 +201,13 @@ func (s *DeliveryStore) admit(ctx context.Context, admission Admission, runnable
 		Version:             1,
 		CurrentGoalRevision: 1,
 		PolicyReference:     normalized.PolicyReference,
+		MaxCostMicrodollars: normalized.MaxCostMicrodollars,
 		CreatedAt:           normalized.Event.OccurredAt,
 		UpdatedAt:           normalized.Event.OccurredAt,
 		Goals:               []Goal{normalized.Goal},
 		Requirements:        normalized.Requirements,
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_deliveries (tenant_id, repository_id, delivery_id, admission_key, admission_fingerprint, state, version, current_goal_revision, policy_reference, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, delivery.TenantID, delivery.RepositoryID, delivery.ID, delivery.AdmissionKey, fingerprint, delivery.State, delivery.Version, delivery.CurrentGoalRevision, delivery.PolicyReference, timestamp(delivery.CreatedAt), timestamp(delivery.UpdatedAt)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_deliveries (tenant_id, repository_id, delivery_id, admission_key, admission_fingerprint, state, version, current_goal_revision, policy_reference, max_cost_microdollars, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, delivery.TenantID, delivery.RepositoryID, delivery.ID, delivery.AdmissionKey, fingerprint, delivery.State, delivery.Version, delivery.CurrentGoalRevision, delivery.PolicyReference, delivery.MaxCostMicrodollars, timestamp(delivery.CreatedAt), timestamp(delivery.UpdatedAt)); err != nil {
 		return Delivery{}, fmt.Errorf("insert delivery: %w", err)
 	}
 	if err := insertGoal(ctx, tx, delivery, normalized.Goal, normalized.Requirements); err != nil {
@@ -543,6 +547,12 @@ func (s *DeliveryStore) resolveMutationFailure(ctx context.Context, tx *sql.Tx, 
 		}
 		current, err := loadDelivery(ctx, s.db, scope, id)
 		if err == nil && current.Version != expectedVersion {
+			// A competing transaction may commit between the first identity
+			// lookup and this version read. Resolve identity before returning a
+			// generic stale-version error for the very same event key.
+			if existing, found, err := loadExistingMutation(ctx, s.db, scope, id, eventType, event, fingerprint); err != nil || found {
+				return existing, err
+			}
 			return Delivery{}, ErrStaleDeliveryVersion
 		}
 		select {
@@ -704,7 +714,7 @@ func loadDelivery(ctx context.Context, db queryer, scope DeliveryScope, id Deliv
 	var delivery Delivery
 	delivery.DeliveryScope, delivery.ID = scope, id
 	var createdAt, updatedAt string
-	err := db.QueryRowContext(ctx, `SELECT admission_key, state, version, current_goal_revision, policy_reference, created_at, updated_at FROM delivery_deliveries WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ?`, scope.TenantID, scope.RepositoryID, id).Scan(&delivery.AdmissionKey, &delivery.State, &delivery.Version, &delivery.CurrentGoalRevision, &delivery.PolicyReference, &createdAt, &updatedAt)
+	err := db.QueryRowContext(ctx, `SELECT admission_key, state, version, current_goal_revision, policy_reference, max_cost_microdollars, created_at, updated_at FROM delivery_deliveries WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ?`, scope.TenantID, scope.RepositoryID, id).Scan(&delivery.AdmissionKey, &delivery.State, &delivery.Version, &delivery.CurrentGoalRevision, &delivery.PolicyReference, &delivery.MaxCostMicrodollars, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Delivery{}, ErrDeliveryNotFound
 	}
@@ -948,7 +958,7 @@ func appendDeliveryEvent(ctx context.Context, tx *sql.Tx, scope DeliveryScope, i
 }
 
 func normalizeAdmission(admission Admission) (Admission, string, error) {
-	if err := validateDeliveryRef(admission.Scope, admission.DeliveryID); err != nil || admission.AdmissionKey == "" || admission.Goal.Statement == "" || admission.Goal.Actor == "" || admission.Event.ID == "" || admission.Event.IdempotencyKey == "" {
+	if err := validateDeliveryRef(admission.Scope, admission.DeliveryID); err != nil || admission.AdmissionKey == "" || admission.Goal.Statement == "" || admission.Goal.Actor == "" || admission.Event.ID == "" || admission.Event.IdempotencyKey == "" || admission.MaxCostMicrodollars < 0 {
 		return Admission{}, "", ErrInvalidDelivery
 	}
 	admission.Goal.Revision = 1
@@ -980,9 +990,10 @@ func normalizeAdmission(admission Admission) (Admission, string, error) {
 		Goal                Goal
 		Requirements        []Requirement
 		PolicyReference     string
+		MaxCostMicrodollars int64
 		EventID             DeliveryEventID
 		EventIdempotencyKey DeliveryIdempotencyKey
-	}{admission.DeliveryID, admission.Goal, make([]Requirement, len(admission.Requirements)), admission.PolicyReference, admission.Event.ID, admission.Event.IdempotencyKey}
+	}{admission.DeliveryID, admission.Goal, make([]Requirement, len(admission.Requirements)), admission.PolicyReference, admission.MaxCostMicrodollars, admission.Event.ID, admission.Event.IdempotencyKey}
 	copy(fingerprintInput.Requirements, admission.Requirements)
 	// Timestamps are metadata, not semantic admission content, so retries may be
 	// issued after reconnect without manufacturing a conflict.
@@ -1304,3 +1315,36 @@ INSERT INTO delivery_queue (tenant_id, repository_id, delivery_id, status, avail
  FROM delivery_deliveries
  WHERE state IN ('queued','waiting_retry','waiting_decision','waiting_credentials','waiting_quota','paused','cancel_requested','succeeded','failed','cancelled');
 CREATE INDEX idx_delivery_queue_claim ON delivery_queue (status, available_at, lease_expires_at, created_at, delivery_id);`
+
+const deliverySchemaV4 = `
+CREATE TABLE delivery_operations (
+  tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL, effect_key TEXT NOT NULL, kind TEXT NOT NULL,
+  replay_class TEXT NOT NULL CHECK (replay_class IN ('read','fingerprinted_write','idempotent_external','unknown')),
+  goal_revision INTEGER NOT NULL,
+  input_fingerprint TEXT NOT NULL, output_fingerprint TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('prepared','running','observed','reconciled')),
+  owner_id TEXT NOT NULL, lease_epoch INTEGER NOT NULL, attempt INTEGER NOT NULL,
+  prepared_at TEXT NOT NULL, updated_at TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '', error_text TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, repository_id, delivery_id, operation_id),
+  UNIQUE (tenant_id, repository_id, delivery_id, effect_key),
+  FOREIGN KEY (tenant_id, repository_id, delivery_id) REFERENCES delivery_deliveries ON DELETE CASCADE
+);
+CREATE INDEX idx_delivery_operations_status ON delivery_operations (tenant_id, repository_id, delivery_id, status);`
+
+const deliverySchemaV5 = `
+ALTER TABLE delivery_deliveries ADD COLUMN max_cost_microdollars INTEGER NOT NULL DEFAULT 0 CHECK (max_cost_microdollars >= 0);
+CREATE TABLE delivery_usage_calls (
+  tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+  call_id TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('reserved','reconciled','unknown','cancelled')),
+  provider TEXT NOT NULL, model TEXT NOT NULL, estimate_tokens INTEGER NOT NULL CHECK (estimate_tokens >= 0),
+  reserved_microdollars INTEGER NOT NULL CHECK (reserved_microdollars >= 0),
+  known_price INTEGER NOT NULL CHECK (known_price IN (0,1)),
+  input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  actual_microdollars INTEGER NOT NULL DEFAULT 0, actual_cost_known INTEGER NOT NULL DEFAULT 0 CHECK (actual_cost_known IN (0,1)), active_nanoseconds INTEGER NOT NULL DEFAULT 0,
+  prepared_at TEXT NOT NULL, reconciled_at TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, repository_id, delivery_id, call_id),
+  FOREIGN KEY (tenant_id, repository_id, delivery_id) REFERENCES delivery_deliveries ON DELETE CASCADE
+);
+CREATE INDEX idx_delivery_usage_calls_status ON delivery_usage_calls (tenant_id, repository_id, delivery_id, status);`
