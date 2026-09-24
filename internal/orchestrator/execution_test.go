@@ -113,6 +113,24 @@ func TestExecuteAttachesAndPreservesRequestWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestExecuteAttachesHostRunIdentity(t *testing.T) {
+	provider := &executionTestProvider{name: "coder", modelID: "test-model"}
+	orch := &Orchestrator{
+		agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)},
+		active: "coder", workspace: &workspace.Info{Root: t.TempDir()},
+	}
+	result, err := orch.Execute(context.Background(), ExecutionRequest{
+		Message: "inspect", RequestedAgent: "coder", SessionID: "session-1", TaskID: "task-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := agent.RunIdentityFromContext(provider.executionContext(0))
+	if !ok || identity.TaskID != result.TaskID || identity.SessionID != result.SessionID || identity.RoleID != result.AgentID || identity.InvocationID == "" || identity.ParentInvocationID != "" {
+		t.Fatalf("run identity = %+v, ok=%v, result=%+v", identity, ok, result)
+	}
+}
+
 func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 	coder := &executionTestProvider{name: "coder", modelID: "coder-model"}
 	debugger := &executionTestProvider{name: "debugger", modelID: "debugger-model"}

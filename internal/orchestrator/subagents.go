@@ -10,6 +10,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spawn08/chronos-code/internal/session"
+	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/sdk/harness"
 )
@@ -72,21 +74,53 @@ func claimTurnModelCall(ctx context.Context) error {
 
 type configuredAgentRunner struct {
 	agents    map[string]*agent.Agent
+	models    *roleModelRegistry
 	fallback  harness.Runner
 	resources *subagentResources
 	once      sync.Once
 }
 
+type roleModelRegistry struct {
+	mu        sync.RWMutex
+	providers map[string]model.Provider
+}
+
+func newRoleModelRegistry(agents map[string]*agent.Agent) *roleModelRegistry {
+	providers := make(map[string]model.Provider, len(agents))
+	for id, configured := range agents {
+		if configured != nil {
+			providers[id] = configured.Model
+		}
+	}
+	return &roleModelRegistry{providers: providers}
+}
+
+func (r *roleModelRegistry) provider(roleID string) model.Provider {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.providers[roleID]
+}
+
+func (r *roleModelRegistry) set(roleID string, provider model.Provider) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.providers[roleID] = provider
+}
+
 // One resource set is shared by every parent runner in an orchestrator. Each
 // active request (including descendants and dynamic agents) holds a permit.
 type subagentResources struct {
-	gate   chan struct{}
-	agents map[*agent.Agent]chan struct{}
+	gate chan struct{}
 }
 
 func newSubagentResources(agents map[string]*agent.Agent) *subagentResources {
 	limit := 0
-	locks := make(map[*agent.Agent]chan struct{}, len(agents))
 	for _, a := range agents {
 		if a == nil {
 			continue
@@ -98,12 +132,11 @@ func newSubagentResources(agents map[string]*agent.Agent) *subagentResources {
 		if limit == 0 || n < limit {
 			limit = n
 		}
-		locks[a] = make(chan struct{}, 1)
 	}
 	if limit == 0 {
 		limit = 5
 	}
-	return &subagentResources{gate: make(chan struct{}, limit), agents: locks}
+	return &subagentResources{gate: make(chan struct{}, limit)}
 }
 
 // Nested requests must not queue: ancestors hold both capacity and agent leases
@@ -169,15 +202,23 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	var result string
 	var err error
 	if configured := r.agents[spec.Name]; configured != nil {
-		lease := r.resources.agents[configured]
-		if err := acquireSubagentLease(runCtx, lease, nested); err != nil {
-			return "", fmt.Errorf("configured subagent %q: %w", spec.Name, err)
+		provider := configured.Model
+		if r.models != nil {
+			provider = r.models.provider(spec.Name)
 		}
-		defer func() { <-lease }()
+		if provider == nil {
+			return "", fmt.Errorf("configured subagent %q has no model", spec.Name)
+		}
 		// Execute builds request-local conversation state. Retain the complete
 		// configured object (security, skills, hooks and services), rather than
 		// copying Agent or maintaining an incomplete builder field allowlist.
 		// Runtime configuration must still change only between active runs.
+		identity, _ := agent.RunIdentityFromContext(runCtx)
+		identity.ParentInvocationID = identity.InvocationID
+		identity.InvocationID = session.NewSessionID()
+		identity.RoleID = configured.ID
+		runCtx = agent.WithRunIdentity(runCtx, identity)
+		runCtx = agent.WithModelProvider(runCtx, provider)
 		result, err = configured.Execute(runCtx, task)
 	} else if r.fallback != nil {
 		result, err = r.fallback.Run(runCtx, spec, task)
@@ -203,28 +244,37 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	return result, nil
 }
 
-// setupSubAgents makes every configured peer available as a real delegation
-// target while retaining dynamic subagents through the standard harness runner.
+// setupSubAgents registers only each role's declared children while retaining
+// dynamic subagents through the standard harness runner.
 func setupSubAgents(agents map[string]*agent.Agent) error {
+	return setupSubAgentsWithModels(agents, newRoleModelRegistry(agents))
+}
+
+func setupSubAgentsWithModels(agents map[string]*agent.Agent, models *roleModelRegistry) error {
 	resources := newSubagentResources(agents)
 	for parentID, parent := range agents {
 		svc, err := harness.NewSubAgentService(parent)
 		if err != nil {
 			return fmt.Errorf("configure subagents for %q: %w", parentID, err)
 		}
-		for childID, child := range agents {
-			if childID == parentID {
-				continue
+		for _, child := range parent.SubAgents {
+			if child == nil || child.ID == "" {
+				return fmt.Errorf("configure subagents for %q: declared child is missing an ID", parentID)
+			}
+			configured, ok := agents[child.ID]
+			if !ok || configured != child {
+				return fmt.Errorf("configure subagents for %q: declared child %q is not a configured agent", parentID, child.ID)
 			}
 			if err := svc.Register(harness.SubAgentSpec{
-				Name:        childID,
+				Name:        child.ID,
 				Description: child.Description,
 			}); err != nil {
-				return fmt.Errorf("register subagent %q for %q: %w", childID, parentID, err)
+				return fmt.Errorf("register subagent %q for %q: %w", child.ID, parentID, err)
 			}
 		}
 		harness.Attach(svc, &configuredAgentRunner{
 			agents:    agents,
+			models:    models,
 			fallback:  harness.NewInProcessRunner(svc),
 			resources: resources,
 		})

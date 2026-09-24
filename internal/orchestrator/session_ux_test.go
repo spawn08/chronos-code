@@ -48,9 +48,11 @@ func TestPlanModeBlocksMutatingTools(t *testing.T) {
 	orch := newTestOrch(t)
 	orch.SetPlanMode(true)
 	hook := sessionUXHook{orchestrator: orch}
-	err := hook.Before(context.Background(), &hooks.Event{Type: hooks.EventToolCallBefore, Name: "file_write", Input: map[string]any{"path": "a.go"}})
-	if err == nil || !strings.Contains(err.Error(), "plan mode") {
-		t.Fatalf("plan mode file_write error = %v", err)
+	for _, name := range []string{"file_write", "mcp__github__create_issue"} {
+		err := hook.Before(context.Background(), &hooks.Event{Type: hooks.EventToolCallBefore, Name: name, Input: map[string]any{"path": "a.go"}})
+		if err == nil || !strings.Contains(err.Error(), "plan mode") {
+			t.Fatalf("plan mode %s error = %v", name, err)
+		}
 	}
 	if err := hook.Before(context.Background(), &hooks.Event{Type: hooks.EventToolCallBefore, Name: "file_read"}); err != nil {
 		t.Fatalf("plan mode file_read blocked: %v", err)

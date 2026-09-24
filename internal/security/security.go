@@ -10,13 +10,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/storage"
 )
 
@@ -42,11 +45,15 @@ func (g *Guard) Before(ctx context.Context, evt *hooks.Event) error {
 	}
 
 	args, _ := evt.Input.(map[string]any)
+	if err := requireToolEffects(ctx, evt.Name); err != nil {
+		g.audit(ctx, evt.Name, err.Error(), args)
+		return err
+	}
 
 	var blockErr error
 	switch evt.Name {
 	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
-		blockErr = g.checkFileArgs(evt.Name, args)
+		blockErr = g.checkFileArgsAtRoot(evt.Name, args, builtins.WorkspaceRoot(ctx, g.root))
 	case "shell":
 		blockErr = g.checkShellArgs(args, false)
 	case "shell_auto":
@@ -76,6 +83,10 @@ func (g *Guard) After(ctx context.Context, evt *hooks.Event) error { return nil 
 // direct case of an agent explicitly globbing for a denied file, e.g.
 // file_glob with pattern="**/.env".
 func (g *Guard) checkFileArgs(toolName string, args map[string]any) error {
+	return g.checkFileArgsAtRoot(toolName, args, g.root)
+}
+
+func (g *Guard) checkFileArgsAtRoot(toolName string, args map[string]any, root string) error {
 	path, hasPath := args["path"].(string)
 	pattern, hasPattern := args["pattern"].(string)
 
@@ -86,9 +97,9 @@ func (g *Guard) checkFileArgs(toolName string, args map[string]any) error {
 		return nil
 	}
 
-	resolved := path
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(g.root, resolved)
+	resolved, err := resolvePolicyPath(g.root, root, path)
+	if err != nil {
+		return fmt.Errorf("security: resolve %q: %w", path, err)
 	}
 
 	if matchesAnyGlob(g.policy.DeniedPaths, resolved) {
@@ -96,17 +107,33 @@ func (g *Guard) checkFileArgs(toolName string, args map[string]any) error {
 	}
 
 	if toolName == "file_write" && g.policy.writablePathsConfigured() {
-		if !isUnderAnyRoot(g.root, g.policy.WritablePaths, resolved) {
+		if !isUnderAnyRoot(root, g.policy.WritablePaths, resolved) {
 			return fmt.Errorf("security: write to %q is denied (outside all writable_paths)", path)
 		}
 	}
 	if toolName != "file_write" && g.policy.readablePathsConfigured() {
-		if !isUnderAnyRoot(g.root, g.policy.ReadablePaths, resolved) {
+		if !isUnderAnyRoot(root, g.policy.ReadablePaths, resolved) {
 			return fmt.Errorf("security: read from %q is denied (outside all readable_paths)", path)
 		}
 	}
 
 	return nil
+}
+
+func resolvePolicyPath(configuredRoot, requestRoot, path string) (string, error) {
+	if filepath.IsAbs(path) && configuredRoot != "" && requestRoot != configuredRoot {
+		configured, err := filepath.Abs(configuredRoot)
+		if err == nil {
+			candidate, absErr := filepath.Abs(path)
+			if absErr == nil {
+				relative, relErr := filepath.Rel(configured, candidate)
+				if relErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					path = filepath.Join(requestRoot, relative)
+				}
+			}
+		}
+	}
+	return canonicalPolicyPath(requestRoot, path)
 }
 
 // isUnderAnyRoot reports whether resolved falls under at least one of the
@@ -117,8 +144,14 @@ func isUnderAnyRoot(root string, writablePaths []string, resolved string) bool {
 		if !filepath.IsAbs(wpResolved) {
 			wpResolved = filepath.Join(root, wpResolved)
 		}
-		wpResolved = filepath.Clean(wpResolved)
-		resolvedClean := filepath.Clean(resolved)
+		wpResolved, err := canonicalPolicyPath(root, wpResolved)
+		if err != nil {
+			continue
+		}
+		resolvedClean, err := canonicalPolicyPath(root, resolved)
+		if err != nil {
+			continue
+		}
 		if resolvedClean == wpResolved {
 			return true
 		}
@@ -131,6 +164,36 @@ func isUnderAnyRoot(root string, writablePaths []string, resolved string) bool {
 		}
 	}
 	return false
+}
+
+func canonicalPolicyPath(root, path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return evalPolicySymlinksAllowMissing(abs)
+}
+
+func evalPolicySymlinksAllowMissing(path string) (string, error) {
+	canonical, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return canonical, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return "", err
+	}
+	canonicalParent, parentErr := evalPolicySymlinksAllowMissing(parent)
+	if parentErr != nil {
+		return "", parentErr
+	}
+	return filepath.Join(canonicalParent, filepath.Base(path)), nil
 }
 
 // checkShellArgs enforces the denied-pattern, never_allow, and

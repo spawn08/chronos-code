@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 )
 
 // maxFiles caps the number of indexed file paths kept in Info.Files.
@@ -193,11 +194,30 @@ func Tool(info *Info) *tool.Definition {
 			"required":   []string{},
 		},
 		Handler: func(ctx context.Context, args map[string]any) (any, error) {
+			selected, err := ForContext(ctx, info)
+			if err != nil {
+				return nil, err
+			}
 			return map[string]any{
-				"root":       info.Root,
-				"languages":  info.Languages,
-				"file_count": info.FileCount,
+				"root":       selected.Root,
+				"languages":  selected.Languages,
+				"file_count": selected.FileCount,
 			}, nil
 		},
 	}
+}
+
+// ForContext returns metadata for the request workspace rather than leaking
+// metadata captured from the configured startup checkout.
+func ForContext(ctx context.Context, configured *Info) (*Info, error) {
+	if configured == nil {
+		return nil, fmt.Errorf("workspace: configured metadata is unavailable")
+	}
+	root := builtins.WorkspaceRoot(ctx, configured.Root)
+	configuredRoot, configuredErr := filepath.Abs(configured.Root)
+	requestRoot, requestErr := filepath.Abs(root)
+	if configuredErr == nil && requestErr == nil && filepath.Clean(configuredRoot) == filepath.Clean(requestRoot) {
+		return configured, nil
+	}
+	return Detect(root)
 }

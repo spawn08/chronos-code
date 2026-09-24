@@ -250,6 +250,7 @@ func TestSetupSubAgentsExecutesConfiguredWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parent.SubAgents = []*agent.Agent{worker, reviewer}
 	agents := map[string]*agent.Agent{"coder": parent, "researcher": worker, "reviewer": reviewer}
 
 	if err := setupSubAgents(agents); err != nil {
@@ -300,6 +301,48 @@ func TestSetupSubAgentsExecutesConfiguredWorker(t *testing.T) {
 	}
 	if got := reviewResult.(map[string]any)["result"]; got != "review findings" {
 		t.Errorf("reviewer result = %#v, want review findings", got)
+	}
+}
+
+func TestConfiguredSubagentUsesConfiguredProvider(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		parentModel string
+		childModel  string
+	}{
+		{name: "frontier parent cheap child", parentModel: "frontier", childModel: "cheap"},
+		{name: "cheap parent frontier child", parentModel: "cheap", childModel: "frontier"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parentProvider := &subagentTestProvider{name: "parent-provider", modelID: test.parentModel, response: "parent"}
+			childProvider := &subagentTestProvider{name: "child-provider", modelID: test.childModel, response: "child"}
+			child, err := agent.New("specialist", "Specialist").WithModel(childProvider).Build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &configuredAgentRunner{agents: map[string]*agent.Agent{"specialist": child}}
+			result, err := runner.Run(agent.WithModelProvider(context.Background(), parentProvider), harness.SubAgentSpec{Name: "specialist"}, "inspect")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result != "child" {
+				t.Fatalf("result = %q, want child provider response", result)
+			}
+			parentProvider.mu.Lock()
+			parentCalls := len(parentProvider.requests)
+			parentProvider.mu.Unlock()
+			if parentCalls != 0 {
+				t.Fatalf("parent provider calls = %d, want 0", parentCalls)
+			}
+			childProvider.mu.Lock()
+			defer childProvider.mu.Unlock()
+			if len(childProvider.requests) != 1 {
+				t.Fatalf("child provider calls = %d, want 1", len(childProvider.requests))
+			}
+			if got := childProvider.requests[0].Model; got != test.childModel {
+				t.Fatalf("request model = %q, want %q", got, test.childModel)
+			}
+		})
 	}
 }
 
@@ -1734,7 +1777,7 @@ func TestSetupMCPRuntimesOwnsIndependentClientsAndYoloStillRequiresApproval(t *t
 		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
 		"reviewer": {ID: "reviewer", Tools: tool.NewRegistry()},
 	}
-	policy := &security.Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: security.MCPRequireApproval}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPAllow}
 	var clients []*orchestratorMCPClient
 	runtimes := setupMCPRuntimes(context.Background(), agents, []mcp.ServerConfig{{
 		Name: "filesystem", Transport: mcp.TransportStdio, Command: "server",

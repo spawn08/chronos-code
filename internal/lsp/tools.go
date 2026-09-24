@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 )
 
 const (
@@ -29,9 +30,10 @@ type openDocument struct {
 }
 
 type toolState struct {
-	manager *Manager
-	root    string
-	rootErr error
+	manager        *Manager
+	root           string
+	managerRoot    string
+	managerRootErr error
 
 	mu   sync.Mutex
 	open map[string]openDocument
@@ -53,40 +55,53 @@ func Tools(manager *Manager, root string) []*tool.Definition {
 }
 
 func newToolState(manager *Manager, root string) *toolState {
-	abs, err := filepath.Abs(root)
+	managerRoot, err := filepath.Abs(manager.root)
 	if err == nil {
-		abs, err = filepath.EvalSymlinks(abs)
+		managerRoot, err = filepath.EvalSymlinks(managerRoot)
 	}
-	return &toolState{manager: manager, root: filepath.Clean(abs), rootErr: err, open: make(map[string]openDocument)}
+	return &toolState{
+		manager: manager, root: root, managerRoot: filepath.Clean(managerRoot), managerRootErr: err,
+		open: make(map[string]openDocument),
+	}
 }
 
-func (s *toolState) canonicalFile(file string) (string, error) {
-	if s.rootErr != nil {
-		return "", fmt.Errorf("lsp: resolve workspace root: %w", s.rootErr)
+func (s *toolState) canonicalFile(ctx context.Context, file string) (string, string, error) {
+	root, err := filepath.Abs(builtins.WorkspaceRoot(ctx, s.root))
+	if err == nil {
+		root, err = filepath.EvalSymlinks(root)
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("lsp: resolve workspace root: %w", err)
 	}
 	path := file
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(s.root, path)
+		path = filepath.Join(root, path)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("lsp: resolve %s: %w", file, err)
+		return "", "", fmt.Errorf("lsp: resolve %s: %w", file, err)
 	}
 	canonical, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("lsp: resolve %s: %w", file, err)
+		return "", "", fmt.Errorf("lsp: resolve %s: %w", file, err)
 	}
-	rel, err := filepath.Rel(s.root, canonical)
+	rel, err := filepath.Rel(root, canonical)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("lsp: file %q is outside workspace", file)
+		return "", "", fmt.Errorf("lsp: file %q is outside workspace", file)
 	}
-	return canonical, nil
+	return canonical, filepath.Clean(root), nil
 }
 
 func (s *toolState) clientAndDocument(ctx context.Context, file string) (ManagedClient, string, error) {
-	path, err := s.canonicalFile(file)
+	path, root, err := s.canonicalFile(ctx, file)
 	if err != nil {
 		return nil, "", err
+	}
+	if s.managerRootErr != nil {
+		return nil, "", fmt.Errorf("lsp: resolve manager workspace root: %w", s.managerRootErr)
+	}
+	if root != s.managerRoot {
+		return nil, "", fmt.Errorf("lsp: unavailable for request workspace %q: manager is bound to %q", root, s.managerRoot)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

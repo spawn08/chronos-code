@@ -38,9 +38,10 @@ func TestStartDoesNotCreateDeniedUntrustedOrInvalidServers(t *testing.T) {
 		MCPDefaultPermission: security.MCPRequireApproval,
 	}
 	created := 0
-	runtime := Start(context.Background(), nil, []mcp.ServerConfig{
-		{Name: "denied", Transport: mcp.TransportStdio, Command: "must-not-run"},
+	runtime := Start(context.Background(), []mcp.ServerConfig{
 		{Name: "invalid", Transport: mcp.Transport("http"), URL: "https://example.test"},
+	}, []mcp.ServerConfig{
+		{Name: "denied", Transport: mcp.TransportStdio, Command: "must-not-run"},
 		{Name: "untrusted", Transport: mcp.TransportStdio, Command: "must-not-run"},
 	}, registry, policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
 		created++
@@ -58,10 +59,10 @@ func TestStartDoesNotCreateDeniedUntrustedOrInvalidServers(t *testing.T) {
 func TestStartDoesNotCreateTrustedServerWithPlaintextCredentials(t *testing.T) {
 	policy := &security.Policy{TrustedMCPServers: []string{"stdio", "sse"}, MCPDefaultPermission: security.MCPRequireApproval}
 	created := 0
-	runtime := Start(context.Background(), nil, []mcp.ServerConfig{
+	runtime := Start(context.Background(), []mcp.ServerConfig{
 		{Name: "stdio", Transport: mcp.TransportStdio, Command: "server", Args: []string{"--api-key=plaintext"}},
 		{Name: "sse", Transport: mcp.TransportSSE, URL: "https://mcp.example.test/events?token=plaintext"},
-	}, tool.NewRegistry(), policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
+	}, nil, tool.NewRegistry(), policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
 		created++
 		return &fakeRuntimeClient{}, nil
 	})
@@ -75,6 +76,23 @@ func TestStartDoesNotCreateTrustedServerWithPlaintextCredentials(t *testing.T) {
 	}
 }
 
+func TestStartDoesNotTrustDiscoveredDefinitionByName(t *testing.T) {
+	policy := &security.Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: security.MCPRequireApproval}
+	created := 0
+	runtime := Start(context.Background(), nil, []mcp.ServerConfig{
+		{Name: "filesystem", Transport: mcp.TransportStdio, Command: "replacement"},
+	}, tool.NewRegistry(), policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
+		created++
+		return &fakeRuntimeClient{}, nil
+	})
+	if created != 0 {
+		t.Fatalf("created clients = %d, want 0", created)
+	}
+	if statuses := runtime.Statuses(); len(statuses) != 1 || statuses[0].State != StateApprovalRequired {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+}
+
 func TestStartNamespacesToolsWithoutReplacingNativeTools(t *testing.T) {
 	registry := tool.NewRegistry()
 	nativeCalls := 0
@@ -83,7 +101,7 @@ func TestStartNamespacesToolsWithoutReplacingNativeTools(t *testing.T) {
 		return "native", nil
 	}})
 	client := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "shell"}}}
-	runtime := Start(context.Background(), nil, []mcp.ServerConfig{{Name: "filesystem", Transport: mcp.TransportStdio, Command: "server"}}, registry,
+	runtime := Start(context.Background(), []mcp.ServerConfig{{Name: "filesystem", Transport: mcp.TransportStdio, Command: "server"}}, nil, registry,
 		&security.Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: security.MCPRequireApproval}, time.Second,
 		func(cfg mcp.ServerConfig) (RuntimeClient, error) {
 			if cfg.Permission != string(tool.PermRequireApproval) {
@@ -121,11 +139,11 @@ func TestStartIsolatesFailuresAndClosesEveryCreatedClientOnce(t *testing.T) {
 		"healthy":     {tools: []mcp.ToolInfo{{Name: "read"}}},
 	}
 	policy := &security.Policy{TrustedMCPServers: []string{"bad-connect", "bad-tools", "healthy"}, MCPDefaultPermission: security.MCPRequireApproval}
-	runtime := Start(context.Background(), nil, []mcp.ServerConfig{
+	runtime := Start(context.Background(), []mcp.ServerConfig{
 		{Name: "healthy", Transport: mcp.TransportStdio, Command: "server"},
 		{Name: "bad-tools", Transport: mcp.TransportStdio, Command: "server"},
 		{Name: "bad-connect", Transport: mcp.TransportStdio, Command: "server"},
-	}, registry, policy, time.Second, func(cfg mcp.ServerConfig) (RuntimeClient, error) { return clients[cfg.Name], nil })
+	}, nil, registry, policy, time.Second, func(cfg mcp.ServerConfig) (RuntimeClient, error) { return clients[cfg.Name], nil })
 	statuses := runtime.Statuses()
 	if len(statuses) != 3 || statuses[0].State != StateConnectFailed || statuses[1].State != StateToolsFailed || statuses[2].State != StateConnected {
 		t.Fatalf("statuses = %#v", statuses)
@@ -197,9 +215,37 @@ func TestConnectServerApprovesPreviouslyPendingServer(t *testing.T) {
 	}
 }
 
+func TestSessionApprovalDoesNotTrustChangedLaunchConfig(t *testing.T) {
+	registry := tool.NewRegistry()
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	initial := mcp.ServerConfig{Name: "filesystem", Transport: mcp.TransportStdio, Command: "v1"}
+	created := 0
+	factory := func(mcp.ServerConfig) (RuntimeClient, error) {
+		created++
+		return &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "read"}}}, nil
+	}
+	runtime := Start(context.Background(), nil, []mcp.ServerConfig{initial}, registry, policy, time.Second, factory)
+	if err := policy.AllowMCPServerSession("filesystem"); err != nil {
+		t.Fatal(err)
+	}
+	if status := runtime.ConnectServer(context.Background(), initial, registry, policy, time.Second, factory); status.State != StateConnected {
+		t.Fatalf("approved status = %#v", status)
+	}
+
+	changed := initial
+	changed.Command = "v2"
+	statuses := runtime.ReloadDiscovery(context.Background(), Snapshot{Servers: []mcp.ServerConfig{changed}})
+	if len(statuses) != 1 || statuses[0].State != StateReloadFailed || !statuses[0].Retained {
+		t.Fatalf("changed status = %#v", statuses)
+	}
+	if created != 1 {
+		t.Fatalf("created clients = %d, want 1", created)
+	}
+}
+
 func TestReloadDiscoveryAtomicallyReplacesRemovesAndRetainsOnFailure(t *testing.T) {
 	registry := tool.NewRegistry()
-	policy := &security.Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: security.MCPRequireApproval}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPAllow}
 	oldClient := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "old"}}}
 	newClient := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "new"}}}
 	failingClient := &fakeRuntimeClient{connectErr: errors.New("unavailable")}

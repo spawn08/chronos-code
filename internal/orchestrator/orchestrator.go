@@ -65,6 +65,7 @@ type Orchestrator struct {
 	store      storage.Storage
 	cfg        *config.Config
 	graphStore *graph.Store
+	graphScope *graph.RequestScope
 	watcher    *graph.Watcher
 
 	sessionMgr *session.Manager
@@ -75,6 +76,7 @@ type Orchestrator struct {
 	routingConfig      *router.Config
 	routingMu          sync.Mutex
 	modelOverrides     map[string]bool
+	roleModels         *roleModelRegistry
 	buildProvider      func(agent.ModelConfig) (model.Provider, error)
 	budget             *budget.Tracker
 	budgetMu           sync.RWMutex
@@ -298,8 +300,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if err := migrateDefaultDatabase(ctx, paths, paths.GraphDB, "graph.db", configuredGraphDB); err != nil {
 		return nil, err
 	}
-	graphStore, watcher := setupGraph(ctx, cfg, agents)
-	orch.graphStore, orch.watcher = graphStore, watcher
+	graphStore, graphScope, watcher := setupGraph(ctx, cfg, agents)
+	orch.graphStore, orch.graphScope, orch.watcher = graphStore, graphScope, watcher
 
 	root := cfg.Workspace.Root
 	if root == "" {
@@ -357,7 +359,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	for _, a := range agents {
 		a.Broker = broker
 	}
-	if err := setupSubAgents(agents); err != nil {
+	roleModels := newRoleModelRegistry(agents)
+	if err := setupSubAgentsWithModels(agents, roleModels); err != nil {
 		return nil, fmt.Errorf("configure subagent delegation: %w", err)
 	}
 	var hookRunner *security.HookRunner
@@ -421,12 +424,14 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		store:              store,
 		cfg:                cfg,
 		graphStore:         graphStore,
+		graphScope:         graphScope,
 		watcher:            watcher,
 		sessionMgr:         sessionMgr,
 		sessions:           sessions,
 		router:             rt,
 		routingConfig:      routingConfig,
 		modelOverrides:     make(map[string]bool),
+		roleModels:         roleModels,
 		budget:             tracker,
 		usdBudget:          budget.NewTrackerWithUSDCap(0, 0, 0),
 		memory:             memStore,
@@ -849,10 +854,20 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 		fmt.Fprintf(os.Stderr, "warning: detect workspace: %v\n", err)
 		return nil
 	}
-	banner := info.Banner()
 	for _, a := range agents {
 		a.Tools.Register(workspace.Tool(info))
-		a.SystemPrompt = strings.TrimSpace(a.SystemPrompt + "\n\n" + banner)
+		previous := a.ContextPinsFn
+		a.ContextPinsFn = func(ctx context.Context) []model.Message {
+			var pins []model.Message
+			if previous != nil {
+				pins = append(pins, previous(ctx)...)
+			}
+			selected, detectErr := workspace.ForContext(ctx, info)
+			if detectErr != nil {
+				return pins
+			}
+			return append(pins, model.Message{Role: model.RoleSystem, Content: selected.Banner()})
+		}
 	}
 	return info
 }
@@ -1617,7 +1632,7 @@ func readOverridableFile(projectDir, overridePath, embeddedName string) ([]byte,
 // at the workspace root) is logged as a warning and treated as non-fatal —
 // the harness still works without the graph, just without the T0 navigation
 // tools.
-func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agent.Agent) (*graph.Store, *graph.Watcher) {
+func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agent.Agent) (*graph.Store, *graph.RequestScope, *graph.Watcher) {
 	root := cfg.Workspace.Root
 	if root == "" {
 		root = config.WorkspaceRoot()
@@ -1630,14 +1645,14 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: create graph db dir %s: %v\n", dir, err)
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
 
 	graphStore, err := graph.OpenStore(dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: open graph store: %v\n", err)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	ix := graph.NewIndexer(graphStore, root)
@@ -1652,11 +1667,12 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 		}
 	}
 
+	requestScope := graph.NewRequestScope(graphStore, root)
 	for _, a := range agents {
-		for _, def := range graph.Tools(graphStore, root) {
+		for _, def := range requestScope.Tools() {
 			a.Tools.Register(def)
 		}
-		for _, def := range graph.ImpactTools(graphStore, root) {
+		for _, def := range requestScope.ImpactTools() {
 			a.Tools.Register(def)
 		}
 	}
@@ -1670,7 +1686,7 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 		}
 	}
 
-	return graphStore, watcher
+	return graphStore, requestScope, watcher
 }
 
 // Execute prepares and runs one task through the selected agent. It is the
@@ -1729,6 +1745,9 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		taskID = session.NewSessionID()
 	}
 	ctx = context.WithValue(ctx, taskIDKey{}, taskID)
+	ctx = agent.WithRunIdentity(ctx, agent.RunIdentity{
+		TaskID: taskID, RoleID: agentID, SessionID: sessionID, InvocationID: session.NewSessionID(),
+	})
 	workspaceRoot := ""
 	if requestRoot, ok := builtins.WorkspaceRootFromContext(ctx); ok {
 		workspaceRoot = requestRoot
@@ -2347,7 +2366,7 @@ func (o *Orchestrator) SetApprovalHandler(handler tool.ApprovalFunc) {
 			if o.runtimeMemory != nil && isLayerMemoryTool(toolName) {
 				return true, nil
 			}
-			switch o.permissionChecker.Check(toolName, args, o.permissionYolo.Load()) {
+			switch o.permissionChecker.CheckContext(ctx, toolName, args, o.permissionYolo.Load()) {
 			case security.Auto:
 				return true, nil
 			case security.Deny:
@@ -2477,6 +2496,7 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 		return fmt.Errorf("no active agent")
 	}
 	a.Model = p
+	o.roleModels.set(o.active, p)
 	if o.modelOverrides == nil {
 		o.modelOverrides = make(map[string]bool)
 	}
@@ -2620,6 +2640,7 @@ func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error
 			return fmt.Errorf("no active agent")
 		}
 		a.Model = p
+		o.roleModels.set(o.active, p)
 	}
 	return nil
 }
@@ -3318,6 +3339,11 @@ func (o *Orchestrator) Close() error {
 		if o.actBuf != nil {
 			if err := o.actBuf.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close activation buffer: %w", err))
+			}
+		}
+		if o.graphScope != nil {
+			if err := o.graphScope.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close request graph scope: %w", err))
 			}
 		}
 		if o.graphStore != nil {

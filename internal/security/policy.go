@@ -2,11 +2,14 @@ package security
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,6 +30,44 @@ const (
 type MCPDecision struct {
 	Permission MCPPermission
 	Reason     string
+}
+
+// MCPServerIdentity is the complete launch configuration covered by an MCP
+// trust decision. Args are ordered; nil and empty args have the same identity.
+type MCPServerIdentity struct {
+	Name      string
+	Origin    string
+	Transport string
+	Command   string
+	Args      []string
+	URL       string
+}
+
+// Digest returns a deterministic, unambiguous digest of the launch identity.
+func (i MCPServerIdentity) Digest() [sha256.Size]byte {
+	h := sha256.New()
+	writeSize := func(value uint64) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], value)
+		_, _ = h.Write(size[:])
+	}
+	write := func(value string) {
+		writeSize(uint64(len(value)))
+		_, _ = h.Write([]byte(value))
+	}
+	write("chronos-code/mcp-launch/v1")
+	write(i.Name)
+	write(i.Origin)
+	write(i.Transport)
+	write(i.Command)
+	writeSize(uint64(len(i.Args)))
+	for _, arg := range i.Args {
+		write(arg)
+	}
+	write(i.URL)
+	var digest [sha256.Size]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
 }
 
 // Policy is the effective in-memory security policy.
@@ -52,6 +93,10 @@ type Policy struct {
 	writablePathsSpecified bool
 	readablePathsSpecified bool
 	allowedCommandsSet     bool
+	mcpMu                  sync.RWMutex
+	trustedMCPIdentities   map[[sha256.Size]byte]struct{}
+	sessionMCPIdentities   map[[sha256.Size]byte]struct{}
+	pendingMCPApprovals    map[string]struct{}
 }
 
 type policyYAML struct {
@@ -281,34 +326,104 @@ func applyOverlay(effective *Policy, raw *policyYAML) error {
 	return nil
 }
 
-// DecideMCPServer resolves a server name without including names, endpoints,
-// arguments, or credentials in its audit-safe reason.
-func (p *Policy) DecideMCPServer(name string) MCPDecision {
-	if contains(p.DeniedMCPServers, name) {
+// TrustConfiguredMCPServer binds a static trusted_servers name to one exact,
+// explicitly configured launch identity. Discovered definitions cannot create
+// this binding merely by reusing a trusted name.
+func (p *Policy) TrustConfiguredMCPServer(identity MCPServerIdentity) {
+	if p == nil {
+		return
+	}
+	p.mcpMu.Lock()
+	defer p.mcpMu.Unlock()
+	if contains(p.DeniedMCPServers, identity.Name) || !contains(p.TrustedMCPServers, identity.Name) {
+		return
+	}
+	if p.trustedMCPIdentities == nil {
+		p.trustedMCPIdentities = make(map[[sha256.Size]byte]struct{})
+	}
+	p.trustedMCPIdentities[identity.Digest()] = struct{}{}
+}
+
+// DecideMCPServerIdentity resolves launch permission for an exact canonical
+// identity. Static and session trust never transfer to a changed identity.
+func (p *Policy) DecideMCPServerIdentity(identity MCPServerIdentity) MCPDecision {
+	if p == nil {
+		return MCPDecision{Permission: MCPRequireApproval, Reason: "security policy is not configured"}
+	}
+	p.mcpMu.RLock()
+	defer p.mcpMu.RUnlock()
+	if contains(p.DeniedMCPServers, identity.Name) {
 		return MCPDecision{Permission: MCPDeny, Reason: "server denied by security policy"}
 	}
-	if contains(p.TrustedMCPServers, name) {
-		return MCPDecision{Permission: MCPAllow, Reason: "server trusted by security policy"}
+	digest := identity.Digest()
+	if _, ok := p.trustedMCPIdentities[digest]; ok {
+		return MCPDecision{Permission: MCPAllow, Reason: "server configuration trusted by security policy"}
+	}
+	if _, ok := p.sessionMCPIdentities[digest]; ok {
+		return MCPDecision{Permission: MCPAllow, Reason: "server configuration approved for this session"}
 	}
 	permission := p.MCPDefaultPermission
 	if permission == "" {
 		permission = MCPRequireApproval
 	}
-	return MCPDecision{Permission: permission, Reason: "unrecognized server uses default security policy"}
+	return MCPDecision{Permission: permission, Reason: "unrecognized server configuration uses default security policy"}
 }
 
-// AllowMCPServerSession grants in-memory trust for name for this process.
-// Denied servers cannot be trusted, and the grant is not written to disk.
+// AllowMCPServerSessionIdentity grants in-memory trust to one exact launch
+// identity. The grant is not written to disk.
+func (p *Policy) AllowMCPServerSessionIdentity(identity MCPServerIdentity) error {
+	if p == nil {
+		return fmt.Errorf("security policy is not configured")
+	}
+	p.mcpMu.Lock()
+	defer p.mcpMu.Unlock()
+	if contains(p.DeniedMCPServers, identity.Name) {
+		return fmt.Errorf("server denied by security policy")
+	}
+	if p.sessionMCPIdentities == nil {
+		p.sessionMCPIdentities = make(map[[sha256.Size]byte]struct{})
+	}
+	p.sessionMCPIdentities[identity.Digest()] = struct{}{}
+	return nil
+}
+
+// BindMCPServerSession binds a pending legacy name approval to the identity at
+// the launch boundary. It intentionally does nothing when no approval is pending.
+func (p *Policy) BindMCPServerSession(identity MCPServerIdentity) error {
+	if p == nil {
+		return fmt.Errorf("security policy is not configured")
+	}
+	p.mcpMu.Lock()
+	defer p.mcpMu.Unlock()
+	if contains(p.DeniedMCPServers, identity.Name) {
+		return fmt.Errorf("server denied by security policy")
+	}
+	if _, ok := p.pendingMCPApprovals[identity.Name]; !ok {
+		return nil
+	}
+	delete(p.pendingMCPApprovals, identity.Name)
+	if p.sessionMCPIdentities == nil {
+		p.sessionMCPIdentities = make(map[[sha256.Size]byte]struct{})
+	}
+	p.sessionMCPIdentities[identity.Digest()] = struct{}{}
+	return nil
+}
+
+// AllowMCPServerSession records a pending name approval for the current caller.
+// The runtime must bind it to a full identity before launch.
 func (p *Policy) AllowMCPServerSession(name string) error {
 	if p == nil {
 		return fmt.Errorf("security policy is not configured")
 	}
+	p.mcpMu.Lock()
+	defer p.mcpMu.Unlock()
 	if contains(p.DeniedMCPServers, name) {
 		return fmt.Errorf("server denied by security policy")
 	}
-	if !contains(p.TrustedMCPServers, name) {
-		p.TrustedMCPServers = append(p.TrustedMCPServers, name)
+	if p.pendingMCPApprovals == nil {
+		p.pendingMCPApprovals = make(map[string]struct{})
 	}
+	p.pendingMCPApprovals[name] = struct{}{}
 	return nil
 }
 

@@ -58,13 +58,15 @@ mcp:
 	if !contains(effective.DeniedPaths, "private/**") || effective.MaxExecSeconds != 30 {
 		t.Fatalf("tightening overlay not applied: %#v", effective)
 	}
-	if got := effective.DecideMCPServer("postgres").Permission; got != MCPDeny {
+	filesystem := MCPServerIdentity{Name: "filesystem", Origin: "configured", Transport: "stdio", Command: "server"}
+	effective.TrustConfiguredMCPServer(filesystem)
+	if got := effective.DecideMCPServerIdentity(MCPServerIdentity{Name: "postgres"}).Permission; got != MCPDeny {
 		t.Fatalf("postgres decision = %q, want deny", got)
 	}
-	if got := effective.DecideMCPServer("filesystem").Permission; got != MCPAllow {
+	if got := effective.DecideMCPServerIdentity(filesystem).Permission; got != MCPAllow {
 		t.Fatalf("filesystem decision = %q, want allow", got)
 	}
-	if got := effective.DecideMCPServer("other").Permission; got != MCPDeny {
+	if got := effective.DecideMCPServerIdentity(MCPServerIdentity{Name: "other"}).Permission; got != MCPDeny {
 		t.Fatalf("unknown decision = %q, want tightened default deny", got)
 	}
 	if effective.MaxMCPConnections != 2 {
@@ -202,15 +204,15 @@ func TestMCPDecisionsUseSafeReasons(t *testing.T) {
 	secretName := "server-token-super-secret"
 	policy := embeddedPolicy(t, Overlay{Source: "project", Data: []byte("mcp:\n  denied_servers: ['" + secretName + "']\n")})
 	for _, name := range []string{secretName, "filesystem", "unknown-password-value"} {
-		decision := policy.DecideMCPServer(name)
+		decision := policy.DecideMCPServerIdentity(MCPServerIdentity{Name: name})
 		if strings.Contains(decision.Reason, name) || strings.Contains(decision.Reason, "super-secret") || strings.Contains(decision.Reason, "password") {
 			t.Fatalf("decision reason %q contains server or secret-shaped value", decision.Reason)
 		}
 	}
-	if got := policy.DecideMCPServer(secretName).Permission; got != MCPDeny {
+	if got := policy.DecideMCPServerIdentity(MCPServerIdentity{Name: secretName}).Permission; got != MCPDeny {
 		t.Fatalf("denied server decision = %q, want deny", got)
 	}
-	if got := policy.DecideMCPServer("unknown").Permission; got != MCPRequireApproval {
+	if got := policy.DecideMCPServerIdentity(MCPServerIdentity{Name: "unknown"}).Permission; got != MCPRequireApproval {
 		t.Fatalf("unknown server decision = %q, want require_approval", got)
 	}
 }
@@ -220,10 +222,53 @@ func TestAllowMCPServerSessionCannotOverrideDeny(t *testing.T) {
 	if err := policy.AllowMCPServerSession("denied"); err == nil {
 		t.Fatal("AllowMCPServerSession(denied) error = nil")
 	}
-	if err := policy.AllowMCPServerSession("filesystem"); err != nil {
-		t.Fatalf("AllowMCPServerSession(filesystem) error = %v", err)
+	identity := MCPServerIdentity{Name: "filesystem", Origin: "configured", Transport: "stdio", Command: "server", Args: []string{"--safe"}}
+	if err := policy.AllowMCPServerSessionIdentity(identity); err != nil {
+		t.Fatalf("AllowMCPServerSessionIdentity(filesystem) error = %v", err)
 	}
-	if got := policy.DecideMCPServer("filesystem").Permission; got != MCPAllow {
+	if got := policy.DecideMCPServerIdentity(identity).Permission; got != MCPAllow {
 		t.Fatalf("session trust = %q, want allow", got)
+	}
+	changed := identity
+	changed.Args = []string{"--unsafe"}
+	if got := policy.DecideMCPServerIdentity(changed).Permission; got != MCPRequireApproval {
+		t.Fatalf("changed session identity = %q, want require_approval", got)
+	}
+}
+
+func TestMCPServerIdentityDigestCoversCanonicalLaunchConfig(t *testing.T) {
+	base := MCPServerIdentity{Name: "server", Origin: "configured", Transport: "stdio", Command: "run", Args: []string{"a", "bc"}}
+	if base.Digest() != (MCPServerIdentity{Name: "server", Origin: "configured", Transport: "stdio", Command: "run", Args: []string{"a", "bc"}}).Digest() {
+		t.Fatal("equal launch configurations have different digests")
+	}
+	variants := []MCPServerIdentity{
+		{Name: "other", Origin: base.Origin, Transport: base.Transport, Command: base.Command, Args: base.Args},
+		{Name: base.Name, Origin: "discovered", Transport: base.Transport, Command: base.Command, Args: base.Args},
+		{Name: base.Name, Origin: base.Origin, Transport: "sse", Command: base.Command, Args: base.Args},
+		{Name: base.Name, Origin: base.Origin, Transport: base.Transport, Command: "other", Args: base.Args},
+		{Name: base.Name, Origin: base.Origin, Transport: base.Transport, Command: base.Command, Args: []string{"ab", "c"}},
+		{Name: base.Name, Origin: base.Origin, Transport: base.Transport, Command: base.Command, Args: base.Args, URL: "https://example.test"},
+	}
+	for i, variant := range variants {
+		if variant.Digest() == base.Digest() {
+			t.Errorf("variant %d did not change digest", i)
+		}
+	}
+}
+
+func TestStaticMCPTrustRequiresBoundConfiguredIdentity(t *testing.T) {
+	policy := &Policy{TrustedMCPServers: []string{"filesystem"}, MCPDefaultPermission: MCPRequireApproval}
+	configured := MCPServerIdentity{Name: "filesystem", Origin: "configured", Transport: "stdio", Command: "server"}
+	if got := policy.DecideMCPServerIdentity(configured).Permission; got != MCPRequireApproval {
+		t.Fatalf("unbound static trust = %q, want require_approval", got)
+	}
+	policy.TrustConfiguredMCPServer(configured)
+	if got := policy.DecideMCPServerIdentity(configured).Permission; got != MCPAllow {
+		t.Fatalf("bound static trust = %q, want allow", got)
+	}
+	changed := configured
+	changed.Command = "replacement"
+	if got := policy.DecideMCPServerIdentity(changed).Permission; got != MCPRequireApproval {
+		t.Fatalf("changed static identity = %q, want require_approval", got)
 	}
 }

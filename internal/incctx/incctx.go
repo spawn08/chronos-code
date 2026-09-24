@@ -29,6 +29,7 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/document"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
 )
 
@@ -129,7 +130,10 @@ func Wrap(a *agent.Agent, root string) {
 				}
 			}
 		}
-		resolved := resolvePath(root, path)
+		resolved, err := resolvePath(ctx, root, path)
+		if err != nil {
+			return nil, fmt.Errorf("file_read: %w", err)
+		}
 		stat, err := os.Stat(resolved)
 		if err != nil {
 			return nil, fmt.Errorf("file_read: %w", err)
@@ -176,11 +180,51 @@ func readDocumentRange(ctx context.Context, path string, start, end int) (any, e
 	}, nil
 }
 
-func resolvePath(root, path string) string {
-	if filepath.IsAbs(path) {
-		return path
+func resolvePath(ctx context.Context, configuredRoot, path string) (string, error) {
+	workspaceRoot := builtins.WorkspaceRoot(ctx, configuredRoot)
+	root, err := canonicalPath(workspaceRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
 	}
-	return filepath.Join(root, path)
+	if filepath.IsAbs(path) {
+		if requestRoot, overridden := builtins.WorkspaceRootFromContext(ctx); overridden && configuredRoot != "" {
+			configured, absErr := filepath.Abs(configuredRoot)
+			if absErr == nil && pathWithin(configured, path) {
+				relative, relErr := filepath.Rel(configured, path)
+				if relErr == nil {
+					path = filepath.Join(requestRoot, relative)
+				}
+			}
+		}
+	} else {
+		path = filepath.Join(workspaceRoot, path)
+	}
+	candidate, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	resolved, err := canonicalPath(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	if !pathWithin(root, resolved) {
+		return "", fmt.Errorf("path %q is outside request workspace", path)
+	}
+	return filepath.Clean(candidate), nil
+}
+
+func canonicalPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
+
+}
+
+func pathWithin(root, path string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // readRange stops at the requested end, rather than scanning the remainder just
@@ -295,7 +339,10 @@ func WrapGrep(a *agent.Agent, root string) {
 		if len(pattern) > maxLineBytes {
 			return nil, fmt.Errorf("file_grep: pattern exceeds 64 KiB")
 		}
-		resolvedPath := resolvePath(root, p)
+		resolvedPath, err := resolvePath(ctx, root, p)
+		if err != nil {
+			return nil, fmt.Errorf("file_grep: %w", err)
+		}
 		info, statErr := os.Lstat(resolvedPath)
 		if statErr != nil {
 			return nil, fmt.Errorf("file_grep: %w", statErr)
@@ -313,7 +360,7 @@ func WrapGrep(a *agent.Agent, root string) {
 		}
 
 		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0)}
-		var err error
+		err = nil
 		if info.IsDir() {
 			err = search.walk(ctx, resolvedPath, 0)
 		} else if info.Mode().IsRegular() {

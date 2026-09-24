@@ -89,6 +89,22 @@ func TestConfiguredSubagentInheritsIsolatedWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestConfiguredSubagentDerivesInvocationIdentity(t *testing.T) {
+	var observed agent.RunIdentity
+	child := resourceAgent(t, "child", resourceProvider{chat: func(ctx context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+		observed, _ = agent.RunIdentityFromContext(ctx)
+		return resourceReply("done"), nil
+	}})
+	runner := &configuredAgentRunner{agents: map[string]*agent.Agent{"child": child}}
+	parent := agent.RunIdentity{TaskID: "task-1", DeliveryID: "delivery-1", RoleID: "parent", InvocationID: "parent-run"}
+	if _, err := runner.Run(agent.WithRunIdentity(context.Background(), parent), harness.SubAgentSpec{Name: "child"}, "inspect"); err != nil {
+		t.Fatal(err)
+	}
+	if observed.TaskID != parent.TaskID || observed.DeliveryID != parent.DeliveryID || observed.RoleID != "child" || observed.ParentInvocationID != parent.InvocationID || observed.InvocationID == "" || observed.InvocationID == parent.InvocationID {
+		t.Fatalf("child identity = %+v, parent = %+v", observed, parent)
+	}
+}
+
 func TestSubagentResourcesAggregateAcrossParents(t *testing.T) {
 	ctx := resourceContext(t)
 	resources := &subagentResources{gate: make(chan struct{}, 3)}
@@ -243,24 +259,31 @@ func TestSubagentCapacityCancellationAndDeadline(t *testing.T) {
 	}
 }
 
-func TestSetupSubagentsSerializesConfiguredAgentAcrossParents(t *testing.T) {
+func TestSetupSubagentsRunsSameRoleWithIsolatedInvocationState(t *testing.T) {
 	ctx := resourceContext(t)
-	entered := make(chan struct{}, 2)
+	type observation struct {
+		task      string
+		identity  agent.RunIdentity
+		workspace string
+		messages  int
+	}
+	entered := make(chan observation, 2)
 	var calls atomic.Int32
 	provider := resourceProvider{chat: func(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 		calls.Add(1)
-		entered <- struct{}{}
 		task := req.Messages[len(req.Messages)-1].Content
-		if task == "hold" {
-			<-ctx.Done()
+		identity, _ := agent.RunIdentityFromContext(ctx)
+		workspace, _ := builtins.WorkspaceRootFromContext(ctx)
+		entered <- observation{task: task, identity: identity, workspace: workspace, messages: len(req.Messages)}
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.Canceled) {
 			return nil, ctx.Err()
-		}
-		if len(req.Messages) != 1 {
-			return nil, fmt.Errorf("conversation leaked: %d messages", len(req.Messages))
 		}
 		return resourceReply(task), nil
 	}}
 	a, b, worker := resourceAgent(t, "a", provider), resourceAgent(t, "b", provider), resourceAgent(t, "worker", provider)
+	a.SubAgents = []*agent.Agent{worker}
+	b.SubAgents = []*agent.Agent{worker}
 	if err := setupSubAgents(map[string]*agent.Agent{"a": a, "b": b, "worker": worker}); err != nil {
 		t.Fatal(err)
 	}
@@ -269,30 +292,52 @@ func TestSetupSubagentsSerializesConfiguredAgentAcrossParents(t *testing.T) {
 		return err
 	}
 	activeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- spawn(activeCtx, a, "hold") }()
-	resourceReceive(t, ctx, entered)
-	waitCtx, stop := context.WithTimeout(ctx, 30*time.Millisecond)
-	defer stop()
-	if err := spawn(waitCtx, b, "queued"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("same-agent wait error = %v", err)
+	done := make(chan error, 2)
+	parentA := agent.WithRunIdentity(builtins.WithWorkspaceRoot(activeCtx, "/workspace/a"), agent.RunIdentity{TaskID: "task", RoleID: "a", InvocationID: "parent-a"})
+	parentB := agent.WithRunIdentity(builtins.WithWorkspaceRoot(activeCtx, "/workspace/b"), agent.RunIdentity{TaskID: "task", RoleID: "b", InvocationID: "parent-b"})
+	go func() { done <- spawn(parentA, a, "first") }()
+	go func() { done <- spawn(parentB, b, "second") }()
+	first := resourceReceive(t, ctx, entered)
+	second := resourceReceive(t, ctx, entered)
+	if first.task == second.task || first.identity.InvocationID == second.identity.InvocationID || first.workspace == second.workspace {
+		t.Fatalf("same-role invocations leaked state: first=%+v second=%+v", first, second)
 	}
-	if calls.Load() != 1 {
-		t.Fatal("same configured agent ran concurrently across parents")
-	}
-	// An unrelated root owns worker: nested contention must also fail fast,
-	// even though no path cycle exists and global capacity is still available.
-	nestedCtx := context.WithValue(ctx, subagentActiveKey{}, true)
-	if err := spawn(nestedCtx, b, "nested"); !errors.Is(err, errSubagentBusy) {
-		t.Fatalf("nested same-agent contention error = %v", err)
+	for _, observed := range []observation{first, second} {
+		if observed.messages != 1 || observed.identity.RoleID != "worker" || observed.identity.ParentInvocationID == "" {
+			t.Fatalf("invalid invocation observation: %+v", observed)
+		}
 	}
 	cancel()
-	if err := resourceReceive(t, ctx, done); !errors.Is(err, context.Canceled) {
+	for range 2 {
+		if err := resourceReceive(t, ctx, done); !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("provider calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestSetupSubAgentsHonorsDeclaredChildren(t *testing.T) {
+	provider := resourceProvider{chat: func(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
+		return resourceReply("done"), nil
+	}}
+	parent := resourceAgent(t, "parent", provider)
+	allowed := resourceAgent(t, "allowed", provider)
+	forbidden := resourceAgent(t, "forbidden", provider)
+	parent.SubAgents = []*agent.Agent{allowed}
+	if err := setupSubAgents(map[string]*agent.Agent{"parent": parent, "allowed": allowed, "forbidden": forbidden}); err != nil {
 		t.Fatal(err)
 	}
-	if err := spawn(ctx, b, "fresh task"); err != nil {
-		t.Fatal(err)
+	definition, ok := parent.Tools.Get(harness.SpawnToolName)
+	if !ok {
+		t.Fatal("spawn_subagent tool is missing")
+	}
+	if !strings.Contains(definition.Description, "allowed") || strings.Contains(definition.Description, "forbidden") {
+		t.Fatalf("spawn_subagent description = %q", definition.Description)
+	}
+	if _, err := parent.Tools.Execute(context.Background(), harness.SpawnToolName, map[string]any{"agent": "forbidden", "task": "inspect"}); err == nil {
+		t.Fatal("undeclared configured peer was executable")
 	}
 }
 

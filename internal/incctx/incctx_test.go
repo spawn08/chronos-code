@@ -15,6 +15,7 @@ import (
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
 )
 
@@ -83,6 +84,52 @@ func TestWrapCanceledRegression(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("%s: want cancellation, got %v", name, err)
 		}
+	}
+}
+
+func TestWrapUsesRequestWorkspaceRoot(t *testing.T) {
+	configured := t.TempDir()
+	request := t.TempDir()
+	writeFile(t, configured, "same.txt", "configured marker")
+	writeFile(t, request, "same.txt", "request marker")
+	a := newTestAgent(t)
+	var calls atomic.Int64
+	registerFakeFileRead(a, configured, &calls)
+	registerFakeFileGrep(a, configured, &calls)
+	Wrap(a, configured)
+	WrapGrep(a, configured)
+	ctx := builtins.WithWorkspaceRoot(context.Background(), request)
+
+	read, err := a.Tools.Execute(ctx, "file_read", map[string]any{"path": "same.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read.(map[string]any)["content"]; got != "request marker" {
+		t.Fatalf("file_read content = %q, want request workspace", got)
+	}
+	grep, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": ".", "pattern": "marker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := grep.(map[string]any)["matches"].([]map[string]any)
+	if len(matches) != 1 || matches[0]["content"] != "request marker" {
+		t.Fatalf("file_grep matches = %#v, want request workspace only", matches)
+	}
+}
+
+func TestWrapRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	target := writeFile(t, outside, "outside.txt", "secret")
+	if err := os.Symlink(target, filepath.Join(root, "escape.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	a := newTestAgent(t)
+	var calls atomic.Int64
+	registerFakeFileRead(a, root, &calls)
+	Wrap(a, root)
+	if _, err := a.Tools.Execute(context.Background(), "file_read", map[string]any{"path": "escape.txt"}); err == nil || !strings.Contains(err.Error(), "outside request workspace") {
+		t.Fatalf("file_read symlink escape error = %v", err)
 	}
 }
 

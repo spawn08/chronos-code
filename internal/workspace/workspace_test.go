@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spawn08/chronos/engine/tool/builtins"
 )
 
 func writeFile(t *testing.T, path, contents string) {
@@ -139,6 +141,30 @@ func TestTool_HandlerReturnsWorkspaceSummary(t *testing.T) {
 	}
 	if _, hasFiles := m["files"]; hasFiles {
 		t.Error("result unexpectedly contains a full files list")
+	}
+}
+
+func TestToolUsesRequestWorkspaceSummary(t *testing.T) {
+	configuredRoot := t.TempDir()
+	requestRoot := t.TempDir()
+	writeFile(t, filepath.Join(configuredRoot, "go.mod"), "module configured\n")
+	writeFile(t, filepath.Join(requestRoot, "package.json"), "{}\n")
+	writeFile(t, filepath.Join(requestRoot, "child.txt"), "child\n")
+	configured, err := Detect(configuredRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Tool(configured).Handler(builtins.WithWorkspaceRoot(context.Background(), requestRoot), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := result.(map[string]any)
+	if summary["root"] != requestRoot || summary["file_count"] != 2 {
+		t.Fatalf("request workspace summary = %#v", summary)
+	}
+	languages := summary["languages"].([]string)
+	if len(languages) != 1 || languages[0] != "Node" {
+		t.Fatalf("request workspace languages = %v, want Node", languages)
 	}
 }
 

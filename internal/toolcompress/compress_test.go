@@ -8,7 +8,9 @@ import (
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/storage"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 )
 
@@ -136,5 +138,27 @@ func TestWrapCompressesLargeResult(t *testing.T) {
 	}
 	if !strings.Contains(reconstructed.String(), big) {
 		t.Fatal("paginated read_stored_result did not preserve the full original data")
+	}
+}
+
+func TestStoredResultIsScopedToRequestWorkspace(t *testing.T) {
+	a := newTestAgent(t)
+	a.Tools.Register(&tool.Definition{Name: "big_tool", Permission: tool.PermAllow, Handler: func(context.Context, map[string]any) (any, error) {
+		return map[string]any{"data": strings.Repeat("scoped result ", 2000)}, nil
+	}})
+	Wrap(a, 1)
+	rootA, rootB := t.TempDir(), t.TempDir()
+	ctxA := builtins.WithWorkspaceRoot(storage.WithSession(context.Background(), "shared-session"), rootA)
+	ctxB := builtins.WithWorkspaceRoot(storage.WithSession(context.Background(), "shared-session"), rootB)
+	result, err := a.Tools.Execute(ctxA, "big_tool", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := result.(map[string]any)["storage_key"].(string)
+	if _, err := a.Tools.Execute(ctxB, ReadStoredResultTool, map[string]any{"key": key}); err == nil {
+		t.Fatal("stored result from another workspace was readable")
+	}
+	if _, err := a.Tools.Execute(ctxA, ReadStoredResultTool, map[string]any{"key": key}); err != nil {
+		t.Fatalf("stored result was unavailable in its workspace: %v", err)
 	}
 }

@@ -75,6 +75,39 @@ func TestRealRepositoryIsolationCollectionAndIntegration(t *testing.T) {
 	}
 }
 
+func TestDependentWorktreeCharacterizesMissingPredecessorSnapshot(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	manager, err := New(filepath.Join(t.TempDir(), "project-data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "predecessor", DirtyPolicy: DirtyPreserve})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(predecessor.Manifest.WorktreePath, "tracked.txt"), []byte("accepted predecessor\n"))
+	if _, err := manager.Integrate(ctx, predecessor, []string{"tracked.txt"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dependent, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "dependent", DirtyPolicy: DirtyPreserve})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Cancel(context.Background(), dependent) })
+	got, err := os.ReadFile(filepath.Join(dependent.Manifest.WorktreePath, "tracked.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "base\n" {
+		t.Fatalf("dependent content = %q, want current HEAD characterization", got)
+	}
+	if parent, err := os.ReadFile(filepath.Join(repo, "tracked.txt")); err != nil || string(parent) != "accepted predecessor\n" {
+		t.Fatalf("parent predecessor content = %q, %v", parent, err)
+	}
+}
+
 func TestIntegrationConflictsLeaveParentBytesUnchanged(t *testing.T) {
 	for _, test := range []struct {
 		name    string

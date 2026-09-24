@@ -79,6 +79,9 @@ func (h sessionUXHook) editSession(ctx context.Context) string {
 }
 
 func mutatingTool(name string) bool {
+	if strings.HasPrefix(name, runtimeMCPToolNamePrefix) {
+		return true
+	}
 	switch name {
 	case "file_write", "shell", "shell_auto":
 		return true

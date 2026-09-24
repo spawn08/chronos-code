@@ -2,11 +2,14 @@ package security
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 
 	"github.com/spawn08/chronos-code/internal/defaults"
 )
@@ -226,6 +229,13 @@ shell:
 		{"sudo rm -rf /", true, Deny},
 		{"sed -n 1,20p README.md", false, Confirm},
 		{"sed -n 1,20p README.md", true, Confirm},
+		{"go test ./...; git push origin main", false, Confirm},
+		{"go test ./... && git push origin main", true, Confirm},
+		{"go test ./... | tee results.txt", false, Confirm},
+		{"go test $(git push origin main)", false, Confirm},
+		{"sh -c 'git push origin main'", true, Confirm},
+		{"go test './pkg;safe'", false, Auto},
+		{"go test ./...; sudo rm -rf /", false, Deny},
 	}
 	for _, tc := range cases {
 		if got := checker.Check("shell", map[string]any{"command": tc.command}, tc.yolo); got != tc.want {
@@ -249,6 +259,28 @@ func TestPermissionChecker_HardRestrictionsOverrideYolo(t *testing.T) {
 		if got := checker.Check(tc.name, tc.args, true); got != Deny {
 			t.Errorf("Check(%q, %#v, yolo=true) = %q, want %q", tc.name, tc.args, got, Deny)
 		}
+	}
+}
+
+func TestPermissionCheckerUsesRequestWorkspaceAndRejectsSymlinkEscape(t *testing.T) {
+	configured := t.TempDir()
+	request := t.TempDir()
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(request, "safe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(request, "escape")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	policy := &Policy{WritablePaths: []string{"."}, ReadablePaths: []string{"."}, writablePathsSpecified: true, readablePathsSpecified: true}
+	checker := NewPermissionChecker(policy, configured)
+	ctx := builtins.WithWorkspaceRoot(context.Background(), request)
+	configuredAbsolute := filepath.Join(configured, "safe", "new.txt")
+	if got := checker.CheckContext(ctx, "file_write", map[string]any{"path": configuredAbsolute}, true); got != Auto {
+		t.Fatalf("remapped request-workspace write = %q, want auto", got)
+	}
+	if got := checker.CheckContext(ctx, "file_read", map[string]any{"path": "escape/secret.txt"}, false); got != Deny {
+		t.Fatalf("symlink escape decision = %q, want deny", got)
 	}
 }
 

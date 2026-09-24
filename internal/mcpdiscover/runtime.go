@@ -158,6 +158,11 @@ func Start(ctx context.Context, configured, discovered []mcp.ServerConfig, regis
 		active: make(map[string]*activeServer), registry: registry, policy: policy, timeout: timeout, factory: factory,
 	}
 	runtime.servers = mergeServerConfigs(configured, discovered)
+	if policy != nil {
+		for _, cfg := range configured {
+			policy.TrustConfiguredMCPServer(serverIdentity(cfg, "configured"))
+		}
+	}
 	for _, cfg := range runtime.servers {
 		runtime.connectLocked(ctx, cfg, registry, policy, timeout, factory)
 	}
@@ -240,6 +245,7 @@ func (r *Runtime) ConnectServer(ctx context.Context, cfg mcp.ServerConfig, regis
 	} else {
 		r.replaceServerLocked(cfg)
 	}
+	_ = policy.BindMCPServerSession(r.serverIdentityLocked(cfg))
 	return r.connectLocked(ctx, cfg, registry, policy, timeout, factory)
 }
 
@@ -263,7 +269,7 @@ func (r *Runtime) connectLocked(ctx context.Context, cfg mcp.ServerConfig, regis
 	if policy == nil {
 		return r.setStatusLocked(status)
 	}
-	decision := policy.DecideMCPServer(cfg.Name)
+	decision := policy.DecideMCPServerIdentity(r.serverIdentityLocked(cfg))
 	if decision.Permission == security.MCPDeny {
 		status.State = StateDenied
 		return r.setStatusLocked(status)
@@ -371,7 +377,7 @@ func (r *Runtime) ReloadDiscovery(ctx context.Context, snapshot Snapshot) []Serv
 func (r *Runtime) reloadServerLocked(ctx context.Context, cfg mcp.ServerConfig) ServerStatus {
 	old := r.active[cfg.Name]
 	status := ServerStatus{Name: cfg.Name, Agent: r.agent, Source: r.sources[cfg.Name], State: StateReloadFailed, Retained: old != nil}
-	if r.policy == nil || r.policy.DecideMCPServer(cfg.Name).Permission != security.MCPAllow || validateRuntimeConfig(cfg) != nil {
+	if r.policy == nil || r.policy.DecideMCPServerIdentity(r.serverIdentityLocked(cfg)).Permission != security.MCPAllow || validateRuntimeConfig(cfg) != nil {
 		return r.setStatusLocked(status)
 	}
 	if old == nil && r.policy.MaxMCPConnections > 0 && r.connected >= r.policy.MaxMCPConnections {
@@ -414,6 +420,21 @@ func (r *Runtime) reloadServerLocked(ctx context.Context, cfg mcp.ServerConfig) 
 		}
 	}
 	return r.setStatusLocked(status)
+}
+
+func (r *Runtime) serverIdentityLocked(cfg mcp.ServerConfig) security.MCPServerIdentity {
+	origin := "discovered"
+	if _, ok := r.configured[cfg.Name]; ok {
+		origin = "configured"
+	}
+	return serverIdentity(cfg, origin)
+}
+
+func serverIdentity(cfg mcp.ServerConfig, origin string) security.MCPServerIdentity {
+	return security.MCPServerIdentity{
+		Name: cfg.Name, Origin: origin, Transport: string(cfg.Transport), Command: cfg.Command,
+		Args: append([]string(nil), cfg.Args...), URL: cfg.URL,
+	}
 }
 
 func (r *Runtime) prepareServerLocked(ctx context.Context, cfg mcp.ServerConfig) (RuntimeClient, []*tool.Definition, []string, error) {

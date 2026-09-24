@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 )
 
 func TestToolsRegisterEstablishedNames(t *testing.T) {
@@ -58,6 +60,96 @@ func TestWorkspaceRejectsTraversalAndSymlinkEscapeBeforeServer(t *testing.T) {
 		if _, err := diagnostics.Handler(context.Background(), map[string]any{"file": file}); err == nil {
 			t.Errorf("file %q should be rejected", file)
 		}
+	}
+	if lookups != 0 {
+		t.Fatalf("server lookups=%d, want 0", lookups)
+	}
+}
+
+func TestToolsResolveRelativePathAgainstRequestWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "main.go"), []byte("package parent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "main.go"), []byte("package child\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &toolTestClient{hover: &HoverResult{Contents: "child"}}
+	hover := definitionNamed(t, Tools(toolTestManager(child, client), parent), "lsp_hover")
+	ctx := builtins.WithWorkspaceRoot(context.Background(), child)
+	if _, err := hover.Handler(ctx, map[string]any{"file": "main.go", "line": 1, "character": 1}); err != nil {
+		t.Fatalf("hover in request workspace: %v", err)
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.text != "package child\n" {
+		t.Fatalf("opened text=%q, want child workspace file", client.text)
+	}
+}
+
+func TestToolsRejectRequestWorkspaceWhenManagerIsBoundElsewhere(t *testing.T) {
+	parent := t.TempDir()
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{parent, child} {
+		if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lookups := 0
+	manager := NewManager(parent,
+		WithExecutableLookup(func(command string) (string, error) {
+			lookups++
+			return command, nil
+		}),
+		WithClientStart(func(string, ...string) (ManagedClient, error) { return &toolTestClient{}, nil }),
+	)
+	hover := definitionNamed(t, Tools(manager, parent), "lsp_hover")
+	ctx := builtins.WithWorkspaceRoot(context.Background(), child)
+	_, err := hover.Handler(ctx, map[string]any{"file": "main.go", "line": 1, "character": 1})
+	if err == nil || !strings.Contains(err.Error(), "unavailable for request workspace") {
+		t.Fatalf("error=%v, want explicit request-workspace unavailable error", err)
+	}
+	if lookups != 0 {
+		t.Fatalf("server lookups=%d, want 0", lookups)
+	}
+}
+
+func TestRequestWorkspaceRejectsSymlinkEscapeBeforeServer(t *testing.T) {
+	parent := t.TempDir()
+	child := filepath.Join(parent, "child")
+	outside := t.TempDir()
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "outside.go"), []byte("package outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "outside.go"), filepath.Join(child, "main.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	lookups := 0
+	manager := NewManager(child,
+		WithExecutableLookup(func(command string) (string, error) {
+			lookups++
+			return command, nil
+		}),
+		WithClientStart(func(string, ...string) (ManagedClient, error) { return &toolTestClient{}, nil }),
+	)
+	diagnostics := definitionNamed(t, Tools(manager, parent), "lsp_diagnostics")
+	ctx := builtins.WithWorkspaceRoot(context.Background(), child)
+	if _, err := diagnostics.Handler(ctx, map[string]any{"file": "main.go"}); err == nil || !strings.Contains(err.Error(), "outside workspace") {
+		t.Fatalf("error=%v, want outside workspace error", err)
 	}
 	if lookups != 0 {
 		t.Fatalf("server lookups=%d, want 0", lookups)

@@ -8,12 +8,15 @@ package toolcompress
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
 )
@@ -194,8 +197,26 @@ func intArg(value any) int {
 }
 
 func sessionOrAgent(ctx context.Context, agentID string) string {
+	owner := agentID
 	if id := storage.SessionFromContext(ctx); id != "" {
-		return id
+		owner = id
 	}
-	return agentID
+	scope := ""
+	if identity, ok := agent.RunIdentityFromContext(ctx); ok {
+		scope = identity.ArtifactSnapshot
+	}
+	if scope == "" {
+		if root, ok := builtins.WorkspaceRootFromContext(ctx); ok {
+			if canonical, err := filepath.EvalSymlinks(root); err == nil {
+				scope = canonical
+			} else if absolute, absErr := filepath.Abs(root); absErr == nil {
+				scope = filepath.Clean(absolute)
+			}
+		}
+	}
+	if scope == "" {
+		return owner
+	}
+	digest := sha256.Sum256([]byte(scope))
+	return fmt.Sprintf("%s@%x", owner, digest[:8])
 }
