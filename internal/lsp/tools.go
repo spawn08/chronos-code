@@ -164,6 +164,7 @@ func detectLanguage(path string) string {
 func diagnosticsTool(state *toolState) *tool.Definition {
 	return &tool.Definition{
 		Name:        "lsp_diagnostics",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Get compiler errors and warnings for a file from the language server, without running a build.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -285,6 +286,7 @@ func renamePreviewTool(state *toolState) *tool.Definition {
 func positionTool(name, description string, state *toolState, request func(context.Context, ManagedClient, string, int, int, map[string]any) (any, error)) *tool.Definition {
 	return &tool.Definition{
 		Name:        name,
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: description,
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{

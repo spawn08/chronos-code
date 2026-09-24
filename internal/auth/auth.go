@@ -35,6 +35,7 @@ type Credential struct {
 // LoginAPIKey stores a bring-your-own API key credential for provider. API
 // keys never expire (ExpiresAt is left at its zero value).
 func LoginAPIKey(store *Store, provider, apiKey string) error {
+	provider = CanonicalProvider(provider)
 	return store.Save(provider, Credential{
 		Provider: provider,
 		Method:   MethodAPIKey,
@@ -45,7 +46,7 @@ func LoginAPIKey(store *Store, provider, apiKey string) error {
 // Logout removes the stored credential for provider. It is idempotent:
 // logging out a provider that was never logged in succeeds.
 func Logout(store *Store, provider string) error {
-	return store.Delete(provider)
+	return store.Delete(CanonicalProvider(provider))
 }
 
 // Status is a point-in-time snapshot of a provider's authentication state,
@@ -65,6 +66,7 @@ type Status struct {
 // with no stored credential is not an error: it yields
 // Status{Authenticated: false}.
 func GetStatus(store *Store, provider string) (Status, error) {
+	provider = CanonicalProvider(provider)
 	cred, err := store.Load(provider)
 	if err != nil {
 		if err == ErrNotFound {

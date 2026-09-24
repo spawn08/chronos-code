@@ -92,17 +92,19 @@ The orchestrator delegates intent classification to `internal/router`. The route
 
 - **Tier** — T0 (graph tools only), T1 (cheap model), or T2 (frontier model)
 - **Path** — `low`, `medium`, or `high` complexity
-- **Agent** — which agent to invoke (default: `chronos-code`; override: specialist or `ppd-planner`)
+- **Agent** — which agent to invoke (default: `chronos-code`; override: specialist or `delivery-strategist`)
 
 The orchestrator applies the `RoutingDecision` when constructing the Chronos turn.
 
-## PPD Delegation
+## Delivery Strategy Delegation
 
-When `ppd.mode: enabled` in `routing.yaml`, the orchestrator delegates qualifying work to `ppd-planner`:
+The `ppd` key is retained for config compatibility. When `ppd.mode: enabled`, the orchestrator delegates qualifying work to `delivery-strategist`, which proposes a bounded frontier but does not execute it:
 
 - **Qualifying criteria**: high-risk or high-complexity tasks, explicit PPD keywords, resume operations, or breadth exceeding file/package/call thresholds
-- **Shadow mode** (`ppd.mode: shadow`): routing decisions are recorded but `ppd-planner` is not invoked
+- **Shadow mode** (`ppd.mode: shadow`, the default): routing decisions are recorded but `delivery-strategist` is not invoked
 - **Disabled** (`ppd.mode: disabled`): PPD policy is skipped entirely
+
+There is no production rolling-replanning loop; enabled mode is a one-turn specialist delegation.
 
 ## See Also
 

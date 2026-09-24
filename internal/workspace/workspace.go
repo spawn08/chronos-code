@@ -186,6 +186,7 @@ func (i *Info) Banner() string {
 func Tool(info *Info) *tool.Definition {
 	return &tool.Definition{
 		Name:        "workspace_info",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Get the workspace root path, detected project language(s), and total indexed file count.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{

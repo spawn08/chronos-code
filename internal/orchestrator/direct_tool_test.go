@@ -105,6 +105,7 @@ func TestExecuteToolPropagatesCancellationAndTimeoutWithRuntimeEvidence(t *testi
 			a.Tools.Register(&tool.Definition{
 				Name:       "shell",
 				Permission: tool.PermAllow,
+				Effects:    []tool.Effect{tool.EffectProcessExecution},
 				Handler: func(ctx context.Context, _ map[string]any) (any, error) {
 					<-ctx.Done()
 					return map[string]any{"exit_code": -1}, nil
@@ -152,6 +153,7 @@ func TestExecuteToolReturnsAfterHookFailure(t *testing.T) {
 	a.Tools.Register(&tool.Definition{
 		Name:       "shell",
 		Permission: tool.PermAllow,
+		Effects:    []tool.Effect{tool.EffectProcessExecution},
 		Handler: func(context.Context, map[string]any) (any, error) {
 			return map[string]any{"stdout": "complete\n", "exit_code": 0}, nil
 		},

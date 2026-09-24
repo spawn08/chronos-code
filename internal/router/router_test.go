@@ -1,6 +1,7 @@
 package router
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos-code/internal/defaults"
@@ -369,7 +370,7 @@ func TestBundledImplementationPaths(t *testing.T) {
 		t.Fatalf("medium path = %+v", medium)
 	}
 	high := cfg.PathFor(ComplexityHigh)
-	if high.MaxToolCalls != 24 || high.Plan != "ppd-or-working-plan" {
+	if high.MaxToolCalls != 24 || high.Plan != "durable-or-working-plan" {
 		t.Fatalf("high path = %+v", high)
 	}
 }
@@ -408,12 +409,58 @@ func TestBundledModelRouting(t *testing.T) {
 			t.Errorf("bundled model %+v is not registered in modelinfo", got)
 		}
 	}
+	if got, ok := cfg.ResolveModelForRole("coder", ComplexityLow, TaskKindEdit); !ok || got != want[Classification{Complexity: ComplexityMedium, Kind: TaskKindEdit}] {
+		t.Fatalf("ResolveModelForRole(coder, low, edit) = (%+v, %v), want medium/edit floor", got, ok)
+	}
+	if got, ok := cfg.ResolveModelForRole("researcher", ComplexityLow, TaskKindEdit); !ok || got != want[Classification{Complexity: ComplexityLow, Kind: TaskKindEdit}] {
+		t.Fatalf("ResolveModelForRole(researcher, low, edit) = (%+v, %v), want low/edit", got, ok)
+	}
 
 	fallback := want[Classification{Complexity: ComplexityMedium, Kind: TaskKindEdit}]
 	for i := 0; i < 2; i++ {
 		got, ok := cfg.ResolveModel(ComplexityHigh, TaskKindExplain)
 		if !ok || got != fallback {
 			t.Errorf("fallback attempt %d = (%+v, %v), want (%+v, true)", i+1, got, ok, fallback)
+		}
+	}
+}
+
+func TestParseRejectsUnknownTopLevelKey(t *testing.T) {
+	_, err := Parse([]byte("router: {}\nunsupported_feature: {}\n"))
+	if err == nil || !strings.Contains(err.Error(), `unknown top-level key "unsupported_feature"`) {
+		t.Fatalf("Parse() error = %v, want unknown top-level key", err)
+	}
+}
+
+func TestParseRejectsInvalidRoleFloors(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{name: "empty role ID", yaml: "model_routing:\n  role_floors:\n    \"\": medium\n", wantErr: "empty role ID"},
+		{name: "whitespace role ID", yaml: "model_routing:\n  role_floors:\n    \"  \": medium\n", wantErr: "empty role ID"},
+		{name: "invalid floor", yaml: "model_routing:\n  role_floors:\n    coder: critical\n", wantErr: `role_floors["coder"] must be low, medium, or high`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.yaml))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Parse() error = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestBundledRoutingDoesNotAdvertiseUnsupportedSections(t *testing.T) {
+	data, err := defaults.ReadFile("routing.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, section := range []string{"escalation:", "pipelines:", "cost_optimization:"} {
+		if strings.Contains(string(data), "\n"+section) {
+			t.Errorf("bundled routing contains unsupported top-level section %q", section)
 		}
 	}
 }

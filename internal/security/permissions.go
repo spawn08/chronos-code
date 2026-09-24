@@ -54,13 +54,13 @@ func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, a
 			return Deny
 		}
 		command, _ := args["command"].(string)
-		segments, compound := shellCommandSegments(command)
-		for _, segment := range segments {
+		analysis := analyzeShellCommand(command)
+		for _, segment := range analysis.segments {
 			if matchesAnyRegex(c.policy.neverAllow, segment) {
 				return Deny
 			}
 		}
-		if compound || invokesShellInterpreter(command) {
+		if analysis.ambiguous {
 			return Confirm
 		}
 		if !c.guard.shellCommandAllowed(command) {
@@ -93,7 +93,12 @@ func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, a
 	}
 }
 
-func shellCommandSegments(command string) ([]string, bool) {
+type shellAnalysis struct {
+	segments  []string
+	ambiguous bool
+}
+
+func analyzeShellCommand(command string) shellAnalysis {
 	var segments []string
 	start := 0
 	quote := rune(0)
@@ -110,6 +115,20 @@ func shellCommandSegments(command string) ([]string, bool) {
 			continue
 		}
 		if quote != 0 {
+			if quote == '"' && current == '$' && i+1 < len(runes) && runes[i+1] == '(' {
+				compound = true
+				if end := matchingParen(runes, i+2); end > i+2 {
+					if nested := strings.TrimSpace(string(runes[i+2 : end])); nested != "" {
+						segments = append(segments, nested)
+					}
+				}
+			}
+			if quote == '"' && current == '`' {
+				compound = true
+				if end := nextRune(runes, i+1, '`'); end > i+1 {
+					segments = append(segments, strings.TrimSpace(string(runes[i+1:end])))
+				}
+			}
 			if current == quote {
 				quote = 0
 			}
@@ -119,8 +138,13 @@ func shellCommandSegments(command string) ([]string, bool) {
 			quote = current
 			continue
 		}
-		if current == '`' || current == '\n' || current == '\r' || current == ';' || current == '|' || current == '&' {
+		if current == '`' || current == '\n' || current == '\r' || current == ';' || current == '|' || current == '&' || current == '<' || current == '>' {
 			compound = true
+			if current == '`' {
+				if end := nextRune(runes, i+1, '`'); end > i+1 {
+					segments = append(segments, strings.TrimSpace(string(runes[i+1:end])))
+				}
+			}
 			if segment := strings.TrimSpace(string(runes[start:i])); segment != "" {
 				segments = append(segments, segment)
 			}
@@ -128,6 +152,11 @@ func shellCommandSegments(command string) ([]string, bool) {
 		}
 		if current == '$' && i+1 < len(runes) && runes[i+1] == '(' {
 			compound = true
+			if end := matchingParen(runes, i+2); end > i+2 {
+				if nested := strings.TrimSpace(string(runes[i+2 : end])); nested != "" {
+					segments = append(segments, nested)
+				}
+			}
 		}
 	}
 	if segment := strings.TrimSpace(string(runes[start:])); segment != "" {
@@ -136,20 +165,77 @@ func shellCommandSegments(command string) ([]string, bool) {
 	if len(segments) == 0 {
 		segments = []string{strings.TrimSpace(command)}
 	}
-	return segments, compound || quote != 0 || escaped
+	interpreterSegments, interpreter := interpretedSegments(command)
+	segments = append(segments, interpreterSegments...)
+	return shellAnalysis{segments: segments, ambiguous: compound || quote != 0 || escaped || interpreter}
 }
 
-func invokesShellInterpreter(command string) bool {
+func nextRune(value []rune, start int, target rune) int {
+	for i := start; i < len(value); i++ {
+		if value[i] == target {
+			return i
+		}
+	}
+	return -1
+}
+
+func matchingParen(command []rune, start int) int {
+	depth := 1
+	for i := start; i < len(command); i++ {
+		switch command[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func interpretedSegments(command string) ([]string, bool) {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
-		return false
+		return nil, false
 	}
-	switch filepathBase(fields[0]) {
-	case "sh", "bash", "dash", "zsh", "ksh", "fish":
-		return true
-	default:
-		return false
+	start := 0
+	if filepathBase(fields[0]) == "env" {
+		start = 1
+		for start < len(fields) && (strings.HasPrefix(fields[start], "-") || strings.Contains(fields[start], "=")) {
+			start++
+		}
 	}
+	var payloads []string
+	for i := start; i < len(fields); i++ {
+		name := filepathBase(fields[i])
+		var flags map[string]bool
+		switch name {
+		case "sh", "bash", "dash", "zsh", "ksh", "fish", "python", "python3":
+			flags = map[string]bool{"-c": true}
+		case "node":
+			flags = map[string]bool{"-e": true, "--eval": true}
+		case "ruby", "perl":
+			flags = map[string]bool{"-e": true}
+		default:
+			continue
+		}
+		for j := i + 1; j < len(fields); j++ {
+			if flags[fields[j]] && j+1 < len(fields) {
+				if flagAt := strings.Index(command, fields[j]); flagAt >= 0 {
+					payload := strings.TrimSpace(command[flagAt+len(fields[j]):])
+					if len(payload) >= 2 && (payload[0] == '\'' && payload[len(payload)-1] == '\'' || payload[0] == '"' && payload[len(payload)-1] == '"') {
+						payload = payload[1 : len(payload)-1]
+					}
+					payloads = append(payloads, payload)
+				}
+				break
+			}
+		}
+		return payloads, true
+	}
+	return nil, false
 }
 
 func filepathBase(path string) string {

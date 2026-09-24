@@ -421,7 +421,11 @@ func TestSharedPoolLateTrustAndRegistrationFailureAreLocal(t *testing.T) {
 	if created != 1 || len(lateRegistry.List()) != 0 || len(blockedRegistry.List()) != 0 || blocked.Statuses()[0].State != StateDenied {
 		t.Fatal("shared transport bypassed server policy")
 	}
-	if err := pending.AllowMCPServerSession("filesystem"); err != nil {
+	identity, ok := late.Identity("filesystem")
+	if !ok {
+		t.Fatal("server identity unavailable")
+	}
+	if err := pending.AllowMCPServerSessionIdentity(identity); err != nil {
 		t.Fatal(err)
 	}
 	if status := late.ConnectServer(context.Background(), poolConfig(), lateRegistry, pending, time.Second, pool.NewClient); status.State != StateConnected {

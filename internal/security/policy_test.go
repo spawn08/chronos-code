@@ -219,8 +219,8 @@ func TestMCPDecisionsUseSafeReasons(t *testing.T) {
 
 func TestAllowMCPServerSessionCannotOverrideDeny(t *testing.T) {
 	policy := &Policy{DeniedMCPServers: []string{"denied"}, MCPDefaultPermission: MCPRequireApproval}
-	if err := policy.AllowMCPServerSession("denied"); err == nil {
-		t.Fatal("AllowMCPServerSession(denied) error = nil")
+	if err := policy.AllowMCPServerSessionIdentity(MCPServerIdentity{Name: "denied"}); err == nil {
+		t.Fatal("AllowMCPServerSessionIdentity(denied) error = nil")
 	}
 	identity := MCPServerIdentity{Name: "filesystem", Origin: "configured", Transport: "stdio", Command: "server", Args: []string{"--safe"}}
 	if err := policy.AllowMCPServerSessionIdentity(identity); err != nil {
@@ -244,6 +244,7 @@ func TestMCPServerIdentityDigestCoversCanonicalLaunchConfig(t *testing.T) {
 	variants := []MCPServerIdentity{
 		{Name: "other", Origin: base.Origin, Transport: base.Transport, Command: base.Command, Args: base.Args},
 		{Name: base.Name, Origin: "discovered", Transport: base.Transport, Command: base.Command, Args: base.Args},
+		{Name: base.Name, Origin: base.Origin, ConfigDigest: "changed", Transport: base.Transport, Command: base.Command, Args: base.Args},
 		{Name: base.Name, Origin: base.Origin, Transport: "sse", Command: base.Command, Args: base.Args},
 		{Name: base.Name, Origin: base.Origin, Transport: base.Transport, Command: "other", Args: base.Args},
 		{Name: base.Name, Origin: base.Origin, Transport: base.Transport, Command: base.Command, Args: []string{"ab", "c"}},
@@ -253,6 +254,22 @@ func TestMCPServerIdentityDigestCoversCanonicalLaunchConfig(t *testing.T) {
 		if variant.Digest() == base.Digest() {
 			t.Errorf("variant %d did not change digest", i)
 		}
+	}
+}
+
+func TestOnlyUserPolicyCanAdmitProjectHookDigest(t *testing.T) {
+	floor := []byte("version: v1\n")
+	user := Overlay{Source: "user", Data: []byte("hooks:\n  trusted_digests: ['abc123']\n")}
+	policy, err := ResolvePolicy(floor, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(policy.TrustedHookDigests, "abc123") {
+		t.Fatalf("trusted hook digests = %v", policy.TrustedHookDigests)
+	}
+	_, err = ResolvePolicy(floor, Overlay{Source: "project", Data: user.Data})
+	if err == nil || !strings.Contains(err.Error(), "may only be granted by user policy") {
+		t.Fatalf("project hook trust error = %v", err)
 	}
 }
 

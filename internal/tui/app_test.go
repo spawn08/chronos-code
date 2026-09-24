@@ -1515,6 +1515,7 @@ func TestShellEscapeUsesRegisteredShellWithoutDirectExecution(t *testing.T) {
 	m.orch.ActiveAgent().Tools.Register(&tool.Definition{
 		Name:       "shell",
 		Permission: tool.PermAllow,
+		Effects:    []tool.Effect{tool.EffectProcessExecution},
 		Handler: func(_ context.Context, args map[string]any) (any, error) {
 			called = true
 			if args["command"] != command {
@@ -1557,6 +1558,7 @@ func TestShellEscapePassesWorkspaceToRegisteredShell(t *testing.T) {
 	m.orch.ActiveAgent().Tools.Register(&tool.Definition{
 		Name:       "shell",
 		Permission: tool.PermAllow,
+		Effects:    []tool.Effect{tool.EffectProcessExecution},
 		Handler: func(_ context.Context, args map[string]any) (any, error) {
 			if args["working_dir"] != root {
 				t.Fatalf("working_dir = %q, want %q", args["working_dir"], root)

@@ -34,6 +34,7 @@ func Tools(store *Store, root string) []*tool.Definition {
 func codebaseMapTool(store *Store, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_map",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Render deterministic package maps, selecting packages by indexed symbol relevance and package name.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -115,6 +116,7 @@ func limitCodebaseMapOutputBytes(output string) string {
 func codebaseSearchTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_search",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Search indexed symbols by exact name and full-text relevance.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -162,6 +164,7 @@ func codebaseSearchTool(store *Store) *tool.Definition {
 func graphQueryTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "graph_query",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Look up a symbol by name. Returns kind, location, signature, and doc for every match.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -197,6 +200,7 @@ func graphQueryTool(store *Store) *tool.Definition {
 func findCallersTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_callers",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Find functions that call a given function or method, up to a bounded call-chain depth.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -252,6 +256,7 @@ func findCallersTool(store *Store) *tool.Definition {
 func findImplementationsTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_implementations",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Find concrete types that implement a given interface.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -278,6 +283,7 @@ func findImplementationsTool(store *Store) *tool.Definition {
 func resolveSymbolTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "resolve_symbol",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Go-to-definition: resolve a symbol name to its definition location(s).",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -319,6 +325,7 @@ func resolveSymbolTool(store *Store) *tool.Definition {
 func multiResolutionViewTool(store *Store, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "multi_resolution_view",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "View code at a chosen zoom level. L0=repo overview, L1=package summary, L2=symbol summary, L3=source snippet.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{

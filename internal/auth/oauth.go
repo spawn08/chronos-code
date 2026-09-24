@@ -215,6 +215,7 @@ func writeCallbackHTML(w http.ResponseWriter, ok bool) {
 // verifier/challenge generation and the authorization-URL-building logic
 // (buildAuthURL) are unit-tested in isolation instead.
 func LoginPKCE(ctx context.Context, store *Store, cfg ProviderOAuthConfig, onPromptURL func(string)) error {
+	cfg.Provider = CanonicalProvider(cfg.Provider)
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
@@ -279,6 +280,7 @@ func LoginPKCE(ctx context.Context, store *Store, cfg ProviderOAuthConfig, onPro
 // golang.org/x/oauth2's Config.DeviceAccessToken, and also respects ctx
 // cancellation/timeout.
 func LoginDeviceCode(ctx context.Context, store *Store, cfg ProviderOAuthConfig, onPrompt func(userCode, verificationURI string)) error {
+	cfg.Provider = CanonicalProvider(cfg.Provider)
 	oc := cfg.oauth2Config()
 	da, err := oc.DeviceAuth(ctx)
 	if err != nil {
@@ -303,6 +305,7 @@ func LoginDeviceCode(ctx context.Context, store *Store, cfg ProviderOAuthConfig,
 // token. Credentials stored via LoginAPIKey (MethodAPIKey) never expire,
 // so Refresh is a no-op for them.
 func Refresh(ctx context.Context, store *Store, cfg ProviderOAuthConfig) error {
+	cfg.Provider = CanonicalProvider(cfg.Provider)
 	cred, err := store.Load(cfg.Provider)
 	if err != nil {
 		return err
@@ -361,6 +364,7 @@ const DefaultRefreshWindow = 60 * time.Second
 // this field set (ClientID/TokenURL empty) — in the latter case the caller
 // must re-run login or auth refresh with explicit flags once.
 func AutoRefreshStored(ctx context.Context, store *Store, provider string, window time.Duration) error {
+	provider = CanonicalProvider(provider)
 	cred, err := store.Load(provider)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {

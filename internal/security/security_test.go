@@ -234,8 +234,16 @@ shell:
 		{"go test ./... | tee results.txt", false, Confirm},
 		{"go test $(git push origin main)", false, Confirm},
 		{"sh -c 'git push origin main'", true, Confirm},
+		{"env SAFE=1 bash -c 'git push origin main'", true, Confirm},
+		{"python3 -c 'print(1)'", true, Confirm},
+		{"node --eval 'console.log(1)'", true, Confirm},
+		{"go test ./... > results.txt", true, Confirm},
 		{"go test './pkg;safe'", false, Auto},
 		{"go test ./...; sudo rm -rf /", false, Deny},
+		{"go test $(sudo rm -rf /)", true, Deny},
+		{`go test "$(sudo rm -rf /)"`, true, Deny},
+		{"go test \"`sudo rm -rf /`\"", true, Deny},
+		{"sh -c 'sudo rm -rf /'", true, Deny},
 	}
 	for _, tc := range cases {
 		if got := checker.Check("shell", map[string]any{"command": tc.command}, tc.yolo); got != tc.want {
@@ -449,16 +457,13 @@ func TestGuard_Shell_NeverAllowHardBlocksEvenForPlainShell(t *testing.T) {
 	}
 }
 
-func TestGuard_Shell_NeverAllowDoesNotBlockPipelinedUses(t *testing.T) {
-	// Anchored at the start of the command, so grep/sed used as a filter
-	// stage in a pipeline (not a direct file/dir search) is unaffected.
+func TestGuard_Shell_NeverAllowBlocksPipelinedUses(t *testing.T) {
 	policy := defaultTestPolicy()
 	policy.neverAllow = compileTestPatterns(t, `^sed\s+-n\s`, `^grep\s+-[a-zA-Z]*r?n[a-zA-Z]*(\s|$)`)
 	g := NewGuard(policy, "/workspace", nil)
 
 	cases := []string{
 		`go test ./... 2>&1 | grep -n FAIL`,
-		`git log --oneline | grep -i fix`,
 	}
 	for _, command := range cases {
 		evt := &hooks.Event{
@@ -466,8 +471,8 @@ func TestGuard_Shell_NeverAllowDoesNotBlockPipelinedUses(t *testing.T) {
 			Name:  "shell",
 			Input: map[string]any{"command": command},
 		}
-		if err := g.Before(context.Background(), evt); err != nil {
-			t.Errorf("expected %q to be unaffected by never_allow, got: %v", command, err)
+		if err := g.Before(context.Background(), evt); err == nil {
+			t.Errorf("expected %q to be blocked by never_allow", command)
 		}
 	}
 }

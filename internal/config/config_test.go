@@ -21,14 +21,14 @@ func TestEmbeddedDefaultsStartFreshSession(t *testing.T) {
 	if cfg.Session.AutoResume {
 		t.Fatal("embedded session.auto_resume = true, want false for a clean default startup")
 	}
-	foundPPDPlanner := false
+	foundStrategist := false
 	for _, configured := range cfg.Agents {
-		if configured.ID == "ppd-planner" {
-			foundPPDPlanner = configured.System != "" && len(configured.Tools) > 0
+		if configured.ID == "delivery-strategist" {
+			foundStrategist = configured.System != "" && len(configured.Tools) > 0
 		}
 	}
-	if !foundPPDPlanner {
-		t.Fatal("embedded defaults do not include a configured ppd-planner")
+	if !foundStrategist {
+		t.Fatal("embedded defaults do not include a configured delivery-strategist")
 	}
 }
 
@@ -205,6 +205,24 @@ func TestMergeHooksReplacesOnlyExplicitPoints(t *testing.T) {
 	}
 	if got := base.UserPromptSubmit; len(got) != 1 || got[0].Name != "base-prompt" {
 		t.Errorf("UserPromptSubmit = %#v, want inherited hook", got)
+	}
+}
+
+func TestMergeHooksBindsSourceAndDigest(t *testing.T) {
+	base := HooksConfig{}
+	overlay := HooksConfig{PreToolCall: []HookDef{{Name: "check", Command: "true", TimeoutMs: 1000}}, preToolCallSet: true}
+	mergeHooks(&base, overlay, "project")
+	if len(base.PreToolCall) != 1 {
+		t.Fatalf("hooks = %#v", base.PreToolCall)
+	}
+	hook := base.PreToolCall[0]
+	if hook.Source != "project" || hook.Digest == "" || hook.Digest != hook.IdentityDigest() {
+		t.Fatalf("hook provenance = %#v", hook)
+	}
+	changed := hook
+	changed.Command = "false"
+	if changed.IdentityDigest() == hook.Digest {
+		t.Fatal("changed hook command retained digest")
 	}
 }
 
@@ -414,6 +432,25 @@ server:
 	}
 	if got := effective.Sources["server.api_key"]; got != "cli" {
 		t.Errorf("source server.api_key = %q, want cli", got)
+	}
+}
+
+func TestPrimaryAgentModelReportsOverrideProvenance(t *testing.T) {
+	base := mustConfig(t, `
+agents:
+  - id: chronos-code
+    model: {provider: anthropic, model: yaml-model}
+`)
+	setAgentModelSources(base, base.Agents, "project")
+	if err := base.OverridePrimaryModel("openai", "cli-model", "cli", "env:CHRONOS_CODE_MODEL"); err != nil {
+		t.Fatal(err)
+	}
+	id, model, providerSource, modelSource := base.PrimaryAgentModel()
+	if id != "chronos-code" || model.Provider != "openai" || model.Model != "cli-model" {
+		t.Fatalf("primary = %q %+v", id, model)
+	}
+	if providerSource != "cli" || modelSource != "env:CHRONOS_CODE_MODEL" {
+		t.Fatalf("sources = %q, %q", providerSource, modelSource)
 	}
 }
 

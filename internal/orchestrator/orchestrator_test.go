@@ -814,13 +814,13 @@ func TestFormatRoutingHintStaysAdvisory(t *testing.T) {
 	if !strings.Contains(same, "Path:") || strings.Contains(same, "spawn_subagent debugger") {
 		t.Fatalf("same-agent hint = %q", same)
 	}
-	shadow := &router.PPDDecision{Action: router.PPDActionShadow, Specialist: "ppd-planner"}
+	shadow := &router.PPDDecision{Action: router.PPDActionShadow, Specialist: "delivery-strategist"}
 	low := router.Classification{Complexity: router.ComplexityLow, Kind: router.TaskKindEdit}
-	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), shadow); !strings.Contains(got, "ppd-planner") || !strings.Contains(got, "Path:") {
+	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), shadow); !strings.Contains(got, "delivery-strategist") || !strings.Contains(got, "Path:") {
 		t.Fatalf("shadow hint = %q", got)
 	}
-	delegate := &router.PPDDecision{Action: router.PPDActionDelegate, Specialist: "ppd-planner"}
-	if got := formatRoutingHint("ppd-planner", "code", "coder", true, class, path, delegate); got != "" {
+	delegate := &router.PPDDecision{Action: router.PPDActionDelegate, Specialist: "delivery-strategist"}
+	if got := formatRoutingHint("delivery-strategist", "code", "coder", true, class, path, delegate); got != "" {
 		t.Fatalf("delegate hint = %q, want empty", got)
 	}
 }
@@ -843,6 +843,30 @@ func TestResolvedModelPreservesExplicitOverride(t *testing.T) {
 	}
 	if builds != 0 {
 		t.Fatalf("provider builds = %d, want 0", builds)
+	}
+}
+
+func TestResolvedModelHonorsRoleFloor(t *testing.T) {
+	low := router.ModelSpec{Provider: "anthropic", Model: "claude-haiku-4-5"}
+	medium := router.ModelSpec{Provider: "anthropic", Model: "claude-sonnet-4-6"}
+	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
+		router.ComplexityLow:    {router.TaskKindEdit: low},
+		router.ComplexityMedium: {router.TaskKindEdit: medium},
+	})
+	orch.routingConfig.ModelRouting.RoleFloors = map[string]router.Complexity{
+		"coder": router.ComplexityMedium,
+	}
+
+	ctx := orch.applyResolvedModel(context.Background(), "coder", "change this")
+	selected := agent.ModelProvider(ctx, orch.agents["coder"].Model)
+	if selected.Name() != medium.Provider || selected.Model() != medium.Model {
+		t.Fatalf("coder request model = (%q, %q), want floor (%q, %q)", selected.Name(), selected.Model(), medium.Provider, medium.Model)
+	}
+
+	ctx = orch.applyResolvedModel(context.Background(), "debugger", "change this")
+	selected = agent.ModelProvider(ctx, orch.agents["debugger"].Model)
+	if selected.Name() != low.Provider || selected.Model() != low.Model {
+		t.Fatalf("unfloored request model = (%q, %q), want low route (%q, %q)", selected.Name(), selected.Model(), low.Provider, low.Model)
 	}
 }
 
@@ -912,6 +936,24 @@ func TestSwitchModelKeepsAzureConnectionSettings(t *testing.T) {
 	}
 	if built.Endpoint != "" || built.APIVersion != "" || built.Deployment != "" {
 		t.Fatalf("Azure settings leaked to another provider: %+v", built)
+	}
+}
+
+func TestBuildModelProviderUsesExecutingAgentConfig(t *testing.T) {
+	cfg := &config.Config{FileConfig: agent.FileConfig{Agents: []agent.AgentConfig{
+		{ID: "coder", Model: agent.ModelConfig{Provider: "openai", Model: "coder-model", APIKey: "coder-key", BaseURL: "https://coder.example/v1"}},
+		{ID: "debugger", Model: agent.ModelConfig{Provider: "openai", Model: "debug-model", APIKey: "debug-key", BaseURL: "https://debug.example/v1"}},
+	}}}
+	var built agent.ModelConfig
+	orch := &Orchestrator{active: "coder", cfg: cfg, buildProvider: func(mc agent.ModelConfig) (model.Provider, error) {
+		built = mc
+		return &routingTestProvider{provider: mc.Provider, model: mc.Model}, nil
+	}}
+	if _, err := orch.buildModelProvider(context.Background(), "debugger", "openai", "routed-model"); err != nil {
+		t.Fatal(err)
+	}
+	if built.APIKey != "debug-key" || built.BaseURL != "https://debug.example/v1" || built.Model != "routed-model" {
+		t.Fatalf("built config = %+v", built)
 	}
 }
 
@@ -1858,6 +1900,30 @@ func TestConnectMCPApprovesDiscoveredServer(t *testing.T) {
 	}
 }
 
+func TestConnectMCPRejectsInconsistentAgentIdentitiesBeforeLaunch(t *testing.T) {
+	agents := map[string]*agent.Agent{
+		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
+		"reviewer": {ID: "reviewer", Tools: tool.NewRegistry()},
+	}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	created := 0
+	factory := func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) {
+		created++
+		return &orchestratorMCPClient{}, nil
+	}
+	runtimes := []*mcpdiscover.Runtime{
+		mcpdiscover.Start(context.Background(), []mcp.ServerConfig{{Name: "filesystem", Transport: mcp.TransportStdio, Command: "server-a"}}, nil, agents["coder"].Tools, policy, time.Second, factory),
+		mcpdiscover.Start(context.Background(), []mcp.ServerConfig{{Name: "filesystem", Transport: mcp.TransportStdio, Command: "server-b"}}, nil, agents["reviewer"].Tools, policy, time.Second, factory),
+	}
+	orch := &Orchestrator{agents: agents, policy: policy, mcpRuntimes: runtimes, mcpFactory: factory}
+	if _, err := orch.ConnectMCP(context.Background(), "filesystem"); err == nil || !strings.Contains(err.Error(), "inconsistent") {
+		t.Fatalf("ConnectMCP() error = %v, want inconsistent identity", err)
+	}
+	if created != 0 {
+		t.Fatalf("created clients = %d, want 0", created)
+	}
+}
+
 func TestSetupSecurityUsesFloorWhenOverlaysAreMissing(t *testing.T) {
 	agents := map[string]*agent.Agent{"coder": {ID: "coder"}}
 	policy, err := setupSecurity(t.TempDir(), t.TempDir(), "/workspace", nil, agents)
@@ -1988,9 +2054,21 @@ func registerApprovalTool(registry *tool.Registry, name string, executions *int)
 }
 
 func registerPermissionTool(registry *tool.Registry, name string, permission tool.Permission, executions *int) {
+	effects := []tool.Effect{}
+	switch {
+	case name == "file_read":
+		effects = []tool.Effect{tool.EffectRead}
+	case name == "file_write":
+		effects = []tool.Effect{tool.EffectDeliveryWrite}
+	case name == "shell" || name == "shell_auto":
+		effects = []tool.Effect{tool.EffectProcessExecution}
+	case strings.HasPrefix(name, "mcp"):
+		effects = []tool.Effect{tool.EffectNetwork, tool.EffectExternalMutation}
+	}
 	registry.Register(&tool.Definition{
 		Name:       name,
 		Permission: permission,
+		Effects:    effects,
 		Handler: func(context.Context, map[string]any) (any, error) {
 			(*executions)++
 			return "executed", nil

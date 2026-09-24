@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -38,8 +40,9 @@ type Config struct {
 	Hooks        HooksConfig                 `yaml:"hooks,omitempty"`
 	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
 
-	set     map[string]struct{}
-	sources map[string]string
+	set               map[string]struct{}
+	sources           map[string]string
+	agentModelSources map[string]map[string]string
 }
 
 // EffectiveConfig is a safe representation of the resolved configuration.
@@ -131,6 +134,22 @@ type HookDef struct {
 	Name      string `yaml:"name"`
 	Command   string `yaml:"command"`
 	TimeoutMs int    `yaml:"timeout_ms"`
+	Source    string `yaml:"-"`
+	Digest    string `yaml:"-"`
+}
+
+func (h HookDef) IdentityDigest() string {
+	hash := sha256.New()
+	for _, value := range []string{"chronos-code/hook/v1", h.Source, h.Name, h.Command} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	var timeout [8]byte
+	binary.BigEndian.PutUint64(timeout[:], uint64(h.TimeoutMs))
+	_, _ = hash.Write(timeout[:])
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 type HooksConfig struct {
@@ -215,6 +234,7 @@ type ServerConfig struct {
 	AuthType          string   `yaml:"auth_type,omitempty"`
 	APIKey            string   `yaml:"api_key,omitempty"`
 	TenantID          string   `yaml:"tenant_id,omitempty"`
+	RepositoryID      string   `yaml:"repository_id,omitempty"`
 	OIDCIssuer        string   `yaml:"oidc_issuer,omitempty"`
 	OIDCClientID      string   `yaml:"oidc_client_id,omitempty"`
 	CORSOrigins       string   `yaml:"cors_origins,omitempty"`
@@ -439,6 +459,7 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("load user agents: %w", err)
 		}
 		base.Agents = mergeAgents(base.Agents, userAgents)
+		setAgentModelSources(base, userAgents, "user")
 	}
 
 	if projectDir != "" {
@@ -452,6 +473,7 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("load project agents: %w", err)
 		}
 		base.Agents = mergeAgents(base.Agents, projectAgents)
+		setAgentModelSources(base, projectAgents, "project")
 		if learned, err := loadLearnedAgents(filepath.Join(projectDir, "learned", "agents")); err == nil {
 			base.Agents = mergeLearnedAgents(base.Agents, learned)
 		}
@@ -535,16 +557,17 @@ func loadEmbeddedDefaults() (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse embedded config: %w", err)
 	}
-	data, err = defaults.ReadFile("agents/ppd-planner.yaml")
+	data, err = defaults.ReadFile("agents/delivery-strategist.yaml")
 	if err != nil {
-		return nil, fmt.Errorf("read embedded ppd-planner agent: %w", err)
+		return nil, fmt.Errorf("read embedded delivery-strategist agent: %w", err)
 	}
-	var ppdPlanner agent.AgentConfig
-	if err := yaml.Unmarshal(data, &ppdPlanner); err != nil {
-		return nil, fmt.Errorf("parse embedded ppd-planner agent: %w", err)
+	var deliveryStrategist agent.AgentConfig
+	if err := yaml.Unmarshal(data, &deliveryStrategist); err != nil {
+		return nil, fmt.Errorf("parse embedded delivery-strategist agent: %w", err)
 	}
-	cfg.Agents = mergeAgents(cfg.Agents, []agent.AgentConfig{ppdPlanner})
+	cfg.Agents = mergeAgents(cfg.Agents, []agent.AgentConfig{deliveryStrategist})
 	setConfigSource(&cfg, "embedded")
+	setAgentModelSources(&cfg, cfg.Agents, "embedded")
 	return &cfg, nil
 }
 
@@ -669,13 +692,14 @@ func mergeFileConfig(base, overlay *agent.FileConfig) {
 
 func mergeConfig(base, overlay *Config, source string) {
 	mergeFileConfig(&base.FileConfig, &overlay.FileConfig)
+	setAgentModelSources(base, overlay.Agents, source)
 	if overlay.Defaults != nil {
 		if base.Defaults == nil {
 			base.Defaults = &agent.AgentConfig{}
 		}
 		mergeTypedSection(base.Defaults, *overlay.Defaults, overlay.set, "defaults")
 	}
-	mergeHooks(&base.Hooks, overlay.Hooks)
+	mergeHooks(&base.Hooks, overlay.Hooks, source)
 	base.Providers = mergeProviders(base.Providers, overlay.Providers)
 	mergeTypedSection(&base.Router, overlay.Router, overlay.set, "router")
 	mergeTypedSection(&base.Security, overlay.Security, overlay.set, "security")
@@ -695,9 +719,121 @@ func mergeConfig(base, overlay *Config, source string) {
 	setConfigPaths(base.sources, overlay.set, source)
 }
 
+func setAgentModelSources(cfg *Config, agents []agent.AgentConfig, source string) {
+	if cfg.agentModelSources == nil {
+		cfg.agentModelSources = make(map[string]map[string]string)
+	}
+	for _, configured := range agents {
+		id := strings.ToLower(configured.ID)
+		if id == "" {
+			continue
+		}
+		cfg.agentModelSources[id] = map[string]string{"provider": source, "model": source}
+	}
+}
+
+// PrimaryAgentModel returns the same primary-agent selection used by the
+// orchestrator together with safe model provenance.
+func (c *Config) PrimaryAgentModel() (id string, model agent.ModelConfig, providerSource, modelSource string) {
+	if c == nil {
+		return "", agent.ModelConfig{}, "unknown", "unknown"
+	}
+	index := -1
+	for _, preferred := range []string{"chronos-code", "coder"} {
+		for i := range c.Agents {
+			if c.Agents[i].ID == preferred {
+				index = i
+				break
+			}
+		}
+		if index >= 0 {
+			break
+		}
+	}
+	if index < 0 && len(c.Agents) > 0 {
+		index = 0
+	}
+	if index < 0 {
+		return "", agent.ModelConfig{}, "unknown", "unknown"
+	}
+	configured := c.Agents[index]
+	sources := c.agentModelSources[strings.ToLower(configured.ID)]
+	return configured.ID, configured.Model, firstSource(sources["provider"]), firstSource(sources["model"])
+}
+
+func firstSource(source string) string {
+	if source == "" {
+		return "unknown"
+	}
+	return source
+}
+
+// OverridePrimaryModel applies process-local CLI/environment selection after
+// YAML resolution and records the source shown by config show.
+func (c *Config) OverridePrimaryModel(provider, model, providerSource, modelSource string) error {
+	id, current, _, _ := c.PrimaryAgentModel()
+	if id == "" {
+		return fmt.Errorf("cannot override model: no primary agent is configured")
+	}
+	for i := range c.Agents {
+		if c.Agents[i].ID != id {
+			continue
+		}
+		if provider != "" && provider != current.Provider {
+			current = agent.ModelConfig{Provider: provider}
+			for _, configured := range c.Agents {
+				if canonicalProvider(configured.Model.Provider) == canonicalProvider(provider) {
+					current = configured.Model
+					break
+				}
+			}
+		}
+		if provider != "" {
+			current.Provider = provider
+		}
+		if model != "" {
+			current.Model = model
+			if current.Provider == "azure" {
+				current.Deployment = model
+			}
+		}
+		c.Agents[i].Model = current
+		if c.agentModelSources == nil {
+			c.agentModelSources = make(map[string]map[string]string)
+		}
+		sources := c.agentModelSources[strings.ToLower(id)]
+		if sources == nil {
+			sources = make(map[string]string)
+			c.agentModelSources[strings.ToLower(id)] = sources
+		}
+		if providerSource != "" {
+			sources["provider"] = providerSource
+		}
+		if modelSource != "" {
+			sources["model"] = modelSource
+		}
+		return nil
+	}
+	return fmt.Errorf("cannot override model: primary agent %q is missing", id)
+}
+
+func canonicalProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return "anthropic"
+	case "codex":
+		return "openai"
+	case "azure-openai":
+		return "azure"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
+
 func setConfigSource(cfg *Config, source string) {
 	cfg.sources = make(map[string]string, len(cfg.set))
 	setConfigPaths(cfg.sources, cfg.set, source)
+	setHookProvenance(&cfg.Hooks, source)
 }
 
 func setConfigPaths(sources map[string]string, set map[string]struct{}, source string) {
@@ -744,7 +880,14 @@ func mergeTypedValue(base, overlay reflect.Value, set map[string]struct{}, path 
 	}
 }
 
-func mergeHooks(base *HooksConfig, overlay HooksConfig) {
+func mergeHooks(base *HooksConfig, overlay HooksConfig, sources ...string) {
+	source := ""
+	if len(sources) > 0 {
+		source = sources[0]
+	}
+	if source != "" {
+		setHookProvenance(&overlay, source)
+	}
 	if overlay.preToolCallSet {
 		base.PreToolCall = overlay.PreToolCall
 		base.preToolCallSet = true
@@ -756,6 +899,15 @@ func mergeHooks(base *HooksConfig, overlay HooksConfig) {
 	if overlay.userPromptSubmitSet {
 		base.UserPromptSubmit = overlay.UserPromptSubmit
 		base.userPromptSubmitSet = true
+	}
+}
+
+func setHookProvenance(hooks *HooksConfig, source string) {
+	for _, definitions := range [][]HookDef{hooks.PreToolCall, hooks.PostToolCall, hooks.UserPromptSubmit} {
+		for i := range definitions {
+			definitions[i].Source = source
+			definitions[i].Digest = definitions[i].IdentityDigest()
+		}
 	}
 }
 

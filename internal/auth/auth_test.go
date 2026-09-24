@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -205,6 +207,54 @@ func TestLoginAPIKey(t *testing.T) {
 	}
 	if cred.Method != MethodAPIKey || cred.APIKey != "sk-abc" || !cred.ExpiresAt.IsZero() {
 		t.Fatalf("Load = %+v, want api key credential that never expires", cred)
+	}
+}
+
+func TestAuthBoundariesUseCanonicalProvider(t *testing.T) {
+	clearAuthEnv(t)
+	withFakeHome(t)
+	store := newTestStore(t)
+	if err := LoginAPIKey(store, " Claude ", "sk-alias"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := GetStatus(store, "ANTHROPIC")
+	if err != nil || !status.Authenticated || status.Provider != "anthropic" {
+		t.Fatalf("GetStatus() = %+v, %v", status, err)
+	}
+	if got := Resolve(context.Background(), store, "claude"); got.Provider != "anthropic" || got.Token != "sk-alias" {
+		t.Fatalf("Resolve() = %+v", got)
+	}
+	if err := Logout(store, "CLAUDE"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = GetStatus(store, "anthropic")
+	if err != nil || status.Authenticated {
+		t.Fatalf("status after logout = %+v, %v", status, err)
+	}
+}
+
+func TestCanonicalProviderReadsAndDeletesLegacyAliasCredential(t *testing.T) {
+	backend := newFakeKeyringBackend()
+	store := NewStoreWithBackend(backend, filepath.Join(t.TempDir(), "providers.json"))
+	if err := backend.Set(keyringService, "claude", `{"provider":"claude","method":"api_key","api_key":"legacy"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.writeIndex([]string{"claude"}); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := store.Load("anthropic")
+	if err != nil || credential.APIKey != "legacy" {
+		t.Fatalf("Load() = %+v, %v", credential, err)
+	}
+	names, err := store.List()
+	if err != nil || len(names) != 1 || names[0] != "anthropic" {
+		t.Fatalf("List() = %v, %v", names, err)
+	}
+	if err := store.Delete("anthropic"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Get(keyringService, "claude"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy alias remains after delete: %v", err)
 	}
 }
 

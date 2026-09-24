@@ -63,7 +63,7 @@ make build        # produces bin/chronos-code
 | `chronos-code` | Primary conversation agent; orients, routes, synthesizes | Frontier |
 | `coder` | Implement, test, iterate | Frontier |
 | `planner` | Task decomposition | Frontier |
-| `ppd-planner` | Read-only durable DAG for multi-package / high-risk work | Frontier |
+| `delivery-strategist` | Read-only proposal of the next evidence-driven work frontier | Frontier |
 | `reviewer` | Bugs, security, style | Frontier |
 | `debugger` | Failures from errors and traces | Frontier |
 | `researcher` | Read-only search | Cheap |

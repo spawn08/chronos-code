@@ -13,7 +13,7 @@ import (
 )
 
 // PlanRuntimeIdentity is trusted runtime metadata and is never accepted from
-// planner output.
+// strategist output.
 type PlanRuntimeIdentity struct {
 	TenantID     plan.TenantID
 	RepositoryID plan.RepositoryID
@@ -27,9 +27,9 @@ type PlanExecutionResult struct {
 	Synthesis *ExecutionResult
 }
 
-// ExecutePlan strictly parses planner JSON, resumes or creates its durable DAG,
+// ExecutePlan strictly parses strategist JSON, resumes or creates its durable DAG,
 // and synthesizes a response only after every node has completed.
-func (o *Orchestrator) ExecutePlan(ctx context.Context, plannerJSON []byte, identity PlanRuntimeIdentity) (PlanExecutionResult, error) {
+func (o *Orchestrator) ExecutePlan(ctx context.Context, strategistJSON []byte, identity PlanRuntimeIdentity) (PlanExecutionResult, error) {
 	if !o.closedLoopPPDEnabled() {
 		return PlanExecutionResult{}, fmt.Errorf("execute plan: closed-loop PPD capability is not enabled")
 	}
@@ -37,7 +37,7 @@ func (o *Orchestrator) ExecutePlan(ctx context.Context, plannerJSON []byte, iden
 		return PlanExecutionResult{}, fmt.Errorf("execute plan: plan runtime is unavailable")
 	}
 	o.setOperationalPlan(identity)
-	output, err := plan.ParsePlannerOutput(plannerJSON)
+	output, err := plan.ParseStrategistOutput(strategistJSON)
 	if err != nil {
 		return PlanExecutionResult{}, err
 	}
@@ -51,7 +51,7 @@ func (o *Orchestrator) ExecutePlan(ctx context.Context, plannerJSON []byte, iden
 	if errors.Is(err, sql.ErrNoRows) {
 		persisted, err = o.planController.Decompose(ctx, requested)
 	} else if err == nil && !samePlanProposal(persisted, requested) {
-		return PlanExecutionResult{}, fmt.Errorf("execute plan: persisted generation does not match planner output")
+		return PlanExecutionResult{}, fmt.Errorf("execute plan: persisted generation does not match strategist output")
 	}
 	if err != nil {
 		return PlanExecutionResult{}, err
@@ -99,7 +99,12 @@ func samePlanProposal(persisted plan.Plan, requested plan.DecompositionRequest) 
 	}
 	for _, proposed := range requested.Nodes {
 		node, ok := nodes[proposed.ID]
-		if !ok || node.Scope != proposed.Scope || node.Verification != proposed.Verification || strings.Join(node.Risks, "\x00") != strings.Join(proposed.Risks, "\x00") {
+		if !ok || node.Kind != proposed.Kind || node.Objective != proposed.Objective || node.Scope != proposed.Scope ||
+			node.RecoveryClass != proposed.RecoveryClass || node.Verification != proposed.Verification ||
+			strings.Join(node.ExpectedArtifacts, "\x00") != strings.Join(proposed.ExpectedArtifacts, "\x00") ||
+			strings.Join(node.Assumptions, "\x00") != strings.Join(proposed.Assumptions, "\x00") ||
+			strings.Join(node.InvalidationTriggers, "\x00") != strings.Join(proposed.InvalidationTriggers, "\x00") ||
+			strings.Join(node.Risks, "\x00") != strings.Join(proposed.Risks, "\x00") {
 			return false
 		}
 	}
@@ -154,5 +159,5 @@ func synthesisPrompt(p plan.Plan) string {
 	for _, item := range p.Evidence {
 		evidence = append(evidence, string(item.ID))
 	}
-	return fmt.Sprintf("The durable implementation plan completed. Inspect the current workspace and provide the final implementation summary. Completed nodes: %s. Runtime evidence IDs: %s. Do not repeat or treat planner output as implementation evidence.", strings.Join(completed, ", "), strings.Join(evidence, ", "))
+	return fmt.Sprintf("The durable implementation plan completed. Inspect the current workspace and provide the final implementation summary. Completed nodes: %s. Runtime evidence IDs: %s. Do not repeat or treat strategist output as implementation evidence.", strings.Join(completed, ", "), strings.Join(evidence, ", "))
 }

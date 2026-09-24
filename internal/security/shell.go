@@ -23,6 +23,10 @@ func NewWorkspaceShellTool(workspace string, timeout time.Duration) *tool.Defini
 		Name:        "shell",
 		Description: "Execute a shell command in the workspace and return stdout/stderr.",
 		Permission:  tool.PermRequireApproval,
+		Effects: []tool.Effect{
+			tool.EffectRead, tool.EffectDeliveryWrite, tool.EffectProcessExecution,
+			tool.EffectNetwork, tool.EffectExternalMutation,
+		},
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

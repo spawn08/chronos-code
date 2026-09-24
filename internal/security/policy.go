@@ -35,12 +35,13 @@ type MCPDecision struct {
 // MCPServerIdentity is the complete launch configuration covered by an MCP
 // trust decision. Args are ordered; nil and empty args have the same identity.
 type MCPServerIdentity struct {
-	Name      string
-	Origin    string
-	Transport string
-	Command   string
-	Args      []string
-	URL       string
+	Name         string
+	Origin       string
+	ConfigDigest string
+	Transport    string
+	Command      string
+	Args         []string
+	URL          string
 }
 
 // Digest returns a deterministic, unambiguous digest of the launch identity.
@@ -58,6 +59,7 @@ func (i MCPServerIdentity) Digest() [sha256.Size]byte {
 	write("chronos-code/mcp-launch/v1")
 	write(i.Name)
 	write(i.Origin)
+	write(i.ConfigDigest)
 	write(i.Transport)
 	write(i.Command)
 	writeSize(uint64(len(i.Args)))
@@ -84,6 +86,7 @@ type Policy struct {
 	TrustedMCPServers      []string
 	MCPDefaultPermission   MCPPermission
 	MaxMCPConnections      int
+	TrustedHookDigests     []string
 	autoAllowPatterns      []string
 	confirmPatterns        []string
 	neverAllowPatterns     []string
@@ -96,7 +99,6 @@ type Policy struct {
 	mcpMu                  sync.RWMutex
 	trustedMCPIdentities   map[[sha256.Size]byte]struct{}
 	sessionMCPIdentities   map[[sha256.Size]byte]struct{}
-	pendingMCPApprovals    map[string]struct{}
 }
 
 type policyYAML struct {
@@ -124,6 +126,9 @@ type policyYAML struct {
 		DefaultPermission *MCPPermission `yaml:"default_permission"`
 		MaxConnections    *int           `yaml:"max_connections"`
 	} `yaml:"mcp"`
+	Hooks struct {
+		TrustedDigests []string `yaml:"trusted_digests"`
+	} `yaml:"hooks"`
 }
 
 // Overlay identifies one optional policy layer for actionable errors.
@@ -170,6 +175,12 @@ func ResolvePolicy(floorData []byte, overlays ...Overlay) (*Policy, error) {
 		}
 		if err := applyOverlay(effective, raw); err != nil {
 			return nil, fmt.Errorf("%s security overlay: %w", safeSource(overlay.Source), err)
+		}
+		if raw.Hooks.TrustedDigests != nil {
+			if overlay.Source != "user" {
+				return nil, fmt.Errorf("%s security overlay: hooks.trusted_digests may only be granted by user policy", safeSource(overlay.Source))
+			}
+			effective.TrustedHookDigests = union(effective.TrustedHookDigests, raw.Hooks.TrustedDigests)
 		}
 	}
 	if err := effective.compile(); err != nil {
@@ -222,6 +233,7 @@ func policyFromRaw(raw *policyYAML) *Policy {
 		SecretPatterns:         cloneStrings(raw.Secrets.Patterns),
 		DeniedMCPServers:       cloneStrings(raw.MCP.DeniedServers),
 		TrustedMCPServers:      cloneStrings(raw.MCP.TrustedServers),
+		TrustedHookDigests:     cloneStrings(raw.Hooks.TrustedDigests),
 		autoAllowPatterns:      cloneStrings(raw.Shell.AutoAllow),
 		confirmPatterns:        cloneStrings(raw.Shell.Confirm),
 		neverAllowPatterns:     cloneStrings(raw.Shell.NeverAllow),
@@ -384,46 +396,6 @@ func (p *Policy) AllowMCPServerSessionIdentity(identity MCPServerIdentity) error
 		p.sessionMCPIdentities = make(map[[sha256.Size]byte]struct{})
 	}
 	p.sessionMCPIdentities[identity.Digest()] = struct{}{}
-	return nil
-}
-
-// BindMCPServerSession binds a pending legacy name approval to the identity at
-// the launch boundary. It intentionally does nothing when no approval is pending.
-func (p *Policy) BindMCPServerSession(identity MCPServerIdentity) error {
-	if p == nil {
-		return fmt.Errorf("security policy is not configured")
-	}
-	p.mcpMu.Lock()
-	defer p.mcpMu.Unlock()
-	if contains(p.DeniedMCPServers, identity.Name) {
-		return fmt.Errorf("server denied by security policy")
-	}
-	if _, ok := p.pendingMCPApprovals[identity.Name]; !ok {
-		return nil
-	}
-	delete(p.pendingMCPApprovals, identity.Name)
-	if p.sessionMCPIdentities == nil {
-		p.sessionMCPIdentities = make(map[[sha256.Size]byte]struct{})
-	}
-	p.sessionMCPIdentities[identity.Digest()] = struct{}{}
-	return nil
-}
-
-// AllowMCPServerSession records a pending name approval for the current caller.
-// The runtime must bind it to a full identity before launch.
-func (p *Policy) AllowMCPServerSession(name string) error {
-	if p == nil {
-		return fmt.Errorf("security policy is not configured")
-	}
-	p.mcpMu.Lock()
-	defer p.mcpMu.Unlock()
-	if contains(p.DeniedMCPServers, name) {
-		return fmt.Errorf("server denied by security policy")
-	}
-	if p.pendingMCPApprovals == nil {
-		p.pendingMCPApprovals = make(map[string]struct{})
-	}
-	p.pendingMCPApprovals[name] = struct{}{}
 	return nil
 }
 

@@ -20,6 +20,7 @@ import (
 func TestPlanRecovery(t *testing.T) {
 	ctx := context.Background()
 	fixture := loadRecoveryFixture(t)
+	fixture.TenantID = plan.LocalTenantID
 	database := filepath.Join(t.TempDir(), "plans.db")
 	effects := filepath.Join(t.TempDir(), "effects.log")
 	p := recoveryPlan(fixture)

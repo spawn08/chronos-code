@@ -27,7 +27,7 @@ func TestDecomposePersistsValidatedDraft(t *testing.T) {
 	if loaded.State != PlanDraft || len(loaded.ContextRefs) != 4 {
 		t.Fatalf("persisted plan = %#v, want draft with source, classifier, and node references", loaded)
 	}
-	if loaded.Nodes[0].Scope != request.Nodes[0].Scope || loaded.Nodes[0].Verification != request.Nodes[0].Verification || len(loaded.Nodes[0].Risks) != 1 || loaded.Nodes[0].Risks[0] != request.Nodes[0].Risks[0] {
+	if loaded.Nodes[0].Kind != request.Nodes[0].Kind || loaded.Nodes[0].Objective != request.Nodes[0].Objective || loaded.Nodes[0].Scope != request.Nodes[0].Scope || loaded.Nodes[0].ExpectedArtifacts[0] != request.Nodes[0].ExpectedArtifacts[0] || loaded.Nodes[0].RecoveryClass != request.Nodes[0].RecoveryClass || loaded.Nodes[0].Verification != request.Nodes[0].Verification || len(loaded.Nodes[0].Risks) != 1 || loaded.Nodes[0].Risks[0] != request.Nodes[0].Risks[0] {
 		t.Fatalf("persisted node metadata = %#v, want %#v", loaded.Nodes[0], request.Nodes[0])
 	}
 }
@@ -71,8 +71,8 @@ func validDecompositionRequest() DecompositionRequest {
 		SourceRequestRef: "request-1",
 		ClassifierRef:    "classifier-1",
 		Nodes: []DecompositionNode{
-			{ID: "implement", DependsOn: []NodeID{}, Scope: "internal/plan/decompose.go", ContextRefs: []ContextID{"graph-plan"}, Risks: []string{"invalid DAG"}, Verification: "go test ./internal/plan -run TestDecompose"},
-			{ID: "verify", DependsOn: []NodeID{"implement"}, Scope: "internal/plan/decompose_test.go", ContextRefs: []ContextID{"test-plan"}, Risks: []string{"missing regression"}, Verification: "go test ./internal/plan -run TestDecompose"},
+			{ID: "implement", Kind: NodeImplement, Objective: "implement the decomposition contract", DependsOn: []NodeID{}, Scope: "internal/plan/decompose.go", ContextRefs: []ContextID{"graph-plan"}, ExpectedArtifacts: []string{"validated parser"}, Assumptions: []string{}, InvalidationTriggers: []string{"schema changes"}, RecoveryClass: RecoveryReplan, Risks: []string{"invalid DAG"}, Verification: "go test ./internal/plan -run TestDecompose"},
+			{ID: "verify", Kind: NodeVerify, Objective: "verify decomposition", DependsOn: []NodeID{"implement"}, Scope: "internal/plan/decompose_test.go", ContextRefs: []ContextID{"test-plan"}, ExpectedArtifacts: []string{"test result"}, Assumptions: []string{"parser implemented"}, InvalidationTriggers: []string{}, RecoveryClass: RecoveryRetry, Risks: []string{"missing regression"}, Verification: "go test ./internal/plan -run TestDecompose"},
 		},
 	}
 }

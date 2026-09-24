@@ -38,7 +38,7 @@ Chronos Code is a single Go binary that loads YAML agents, skills, and policies,
 - [MCP and safety](#mcp-and-safety)
 - [Development](#development)
   - [Token efficiency eval](#token-efficiency-eval)
-  - [PPD routing](#ppd-routing)
+  - [Delivery-strategy routing](#delivery-strategy-routing)
 - [Releases and versioning](#releases-and-versioning)
 - [License](#license)
 
@@ -49,7 +49,7 @@ The full documentation site is published at **[spawn08.github.io/chronos-code](h
 ## Features
 
 - **YAML-first configuration** — agents, skills, guardrails, security policies, routing, and MCP servers defined in YAML, not Go
-- **Primary agent plus specialists** — Chronos Code stays the conversation partner; coder, planner, PPD planner, reviewer, debugger, researcher, architect, and explainer run via `spawn_subagent` or `@agent_id`
+- **Primary agent plus specialists** — Chronos Code stays the conversation partner; coder, planner, delivery strategist, reviewer, debugger, researcher, architect, explainer, and tester run via `spawn_subagent` or `@agent_id`
 - **Go code graph** — default indexer uses `go/packages` and the Go AST; tree-sitter is an optional `treesitter` build tag
 - **Tiered routing** — T0 graph tools before T1 cheap models before T2 frontier models; complexity paths bound tool-call counts
 - **Self-learning loop** — traces sessions into reviewable YAML suggestions (`learn accept` / `learn reject`); automatic distillation is off by default
@@ -71,7 +71,7 @@ The TUI and HTTP server are surfaces, not a second runtime. They do not talk to 
 
 1. **CLI** starts a REPL, a one-shot `run`, or HTTP `serve`.
 2. **Orchestrator** loads config, agents, skills, security policy, routing, graph, session, and memory stores.
-3. **Router** classifies the user message with YAML regexes first (T0), optionally a cheap model (T1). It selects a model tier and an implementation path (`low` / `medium` / `high`). The conversation agent stays `chronos-code` unless the user `@mention`s a specialist or PPD `enabled` mode delegates qualifying work to `ppd-planner`.
+3. **Router** classifies the user message with YAML regexes first (T0), optionally a cheap model (T1). It selects a model tier and an implementation path (`low` / `medium` / `high`). The conversation agent stays `chronos-code` unless the user `@mention`s a specialist or `ppd.mode: enabled` delegates qualifying work to `delivery-strategist`.
 4. **Chronos** runs the agent loop: graph tools (T0), ranged file reads (T1), shell and writes (T2). Guardrails and the security policy wrap tool calls. MCP servers that fail to start do not block healthy servers or chat.
 5. **After the turn**, sessions persist, explicit memory intents may write YAML, and learning may emit a pending suggestion for human review.
 
@@ -177,6 +177,7 @@ chronos-code run <message>           One task, then exit
 chronos-code init                    Export .chronos-code/ into the project
 chronos-code login / logout / whoami Provider credentials
 chronos-code providers               List resolvable providers
+chronos-code models [provider]       Query live models, with a labeled static fallback
 chronos-code agents list             List resolved agents
 chronos-code config show|validate    Resolved config
 chronos-code session list|delete|export
@@ -191,7 +192,9 @@ chronos-code serve                   HTTP server
 chronos-code version
 ```
 
-Useful flags: `-c/--config`, `--debug`, `--stream` / `--no-stream`, `--permission-mode`, `--yolo`, `--budget <usd>`, `--resume <session-id>`, `--json` (headless).
+Useful flags: `-c/--config`, `--provider <name>`, `--model <id>`, `--debug`, `--stream` / `--no-stream`, `--permission-mode`, `--yolo`, `--budget <usd>`, `--resume <session-id>`, `--json` (headless).
+
+`--provider` and `--model` override the selected primary agent for the current process. `CHRONOS_CODE_PROVIDER` and `CHRONOS_CODE_MODEL` provide the same selection when the corresponding CLI flag is absent; CLI flags take precedence. A provider-only switch reuses a model only when that provider has a model configured on a resolved agent, otherwise it fails with a request for `--model` instead of pairing the new provider with an incompatible model. `config show` reports the primary agent and the source of its selected provider and model. Live model discovery occurs only through `models` or the interactive `/model` surfaces.
 
 `--yolo` auto-approves policy-allowed tools. It never overrides deny rules or destructive confirmations.
 
@@ -283,7 +286,7 @@ Restart after changing these. `memory.enabled: false` stops persist and recall. 
 | Tree-sitter graph | Optional `treesitter` build |
 | PostgreSQL storage | Optional `postgres` build |
 | LSP tools | Optional `lsp` build |
-| PPD policy | Live `enabled` in embedded `routing.yaml`; `shadow` observes without invoking `ppd-planner`; `disabled` skips it |
+| Delivery-strategy policy | Embedded `ppd` compatibility key defaults to `shadow`; it observes without invoking `delivery-strategist`; `disabled` skips it |
 | Verification | `report` by default; `enforce` is opt-in |
 | Learning suggestions | On, human review required; `auto_distill: false` |
 | Vector recall and branchable sessions | Roadmap |
@@ -295,7 +298,7 @@ Restart after changing these. `memory.enabled: false` stops persist and recall. 
 | `chronos-code` | Primary conversation agent; orients, routes, synthesizes | Frontier |
 | `coder` | Implement, test, iterate | Frontier |
 | `planner` | Task decomposition | Frontier |
-| `ppd-planner` | Read-only durable DAG for multi-package / high-risk work | Frontier |
+| `delivery-strategist` | Read-only, evidence-driven proposal of the next bounded work frontier | Frontier |
 | `reviewer` | Bugs, security, style | Frontier |
 | `debugger` | Failures from errors and traces | Frontier |
 | `researcher` | Read-only search | Cheap |
@@ -307,7 +310,7 @@ Bypass the router:
 ```text
 @reviewer check my last commit
 @debugger why is TestAuth failing
-@ppd-planner decompose this migration
+@delivery-strategist propose the next evidence-driven frontier for this migration
 ```
 
 ## Interactive TUI
@@ -364,9 +367,9 @@ make install      # $GOPATH/bin
 
 `benchmark/ppd/results.json` is `invalid`: no real model was invoked. It must not support a PPD quality or efficiency claim. Invalid runs are excluded from successful-task denominators.
 
-### PPD routing
+### Delivery-strategy routing
 
-Embedded `routing.yaml` sets `ppd.mode: enabled`. Qualifying work (high-risk or high-complexity, explicit PPD, resume, or breadth past file/package/call thresholds) is delegated to `ppd-planner`. Use `shadow` to record decisions without invoking the specialist, or `disabled` to skip the policy.
+The public `ppd` key is retained for configuration compatibility. Embedded `routing.yaml` sets `ppd.mode: shadow`, so qualifying decisions are observed without invoking `delivery-strategist`; `disabled` skips the policy. `enabled` delegates one turn to the read-only strategist, but production rolling replanning is not implemented.
 
 ```bash
 chronos-code eval ppd --validate-only   # registration only, not efficacy

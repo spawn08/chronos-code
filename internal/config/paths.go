@@ -11,15 +11,16 @@ import (
 // ProjectPaths identifies one canonical checkout/worktree and its persistent
 // data locations. Resolving paths never creates directories or migrates data.
 type ProjectPaths struct {
-	Root        string
-	ID          string
-	Dir         string
-	SessionsDB  string
-	GraphDB     string
-	PlansDB     string
-	TelemetryDB string
-	MemoryDB    string
-	LegacyDir   string
+	Root         string
+	ID           string
+	Dir          string
+	SessionsDB   string
+	GraphDB      string
+	PlansDB      string
+	DeliveriesDB string
+	TelemetryDB  string
+	MemoryDB     string
+	LegacyDir    string
 }
 
 // ResolveProjectPaths finds the nearest .git directory or file above root,
@@ -50,12 +51,13 @@ func ResolveProjectPaths(root string) (ProjectPaths, error) {
 	dir := filepath.Join(home, "projects", id)
 	return ProjectPaths{
 		Root: root, ID: id, Dir: dir,
-		SessionsDB:  filepath.Join(dir, "sessions.db"),
-		GraphDB:     filepath.Join(dir, "graph.db"),
-		PlansDB:     filepath.Join(dir, "plans.db"),
-		TelemetryDB: filepath.Join(dir, "telemetry.db"),
-		MemoryDB:    filepath.Join(dir, "memory.db"),
-		LegacyDir:   filepath.Join(root, ConfigDirName),
+		SessionsDB:   filepath.Join(dir, "sessions.db"),
+		GraphDB:      filepath.Join(dir, "graph.db"),
+		PlansDB:      filepath.Join(dir, "plans.db"),
+		DeliveriesDB: filepath.Join(dir, "deliveries.db"),
+		TelemetryDB:  filepath.Join(dir, "telemetry.db"),
+		MemoryDB:     filepath.Join(dir, "memory.db"),
+		LegacyDir:    filepath.Join(root, ConfigDirName),
 	}, nil
 }
 

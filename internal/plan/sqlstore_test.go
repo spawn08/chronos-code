@@ -27,7 +27,7 @@ func TestSQLRoundTrip(t *testing.T) {
 	if got.Nodes[0].ID != "a" || got.Dependencies[0].NodeID != "b" || got.Events[0].ID != "event" {
 		t.Fatalf("loaded identities = %#v", got)
 	}
-	if got.Nodes[0].Scope != p.Nodes[0].Scope || !reflect.DeepEqual(got.Nodes[0].Risks, p.Nodes[0].Risks) || got.Nodes[0].Verification != p.Nodes[0].Verification {
+	if !reflect.DeepEqual(got.Nodes[0], p.Nodes[0]) {
 		t.Fatalf("loaded node metadata = %#v, want %#v", got.Nodes[0], p.Nodes[0])
 	}
 }
@@ -145,7 +145,7 @@ func TestSQLMigratesVersionOneAndPreservesPlans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Nodes) != 1 || loaded.Nodes[0].Scope != "" || len(loaded.Nodes[0].Risks) != 0 || loaded.Nodes[0].Verification != "" {
+	if len(loaded.Nodes) != 1 || loaded.Nodes[0].Scope != "" || loaded.Nodes[0].Kind != NodeImplement || loaded.Nodes[0].Objective != "" || !reflect.DeepEqual(loaded.Nodes[0].ExpectedArtifacts, []string{"legacy node result"}) || loaded.Nodes[0].RecoveryClass != RecoveryReplan || len(loaded.Nodes[0].Risks) != 0 || loaded.Nodes[0].Verification != "" {
 		t.Fatalf("migrated plan = %#v", loaded)
 	}
 	var versions int
@@ -154,6 +154,45 @@ func TestSQLMigratesVersionOneAndPreservesPlans(t *testing.T) {
 	}
 	if versions != schemaVersion {
 		t.Fatalf("migration rows = %d, want %d", versions, schemaVersion)
+	}
+}
+
+func TestSQLMigratesVersionTwoNodeMetadata(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "plans.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE plan_schema_migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV1SQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaV2SQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan_schema_migrations (version, checksum) VALUES (1, ?), (2, ?)`, schemaV1Checksum, schemaV2Checksum); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plans (tenant_id, repository_id, task_id, plan_id, generation_id, state) VALUES ('tenant', 'repo', 'task', 'plan', 'one', 'draft')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO plan_nodes (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, state, scope, risks, verification) VALUES ('tenant', 'repo', 'task', 'plan', 'one', 'node', 'pending', 'old.go', '["risk"]', 'old check')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openTestSQLStorePath(t, path)
+	loaded, err := store.Load(ctx, Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Nodes) != 1 || loaded.Nodes[0].Scope != "old.go" || loaded.Nodes[0].Kind != NodeImplement || loaded.Nodes[0].Objective != "old.go" || !reflect.DeepEqual(loaded.Nodes[0].ExpectedArtifacts, []string{"legacy node result"}) || loaded.Nodes[0].RecoveryClass != RecoveryReplan {
+		t.Fatalf("migrated v2 node = %#v", loaded.Nodes)
 	}
 }
 
@@ -420,5 +459,5 @@ func openTestSQLStorePath(t *testing.T, path string) *SQLStore {
 }
 
 func testPlan() Plan {
-	return Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanDraft, Nodes: []Node{{ID: "a", State: NodePending, Scope: "internal/plan", Risks: []string{"migration risk"}, Verification: "go test ./internal/plan"}, {ID: "b", State: NodeProposed, Scope: "internal/plan tests", Risks: []string{"regression risk"}, Verification: "go test ./internal/plan"}}, Dependencies: []Dependency{{NodeID: "b", DependsOn: "a"}}, Attempts: []Attempt{{ID: "attempt", NodeID: "a", IdempotencyKey: "attempt-key"}}, ContextRefs: []ContextRef{{ID: "context", NodeID: "a"}}, Evidence: []Evidence{{ID: "evidence", NodeID: "a"}}, Leases: []Lease{{ID: "lease", AttemptID: "attempt"}}, Events: []Event{{ID: "event", NodeID: "a", IdempotencyKey: "event-key"}}}
+	return Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanDraft, Nodes: []Node{{ID: "a", State: NodePending, Kind: NodeImplement, Objective: "change the store", Scope: "internal/plan", ExpectedArtifacts: []string{"patch"}, Assumptions: []string{"SQLite available"}, InvalidationTriggers: []string{"schema conflict"}, RecoveryClass: RecoveryReplan, Risks: []string{"migration risk"}, Verification: "go test ./internal/plan"}, {ID: "b", State: NodeProposed, Kind: NodeVerify, Objective: "verify the store", Scope: "internal/plan tests", ExpectedArtifacts: []string{"test result"}, Assumptions: []string{}, InvalidationTriggers: []string{}, RecoveryClass: RecoveryRetry, Risks: []string{"regression risk"}, Verification: "go test ./internal/plan"}}, Dependencies: []Dependency{{NodeID: "b", DependsOn: "a"}}, Attempts: []Attempt{{ID: "attempt", NodeID: "a", IdempotencyKey: "attempt-key"}}, ContextRefs: []ContextRef{{ID: "context", NodeID: "a"}}, Evidence: []Evidence{{ID: "evidence", NodeID: "a"}}, Leases: []Lease{{ID: "lease", AttemptID: "attempt"}}, Events: []Event{{ID: "event", NodeID: "a", IdempotencyKey: "event-key"}}}
 }

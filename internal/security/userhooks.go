@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos/engine/tool"
 )
 
 const hookWaitDelay = 100 * time.Millisecond
@@ -222,6 +223,10 @@ func quoteShellWord(value string) string {
 // host's POSIX shell; no runtime or interpreter is installed by the runner.
 func (r *HookRunner) Run(ctx context.Context, def config.HookDef, vars map[string]any) (HookResult, error) {
 	result := HookResult{ExitCode: -1}
+	if err := tool.RequireEffects(ctx, tool.EffectProcessExecution); err != nil {
+		result.Status = HookSpawnError
+		return result, &HookError{Kind: ErrHookSpawn, HookName: def.Name, ExitCode: -1, Cause: err}
+	}
 	command, err := ExpandTemplate(def.Command, vars)
 	if err != nil {
 		result.Status = HookTemplateError
@@ -264,6 +269,29 @@ func (r *HookRunner) Run(ctx context.Context, def config.HookDef, vars map[strin
 	}
 	result.Status = HookSpawnError
 	return result, &HookError{Kind: ErrHookSpawn, HookName: def.Name, ExitCode: -1, Cause: err}
+}
+
+// AdmitHooks verifies executable hook provenance before any hook can run.
+func AdmitHooks(hooks config.HooksConfig, policy *Policy) error {
+	trusted := make(map[string]struct{})
+	if policy != nil {
+		for _, digest := range policy.TrustedHookDigests {
+			trusted[digest] = struct{}{}
+		}
+	}
+	for _, definitions := range [][]config.HookDef{hooks.PreToolCall, hooks.PostToolCall, hooks.UserPromptSubmit} {
+		for _, def := range definitions {
+			if def.Source == "" || def.Digest == "" || def.Digest != def.IdentityDigest() {
+				return fmt.Errorf("hook %q has missing or invalid provenance", def.Name)
+			}
+			if def.Source == "project" {
+				if _, ok := trusted[def.Digest]; !ok {
+					return fmt.Errorf("project hook %q is not admitted by user policy (digest %s)", def.Name, def.Digest)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ExecuteHook is a convenience for one-off execution in workspaceRoot.

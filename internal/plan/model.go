@@ -26,7 +26,24 @@ type (
 	IdempotencyKey string
 	PlanState      string
 	NodeState      string
+	NodeKind       string
+	RecoveryClass  string
 	StopReason     string
+)
+
+const (
+	NodeInvestigate NodeKind = "investigate"
+	NodeDecide      NodeKind = "decide"
+	NodeImplement   NodeKind = "implement"
+	NodeVerify      NodeKind = "verify"
+	NodeIntegrate   NodeKind = "integrate"
+)
+
+const (
+	RecoveryRetry  RecoveryClass = "retry"
+	RecoveryReplan RecoveryClass = "replan"
+	RecoveryDecide RecoveryClass = "decide"
+	RecoveryHalt   RecoveryClass = "halt"
 )
 
 const (
@@ -81,11 +98,17 @@ type Plan struct {
 }
 
 type Node struct {
-	ID           NodeID
-	State        NodeState
-	Scope        string
-	Risks        []string
-	Verification string
+	ID                   NodeID
+	State                NodeState
+	Kind                 NodeKind
+	Objective            string
+	Scope                string
+	ExpectedArtifacts    []string
+	Assumptions          []string
+	InvalidationTriggers []string
+	RecoveryClass        RecoveryClass
+	Risks                []string
+	Verification         string
 }
 
 // Dependency declares that NodeID cannot run until DependsOn is complete.

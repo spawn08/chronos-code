@@ -10,12 +10,18 @@ import (
 	"strings"
 )
 
-const MaxDecompositionNodes = 12
+const (
+	MaxDecompositionNodes = 6
+	maxNodeIDBytes        = 64
+	maxContextIDBytes     = 128
+	maxNodeTextBytes      = 512
+	maxNodeListItems      = 8
+)
 
 var ErrInvalidDecomposition = errors.New("invalid plan decomposition")
 
 // DecompositionRequest is the compact, metadata-only output accepted from the
-// read-only PPD planner. The reference IDs point to separately managed source
+// read-only delivery strategist. The reference IDs point to separately managed source
 // and classifier records rather than persisting raw prompts or evidence.
 type DecompositionRequest struct {
 	TenantID         TenantID
@@ -30,40 +36,46 @@ type DecompositionRequest struct {
 
 // DecompositionNode describes one bounded, verifiable unit of planned work.
 type DecompositionNode struct {
-	ID           NodeID      `json:"id"`
-	DependsOn    []NodeID    `json:"depends_on"`
-	Scope        string      `json:"scope"`
-	ContextRefs  []ContextID `json:"context_refs"`
-	Risks        []string    `json:"risks"`
-	Verification string      `json:"verification"`
+	ID                   NodeID        `json:"id"`
+	Kind                 NodeKind      `json:"kind"`
+	Objective            string        `json:"objective"`
+	DependsOn            []NodeID      `json:"depends_on"`
+	Scope                string        `json:"scope"`
+	ContextRefs          []ContextID   `json:"context_refs"`
+	ExpectedArtifacts    []string      `json:"expected_artifacts"`
+	Assumptions          []string      `json:"assumptions"`
+	InvalidationTriggers []string      `json:"invalidation_triggers"`
+	RecoveryClass        RecoveryClass `json:"recovery_class"`
+	Risks                []string      `json:"risks"`
+	Verification         string        `json:"verification"`
 }
 
-// PlannerOutput is the complete JSON object accepted from the PPD planner.
+// StrategistOutput is the complete JSON object accepted from the delivery strategist.
 // Runtime plan identity is supplied separately by the caller.
-type PlannerOutput struct {
+type StrategistOutput struct {
 	SourceRequestRef ContextID           `json:"source_request_ref"`
 	ClassifierRef    ContextID           `json:"classifier_ref"`
 	Nodes            []DecompositionNode `json:"nodes"`
 }
 
-// ParsePlannerOutput strictly decodes and validates one unwrapped JSON object.
-func ParsePlannerOutput(data []byte) (PlannerOutput, error) {
+// ParseStrategistOutput strictly decodes and validates one unwrapped JSON object.
+func ParseStrategistOutput(data []byte) (StrategistOutput, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var output PlannerOutput
+	var output StrategistOutput
 	if err := decoder.Decode(&output); err != nil {
-		return PlannerOutput{}, fmt.Errorf("%w: decode planner output: %v", ErrInvalidDecomposition, err)
+		return StrategistOutput{}, fmt.Errorf("%w: decode strategist output: %v", ErrInvalidDecomposition, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return PlannerOutput{}, fmt.Errorf("%w: planner output must contain exactly one JSON object", ErrInvalidDecomposition)
+		return StrategistOutput{}, fmt.Errorf("%w: strategist output must contain exactly one JSON object", ErrInvalidDecomposition)
 	}
 	if err := validateDecomposition(output.SourceRequestRef, output.ClassifierRef, output.Nodes); err != nil {
-		return PlannerOutput{}, err
+		return StrategistOutput{}, err
 	}
 	return output, nil
 }
 
-// Decompose validates a planner proposal, creates an inactive draft, and
+// Decompose validates a strategist proposal, creates an inactive draft, and
 // persists the complete generation through the transactional plan store.
 func Decompose(ctx context.Context, store *SQLStore, request DecompositionRequest) (Plan, error) {
 	if store == nil {
@@ -85,7 +97,12 @@ func Decompose(ctx context.Context, store *SQLStore, request DecompositionReques
 		State:        PlanDraft,
 	}
 	for _, node := range request.Nodes {
-		p.Nodes = append(p.Nodes, Node{ID: node.ID, State: NodePending, Scope: node.Scope, Risks: append([]string(nil), node.Risks...), Verification: node.Verification})
+		p.Nodes = append(p.Nodes, Node{
+			ID: node.ID, State: NodePending, Kind: node.Kind, Objective: node.Objective, Scope: node.Scope,
+			ExpectedArtifacts: append([]string(nil), node.ExpectedArtifacts...), Assumptions: append([]string(nil), node.Assumptions...),
+			InvalidationTriggers: append([]string(nil), node.InvalidationTriggers...), RecoveryClass: node.RecoveryClass,
+			Risks: append([]string(nil), node.Risks...), Verification: node.Verification,
+		})
 		for _, dependency := range node.DependsOn {
 			edge := Dependency{NodeID: node.ID, DependsOn: dependency}
 			p.Dependencies = append(p.Dependencies, edge)
@@ -109,7 +126,7 @@ func Decompose(ctx context.Context, store *SQLStore, request DecompositionReques
 }
 
 func validateDecomposition(sourceRequestRef, classifierRef ContextID, nodes []DecompositionNode) error {
-	if strings.TrimSpace(string(sourceRequestRef)) == "" || strings.TrimSpace(string(classifierRef)) == "" {
+	if !boundedContextID(sourceRequestRef) || !boundedContextID(classifierRef) {
 		return fmt.Errorf("%w: missing source or classifier reference", ErrInvalidDecomposition)
 	}
 	if sourceRequestRef == classifierRef {
@@ -123,33 +140,52 @@ func validateDecomposition(sourceRequestRef, classifierRef ContextID, nodes []De
 	dependencies := make(map[Dependency]struct{})
 	graph := Plan{}
 	for index, node := range nodes {
-		if strings.TrimSpace(string(node.ID)) == "" {
-			return fmt.Errorf("%w: node %d has no id", ErrInvalidDecomposition, index)
+		if strings.TrimSpace(string(node.ID)) == "" || len(node.ID) > maxNodeIDBytes {
+			return fmt.Errorf("%w: node %d has invalid id", ErrInvalidDecomposition, index)
+		}
+		if !validNodeKind(node.Kind) {
+			return fmt.Errorf("%w: node %q has invalid kind %q", ErrInvalidDecomposition, node.ID, node.Kind)
+		}
+		if !boundedText(node.Objective) {
+			return fmt.Errorf("%w: node %q has invalid objective", ErrInvalidDecomposition, node.ID)
 		}
 		if node.DependsOn == nil {
 			return fmt.Errorf("%w: node %q is missing depends_on", ErrInvalidDecomposition, node.ID)
 		}
-		if strings.TrimSpace(node.Scope) == "" {
+		if len(node.DependsOn) > MaxDecompositionNodes {
+			return fmt.Errorf("%w: node %q has too many dependencies", ErrInvalidDecomposition, node.ID)
+		}
+		if !boundedText(node.Scope) {
 			return fmt.Errorf("%w: node %q has no scope", ErrInvalidDecomposition, node.ID)
 		}
 		if node.ContextRefs == nil {
 			return fmt.Errorf("%w: node %q is missing context_refs", ErrInvalidDecomposition, node.ID)
 		}
-		if len(node.Risks) == 0 {
+		if len(node.ContextRefs) > maxNodeListItems {
+			return fmt.Errorf("%w: node %q has too many context_refs", ErrInvalidDecomposition, node.ID)
+		}
+		if err := validateStringList(node.ExpectedArtifacts, true); err != nil {
+			return fmt.Errorf("%w: node %q has invalid expected_artifacts: %v", ErrInvalidDecomposition, node.ID, err)
+		}
+		if err := validateStringList(node.Assumptions, false); err != nil {
+			return fmt.Errorf("%w: node %q has invalid assumptions: %v", ErrInvalidDecomposition, node.ID, err)
+		}
+		if err := validateStringList(node.InvalidationTriggers, false); err != nil {
+			return fmt.Errorf("%w: node %q has invalid invalidation_triggers: %v", ErrInvalidDecomposition, node.ID, err)
+		}
+		if !validRecoveryClass(node.RecoveryClass) {
+			return fmt.Errorf("%w: node %q has invalid recovery_class %q", ErrInvalidDecomposition, node.ID, node.RecoveryClass)
+		}
+		if err := validateStringList(node.Risks, true); err != nil {
 			return fmt.Errorf("%w: node %q has no risks", ErrInvalidDecomposition, node.ID)
 		}
-		if strings.TrimSpace(node.Verification) == "" {
+		if !boundedText(node.Verification) {
 			return fmt.Errorf("%w: node %q has no verification", ErrInvalidDecomposition, node.ID)
-		}
-		for _, risk := range node.Risks {
-			if strings.TrimSpace(risk) == "" {
-				return fmt.Errorf("%w: node %q has an empty risk", ErrInvalidDecomposition, node.ID)
-			}
 		}
 
 		graph.Nodes = append(graph.Nodes, Node{ID: node.ID})
 		for _, dependency := range node.DependsOn {
-			if strings.TrimSpace(string(dependency)) == "" {
+			if strings.TrimSpace(string(dependency)) == "" || len(dependency) > maxNodeIDBytes {
 				return fmt.Errorf("%w: node %q has an empty dependency", ErrInvalidDecomposition, node.ID)
 			}
 			edge := Dependency{NodeID: node.ID, DependsOn: dependency}
@@ -160,7 +196,7 @@ func validateDecomposition(sourceRequestRef, classifierRef ContextID, nodes []De
 			graph.Dependencies = append(graph.Dependencies, edge)
 		}
 		for _, ref := range node.ContextRefs {
-			if strings.TrimSpace(string(ref)) == "" {
+			if !boundedContextID(ref) {
 				return fmt.Errorf("%w: node %q has an empty context reference", ErrInvalidDecomposition, node.ID)
 			}
 			if _, exists := contextIDs[ref]; exists {
@@ -173,4 +209,35 @@ func validateDecomposition(sourceRequestRef, classifierRef ContextID, nodes []De
 		return fmt.Errorf("%w: %w", ErrInvalidDecomposition, err)
 	}
 	return nil
+}
+
+func boundedText(value string) bool {
+	return strings.TrimSpace(value) != "" && len(value) <= maxNodeTextBytes
+}
+
+func boundedContextID(id ContextID) bool {
+	return strings.TrimSpace(string(id)) != "" && len(id) <= maxContextIDBytes
+}
+
+func validateStringList(values []string, required bool) error {
+	if values == nil || required && len(values) == 0 {
+		return errors.New("missing list")
+	}
+	if len(values) > maxNodeListItems {
+		return fmt.Errorf("more than %d items", maxNodeListItems)
+	}
+	for _, value := range values {
+		if !boundedText(value) {
+			return errors.New("empty or oversized item")
+		}
+	}
+	return nil
+}
+
+func validNodeKind(kind NodeKind) bool {
+	return kind == NodeInvestigate || kind == NodeDecide || kind == NodeImplement || kind == NodeVerify || kind == NodeIntegrate
+}
+
+func validRecoveryClass(class RecoveryClass) bool {
+	return class == RecoveryRetry || class == RecoveryReplan || class == RecoveryDecide || class == RecoveryHalt
 }

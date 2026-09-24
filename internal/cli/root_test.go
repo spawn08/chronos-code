@@ -29,6 +29,161 @@ func TestStripGlobalFlagsJSON(t *testing.T) {
 	}
 }
 
+func TestStripGlobalFlagsModelSelection(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "run", "--provider= Claude ", "--model", "claude-test", "task"})
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	if !providerOverrideSet || providerOverride != "anthropic" || !modelOverrideSet || modelOverride != "claude-test" {
+		t.Fatalf("selection = provider(%t,%q) model(%t,%q)", providerOverrideSet, providerOverride, modelOverrideSet, modelOverride)
+	}
+	if got := strings.Join(os.Args, " "); got != "chronos-code run task" {
+		t.Fatalf("args after strip = %q", got)
+	}
+}
+
+func TestLoadConfigModelSelectionPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`agents:
+  - id: chronos-code
+    name: Primary
+    model: {provider: anthropic, model: yaml-model}
+  - id: openai-worker
+    name: OpenAI Worker
+    model: {provider: openai, model: configured-openai}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CHRONOS_CODE_PROVIDER", "codex")
+	t.Setenv("CHRONOS_CODE_MODEL", "env-model")
+	resetGlobalFlags(t, []string{"chronos-code", "--provider", "claude", "--model", "cli-model", "config", "show"})
+	configPath = path
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigWithModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, selected, providerSource, modelSource := cfg.PrimaryAgentModel()
+	if selected.Provider != "anthropic" || selected.Model != "cli-model" || providerSource != "flag:--provider" || modelSource != "flag:--model" {
+		t.Fatalf("selected = %+v, sources=(%q,%q)", selected, providerSource, modelSource)
+	}
+}
+
+func TestLoadConfigProviderOnlyUsesConfiguredModelOrErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`agents:
+  - id: chronos-code
+    name: Primary
+    model: {provider: anthropic, model: yaml-model}
+  - id: openai-worker
+    name: OpenAI Worker
+    model: {provider: openai, model: configured-openai}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CHRONOS_CODE_PROVIDER", "")
+	t.Setenv("CHRONOS_CODE_MODEL", "")
+	resetGlobalFlags(t, []string{"chronos-code", "--provider", "openai", "config", "show"})
+	configPath = path
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigWithModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, selected, _, source := cfg.PrimaryAgentModel()
+	if selected.Provider != "openai" || selected.Model != "configured-openai" || source != "configured agent openai-worker" {
+		t.Fatalf("selected = %+v, source=%q", selected, source)
+	}
+
+	resetGlobalFlags(t, []string{"chronos-code", "--provider", "mistral", "config", "show"})
+	configPath = path
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfigWithModelSelection(); err == nil || !strings.Contains(err.Error(), "supply --model") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunModelsUsesExplicitStaticFallback(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "models", "mistral"})
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MISTRAL_API_KEY", "")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		r.Close()
+	})
+	if err := runModels(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(output); !strings.Contains(got, "mistral [static (live unavailable:") || !strings.Contains(got, "mistral-large-latest") {
+		t.Fatalf("models output = %q", got)
+	}
+}
+
+func TestConfigShowReportsPrimaryModelAndProvenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`defaults:
+  model: {provider: openai, model: default-model}
+agents:
+  - id: chronos-code
+    name: Primary
+    model: {provider: anthropic, model: primary-model, api_key: must-not-print}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resetGlobalFlags(t, []string{"chronos-code", "config", "show"})
+	t.Setenv("CHRONOS_CODE_PROVIDER", "")
+	t.Setenv("CHRONOS_CODE_MODEL", "")
+	configPath = path
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = originalStdout
+		r.Close()
+	})
+	if err := runConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(output)
+	for _, want := range []string{"Primary:   chronos-code", "Provider:  anthropic (source: cli)", "Model:     primary-model (source: cli)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("config show output %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "must-not-print") || strings.Contains(got, "default-model") {
+		t.Fatalf("config show leaked a secret or reported defaults: %q", got)
+	}
+}
+
 func TestStripGlobalFlagsBudget(t *testing.T) {
 	tests := []struct {
 		name string
@@ -477,6 +632,10 @@ func resetGlobalFlags(t *testing.T, args []string) {
 	originalUSDBudgetSet := usdBudgetSet
 	originalResumeSessionID := resumeSessionID
 	originalJSONMode := jsonMode
+	originalProviderOverride := providerOverride
+	originalModelOverride := modelOverride
+	originalProviderOverrideSet := providerOverrideSet
+	originalModelOverrideSet := modelOverrideSet
 
 	os.Args = append([]string(nil), args...)
 	configPath = ""
@@ -488,6 +647,10 @@ func resetGlobalFlags(t *testing.T, args []string) {
 	usdBudgetSet = false
 	resumeSessionID = ""
 	jsonMode = false
+	providerOverride = ""
+	modelOverride = ""
+	providerOverrideSet = false
+	modelOverrideSet = false
 
 	t.Cleanup(func() {
 		os.Args = originalArgs
@@ -500,5 +663,9 @@ func resetGlobalFlags(t *testing.T, args []string) {
 		usdBudgetSet = originalUSDBudgetSet
 		resumeSessionID = originalResumeSessionID
 		jsonMode = originalJSONMode
+		providerOverride = originalProviderOverride
+		modelOverride = originalModelOverride
+		providerOverrideSet = originalProviderOverrideSet
+		modelOverrideSet = originalModelOverrideSet
 	})
 }

@@ -189,10 +189,12 @@ router:
 
 ppd:
   mode: shadow             # enabled | shadow | disabled
-  # enabled  — rejected until closed-loop durable PPD execution is available
-  # shadow   — observe routing decisions without invoking ppd-planner
+  # enabled  — delegate one proposal turn to delivery-strategist
+  # shadow   — observe routing decisions without invoking delivery-strategist
   # disabled — skip PPD policy entirely
 ```
+
+`ppd` is retained as the public compatibility key. Shadow remains the default because a production rolling-replanning loop is not implemented.
 
 ## Security Config (`security.yaml`)
 

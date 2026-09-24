@@ -33,6 +33,7 @@ func ImpactTools(store *Store, root string) []*tool.Definition {
 func impactAnalysisTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "impact_analysis",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Before editing code, compute blast radius: callers, affected tests, and a breaking-change heuristic for symbols declared in a file's line range.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -109,6 +110,7 @@ func impactAnalysisTool(store *Store) *tool.Definition {
 func testMapTool(store *Store) *tool.Definition {
 	return &tool.Definition{
 		Name:        "test_map",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Find which tests exercise a function or file.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
@@ -152,6 +154,7 @@ func testMapTool(store *Store) *tool.Definition {
 func coChangeTool(root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "co_change",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Find files that historically change together (from git log).",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{

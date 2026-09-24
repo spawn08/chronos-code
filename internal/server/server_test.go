@@ -366,6 +366,13 @@ func TestServerRejectsAPIKeyConfigurationWithoutTenant(t *testing.T) {
 	}
 }
 
+func TestServerRejectsAuthenticatedConfigurationWithoutRepository(t *testing.T) {
+	s := New(nil, ServerConfig{AuthType: "api_key", APIKey: "secret-key", TenantID: "tenant-a"})
+	if s.configErr == nil || !strings.Contains(s.configErr.Error(), "repository ID") {
+		t.Fatalf("config error = %v, want missing repository identity", s.configErr)
+	}
+}
+
 func TestExecutionConcurrencyLimit(t *testing.T) {
 	s := New(nil, ServerConfig{AuthType: "none", MaxConcurrent: 1})
 	started := make(chan struct{})

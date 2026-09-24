@@ -65,7 +65,7 @@ func TestPPDPolicy_ShadowAndObservability(t *testing.T) {
 	if decision.Action != PPDActionShadow || decision.Reason != "package_breadth" || !decision.FalsePositive {
 		t.Fatalf("Decide() = %+v, want observable shadow false positive", decision)
 	}
-	if decision.ClassifierVersion != "v1" || decision.Features.PackageCount != 2 || decision.Thresholds.MinPackages != 2 || decision.Specialist != "ppd-planner" || decision.OracleCohort != "simple" {
+	if decision.ClassifierVersion != "v1" || decision.Features.PackageCount != 2 || decision.Thresholds.MinPackages != 2 || decision.Specialist != "delivery-strategist" || decision.OracleCohort != "simple" {
 		t.Errorf("Decision observability fields = %+v", decision)
 	}
 }
@@ -99,14 +99,14 @@ func TestPPDPolicy_BundledConfigDefaultsToShadow(t *testing.T) {
 		t.Fatalf("bundled PPD mode = %q, want %q", cfg.PPD.Mode, PPDModeShadow)
 	}
 	decision := NewPPDPolicy(cfg.PPD, nil).Decide(PPDRequest{PackageCount: cfg.PPD.Thresholds.MinPackages})
-	if decision.Action != PPDActionShadow || decision.ClassifierVersion != cfg.PPD.Version || decision.Specialist != "ppd-planner" {
+	if decision.Action != PPDActionShadow || decision.ClassifierVersion != cfg.PPD.Version || decision.Specialist != "delivery-strategist" {
 		t.Errorf("bundled policy decision = %+v, want shadow with version %q", decision, cfg.PPD.Version)
 	}
 }
 
 func testPPDConfig(mode PPDMode) PPDConfig {
 	return PPDConfig{
-		Version: "v1", Mode: mode, Specialist: "ppd-planner", MaxPlannerCalls: 1,
+		Version: "v1", Mode: mode, Specialist: "delivery-strategist", MaxPlannerCalls: 1,
 		Thresholds: PPDThresholds{MinFiles: 3, MinPackages: 2, MinEstimatedCalls: 5},
 	}
 }

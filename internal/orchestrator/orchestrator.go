@@ -29,6 +29,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/attention"
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/defaults"
@@ -270,9 +271,15 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		err = errors.Join(err, orch.Close())
 	}()
 
-	applyStoredCredentials(ctx, cfg)
+	buildConfig := *cfg
+	buildConfig.Agents = append([]agent.AgentConfig(nil), cfg.Agents...)
+	if cfg.Defaults != nil {
+		defaultsCopy := *cfg.Defaults
+		buildConfig.Defaults = &defaultsCopy
+	}
+	applyStoredCredentials(ctx, &buildConfig)
 
-	agents, err := agent.BuildAllWithOptions(ctx, &cfg.FileConfig, agent.BuildAllOptions{DefaultStorage: store})
+	agents, err := agent.BuildAllWithOptions(ctx, &buildConfig.FileConfig, agent.BuildAllOptions{DefaultStorage: store})
 	if err != nil {
 		return nil, fmt.Errorf("build agents: %w", err)
 	}
@@ -337,7 +344,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	languageServerManager = setupLSP(root, wsInfo, agents)
 	orch.lspManager = languageServerManager
 
-	rt, routingConfig := setupRouter(cfg, projectDir, selectPrimaryAgent(agents, order))
+	rt, routingConfig := setupRouter(ctx, cfg, projectDir, selectPrimaryAgent(agents, order))
 
 	policy, err := setupSecurity(projectDir, userDir, root, store, agents)
 	if err != nil {
@@ -366,6 +373,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	var hookRunner *security.HookRunner
 	hookActivity := &hookActivityTracker{}
 	if len(cfg.Hooks.PreToolCall)+len(cfg.Hooks.PostToolCall)+len(cfg.Hooks.UserPromptSubmit) > 0 {
+		if err := security.AdmitHooks(cfg.Hooks, policy); err != nil {
+			return nil, fmt.Errorf("admit user hooks: %w", err)
+		}
 		hookRunner, err = security.NewHookRunner(root)
 		if err != nil {
 			return nil, fmt.Errorf("configure user hooks: %w", err)
@@ -537,40 +547,46 @@ func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout
 // case.
 func applyStoredCredentials(ctx context.Context, cfg *config.Config) {
 	store := auth.NewStore()
-	resolved := make(map[string]string) // provider -> effective token (may be "")
-
-	resolve := func(provider string) string {
-		key, cached := resolved[provider]
-		if cached {
-			return key
-		}
-		key = auth.Resolve(ctx, store, provider).Token
-		resolved[provider] = key
-		return key
-	}
-
-	apply := func(mc *agent.ModelConfig) {
-		if mc.Provider == "" {
-			return
-		}
-		if mc.APIKey == "" {
-			if key := resolve(mc.Provider); key != "" {
-				mc.APIKey = key
-			}
-		}
-		if mc.BaseURL == "" {
-			if override, ok := cfg.Providers[mc.Provider]; ok && override.BaseURL != "" {
-				mc.BaseURL = override.BaseURL
-			}
-		}
-	}
-
 	if cfg.Defaults != nil {
-		apply(&cfg.Defaults.Model)
+		cfg.Defaults.Model = resolveModelConfig(ctx, cfg, store, "", cfg.Defaults.Model.Provider, cfg.Defaults.Model.Model)
 	}
 	for i := range cfg.Agents {
-		apply(&cfg.Agents[i].Model)
+		mc := cfg.Agents[i].Model
+		cfg.Agents[i].Model = resolveModelConfig(ctx, cfg, store, cfg.Agents[i].ID, mc.Provider, mc.Model)
 	}
+}
+
+func resolveModelConfig(ctx context.Context, cfg *config.Config, store *auth.Store, agentID, provider, modelID string) agent.ModelConfig {
+	provider = auth.CanonicalProvider(provider)
+	mc := agent.ModelConfig{Provider: provider, Model: modelID}
+	if cfg != nil {
+		if cfg.Defaults != nil && auth.CanonicalProvider(cfg.Defaults.Model.Provider) == provider {
+			mc = cfg.Defaults.Model
+		}
+		for _, configured := range cfg.Agents {
+			if configured.ID == agentID && auth.CanonicalProvider(configured.Model.Provider) == provider {
+				mc = configured.Model
+				break
+			}
+		}
+	}
+	mc.Provider = provider
+	mc.Model = modelID
+	if provider == "azure" {
+		mc.Deployment = modelID
+	}
+	if mc.APIKey == "" {
+		mc.APIKey = auth.Resolve(ctx, store, provider).Token
+	}
+	if cfg != nil {
+		for name, override := range cfg.Providers {
+			if auth.CanonicalProvider(name) == provider && override.BaseURL != "" {
+				mc.BaseURL = override.BaseURL
+				break
+			}
+		}
+	}
+	return mc
 }
 
 // sessionOrAgentKey resolves the same per-conversation cache/tracking key
@@ -1502,7 +1518,7 @@ func skillCapabilityManifest(a *agent.Agent) skills.CapabilityManifest {
 // T0 pattern are classified by that cheap model instead of always defaulting
 // to the "code" intent. Failure to build the T1 provider (e.g. missing API
 // key) is non-fatal — the router still works with T0-only matching.
-func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*router.Router, *router.Config) {
+func setupRouter(ctx context.Context, cfg *config.Config, projectDir string, defaultAgent string) (*router.Router, *router.Config) {
 	if !cfg.Router.Enabled {
 		return nil, nil
 	}
@@ -1525,10 +1541,8 @@ func setupRouter(cfg *config.Config, projectDir string, defaultAgent string) (*r
 		return nil, nil
 	}
 	if rcfg.Router.Model.Provider != "" && rcfg.Router.Model.Model != "" {
-		provider, err := agent.BuildProvider(agent.ModelConfig{
-			Provider: rcfg.Router.Model.Provider,
-			Model:    rcfg.Router.Model.Model,
-		})
+		modelConfig := resolveModelConfig(ctx, cfg, auth.NewStore(), defaultAgent, rcfg.Router.Model.Provider, rcfg.Router.Model.Model)
+		provider, err := agent.BuildProvider(modelConfig)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: build T1 router classifier: %v\n", err)
 		} else if t1 := router.NewT1Classifier(provider, rcfg); t1 != nil {
@@ -1731,7 +1745,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	a, ok := o.agents[agentID]
 	if !ok || a == nil {
 		if ppdDecision != nil && ppdDecision.Action == router.PPDActionDelegate {
-			return ExecutionResult{AgentID: agentID, PPDDecision: ppdDecision}, fmt.Errorf("PPD specialist %q not found", agentID)
+			return ExecutionResult{AgentID: agentID, PPDDecision: ppdDecision}, fmt.Errorf("delivery strategist %q not found", agentID)
 		}
 		return ExecutionResult{}, fmt.Errorf("agent %q not found", agentID)
 	}
@@ -1745,9 +1759,12 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		taskID = session.NewSessionID()
 	}
 	ctx = context.WithValue(ctx, taskIDKey{}, taskID)
-	ctx = agent.WithRunIdentity(ctx, agent.RunIdentity{
-		TaskID: taskID, RoleID: agentID, SessionID: sessionID, InvocationID: session.NewSessionID(),
-	})
+	runIdentity := agent.RunIdentity{TaskID: taskID, RoleID: agentID, SessionID: sessionID, InvocationID: session.NewSessionID()}
+	if authorized, ok := authorization.FromContext(ctx); ok {
+		runIdentity.TenantID = authorized.TenantID
+		runIdentity.RepositoryID = authorized.RepositoryID
+	}
+	ctx = agent.WithRunIdentity(ctx, runIdentity)
 	workspaceRoot := ""
 	if requestRoot, ok := builtins.WorkspaceRootFromContext(ctx); ok {
 		workspaceRoot = requestRoot
@@ -1757,6 +1774,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		workspaceRoot = o.cfg.Workspace.Root
 	}
 	ctx = builtins.WithWorkspaceRoot(ctx, workspaceRoot)
+	ctx = executionEffectContext(ctx, o.PlanMode())
 	taskRuntime, err := newTaskRuntimeWithLimits(taskID, workspaceRoot, taskLimits(o.cfg))
 	if err != nil {
 		return ExecutionResult{}, err
@@ -2339,8 +2357,8 @@ func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message 
 	selected := o.agents[agentID].Model
 	o.routingMu.Unlock()
 	if routingConfig != nil && !overridden {
-		if spec, ok := routingConfig.ResolveModel(classification.Complexity, classification.Kind); ok {
-			if provider, err := o.buildModelProvider(ctx, spec.Provider, spec.Model); err == nil {
+		if spec, ok := routingConfig.ResolveModelForRole(agentID, classification.Complexity, classification.Kind); ok {
+			if provider, err := o.buildModelProvider(ctx, agentID, spec.Provider, spec.Model); err == nil {
 				selected = provider
 			}
 		}
@@ -2485,7 +2503,8 @@ func (o *Orchestrator) AgentModelInfo(agentID string) (provider, modelID string,
 // immediately and is treated as an explicit per-agent override of automatic
 // model routing; there is no need to restart or rebuild the Orchestrator.
 func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string) error {
-	p, err := o.buildModelProvider(ctx, provider, modelID)
+	provider = auth.CanonicalProvider(provider)
+	p, err := o.buildModelProvider(ctx, o.active, provider, modelID)
 	if err != nil {
 		return err
 	}
@@ -2504,31 +2523,9 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 	return nil
 }
 
-func (o *Orchestrator) buildModelProvider(ctx context.Context, provider, modelID string) (model.Provider, error) {
-	mc := agent.ModelConfig{Provider: provider, Model: modelID}
-	if o.cfg != nil {
-		if o.cfg.Defaults != nil && o.cfg.Defaults.Model.Provider == provider {
-			mc = o.cfg.Defaults.Model
-		}
-		for _, configured := range o.cfg.Agents {
-			if configured.ID == o.active && configured.Model.Provider == provider {
-				mc = configured.Model
-				break
-			}
-		}
-		mc.Model = modelID
-		if provider == "azure" {
-			mc.Deployment = modelID
-		}
-	}
-	if key := auth.Resolve(ctx, auth.NewStore(), provider).Token; key != "" {
-		mc.APIKey = key
-	}
-	if o.cfg != nil {
-		if override, ok := o.cfg.Providers[provider]; ok && override.BaseURL != "" {
-			mc.BaseURL = override.BaseURL
-		}
-	}
+func (o *Orchestrator) buildModelProvider(ctx context.Context, agentID, provider, modelID string) (model.Provider, error) {
+	provider = auth.CanonicalProvider(provider)
+	mc := resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, provider, modelID)
 	buildProvider := o.buildProvider
 	if buildProvider == nil {
 		buildProvider = agent.BuildProvider
@@ -2620,27 +2617,31 @@ func (o *Orchestrator) SetThinking(level string) error {
 	return nil
 }
 
-// Login stores an API-key credential for provider (ROADMAP.md §5.3's
-// simplest, always-available auth path) and, if provider matches the
-// active agent's current provider, immediately rebuilds its model provider
-// so the new credential takes effect without restarting the session.
+// Login stores an API-key credential for provider and immediately rebuilds
+// every loaded agent using that provider so the credential takes effect
+// without restarting the session.
 func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error {
+	provider = auth.CanonicalProvider(provider)
 	if err := auth.LoginAPIKey(auth.NewStore(), provider, apiKey); err != nil {
 		return err
 	}
-	if activeProvider, modelID := o.ActiveModelInfo(); activeProvider == provider && modelID != "" {
-		p, err := o.buildModelProvider(ctx, provider, modelID)
+	return o.rebuildProviderAgents(ctx, provider)
+}
+
+func (o *Orchestrator) rebuildProviderAgents(ctx context.Context, provider string) error {
+	for agentID, configured := range o.agents {
+		if configured == nil || configured.Model == nil || auth.CanonicalProvider(configured.Model.Name()) != provider {
+			continue
+		}
+		modelID := configured.Model.Model()
+		p, err := o.buildModelProvider(ctx, agentID, provider, modelID)
 		if err != nil {
 			return err
 		}
 		o.routingMu.Lock()
-		defer o.routingMu.Unlock()
-		a := o.agents[o.active]
-		if a == nil {
-			return fmt.Errorf("no active agent")
-		}
-		a.Model = p
-		o.roleModels.set(o.active, p)
+		configured.Model = p
+		o.roleModels.set(agentID, p)
+		o.routingMu.Unlock()
 	}
 	return nil
 }
@@ -2653,7 +2654,10 @@ func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error
 // called with the authorization URL to show the user (e.g. print it in the
 // TUI); LoginOAuth also always attempts to open it in the system browser.
 func (o *Orchestrator) LoginOAuth(ctx context.Context, cfg auth.ProviderOAuthConfig, onPromptURL func(string)) error {
-	return auth.LoginPKCE(ctx, auth.NewStore(), cfg, onPromptURL)
+	if err := auth.LoginPKCE(ctx, auth.NewStore(), cfg, onPromptURL); err != nil {
+		return err
+	}
+	return o.rebuildProviderAgents(ctx, auth.CanonicalProvider(cfg.Provider))
 }
 
 // Logout removes provider's stored chronos-code credential. It has no
@@ -2726,11 +2730,21 @@ func (o *Orchestrator) ListActiveProviderModels(ctx context.Context) (models []m
 // timeout, auth); callers should fall back to modelinfo.All() in that case,
 // which is the pre-existing, always-available static registry.
 func (o *Orchestrator) ListProviderModels(ctx context.Context, provider string) (models []modelinfo.Info, ok bool) {
-	key := auth.Resolve(ctx, auth.NewStore(), provider).Token
-	if key == "" {
+	provider = auth.CanonicalProvider(provider)
+	agentID := ""
+	if o.cfg != nil {
+		for _, configured := range o.cfg.Agents {
+			if auth.CanonicalProvider(configured.Model.Provider) == provider {
+				agentID = configured.ID
+				break
+			}
+		}
+	}
+	mc := resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, provider, "")
+	if mc.APIKey == "" {
 		return nil, false
 	}
-	list, err := modelinfo.FetchLive(ctx, provider, key)
+	list, err := modelinfo.FetchLive(ctx, provider, mc.APIKey, modelinfo.LiveConfig{BaseURL: mc.BaseURL, Endpoint: mc.Endpoint})
 	if err != nil {
 		return nil, false
 	}
@@ -2817,9 +2831,6 @@ func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover
 	if o.policy == nil {
 		return mcpdiscover.ServerStatus{}, fmt.Errorf("security policy is not configured")
 	}
-	if err := o.policy.AllowMCPServerSession(name); err != nil {
-		return mcpdiscover.ServerStatus{}, fmt.Errorf("connect MCP server %q: %w", name, err)
-	}
 	factory := o.mcpFactory
 	if factory == nil {
 		factory = mcpdiscover.NewSharedClientFactory(nil).NewClient
@@ -2835,7 +2846,13 @@ func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover
 		agentIDs = append(agentIDs, id)
 	}
 	sort.Strings(agentIDs)
-	var last mcpdiscover.ServerStatus
+	type mcpConnection struct {
+		agent    *agent.Agent
+		runtime  *mcpdiscover.Runtime
+		config   mcp.ServerConfig
+		identity security.MCPServerIdentity
+	}
+	connections := make([]mcpConnection, 0, len(agentIDs))
 	for i, id := range agentIDs {
 		a := o.agents[id]
 		if a == nil {
@@ -2844,17 +2861,31 @@ func (o *Orchestrator) ConnectMCP(ctx context.Context, name string) (mcpdiscover
 		if i >= len(o.mcpRuntimes) || o.mcpRuntimes[i] == nil {
 			return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP runtime for agent %q is not available", id)
 		}
-		before := registeredToolNameSet(a)
 		agentConfig, known := o.mcpRuntimes[i].Server(name)
 		if !known {
 			agentConfig = cfg
 			o.mcpRuntimes[i].RememberServer(agentConfig)
 		}
-		last = o.mcpRuntimes[i].ConnectServer(ctx, agentConfig, a.Tools, o.policy, timeout, factory)
-		wrapLateTools(a, before, o)
+		identity, exists := o.mcpRuntimes[i].Identity(name)
+		if !exists {
+			return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP server %q identity is unavailable", name)
+		}
+		if len(connections) > 0 && identity.Digest() != connections[0].identity.Digest() {
+			return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP server %q has inconsistent agent configuration identities", name)
+		}
+		connections = append(connections, mcpConnection{agent: a, runtime: o.mcpRuntimes[i], config: agentConfig, identity: identity})
 	}
-	if last.Name == "" {
+	if len(connections) == 0 {
 		return mcpdiscover.ServerStatus{}, fmt.Errorf("MCP server %q is not configured", name)
+	}
+	if err := o.policy.AllowMCPServerSessionIdentity(connections[0].identity); err != nil {
+		return mcpdiscover.ServerStatus{}, fmt.Errorf("connect MCP server %q: %w", name, err)
+	}
+	var last mcpdiscover.ServerStatus
+	for _, connection := range connections {
+		before := registeredToolNameSet(connection.agent)
+		last = connection.runtime.ConnectServer(ctx, connection.config, connection.agent.Tools, o.policy, timeout, factory)
+		wrapLateTools(connection.agent, before, o)
 	}
 	if last.State != mcpdiscover.StateConnected {
 		return last, fmt.Errorf("MCP server %q: %s", name, last.State)

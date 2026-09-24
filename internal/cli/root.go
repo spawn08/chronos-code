@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 	"github.com/spawn08/chronos-code/internal/retention"
 	"github.com/spawn08/chronos-code/internal/server"
@@ -27,6 +29,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/tui"
 	"github.com/spawn08/chronos/engine/mcp"
 	"github.com/spawn08/chronos/engine/model"
+	"github.com/spawn08/chronos/sdk/agent"
 )
 
 var (
@@ -36,15 +39,19 @@ var (
 )
 
 var (
-	configPath      string
-	debugMode       bool
-	streamMode      = true
-	permissionMode  string
-	yoloMode        bool
-	usdBudgetCap    budget.Microdollars
-	usdBudgetSet    bool
-	resumeSessionID string
-	jsonMode        bool
+	configPath          string
+	debugMode           bool
+	streamMode          = true
+	permissionMode      string
+	yoloMode            bool
+	usdBudgetCap        budget.Microdollars
+	usdBudgetSet        bool
+	resumeSessionID     string
+	jsonMode            bool
+	providerOverride    string
+	modelOverride       string
+	providerOverrideSet bool
+	modelOverrideSet    bool
 )
 
 // Specialists retain the lean PRD P1-005 ceiling. The primary agent also owns
@@ -78,6 +85,8 @@ func Execute() error {
 		return runWhoami()
 	case "providers":
 		return runProviders()
+	case "models":
+		return runModels()
 	case "agents":
 		return runAgents()
 	case "auth":
@@ -136,6 +145,27 @@ func stripGlobalFlags() error {
 			continue
 		case arg == "--debug":
 			debugMode = true
+			i++
+			continue
+		case arg == "--provider" || arg == "--model":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a value", arg)
+			}
+			if err := setModelSelectionFlag(arg, args[i+1]); err != nil {
+				return err
+			}
+			i += 2
+			continue
+		case strings.HasPrefix(arg, "--provider="):
+			if err := setModelSelectionFlag("--provider", strings.TrimPrefix(arg, "--provider=")); err != nil {
+				return err
+			}
+			i++
+			continue
+		case strings.HasPrefix(arg, "--model="):
+			if err := setModelSelectionFlag("--model", strings.TrimPrefix(arg, "--model=")); err != nil {
+				return err
+			}
 			i++
 			continue
 		case arg == "--stream" || arg == "-s":
@@ -208,6 +238,21 @@ func stripGlobalFlags() error {
 	return nil
 }
 
+func setModelSelectionFlag(name, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("%s requires a non-empty value", name)
+	}
+	if name == "--provider" {
+		providerOverride = auth.CanonicalProvider(value)
+		providerOverrideSet = true
+	} else {
+		modelOverride = value
+		modelOverrideSet = true
+	}
+	return nil
+}
+
 func parseUSDBudget(value string) (budget.Microdollars, error) {
 	parts := strings.Split(value, ".")
 	if len(parts) > 2 || parts[0] == "" || (len(parts) == 2 && (parts[1] == "" || len(parts[1]) > 6)) {
@@ -261,6 +306,7 @@ Usage:
   chronos-code logout <provider>   Remove a stored credential
   chronos-code whoami [provider]   Show the effective credential source
   chronos-code providers          List built-in and resolvable providers
+  chronos-code models [provider]  List live models, with an explicit static fallback
   chronos-code agents list        List resolved built-in, user, and project agents
   chronos-code config show        Print resolved configuration
   chronos-code config validate    Validate all config files
@@ -310,6 +356,8 @@ Usage:
 
 Global flags:
   -c, --config <path>             Path to config file
+  --provider <name>               Override the primary agent provider (env: CHRONOS_CODE_PROVIDER)
+  --model <id>                    Override the primary agent model (env: CHRONOS_CODE_MODEL)
   --debug                         Enable debug logging
   -s, --stream                    Enable streaming output
   --no-stream                     Disable streaming output
@@ -326,7 +374,7 @@ func runAgents() error {
 	if len(os.Args) < 3 || os.Args[2] != "list" || len(os.Args) > 3 {
 		return fmt.Errorf("usage: chronos-code agents list")
 	}
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfigWithModelSelection()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -342,7 +390,7 @@ func loadAndBuild() (*orchestrator.Orchestrator, error) {
 }
 
 func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfigWithModelSelection()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
 	}
@@ -359,6 +407,56 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 		return nil, nil, fmt.Errorf("apply --permission-mode: %w", err)
 	}
 	return orch, cfg, nil
+}
+
+func loadConfigWithModelSelection() (*config.Config, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	provider, providerSource := providerOverride, "flag:--provider"
+	modelID, modelSource := modelOverride, "flag:--model"
+	if !providerOverrideSet {
+		provider = strings.TrimSpace(os.Getenv("CHRONOS_CODE_PROVIDER"))
+		if provider != "" {
+			providerSource = "env:CHRONOS_CODE_PROVIDER"
+		} else {
+			providerSource = ""
+		}
+	}
+	if !modelOverrideSet {
+		modelID = strings.TrimSpace(os.Getenv("CHRONOS_CODE_MODEL"))
+		if modelID != "" {
+			modelSource = "env:CHRONOS_CODE_MODEL"
+		} else {
+			modelSource = ""
+		}
+	}
+	provider = auth.CanonicalProvider(provider)
+	if provider == "" && modelID == "" {
+		return cfg, nil
+	}
+	_, current, _, _ := cfg.PrimaryAgentModel()
+	if provider == "" {
+		provider = auth.CanonicalProvider(current.Provider)
+		providerSource = ""
+	}
+	if modelID == "" && provider != auth.CanonicalProvider(current.Provider) {
+		for _, configured := range cfg.Agents {
+			if auth.CanonicalProvider(configured.Model.Provider) == provider && configured.Model.Model != "" {
+				modelID = configured.Model.Model
+				modelSource = "configured agent " + configured.ID
+				break
+			}
+		}
+		if modelID == "" {
+			return nil, fmt.Errorf("provider %q does not have a configured model; supply --model or CHRONOS_CODE_MODEL", provider)
+		}
+	}
+	if err := cfg.OverridePrimaryModel(provider, modelID, providerSource, modelSource); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func effectivePermissionMode() string {
@@ -535,12 +633,14 @@ func runConfig() error {
 	}
 	switch os.Args[2] {
 	case "show":
-		cfg, err := config.Load(configPath)
+		cfg, err := loadConfigWithModelSelection()
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Provider:  %s\n", resolveProvider(cfg))
-		fmt.Printf("Model:     %s\n", resolveModel(cfg))
+		primaryID, primaryModel, providerSource, modelSource := cfg.PrimaryAgentModel()
+		fmt.Printf("Primary:   %s\n", primaryID)
+		fmt.Printf("Provider:  %s (source: %s)\n", primaryModel.Provider, providerSource)
+		fmt.Printf("Model:     %s (source: %s)\n", primaryModel.Model, modelSource)
 		fmt.Printf("Storage:   %s\n", resolveStorage(cfg))
 		fmt.Printf("Agents:    %d\n", len(cfg.Agents))
 		for _, a := range cfg.Agents {
@@ -567,6 +667,136 @@ func runConfig() error {
 	default:
 		return fmt.Errorf("unknown config command: %s", os.Args[2])
 	}
+}
+
+func runModels() error {
+	if len(os.Args) > 3 {
+		return fmt.Errorf("usage: chronos-code models [provider]")
+	}
+	cfg, err := loadConfigWithModelSelection()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	requested := ""
+	if len(os.Args) == 3 {
+		requested = auth.CanonicalProvider(os.Args[2])
+	}
+	providers := configuredProviders(cfg)
+	if requested != "" {
+		providers = []string{requested}
+	} else {
+		seen := make(map[string]struct{}, len(providers))
+		for _, provider := range providers {
+			seen[provider] = struct{}{}
+		}
+		for _, info := range modelinfo.All() {
+			provider := auth.CanonicalProvider(info.Provider)
+			if _, ok := seen[provider]; ok || auth.Resolve(context.Background(), auth.NewStore(), provider).Token == "" {
+				continue
+			}
+			seen[provider] = struct{}{}
+			providers = append(providers, provider)
+		}
+		sort.Strings(providers)
+	}
+	if len(providers) == 0 {
+		return fmt.Errorf("no configured providers")
+	}
+	store := auth.NewStore()
+	ctx := context.Background()
+	for _, provider := range providers {
+		resolved := auth.Resolve(ctx, store, provider)
+		modelCfg := configuredProviderModel(cfg, provider)
+		apiKey := modelCfg.APIKey
+		if apiKey == "" {
+			apiKey = resolved.Token
+		}
+		var list []modelinfo.Info
+		status := "static (live unavailable: not authorized)"
+		if apiKey != "" {
+			list, err = modelinfo.FetchLive(ctx, provider, apiKey, modelinfo.LiveConfig{
+				BaseURL:  modelCfg.BaseURL,
+				Endpoint: modelCfg.Endpoint,
+			})
+			if err == nil {
+				status = "live"
+			} else {
+				status = "static (live unavailable: " + err.Error() + ")"
+			}
+		}
+		if len(list) == 0 {
+			list = staticProviderModels(cfg, provider)
+		}
+		fmt.Printf("%s [%s]\n", provider, status)
+		for _, info := range list {
+			fmt.Printf("  %s\n", info.Model)
+		}
+	}
+	return nil
+}
+
+func configuredProviders(cfg *config.Config) []string {
+	set := make(map[string]struct{})
+	for _, configured := range cfg.Agents {
+		if provider := auth.CanonicalProvider(configured.Model.Provider); provider != "" {
+			set[provider] = struct{}{}
+		}
+	}
+	for provider := range cfg.Providers {
+		set[auth.CanonicalProvider(provider)] = struct{}{}
+	}
+	providers := make([]string, 0, len(set))
+	for provider := range set {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
+}
+
+func configuredProviderModel(cfg *config.Config, provider string) agent.ModelConfig {
+	provider = auth.CanonicalProvider(provider)
+	for _, configured := range cfg.Agents {
+		if auth.CanonicalProvider(configured.Model.Provider) == provider {
+			mc := configured.Model
+			for name, override := range cfg.Providers {
+				if auth.CanonicalProvider(name) == provider && override.BaseURL != "" {
+					mc.BaseURL = override.BaseURL
+					break
+				}
+			}
+			return mc
+		}
+	}
+	mc := agent.ModelConfig{Provider: provider}
+	for name, override := range cfg.Providers {
+		if auth.CanonicalProvider(name) == provider && override.BaseURL != "" {
+			mc.BaseURL = override.BaseURL
+			break
+		}
+	}
+	return mc
+}
+
+func staticProviderModels(cfg *config.Config, provider string) []modelinfo.Info {
+	provider = auth.CanonicalProvider(provider)
+	var list []modelinfo.Info
+	seen := make(map[string]struct{})
+	for _, info := range modelinfo.All() {
+		if auth.CanonicalProvider(info.Provider) == provider {
+			list = append(list, info)
+			seen[info.Model] = struct{}{}
+		}
+	}
+	for _, configured := range cfg.Agents {
+		if auth.CanonicalProvider(configured.Model.Provider) == provider && configured.Model.Model != "" {
+			if _, ok := seen[configured.Model.Model]; !ok {
+				list = append(list, modelinfo.Info{Provider: provider, Model: configured.Model.Model})
+				seen[configured.Model.Model] = struct{}{}
+			}
+		}
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Model < list[j].Model })
+	return list
 }
 
 // flagValue scans args for "--name value" or "--name=value" and returns the
@@ -618,7 +848,7 @@ func runLogin() error {
 	if len(os.Args) < 3 {
 		return fmt.Errorf("usage: chronos-code login <provider> [--api-key <key>]")
 	}
-	provider := os.Args[2]
+	provider := auth.CanonicalProvider(os.Args[2])
 	rest := os.Args[3:]
 
 	if hasFlag(rest, "api-key") {
@@ -654,11 +884,12 @@ func runLogout() error {
 	if len(os.Args) < 3 {
 		return fmt.Errorf("usage: chronos-code logout <provider>")
 	}
+	provider := auth.CanonicalProvider(os.Args[2])
 	store := auth.NewStore()
-	if err := auth.Logout(store, os.Args[2]); err != nil {
+	if err := auth.Logout(store, provider); err != nil {
 		return err
 	}
-	fmt.Printf("logged out of %q\n", os.Args[2])
+	fmt.Printf("logged out of %q\n", provider)
 	return nil
 }
 
@@ -714,7 +945,7 @@ func runAuth() error {
 		if len(os.Args) < 4 {
 			return fmt.Errorf("usage: chronos-code auth login <provider> [--api-key <key> | --oauth-pkce ... | --device-code ...]")
 		}
-		provider := os.Args[3]
+		provider := auth.CanonicalProvider(os.Args[3])
 		rest := os.Args[4:]
 		switch {
 		case hasFlag(rest, "api-key"):
@@ -765,10 +996,11 @@ func runAuth() error {
 		if len(os.Args) < 4 {
 			return fmt.Errorf("usage: chronos-code auth logout <provider>")
 		}
-		if err := auth.Logout(store, os.Args[3]); err != nil {
+		provider := auth.CanonicalProvider(os.Args[3])
+		if err := auth.Logout(store, provider); err != nil {
 			return err
 		}
-		fmt.Printf("logged out of %q\n", os.Args[3])
+		fmt.Printf("logged out of %q\n", provider)
 		return nil
 
 	case "status":
@@ -797,7 +1029,7 @@ func runAuth() error {
 		if len(os.Args) < 4 {
 			return fmt.Errorf("usage: chronos-code auth refresh <provider> --client-id <id> --token-url <url>")
 		}
-		provider := os.Args[3]
+		provider := auth.CanonicalProvider(os.Args[3])
 		cfg := oauthConfigFromFlags(provider, os.Args[4:])
 		if err := auth.Refresh(ctx, store, cfg); err != nil {
 			return err
@@ -1323,26 +1555,6 @@ func printMemoryRecords(stdout io.Writer, records []memory.Record) {
 	}
 }
 
-func resolveProvider(cfg *config.Config) string {
-	if cfg.Defaults != nil && cfg.Defaults.Model.Provider != "" {
-		return cfg.Defaults.Model.Provider
-	}
-	if len(cfg.Agents) > 0 {
-		return cfg.Agents[0].Model.Provider
-	}
-	return "unknown"
-}
-
-func resolveModel(cfg *config.Config) string {
-	if cfg.Defaults != nil && cfg.Defaults.Model.Model != "" {
-		return cfg.Defaults.Model.Model
-	}
-	if len(cfg.Agents) > 0 {
-		return cfg.Agents[0].Model.Model
-	}
-	return "unknown"
-}
-
 func resolveStorage(cfg *config.Config) string {
 	if cfg.Defaults != nil && cfg.Defaults.Storage.Backend != "" {
 		return cfg.Defaults.Storage.Backend + " (" + cfg.Defaults.Storage.DSN + ")"
@@ -1365,6 +1577,7 @@ func runServe() error {
 		AuthType:        flagValue(args, "auth", firstNonEmpty(serverDefaults.AuthType, "api_key")),
 		APIKey:          flagValue(args, "api-key", firstNonEmpty(os.Getenv("CHRONOS_CODE_API_KEY"), serverDefaults.APIKey)),
 		TenantID:        flagValue(args, "tenant-id", firstNonEmpty(os.Getenv("CHRONOS_CODE_TENANT_ID"), serverDefaults.TenantID)),
+		RepositoryID:    flagValue(args, "repository-id", firstNonEmpty(os.Getenv("CHRONOS_CODE_REPOSITORY_ID"), serverDefaults.RepositoryID, appCfg.Workspace.Root)),
 		OIDCIssuer:      flagValue(args, "oidc-issuer", firstNonEmpty(os.Getenv("CHRONOS_CODE_OIDC_ISSUER"), serverDefaults.OIDCIssuer)),
 		OIDCClientID:    flagValue(args, "oidc-client-id", firstNonEmpty(os.Getenv("CHRONOS_CODE_OIDC_CLIENT_ID"), serverDefaults.OIDCClientID)),
 		CORSOrigins:     flagValue(args, "cors-origins", firstNonEmpty(serverDefaults.CORSOrigins, "*")),
@@ -1409,6 +1622,20 @@ func runServe() error {
 	}
 	if cfg.AuthType == "api_key" && cfg.TenantID == "" {
 		return fmt.Errorf("serve: --tenant-id or CHRONOS_CODE_TENANT_ID required when --auth=api_key")
+	}
+	if cfg.AuthType == "api_key" || cfg.AuthType == "oidc" {
+		paths, err := appCfg.ResolveProjectPaths("")
+		if err != nil {
+			return fmt.Errorf("serve: resolve delivery paths: %w", err)
+		}
+		if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+			return fmt.Errorf("serve: create delivery data directory: %w", err)
+		}
+		cfg.DeliveryStore, err = execution.OpenDeliveryStore(context.Background(), paths.DeliveriesDB)
+		if err != nil {
+			return fmt.Errorf("serve: open delivery store: %w", err)
+		}
+		defer cfg.DeliveryStore.Close()
 	}
 
 	srv := server.New(orch, cfg)

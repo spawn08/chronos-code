@@ -3,6 +3,7 @@ package mcpdiscover
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -160,7 +161,7 @@ func Start(ctx context.Context, configured, discovered []mcp.ServerConfig, regis
 	runtime.servers = mergeServerConfigs(configured, discovered)
 	if policy != nil {
 		for _, cfg := range configured {
-			policy.TrustConfiguredMCPServer(serverIdentity(cfg, "configured"))
+			policy.TrustConfiguredMCPServer(serverIdentity(cfg, "agent-config"))
 		}
 	}
 	for _, cfg := range runtime.servers {
@@ -245,7 +246,6 @@ func (r *Runtime) ConnectServer(ctx context.Context, cfg mcp.ServerConfig, regis
 	} else {
 		r.replaceServerLocked(cfg)
 	}
-	_ = policy.BindMCPServerSession(r.serverIdentityLocked(cfg))
 	return r.connectLocked(ctx, cfg, registry, policy, timeout, factory)
 }
 
@@ -423,18 +423,39 @@ func (r *Runtime) reloadServerLocked(ctx context.Context, cfg mcp.ServerConfig) 
 }
 
 func (r *Runtime) serverIdentityLocked(cfg mcp.ServerConfig) security.MCPServerIdentity {
-	origin := "discovered"
+	origin := r.sources[cfg.Name]
 	if _, ok := r.configured[cfg.Name]; ok {
-		origin = "configured"
+		origin = "agent-config"
+	} else if origin == "" {
+		origin = "discovered"
 	}
 	return serverIdentity(cfg, origin)
 }
 
 func serverIdentity(cfg mcp.ServerConfig, origin string) security.MCPServerIdentity {
-	return security.MCPServerIdentity{
-		Name: cfg.Name, Origin: origin, Transport: string(cfg.Transport), Command: cfg.Command,
+	configIdentity := security.MCPServerIdentity{
+		Name: cfg.Name, Transport: string(cfg.Transport), Command: cfg.Command,
 		Args: append([]string(nil), cfg.Args...), URL: cfg.URL,
 	}
+	return security.MCPServerIdentity{
+		Name: cfg.Name, Origin: origin, ConfigDigest: fmt.Sprintf("%x", configIdentity.Digest()), Transport: string(cfg.Transport), Command: cfg.Command,
+		Args: append([]string(nil), cfg.Args...), URL: cfg.URL,
+	}
+}
+
+// Identity returns the exact source and launch configuration currently bound
+// to name for approval at the execution boundary.
+func (r *Runtime) Identity(name string) (security.MCPServerIdentity, bool) {
+	if r == nil {
+		return security.MCPServerIdentity{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cfg, ok := r.serverLocked(name)
+	if !ok {
+		return security.MCPServerIdentity{}, false
+	}
+	return r.serverIdentityLocked(cfg), true
 }
 
 func (r *Runtime) prepareServerLocked(ctx context.Context, cfg mcp.ServerConfig) (RuntimeClient, []*tool.Definition, []string, error) {
@@ -575,6 +596,7 @@ func toolDefinitions(server string, client RuntimeClient, tools []mcp.ToolInfo) 
 		definitions = append(definitions, &tool.Definition{
 			Name: item.name, Description: item.info.Description,
 			Parameters: item.info.InputSchema, Permission: tool.PermRequireApproval,
+			Effects: []tool.Effect{tool.EffectNetwork, tool.EffectExternalMutation},
 			Handler: func(ctx context.Context, args map[string]any) (any, error) {
 				return client.CallTool(ctx, remoteName, args)
 			},

@@ -172,3 +172,31 @@ func TestHookRunnerBoundsStdoutAndStderr(t *testing.T) {
 		t.Fatalf("bounded tails start at stdout %q, stderr %q", result.Stdout.Lines[0], result.Stderr.Lines[0])
 	}
 }
+
+func TestAdmitHooksRequiresTrustedProjectDigest(t *testing.T) {
+	hook := config.HookDef{Name: "project-check", Command: "true", TimeoutMs: 1000, Source: "project"}
+	hook.Digest = hook.IdentityDigest()
+	hooks := config.HooksConfig{PreToolCall: []config.HookDef{hook}}
+	if err := AdmitHooks(hooks, &Policy{}); err == nil || !strings.Contains(err.Error(), "not admitted") {
+		t.Fatalf("AdmitHooks() error = %v, want untrusted project hook", err)
+	}
+	if err := AdmitHooks(hooks, &Policy{TrustedHookDigests: []string{hook.Digest}}); err != nil {
+		t.Fatalf("AdmitHooks() trusted project hook: %v", err)
+	}
+	changed := hook
+	changed.Command = "false"
+	if err := AdmitHooks(config.HooksConfig{PreToolCall: []config.HookDef{changed}}, &Policy{TrustedHookDigests: []string{hook.Digest}}); err == nil {
+		t.Fatal("changed hook retained trust")
+	}
+}
+
+func TestHookRunnerRequiresProcessEffect(t *testing.T) {
+	runner, err := NewHookRunner(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.Run(WithEffectGrant(context.Background(), EffectRead), config.HookDef{Name: "blocked", Command: "true", TimeoutMs: 1000}, nil)
+	if err == nil || !strings.Contains(err.Error(), "process_execution") {
+		t.Fatalf("Run() error = %v, want process effect denial", err)
+	}
+}

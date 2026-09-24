@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos-code/internal/authorization"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/observability"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
 	"github.com/spawn08/chronos-code/internal/retention"
@@ -25,10 +27,13 @@ import (
 
 // ServerConfig holds configuration for the HTTP server.
 type ServerConfig struct {
-	Listen          string       // address to listen on, e.g. ":8430"
-	AuthType        string       // "api_key", "oidc", or "none"
-	APIKey          string       // required when AuthType is "api_key"
-	TenantID        string       // required when AuthType is "api_key"
+	Listen          string // address to listen on, e.g. ":8430"
+	AuthType        string // "api_key", "oidc", or "none"
+	APIKey          string // required when AuthType is "api_key"
+	TenantID        string // required when AuthType is "api_key"
+	RepositoryID    string // trusted repository identity for all non-probe routes
+	Authorizer      authorization.Authorizer
+	DeliveryStore   *execution.DeliveryStore // durable admission/inspection; owned by the caller
 	OIDCIssuer      string       // required when AuthType is "oidc"
 	OIDCClientID    string       // required when AuthType is "oidc"
 	CORSOrigins     string       // comma-separated allowed origins; "*" for all
@@ -84,6 +89,17 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	if cfg.Metrics == nil {
 		cfg.Metrics = observability.NewRegistry()
 	}
+	if cfg.AuthType == "none" {
+		if strings.TrimSpace(cfg.TenantID) == "" {
+			cfg.TenantID = "local"
+		}
+		if strings.TrimSpace(cfg.RepositoryID) == "" {
+			cfg.RepositoryID = "local"
+		}
+	}
+	if cfg.Authorizer == nil && strings.TrimSpace(cfg.RepositoryID) != "" {
+		cfg.Authorizer = authorization.RepositoryAuthorizer{RepositoryID: cfg.RepositoryID, AllowedActions: serverActions()}
+	}
 	s := &Server{
 		orch:        orch,
 		cfg:         cfg,
@@ -119,6 +135,8 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.handleDeleteSession)
 
 	mux.HandleFunc("GET /v1/agents", s.handleListAgents)
+	mux.HandleFunc("POST /v1/deliveries", s.handleAdmitDelivery)
+	mux.HandleFunc("GET /v1/deliveries/{id}", s.handleInspectDelivery)
 
 	mux.HandleFunc("GET /v1/memory", s.handleListMemory)
 	mux.HandleFunc("POST /v1/memory", s.handleAddMemory)
@@ -141,8 +159,16 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 			s.configErr = fmt.Errorf("tenant ID is required when auth type is api_key")
 			break
 		}
-		handler = authMiddleware(cfg.AuthType, cfg.APIKey, cfg.TenantID)(tenantMiddleware(handler))
+		if strings.TrimSpace(cfg.RepositoryID) == "" {
+			s.configErr = fmt.Errorf("repository ID is required when auth type is api_key")
+			break
+		}
+		handler = authMiddleware(cfg.AuthType, cfg.APIKey, cfg.TenantID)(tenantMiddleware(authorizationMiddleware(cfg.RepositoryID, cfg.Authorizer)(handler)))
 	case "oidc":
+		if strings.TrimSpace(cfg.RepositoryID) == "" {
+			s.configErr = fmt.Errorf("repository ID is required when auth type is oidc")
+			break
+		}
 		validator, err := auth.NewOIDCValidator(auth.OIDCConfig{
 			Issuer:   cfg.OIDCIssuer,
 			ClientID: cfg.OIDCClientID,
@@ -150,10 +176,13 @@ func New(orch *orchestrator.Orchestrator, cfg ServerConfig) *Server {
 		if err != nil {
 			s.configErr = fmt.Errorf("OIDC validator: %w", err)
 		} else {
-			handler = oidcAuthMiddleware(validator)(tenantMiddleware(handler))
+			handler = oidcAuthMiddleware(validator)(tenantMiddleware(authorizationMiddleware(cfg.RepositoryID, cfg.Authorizer)(handler)))
 		}
 	default:
 		s.configErr = fmt.Errorf("unknown auth type %q", cfg.AuthType)
+	}
+	if cfg.AuthType == "none" && s.configErr == nil {
+		handler = localIdentityMiddleware(cfg.TenantID)(tenantMiddleware(authorizationMiddleware(cfg.RepositoryID, cfg.Authorizer)(handler)))
 	}
 	if s.configErr != nil {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -77,8 +77,8 @@ func TestPlanNodeExecutorUsesBoundedBlockingExecutionAndMapsRuntimeEvidence(t *t
 	}
 	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
 	request := plan.NodeExecutionRequest{
-		Plan:    plan.Plan{ID: "plan", TaskID: "task", ContextRefs: []plan.ContextRef{{ID: "source", NodeID: "node"}}},
-		Node:    plan.Node{ID: "node", Scope: "internal/plan/controller.go", Risks: []string{"must not leak"}, Verification: "go test ./internal/plan"},
+		Plan:    plan.Plan{ID: "plan", TaskID: "task", ContextRefs: []plan.ContextRef{{ID: "source", NodeID: "node"}}, Dependencies: []plan.Dependency{{NodeID: "node", DependsOn: "prior"}}, Evidence: []plan.Evidence{{ID: "evidence-prior", NodeID: "prior"}}},
+		Node:    plan.Node{ID: "node", Kind: plan.NodeImplement, Objective: "implement durable node metadata", Scope: "internal/plan/controller.go", ExpectedArtifacts: []string{"controller patch"}, Assumptions: []string{"store migration is present"}, InvalidationTriggers: []string{"node schema changes"}, RecoveryClass: plan.RecoveryReplan, Risks: []string{"metadata may be lost"}, Verification: "go test ./internal/plan"},
 		Attempt: "attempt", Context: plan.RestartContext{Entries: []plan.ContextEntry{{ID: "ctx", Content: "bounded context"}}},
 	}
 
@@ -96,7 +96,12 @@ func TestPlanNodeExecutorUsesBoundedBlockingExecutionAndMapsRuntimeEvidence(t *t
 	if got.Mode != ExecutionBlocking || got.RequestedAgent != "coder" || got.PPD != nil || !got.BoundedContext {
 		t.Fatalf("execution request = %#v", got)
 	}
-	if strings.Contains(got.Message, "must not leak") || !strings.Contains(got.Message, "Scope:\ninternal/plan/controller.go") || !strings.Contains(got.Message, "Context:\nctx: bounded context") || !strings.Contains(got.Message, "Verification:\ngo test ./internal/plan") {
+	for _, required := range []string{"Objective:\nimplement durable node metadata", "Scope boundary (not the task instruction):\ninternal/plan/controller.go", "Expected artifacts:\ncontroller patch", "Risks:\nmetadata may be lost", "Context references/evidence:\nctx: bounded context\nevidence-prior", "Verification:\ngo test ./internal/plan"} {
+		if !strings.Contains(got.Message, required) {
+			t.Fatalf("bounded node prompt missing %q: %q", required, got.Message)
+		}
+	}
+	if strings.Contains(got.Message, "Scope:\n") {
 		t.Fatalf("bounded node prompt = %q", got.Message)
 	}
 	if result.Status != plan.NodeCompleted || result.Verification != plan.VerificationPassed || result.Summary != "implemented" || result.InputTokens != 13 || result.OutputTokens != 5 || result.CostMicrodollars != 9 {

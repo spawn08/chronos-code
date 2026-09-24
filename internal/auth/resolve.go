@@ -58,10 +58,11 @@ var providerEnvVars = map[string][]string{
 // checks that provider's own API-key env var (per providerEnvVars) before
 // chronos-code's own stored API-key credential.
 func Resolve(ctx context.Context, store *Store, provider string) ResolvedCredential {
+	provider = CanonicalProvider(provider)
 	switch provider {
-	case "anthropic", "claude":
+	case "anthropic":
 		return resolveAnthropic(ctx, store)
-	case "openai", "codex":
+	case "openai":
 		return resolveOpenAI(ctx, store)
 	default:
 		return resolveGeneric(store, provider)

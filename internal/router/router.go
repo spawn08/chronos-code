@@ -8,6 +8,7 @@ package router
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -51,12 +52,10 @@ type ModelSpec struct {
 // ModelRouting maps task complexity and kind to the model that should handle
 // the task. Missing cells resolve to the medium/edit model.
 type ModelRouting struct {
-	Models map[Complexity]map[TaskKind]ModelSpec `yaml:"models"`
+	Models     map[Complexity]map[TaskKind]ModelSpec `yaml:"models"`
+	RoleFloors map[string]Complexity                 `yaml:"role_floors"`
 }
 
-// Config is the subset of routing.yaml this package understands. The
-// explicit_switch, escalation, pipelines, and cost_optimization sections are
-// intentionally not modeled — yaml.Unmarshal drops unknown keys.
 // ImplementationPath is advisory execution guidance for a complexity band.
 // MaxToolCalls is an effort estimate, not an enforced runtime budget.
 type ImplementationPath struct {
@@ -66,9 +65,8 @@ type ImplementationPath struct {
 	Hint         string `yaml:"hint"`
 }
 
-// Config is the subset of routing.yaml this package understands. The
-// explicit_switch, escalation, pipelines, and cost_optimization sections are
-// intentionally not modeled — yaml.Unmarshal drops unknown keys.
+// Config contains runtime routing fields. Some legacy document-only sections
+// remain accepted by Parse so existing user routing files continue to load.
 type Config struct {
 	Router              routerSection                     `yaml:"router"`
 	IntentRouting       []IntentRoute                     `yaml:"intent_routing"`
@@ -81,11 +79,64 @@ type Config struct {
 // into a Config. The caller is responsible for supplying the bytes; this
 // package does not read files itself.
 func Parse(data []byte) (*Config, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return nil, fmt.Errorf("router: parse routing config: %w", err)
+	}
+	if len(document.Content) > 0 {
+		root := document.Content[0]
+		if root.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("router: parse routing config: top-level document must be a mapping")
+		}
+		known := map[string]bool{
+			"meta": true, "router": true, "implementation_paths": true,
+			"model_routing": true, "ppd": true, "intent_routing": true,
+			// Accepted for compatibility with routing files exported before these
+			// document-only sections were removed from the bundled defaults.
+			"explicit_switch": true, "escalation": true, "pipelines": true,
+			"cost_optimization": true,
+		}
+		for i := 0; i < len(root.Content); i += 2 {
+			if key := root.Content[i].Value; !known[key] {
+				return nil, fmt.Errorf("router: parse routing config: unknown top-level key %q", key)
+			}
+		}
+	}
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("router: parse routing config: %w", err)
 	}
+	for roleID, floor := range cfg.ModelRouting.RoleFloors {
+		if strings.TrimSpace(roleID) == "" {
+			return nil, fmt.Errorf("router: parse routing config: role_floors contains an empty role ID")
+		}
+		if floor != ComplexityLow && floor != ComplexityMedium && floor != ComplexityHigh {
+			return nil, fmt.Errorf("router: parse routing config: role_floors[%q] must be low, medium, or high, got %q", roleID, floor)
+		}
+	}
 	return &cfg, nil
+}
+
+// ResolveModelForRole applies a role's minimum complexity before resolving a
+// model. Complexity floors avoid provider-specific model-name comparisons.
+func (c *Config) ResolveModelForRole(roleID string, complexity Complexity, kind TaskKind) (ModelSpec, bool) {
+	if floor, ok := c.ModelRouting.RoleFloors[roleID]; ok && complexityRank(complexity) < complexityRank(floor) {
+		complexity = floor
+	}
+	return c.ResolveModel(complexity, kind)
+}
+
+func complexityRank(complexity Complexity) int {
+	switch complexity {
+	case ComplexityHigh:
+		return 3
+	case ComplexityMedium:
+		return 2
+	case ComplexityLow:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // ResolveModel returns the exact complexity/kind model when declared, falling
@@ -109,8 +160,8 @@ func DefaultPath(complexity Complexity) ImplementationPath {
 		return ImplementationPath{
 			MaxToolCalls: 24,
 			Graph:        "L0-L3",
-			Plan:         "ppd-or-working-plan",
-			Hint:         "map dependencies and acceptance criteria; use ppd-planner when a durable DAG is needed and execution is wired for the selected mode; otherwise maintain a working plan, execute dependency-first, and verify integration and every deliverable",
+			Plan:         "durable-or-working-plan",
+			Hint:         "map dependencies and acceptance criteria; ask delivery-strategist for a bounded evidence-driven frontier when durable planning is useful; shadow mode does not execute that frontier, so otherwise maintain a working plan and verify every deliverable",
 		}
 	case ComplexityMedium:
 		return ImplementationPath{

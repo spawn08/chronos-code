@@ -39,9 +39,23 @@ func TestLookupProvider_OpenAI(t *testing.T) {
 }
 
 func TestLookupProvider_CaseInsensitive(t *testing.T) {
-	for _, name := range []string{"ANTHROPIC", "Anthropic", "AnThRoPiC"} {
+	for _, name := range []string{"ANTHROPIC", "Anthropic", "AnThRoPiC", " claude "} {
 		if _, ok := LookupProvider(name); !ok {
 			t.Errorf("LookupProvider(%q) returned false", name)
+		}
+	}
+}
+
+func TestCanonicalProviderAliases(t *testing.T) {
+	tests := map[string]string{
+		" Claude ":     "anthropic",
+		"CODEX":        "openai",
+		"azure-openai": "azure",
+		" Gemini ":     "gemini",
+	}
+	for input, want := range tests {
+		if got := CanonicalProvider(input); got != want {
+			t.Errorf("CanonicalProvider(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

@@ -18,7 +18,7 @@ func TestPlanCommandInspectionJSON(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"status", []string{"status", "--db", database}, `{"schema_version":2,"healthy":true}`},
+		{"status", []string{"status", "--db", database}, `{"schema_version":3,"healthy":true}`},
 		{"list", planScopeArgs(database, "list"), `[{"task_id":"task-1","plan_id":"plan-1","generation_id":"generation-1","state":"active","stop_reason":"","version":1}]`},
 		{"show", planRefArgs(database, "show"), `"idempotency_key":"[REDACTED]"`},
 		{"graph", planRefArgs(database, "graph"), `"dependencies":[{"NodeID":"node-2","DependsOn":"node-1"}]`},
@@ -73,6 +73,9 @@ func TestPlanCommandSafeFailures(t *testing.T) {
 	if _, err := runPlanForTest(t, "list", "--db", "broken", "--unknown"); err == nil || !strings.Contains(err.Error(), "unknown flag") {
 		t.Fatalf("unknown flag error = %v", err)
 	}
+	if _, err := runPlanForTest(t, "list", "--db", t.TempDir()+"/plans.db", "--tenant", "other", "--repository", "repo"); err == nil || !strings.Contains(err.Error(), "tenant scope mismatch") {
+		t.Fatalf("foreign tenant error = %v", err)
+	}
 
 	corrupt := filepath.Join(t.TempDir(), "corrupt.db")
 	if err := os.WriteFile(corrupt, []byte("not a database"), 0o600); err != nil {
@@ -92,7 +95,7 @@ func seedPlanCommandStore(t *testing.T) string {
 	}
 	t.Cleanup(func() { store.Close() })
 	err = store.Create(context.Background(), plan.Plan{
-		TenantID: "tenant-1", RepositoryID: "repository-1", TaskID: "task-1", ID: "plan-1", Generation: "generation-1", State: plan.PlanActive,
+		TenantID: plan.LocalTenantID, RepositoryID: "repository-1", TaskID: "task-1", ID: "plan-1", Generation: "generation-1", State: plan.PlanActive,
 		Nodes:        []plan.Node{{ID: "node-1", State: plan.NodeReady}, {ID: "node-2", State: plan.NodePending}},
 		Dependencies: []plan.Dependency{{NodeID: "node-2", DependsOn: "node-1"}},
 		Attempts:     []plan.Attempt{{ID: "attempt-1", NodeID: "node-1", IdempotencyKey: "attempt-secret"}},
@@ -108,7 +111,7 @@ func seedPlanCommandStore(t *testing.T) string {
 }
 
 func planScopeArgs(database, operation string) []string {
-	return []string{operation, "--db", database, "--tenant", "tenant-1", "--repository", "repository-1"}
+	return []string{operation, "--db", database, "--tenant", string(plan.LocalTenantID), "--repository", "repository-1"}
 }
 
 func planRefArgs(database, operation string) []string {

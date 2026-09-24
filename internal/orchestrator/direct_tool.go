@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/session"
@@ -50,6 +51,7 @@ func (o *Orchestrator) ExecuteTool(ctx context.Context, name string, args map[st
 			ctx = storage.WithSession(ctx, sessionID)
 		}
 	}
+	ctx = executionEffectContext(ctx, o.PlanMode())
 
 	evt := &hooks.Event{Type: hooks.EventToolCallBefore, Name: name, Input: args}
 	if err := active.Hooks.Before(ctx, evt); err != nil {
@@ -67,4 +69,21 @@ func (o *Orchestrator) ExecuteTool(ctx context.Context, name string, args map[st
 		return result, errors.Join(toolErr, fmt.Errorf("hook after tool %q: %w", name, err))
 	}
 	return result, toolErr
+}
+
+func executionEffectContext(ctx context.Context, planOnly bool) context.Context {
+	if _, constrained := tool.EffectGrantFromContext(ctx); constrained {
+		return ctx
+	}
+	if planOnly {
+		return tool.WithEffectGrant(ctx, tool.EffectRead, tool.EffectScratchWrite)
+	}
+	return tool.WithEffectGrant(ctx,
+		tool.EffectRead,
+		tool.EffectScratchWrite,
+		tool.EffectDeliveryWrite,
+		tool.EffectProcessExecution,
+		tool.EffectNetwork,
+		tool.EffectExternalMutation,
+	)
 }

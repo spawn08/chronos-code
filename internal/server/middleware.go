@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/auth"
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos/storage"
 )
 
 type tenantContextKey struct{}
+type principalContextKey struct{}
 type correlationIDContextKey struct{}
 
 const correlationIDHeader = "X-Request-ID"
@@ -97,6 +99,11 @@ func TenantIDFromContext(ctx context.Context) (string, bool) {
 	return tenantID, ok && tenantID != ""
 }
 
+func principalIDFromContext(ctx context.Context) (string, bool) {
+	principalID, ok := ctx.Value(principalContextKey{}).(string)
+	return principalID, ok && principalID != ""
+}
+
 // tenantMiddleware scopes authenticated requests to their validated tenant.
 func tenantMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +146,9 @@ func authMiddleware(authType, apiKey, tenantID string) func(http.Handler) http.H
 				http.Error(w, `{"error":"tenant is not configured"}`, http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantContextKey{}, tenantID)))
+			ctx := context.WithValue(r.Context(), tenantContextKey{}, tenantID)
+			ctx = context.WithValue(ctx, principalContextKey{}, "api-key")
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -197,9 +206,94 @@ func oidcAuthMiddleware(validator *auth.OIDCValidator) func(http.Handler) http.H
 				http.Error(w, `{"error":"OIDC token is missing tenant identity"}`, http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantContextKey{}, claims.TenantID)))
+			ctx := context.WithValue(r.Context(), tenantContextKey{}, claims.TenantID)
+			ctx = context.WithValue(ctx, principalContextKey{}, claims.Subject)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func localIdentityMiddleware(tenantID string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if probePath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			ctx := context.WithValue(r.Context(), tenantContextKey{}, tenantID)
+			ctx = context.WithValue(ctx, principalContextKey{}, "local")
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func authorizationMiddleware(repositoryID string, authorizer authorization.Authorizer) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if probePath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			principalID, principalOK := principalIDFromContext(r.Context())
+			tenantID, tenantOK := TenantIDFromContext(r.Context())
+			if authorizer == nil || !principalOK || !tenantOK {
+				http.Error(w, `{"error":"authorization context is unavailable"}`, http.StatusForbidden)
+				return
+			}
+			action := requestAction(r.Method, r.URL.Path)
+			request := authorization.Request{PrincipalID: principalID, TenantID: tenantID, RepositoryID: repositoryID, Action: action}
+			if err := authorizer.Authorize(r.Context(), request); err != nil {
+				http.Error(w, `{"error":"authorization denied"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(authorization.WithRequest(r.Context(), request)))
+		})
+	}
+}
+
+func requestAction(method, path string) string {
+	switch {
+	case method == http.MethodPost && (path == "/v1/chat" || path == "/v1/chat/stream"):
+		return "chat.execute"
+	case method == http.MethodGet && path == "/v1/sessions":
+		return "session.list"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/sessions/"):
+		return "session.delete"
+	case method == http.MethodGet && path == "/v1/agents":
+		return "agent.list"
+	case method == http.MethodPost && path == "/v1/deliveries":
+		return "delivery.admit"
+	case method == http.MethodGet && strings.HasPrefix(path, "/v1/deliveries/"):
+		return "delivery.inspect"
+	case method == http.MethodGet && path == "/v1/memory":
+		return "memory.list"
+	case method == http.MethodPost && path == "/v1/memory":
+		return "memory.add"
+	case method == http.MethodDelete && strings.HasPrefix(path, "/v1/memory/"):
+		return "memory.delete"
+	case method == http.MethodPost && path == "/v1/memory/search":
+		return "memory.search"
+	case method == http.MethodGet && path == "/v1/teams":
+		return "team.list"
+	case method == http.MethodPost && strings.HasPrefix(path, "/v1/teams/") && strings.HasSuffix(path, "/run"):
+		return "team.run"
+	case method == http.MethodGet && path == "/metrics":
+		return "metrics.read"
+	default:
+		return ""
+	}
+}
+
+func serverActions() map[string]struct{} {
+	actions := make(map[string]struct{})
+	for _, action := range []string{
+		"chat.execute", "session.list", "session.delete", "agent.list",
+		"memory.list", "memory.add", "memory.delete", "memory.search",
+		"team.list", "team.run", "metrics.read", "delivery.admit", "delivery.inspect",
+	} {
+		actions[action] = struct{}{}
+	}
+	return actions
 }
 
 func probePath(path string) bool {

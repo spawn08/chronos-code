@@ -3,7 +3,7 @@ package router
 import "fmt"
 
 // PPDMode controls whether qualifying requests are recorded only or sent to
-// the PPD specialist.
+// the configured delivery strategist. The name is retained for config compatibility.
 type PPDMode string
 
 const (
@@ -28,8 +28,8 @@ type PPDThresholds struct {
 	MinEstimatedCalls int `yaml:"min_estimated_calls"`
 }
 
-// PPDConfig is the routing.yaml policy section. Enabled delegates qualifying
-// work to the specialist. Shadow preserves a decision without invoking it.
+// PPDConfig is the legacy-named routing.yaml policy section. Enabled delegates
+// qualifying work to the strategist. Shadow preserves a decision without invoking it.
 type PPDConfig struct {
 	Version         string        `yaml:"version"`
 	Mode            PPDMode       `yaml:"mode"`
@@ -65,7 +65,7 @@ type PPDFeatures struct {
 	ResumeLikely   bool
 }
 
-// PPDDecision is retained with routing telemetry before a PPD specialist can
+// PPDDecision is retained with routing telemetry before the strategist can
 // be called. A false positive is a policy delegate/shadow against a bypass
 // oracle label.
 type PPDDecision struct {

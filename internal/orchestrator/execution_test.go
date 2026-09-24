@@ -24,6 +24,7 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/activation"
 	"github.com/spawn08/chronos-code/internal/apierror"
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/graph"
@@ -119,14 +120,15 @@ func TestExecuteAttachesHostRunIdentity(t *testing.T) {
 		agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)},
 		active: "coder", workspace: &workspace.Info{Root: t.TempDir()},
 	}
-	result, err := orch.Execute(context.Background(), ExecutionRequest{
+	ctx := authorization.WithRequest(context.Background(), authorization.Request{PrincipalID: "user-1", TenantID: "tenant-1", RepositoryID: "repo-1", Action: "chat.execute"})
+	result, err := orch.Execute(ctx, ExecutionRequest{
 		Message: "inspect", RequestedAgent: "coder", SessionID: "session-1", TaskID: "task-1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	identity, ok := agent.RunIdentityFromContext(provider.executionContext(0))
-	if !ok || identity.TaskID != result.TaskID || identity.SessionID != result.SessionID || identity.RoleID != result.AgentID || identity.InvocationID == "" || identity.ParentInvocationID != "" {
+	if !ok || identity.TenantID != "tenant-1" || identity.RepositoryID != "repo-1" || identity.TaskID != result.TaskID || identity.SessionID != result.SessionID || identity.RoleID != result.AgentID || identity.InvocationID == "" || identity.ParentInvocationID != "" {
 		t.Fatalf("run identity = %+v, ok=%v, result=%+v", identity, ok, result)
 	}
 }
@@ -382,7 +384,7 @@ func TestExecuteRequestedAgentAndChatAdaptersRemainCompatible(t *testing.T) {
 
 func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 	ppdConfig := router.PPDConfig{
-		Version: "v1", Mode: router.PPDModeEnabled, Specialist: "ppd-planner", MaxPlannerCalls: 1,
+		Version: "v1", Mode: router.PPDModeEnabled, Specialist: "delivery-strategist", MaxPlannerCalls: 1,
 		Thresholds: router.PPDThresholds{MinFiles: 3, MinPackages: 2, MinEstimatedCalls: 5},
 	}
 
@@ -422,7 +424,7 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, planner)
 
 		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "refactor across multiple packages"})
-		if err != nil || result.AgentID != "ppd-planner" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate || result.PPDDecision.Reason != "high_risk" {
+		if err != nil || result.AgentID != "delivery-strategist" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate || result.PPDDecision.Reason != "high_risk" {
 			t.Fatalf("Execute() = %#v, %v; want live PPD delegation on high complexity", result, err)
 		}
 		if len(coder.requests) != 0 {
@@ -436,7 +438,7 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, planner)
 
 		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "change behavior", PPD: &router.PPDRequest{FileCount: 3}})
-		if err != nil || result.AgentID != "ppd-planner" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate {
+		if err != nil || result.AgentID != "delivery-strategist" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate {
 			t.Fatalf("Execute() = %#v, %v; want planner delegation", result, err)
 		}
 	})
@@ -460,7 +462,7 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, nil)
 
 		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "change behavior", PPD: &router.PPDRequest{PackageCount: 2}})
-		if err == nil || !contains(err.Error(), `PPD specialist "ppd-planner" not found`) || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate {
+		if err == nil || !contains(err.Error(), `delivery strategist "delivery-strategist" not found`) || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate {
 			t.Fatalf("Execute() = %#v, %v; want explicit missing specialist failure", result, err)
 		}
 		if len(coder.requests) != 0 {
@@ -486,7 +488,7 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 func newPPDExecutionTestOrchestrator(config router.PPDConfig, coder, planner *executionTestProvider) *Orchestrator {
 	agents := map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", coder)}
 	if planner != nil {
-		agents["ppd-planner"] = newExecutionTestAgent("ppd-planner", planner)
+		agents["delivery-strategist"] = newExecutionTestAgent("delivery-strategist", planner)
 	}
 	return &Orchestrator{
 		agents: agents, active: "coder",
@@ -842,7 +844,7 @@ func TestExecuteFailureAfterMutationDoesNotReplayTask(t *testing.T) {
 				a := newExecutionTestAgent("coder", provider)
 				a.Storage = store
 				var mutations atomic.Int32
-				a.Tools.Register(&tool.Definition{Name: "mutate", Permission: tool.PermAllow, Handler: func(context.Context, map[string]any) (any, error) {
+				a.Tools.Register(&tool.Definition{Name: "mutate", Permission: tool.PermAllow, Effects: []tool.Effect{tool.EffectExternalMutation}, Handler: func(context.Context, map[string]any) (any, error) {
 					mutations.Add(1)
 					return "mutation committed", nil
 				}})

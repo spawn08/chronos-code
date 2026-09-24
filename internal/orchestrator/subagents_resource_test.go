@@ -537,3 +537,27 @@ func TestSetupSubagentsPreservesDynamicFallback(t *testing.T) {
 		t.Fatalf("dynamic fallback result=%v calls=%d", result, calls)
 	}
 }
+
+func TestDelegationAttenuatesEffectGrant(t *testing.T) {
+	ctx := tool.WithEffectGrant(context.Background(), tool.EffectRead, tool.EffectDeliveryWrite)
+	definitions := []*tool.Definition{
+		{Name: "read", Effects: []tool.Effect{tool.EffectRead}},
+		{Name: "network", Effects: []tool.Effect{tool.EffectNetwork}},
+	}
+	grant, ok := tool.EffectGrantFromContext(attenuateEffectGrant(ctx, definitions))
+	if !ok {
+		t.Fatal("attenuated grant missing")
+	}
+	if len(grant) != 1 {
+		t.Fatalf("attenuated grant = %v", grant)
+	}
+	if _, ok := grant[tool.EffectRead]; !ok {
+		t.Fatal("delegated read effect removed")
+	}
+	if _, ok := grant[tool.EffectDeliveryWrite]; ok {
+		t.Fatal("child gained unused parent delivery-write authority")
+	}
+	if _, ok := grant[tool.EffectNetwork]; ok {
+		t.Fatal("child gained network authority absent from parent")
+	}
+}

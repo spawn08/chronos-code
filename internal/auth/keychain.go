@@ -163,6 +163,8 @@ func NewStoreWithBackend(b keyringBackend, indexPath string) *Store {
 // Save stores cred under provider in the keychain backend, then updates the
 // local provider-name index so List can find it later.
 func (s *Store) Save(provider string, cred Credential) error {
+	provider = CanonicalProvider(provider)
+	cred.Provider = provider
 	data, err := json.Marshal(cred)
 	if err != nil {
 		return fmt.Errorf("auth: marshal credential for %q: %w", provider, err)
@@ -179,12 +181,20 @@ func (s *Store) Save(provider string, cred Credential) error {
 // Load reads the credential stored for provider. If no credential is
 // stored, it returns (nil, ErrNotFound).
 func (s *Store) Load(provider string) (*Credential, error) {
-	data, err := s.backend.Get(keyringService, provider)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, ErrNotFound
+	provider = CanonicalProvider(provider)
+	var data string
+	var err error
+	for _, name := range providerStorageNames(provider) {
+		data, err = s.backend.Get(keyringService, name)
+		if err == nil {
+			break
 		}
-		return nil, fmt.Errorf("auth: load credential for %q: %w", provider, err)
+		if !errors.Is(err, ErrNotFound) {
+			return nil, fmt.Errorf("auth: load credential for %q: %w", provider, err)
+		}
+	}
+	if err != nil {
+		return nil, ErrNotFound
 	}
 	var cred Credential
 	if err := json.Unmarshal([]byte(data), &cred); err != nil {
@@ -199,10 +209,13 @@ func (s *Store) Load(provider string) (*Credential, error) {
 // does not cause Delete to fail, but a real backend deletion error is never
 // silently swallowed.
 func (s *Store) Delete(provider string) error {
-	if err := s.backend.Delete(keyringService, provider); err != nil && !errors.Is(err, ErrNotFound) {
-		return fmt.Errorf("auth: delete credential for %q: %w", provider, err)
+	provider = CanonicalProvider(provider)
+	for _, name := range providerStorageNames(provider) {
+		if err := s.backend.Delete(keyringService, name); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("auth: delete credential for %q: %w", provider, err)
+		}
+		_ = s.removeFromIndex(name)
 	}
-	_ = s.removeFromIndex(provider) // best-effort; index staleness isn't fatal.
 	return nil
 }
 
@@ -213,6 +226,15 @@ func (s *Store) List() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[CanonicalProvider(name)] = struct{}{}
+	}
+	names = names[:0]
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	return names, nil
 }
 

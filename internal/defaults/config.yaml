@@ -102,12 +102,13 @@ agents:
     sub_agents:
       - coder
       - planner
-      - ppd-planner
+      - delivery-strategist
       - reviewer
       - debugger
       - researcher
       - architect
       - explainer
+      - tester
 
   - id: coder
     name: Coding Agent
@@ -131,6 +132,7 @@ agents:
       - reviewer
       - planner
       - researcher
+      - tester
 
   - id: planner
     name: Planner
@@ -221,3 +223,20 @@ agents:
         permission: allow
       - name: file_grep
         permission: allow
+
+  - id: tester
+    name: Tester
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-4-6"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow
+      - name: shell
+        permission: require_approval

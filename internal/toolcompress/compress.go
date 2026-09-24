@@ -119,6 +119,7 @@ func RegisterReader(a *agent.Agent) {
 	store, agentID := a.Storage, a.ID
 	a.Tools.Register(&tool.Definition{
 		Name:        ReadStoredResultTool,
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Retrieve a bounded chunk of a compressed tool result. Continue with next_offset only when more content is necessary.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{

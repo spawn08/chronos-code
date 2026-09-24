@@ -48,7 +48,17 @@ func runPlan() error {
 	}
 	defer store.Close()
 
-	scope := plan.PlanScope{TenantID: plan.TenantID(command.tenant), RepositoryID: plan.RepositoryID(command.repository)}
+	requestedTenant := plan.TenantID(command.tenant)
+	if requestedTenant == "" {
+		requestedTenant = plan.LocalTenantID
+	}
+	scope := plan.PlanScope{TenantID: requestedTenant, RepositoryID: plan.RepositoryID(command.repository)}
+	if planScopedOperation(operation) {
+		scope, err = plan.AdmitPlanScope(plan.LocalTenantID, scope)
+		if err != nil {
+			return fmt.Errorf("authorize plan %s: %w", operation, err)
+		}
+	}
 	ref := plan.PlanRef{TaskID: plan.TaskID(command.task), PlanID: plan.PlanID(command.planID), Generation: plan.GenerationID(command.generation)}
 	switch operation {
 	case "status", "verify-db":
@@ -98,6 +108,15 @@ func runPlan() error {
 		return writePlanResult(result, err)
 	default:
 		return fmt.Errorf("unknown plan command: %s; %s", operation, planUsage)
+	}
+}
+
+func planScopedOperation(operation string) bool {
+	switch operation {
+	case "list", "show", "graph", "events", "resume", "pause", "cancel", "retry", "export", "prune":
+		return true
+	default:
+		return false
 	}
 }
 

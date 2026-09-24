@@ -5,6 +5,34 @@ import (
 	"strings"
 )
 
+// CanonicalProvider normalizes provider names accepted at public auth
+// boundaries so aliases share credentials and status.
+func CanonicalProvider(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claude":
+		return "anthropic"
+	case "codex":
+		return "openai"
+	case "azure-openai":
+		return "azure"
+	default:
+		return strings.ToLower(strings.TrimSpace(name))
+	}
+}
+
+func providerStorageNames(provider string) []string {
+	switch CanonicalProvider(provider) {
+	case "anthropic":
+		return []string{"anthropic", "claude"}
+	case "openai":
+		return []string{"openai", "codex"}
+	case "azure":
+		return []string{"azure", "azure-openai"}
+	default:
+		return []string{CanonicalProvider(provider)}
+	}
+}
+
 var builtinProviders = map[string]ProviderOAuthConfig{
 	"anthropic": {
 		Provider:     "anthropic",
@@ -21,7 +49,7 @@ var builtinProviders = map[string]ProviderOAuthConfig{
 // provider name (case-insensitive). Returns false if the provider has no
 // built-in registration and the caller must supply credentials manually.
 func LookupProvider(name string) (ProviderOAuthConfig, bool) {
-	cfg, ok := builtinProviders[strings.ToLower(name)]
+	cfg, ok := builtinProviders[CanonicalProvider(name)]
 	return cfg, ok
 }
 

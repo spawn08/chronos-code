@@ -114,12 +114,12 @@ On every turn start:
 4. Accepted patterns are injected via `PatternInjector` on future turns
 5. Accepted patterns are also written to `feedback.yaml` for recall
 
-### Plan Resumption Loop
+### Durable Plan Runtime
 
-1. PPD-qualifying task creates a `PlanGraph` in SQLite
-2. `ppd-planner` updates `PlanNode` status as it works
-3. On `/resume` or `--resume <session-id>`, the orchestrator loads the plan from SQLite
-4. Remaining nodes continue from where execution stopped
+1. `delivery-strategist` can propose a strict, bounded frontier when explicitly invoked or enabled
+2. The separate gated plan runtime can validate and persist that frontier in SQLite
+3. The scheduler, not the strategist, updates node status while an admitted generation executes
+4. Successor generations exist in the plan domain, but production rolling replanning is not wired
 
 ## See Also
 

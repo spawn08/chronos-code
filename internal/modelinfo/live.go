@@ -5,149 +5,232 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 )
 
-// ErrUnsupportedProvider is returned by FetchLive for any provider without
-// a documented, stable models-list endpoint this package knows how to
-// call. Callers should fall back to All() (the static registry).
 var ErrUnsupportedProvider = errors.New("modelinfo: live model listing not supported for this provider")
+var ErrMissingEndpoint = errors.New("modelinfo: provider endpoint is not configured")
 
-// LiveProviders lists every provider FetchLive can query, kept in lockstep
-// with FetchLive's switch statement so callers that want to try live
-// listing across several providers (e.g. a model picker enriching more than
-// just the active one) don't need their own separate, driftable copy of
-// this list.
-func LiveProviders() []string {
-	return []string{"anthropic", "openai", "azure"}
+type LiveConfig struct {
+	BaseURL  string
+	Endpoint string
 }
 
-// fetchTimeout bounds a single live models-list call — short enough that a
-// synchronous caller (e.g. a TUI's /model command) never hangs noticeably.
+type ConfigurationError struct {
+	Provider string
+	Err      error
+}
+
+func (e *ConfigurationError) Error() string {
+	return fmt.Sprintf("modelinfo: %s configuration: %v", e.Provider, e.Err)
+}
+func (e *ConfigurationError) Unwrap() error { return e.Err }
+
+type HTTPError struct {
+	Provider   string
+	StatusCode int
+	Snippet    string
+}
+
+type RequestError struct {
+	Provider string
+	Err      error
+}
+
+func (e *RequestError) Error() string {
+	switch {
+	case errors.Is(e.Err, context.DeadlineExceeded):
+		return fmt.Sprintf("modelinfo: %s models request timed out", e.Provider)
+	case errors.Is(e.Err, context.Canceled):
+		return fmt.Sprintf("modelinfo: %s models request canceled", e.Provider)
+	default:
+		return fmt.Sprintf("modelinfo: %s models request failed", e.Provider)
+	}
+}
+func (e *RequestError) Unwrap() error { return e.Err }
+
+func (e *HTTPError) Error() string {
+	if e.Snippet == "" {
+		return fmt.Sprintf("modelinfo: %s models returned HTTP %d", e.Provider, e.StatusCode)
+	}
+	return fmt.Sprintf("modelinfo: %s models returned HTTP %d: %s", e.Provider, e.StatusCode, e.Snippet)
+}
+
+func LiveProviders() []string { return []string{"anthropic", "openai", "azure"} }
+
 const fetchTimeout = 5 * time.Second
 
-// anthropicModelsURL and openaiModelsURL are vars, not consts, so tests can
-// point them at an httptest.Server instead of the real API.
 var (
 	anthropicModelsURL = "https://api.anthropic.com/v1/models"
 	openaiModelsURL    = "https://api.openai.com/v1/models"
 )
 
-// FetchLive queries provider's real models-list API using apiKey and
-// returns live Info entries. "anthropic" and "openai" use their documented,
-// stable, unauthenticated-schema models-list endpoint. "azure" uses Azure
-// OpenAI's own deployments-as-models listing (its newer "v1 preview" data
-// plane API, mirroring OpenAI's /v1/models shape) against the caller's own
-// AZURE_OPENAI_ENDPOINT — every other provider returns
-// ErrUnsupportedProvider.
-//
-// Model IDs and their existence come straight from the API, never
-// hardcoded. ContextWindow is filled in from this package's static
-// registry when the model is known there, and left 0 ("unknown")
-// otherwise — because context window size is the one field these
-// endpoints don't return at all (confirmed against both vendors' current
-// API responses), not because chronos-code chose to hardcode identity data
-// it could have fetched.
-func FetchLive(ctx context.Context, provider, apiKey string) ([]Info, error) {
+func CanonicalProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return "anthropic"
+	case "codex":
+		return "openai"
+	case "azure-openai":
+		return "azure"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
+
+// FetchLive performs an opt-in live lookup. The optional configuration routes
+// discovery through the same base URL or endpoint used for model calls.
+func FetchLive(ctx context.Context, provider, apiKey string, configs ...LiveConfig) ([]Info, error) {
+	provider = CanonicalProvider(provider)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, fetchTimeout)
+		defer cancel()
+	}
+	var cfg LiveConfig
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
 	switch provider {
 	case "anthropic":
-		return fetchAnthropicModels(ctx, apiKey)
+		endpoint, err := modelsURL(cfg.BaseURL, anthropicModelsURL)
+		if err != nil {
+			return nil, &ConfigurationError{Provider: provider, Err: err}
+		}
+		return fetchPagedModels(ctx, provider, endpoint, apiKey, "after_id")
 	case "openai":
-		return fetchOpenAIModels(ctx, apiKey)
+		endpoint, err := modelsURL(cfg.BaseURL, openaiModelsURL)
+		if err != nil {
+			return nil, &ConfigurationError{Provider: provider, Err: err}
+		}
+		return fetchPagedModels(ctx, provider, endpoint, apiKey, "after")
 	case "azure":
-		return fetchAzureModels(ctx, apiKey)
+		return fetchAzureModels(ctx, apiKey, cfg)
 	default:
 		return nil, ErrUnsupportedProvider
 	}
 }
 
-func fetchAnthropicModels(ctx context.Context, apiKey string) ([]Info, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, anthropicModelsURL, nil)
-	if err != nil {
-		return nil, err
+func modelsURL(baseURL, fallback string) (string, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		return fallback, nil
 	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	endpoint := baseURL + "/v1/models"
+	if strings.HasSuffix(baseURL, "/models") {
+		endpoint = baseURL
 	}
-	if err := doJSON(req, &body); err != nil {
-		return nil, fmt.Errorf("modelinfo: fetch anthropic models: %w", err)
+	if strings.HasSuffix(baseURL, "/v1") {
+		endpoint = baseURL + "/models"
 	}
-	out := make([]Info, len(body.Data))
-	for i, d := range body.Data {
-		out[i] = enrich("anthropic", d.ID)
+	if !validHTTPURL(endpoint) {
+		return "", errors.New("invalid models URL")
 	}
-	return out, nil
+	return endpoint, nil
 }
 
-func fetchOpenAIModels(ctx context.Context, apiKey string) ([]Info, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, openaiModelsURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := doJSON(req, &body); err != nil {
-		return nil, fmt.Errorf("modelinfo: fetch openai models: %w", err)
-	}
-	out := make([]Info, len(body.Data))
-	for i, d := range body.Data {
-		out[i] = enrich("openai", d.ID)
-	}
-	return out, nil
+type modelsPage struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+	HasMore bool   `json:"has_more"`
+	LastID  string `json:"last_id"`
 }
 
-// fetchAzureModels lists deployments on the caller's own Azure OpenAI
-// resource, read from AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_VERSION —
-// there is no single azure-wide URL like the other vendors since every
-// customer has their own resource endpoint. Returns ErrUnsupportedProvider
-// if the endpoint isn't configured, since there is nothing to call.
-func fetchAzureModels(ctx context.Context, apiKey string) ([]Info, error) {
-	endpoint := strings.TrimRight(os.Getenv("AZURE_OPENAI_ENDPOINT"), "/")
+func fetchPagedModels(ctx context.Context, provider, endpoint, apiKey, cursorParam string) ([]Info, error) {
+	var out []Info
+	cursor := ""
+	for pageNumber := 0; pageNumber < 100; pageNumber++ {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, &ConfigurationError{Provider: provider, Err: errors.New("invalid models URL")}
+		}
+		if cursor != "" {
+			query := u.Query()
+			query.Set(cursorParam, cursor)
+			u.RawQuery = query.Encode()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		if provider == "anthropic" {
+			req.Header.Set("x-api-key", apiKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		var page modelsPage
+		if err := doJSON(provider, apiKey, req, &page); err != nil {
+			return nil, fmt.Errorf("modelinfo: fetch %s models: %w", provider, err)
+		}
+		for _, item := range page.Data {
+			if item.ID != "" {
+				out = append(out, enrich(provider, item.ID))
+			}
+		}
+		if !page.HasMore {
+			return out, nil
+		}
+		if page.LastID == "" || page.LastID == cursor {
+			return nil, fmt.Errorf("modelinfo: fetch %s models: pagination cursor missing or repeated", provider)
+		}
+		cursor = page.LastID
+	}
+	return nil, fmt.Errorf("modelinfo: fetch %s models: pagination exceeded 100 pages", provider)
+}
+
+func fetchAzureModels(ctx context.Context, apiKey string, cfg LiveConfig) ([]Info, error) {
+	endpoint := firstNonEmpty(cfg.Endpoint, cfg.BaseURL, os.Getenv("AZURE_OPENAI_ENDPOINT"), os.Getenv("AZURE_OPENAI_BASE_URL"))
+	endpoint = strings.TrimRight(endpoint, "/")
 	if endpoint == "" {
-		return nil, ErrUnsupportedProvider
+		return nil, &ConfigurationError{Provider: "azure", Err: ErrMissingEndpoint}
 	}
 	apiVersion := os.Getenv("AZURE_OPENAI_API_VERSION")
 	if apiVersion == "" {
 		apiVersion = "preview"
 	}
-
-	url := fmt.Sprintf("%s/openai/v1/models?api-version=%s", endpoint, apiVersion)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	modelsEndpoint := endpoint
+	if !strings.HasSuffix(modelsEndpoint, "/models") {
+		if strings.HasSuffix(modelsEndpoint, "/openai/v1") {
+			modelsEndpoint += "/models"
+		} else {
+			modelsEndpoint += "/openai/v1/models"
+		}
+	}
+	if !validHTTPURL(modelsEndpoint) {
+		return nil, &ConfigurationError{Provider: "azure", Err: errors.New("invalid endpoint")}
+	}
+	u, err := url.Parse(modelsEndpoint)
+	if err != nil {
+		return nil, &ConfigurationError{Provider: "azure", Err: errors.New("invalid endpoint")}
+	}
+	query := u.Query()
+	query.Set("api-version", apiVersion)
+	u.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("api-key", apiKey)
-
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := doJSON(req, &body); err != nil {
+	var body modelsPage
+	if err := doJSON("azure", apiKey, req, &body); err != nil {
 		return nil, fmt.Errorf("modelinfo: fetch azure models: %w", err)
 	}
-	out := make([]Info, len(body.Data))
-	for i, d := range body.Data {
-		out[i] = enrich("azure", d.ID)
+	out := make([]Info, 0, len(body.Data))
+	for _, item := range body.Data {
+		if item.ID != "" {
+			out = append(out, enrich("azure", item.ID))
+		}
 	}
 	return out, nil
 }
 
-// enrich fills in a live-fetched model ID's ContextWindow from the static
-// registry when known, leaving it 0 ("unknown") otherwise.
 func enrich(provider, modelID string) Info {
 	if info, ok := Lookup(provider, modelID); ok {
 		return info
@@ -155,15 +238,39 @@ func enrich(provider, modelID string) Info {
 	return Info{Provider: provider, Model: modelID}
 }
 
-func doJSON(req *http.Request, out any) error {
-	client := &http.Client{Timeout: fetchTimeout}
-	resp, err := client.Do(req)
+func doJSON(provider, apiKey string, req *http.Request, out any) error {
+	resp, err := (&http.Client{Timeout: fetchTimeout}).Do(req)
 	if err != nil {
-		return err
+		return &RequestError{Provider: provider, Err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 513))
+		snippet := strings.TrimSpace(string(body))
+		if len(snippet) > 512 {
+			snippet = snippet[:512]
+		}
+		if apiKey != "" {
+			snippet = strings.ReplaceAll(snippet, apiKey, "[REDACTED]")
+		}
+		return &HTTPError{Provider: provider, StatusCode: resp.StatusCode, Snippet: snippet}
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func validHTTPURL(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

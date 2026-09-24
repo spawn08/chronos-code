@@ -91,22 +91,22 @@ stateDiagram-v2
     done --> [*]
 ```
 
-## PPD Integration
+## Delivery Strategy Integration
 
-When `ppd.mode: enabled` in `routing.yaml`, the orchestrator routes qualifying tasks through
-the `ppd-planner` specialist agent. `ppd-planner` decomposes the task, writes a plan to the
-SQLite store, and returns `PlanRef`s for each step. The orchestrator then schedules steps via
-`SQLStore.Graph`.
+The public `ppd` key is retained for compatibility. In enabled mode the orchestrator routes a
+qualifying turn to `delivery-strategist`. It proposes strict JSON for the next evidence-driven
+frontier only; it does not write the plan, execute work, or claim completion.
 
 PPD qualifying criteria:
 
 - Explicit PPD keywords in the message (`plan`, `decompose`, `step-by-step`, etc.)
 - High complexity path (`high` tier from the router)
 - Breadth exceeding configured thresholds (files > 5, packages > 2, call-chain depth > 3)
-- `@ppd-planner` direct mention
+- `@delivery-strategist` direct mention
 
-In `shadow` mode, routing decisions are recorded but `ppd-planner` is not invoked. This is
-useful for evaluating PPD coverage without changing behavior.
+In the default `shadow` mode, routing decisions are recorded but `delivery-strategist` is not
+invoked. The repository has durable scheduling primitives and a gated `ExecutePlan` path, but
+does not have a production loop that repeatedly requests and admits rolling frontiers.
 
 ## CLI Operations
 

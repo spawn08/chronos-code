@@ -45,11 +45,6 @@ func (g *Guard) Before(ctx context.Context, evt *hooks.Event) error {
 	}
 
 	args, _ := evt.Input.(map[string]any)
-	if err := requireToolEffects(ctx, evt.Name); err != nil {
-		g.audit(ctx, evt.Name, err.Error(), args)
-		return err
-	}
-
 	var blockErr error
 	switch evt.Name {
 	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
@@ -217,8 +212,10 @@ func (g *Guard) checkShellArgs(args map[string]any, requireAllowlisted bool) err
 		}
 	}
 
-	if pattern := firstMatchingRegex(g.policy.neverAllow, command); pattern != nil {
-		return fmt.Errorf("security: shell command denied (matches never_allow pattern %q)", pattern.String())
+	for _, segment := range analyzeShellCommand(command).segments {
+		if pattern := firstMatchingRegex(g.policy.neverAllow, segment); pattern != nil {
+			return fmt.Errorf("security: shell command denied (matches never_allow pattern %q)", pattern.String())
+		}
 	}
 
 	if requireAllowlisted && !g.shellCommandAllowed(command) {

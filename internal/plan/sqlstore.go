@@ -20,11 +20,12 @@ var (
 	ErrInvalidPlanRef     = errors.New("invalid plan reference")
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const (
 	schemaV1Checksum = "c6f8c0da8c42f04a"
 	schemaV2Checksum = "7436d0a91d7f9b52"
+	schemaV3Checksum = "45650bf42bb53351"
 )
 
 var planMigrations = []struct {
@@ -34,6 +35,7 @@ var planMigrations = []struct {
 }{
 	{version: 1, checksum: schemaV1Checksum, sql: schemaV1SQL},
 	{version: 2, checksum: schemaV2Checksum, sql: schemaV2SQL},
+	{version: 3, checksum: schemaV3Checksum, sql: schemaV3SQL},
 }
 
 // SQLStore is the SQLite-backed durable plan repository.
@@ -260,7 +262,10 @@ func (s *SQLStore) Create(ctx context.Context, p Plan) error {
 		if err != nil {
 			return fmt.Errorf("encode node risks: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_nodes (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, state, scope, risks, verification) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.TenantID, p.RepositoryID, p.TaskID, p.ID, p.Generation, node.ID, node.State, node.Scope, string(risks), node.Verification); err != nil {
+		expectedArtifacts, _ := json.Marshal(node.ExpectedArtifacts)
+		assumptions, _ := json.Marshal(node.Assumptions)
+		invalidationTriggers, _ := json.Marshal(node.InvalidationTriggers)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_nodes (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, state, kind, objective, scope, expected_artifacts, assumptions, invalidation_triggers, recovery_class, risks, verification) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.TenantID, p.RepositoryID, p.TaskID, p.ID, p.Generation, node.ID, node.State, node.Kind, node.Objective, node.Scope, string(expectedArtifacts), string(assumptions), string(invalidationTriggers), node.RecoveryClass, string(risks), node.Verification); err != nil {
 			return fmt.Errorf("insert node: %w", err)
 		}
 	}
@@ -330,19 +335,24 @@ func (s *SQLStore) Load(ctx context.Context, p Plan) (Plan, error) {
 }
 
 func (s *SQLStore) loadNodes(ctx context.Context, p *Plan) error {
-	rows, err := s.db.QueryContext(ctx, planWhere(`SELECT node_id, state, scope, risks, verification FROM plan_nodes`)+` ORDER BY node_id`, planArgs(*p)...)
+	rows, err := s.db.QueryContext(ctx, planWhere(`SELECT node_id, state, kind, objective, scope, expected_artifacts, assumptions, invalidation_triggers, recovery_class, risks, verification FROM plan_nodes`)+` ORDER BY node_id`, planArgs(*p)...)
 	if err != nil {
 		return fmt.Errorf("load nodes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var node Node
-		var risks string
-		if err := rows.Scan(&node.ID, &node.State, &node.Scope, &risks, &node.Verification); err != nil {
+		var expectedArtifacts, assumptions, invalidationTriggers, risks string
+		if err := rows.Scan(&node.ID, &node.State, &node.Kind, &node.Objective, &node.Scope, &expectedArtifacts, &assumptions, &invalidationTriggers, &node.RecoveryClass, &risks, &node.Verification); err != nil {
 			return fmt.Errorf("scan node: %w", err)
 		}
-		if err := json.Unmarshal([]byte(risks), &node.Risks); err != nil {
-			return fmt.Errorf("decode node risks: %w", err)
+		for _, metadata := range []struct {
+			encoded string
+			target  *[]string
+		}{{expectedArtifacts, &node.ExpectedArtifacts}, {assumptions, &node.Assumptions}, {invalidationTriggers, &node.InvalidationTriggers}, {risks, &node.Risks}} {
+			if err := json.Unmarshal([]byte(metadata.encoded), metadata.target); err != nil {
+				return fmt.Errorf("decode node metadata: %w", err)
+			}
 		}
 		p.Nodes = append(p.Nodes, node)
 	}
@@ -824,7 +834,7 @@ func validatePlanDatabase(ctx context.Context, db *sql.DB) (int, error) {
 	if version > schemaVersion {
 		return 0, ErrUnsupportedSchema
 	}
-	if version != schemaVersion || checksum != schemaV2Checksum {
+	if version != schemaVersion || checksum != schemaV3Checksum {
 		return 0, ErrIncompatibleSchema
 	}
 	for _, table := range []string{"plans", "plan_nodes", "plan_edges", "plan_attempts", "plan_context_refs", "plan_evidence", "plan_events", "plan_leases"} {
@@ -866,3 +876,12 @@ const schemaV2SQL = `
 ALTER TABLE plan_nodes ADD COLUMN scope TEXT NOT NULL DEFAULT '';
 ALTER TABLE plan_nodes ADD COLUMN risks TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE plan_nodes ADD COLUMN verification TEXT NOT NULL DEFAULT '';`
+
+const schemaV3SQL = `
+ALTER TABLE plan_nodes ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE plan_nodes ADD COLUMN objective TEXT NOT NULL DEFAULT '';
+ALTER TABLE plan_nodes ADD COLUMN expected_artifacts TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plan_nodes ADD COLUMN assumptions TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plan_nodes ADD COLUMN invalidation_triggers TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE plan_nodes ADD COLUMN recovery_class TEXT NOT NULL DEFAULT '';
+UPDATE plan_nodes SET kind = 'implement', objective = scope, expected_artifacts = '["legacy node result"]', recovery_class = 'replan';`

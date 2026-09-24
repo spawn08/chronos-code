@@ -13,6 +13,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos-code/internal/worktree"
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
 )
 
@@ -37,7 +38,7 @@ func (e *IsolationCapabilityError) Error() string {
 }
 
 // planNodeExecutor adapts a durable node to the ordinary execution path. The
-// explicit agent selection prevents Execute from routing the node back to PPD.
+// explicit agent selection prevents Execute from routing the node back to the strategist.
 type planNodeExecutor struct {
 	runner              executionRunner
 	worktrees           planWorktreeManager
@@ -70,6 +71,7 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 	}
 
 	runCtx := builtins.WithWorkspaceRoot(ctx, handle.Manifest.WorktreePath)
+	runCtx = tool.WithScratchWorkspace(runCtx)
 	mapped, runErr := e.execute(runCtx, request, access.Paths)
 	passed := runErr == nil && mapped.Status == plan.NodeCompleted && mapped.StopReason == "" && mapped.Verification == plan.VerificationPassed
 	check := worktree.Check{Name: "plan-node-verification", Passed: passed}
@@ -117,7 +119,7 @@ func (e *planNodeExecutor) execute(ctx context.Context, request plan.NodeExecuti
 		Message:          nodeImplementationPrompt(request),
 		Mode:             ExecutionBlocking,
 		RequestedAgent:   e.implementationAgent,
-		SessionID:        fmt.Sprintf("ppd-%s-%s", request.Plan.ID, request.Attempt),
+		SessionID:        fmt.Sprintf("plan-%s-%s", request.Plan.ID, request.Attempt),
 		TaskID:           fmt.Sprintf("%s-%s-%s", request.Plan.TaskID, request.Node.ID, request.Attempt),
 		BoundedContext:   true,
 		VerificationMode: verification.ModeEnforce,
@@ -175,7 +177,24 @@ func nodeImplementationPrompt(request plan.NodeExecutionRequest) string {
 		}
 	}
 	sort.Strings(contextLines)
-	return fmt.Sprintf("Scope:\n%s\n\nContext:\n%s\n\nVerification:\n%s", request.Node.Scope, strings.Join(contextLines, "\n"), request.Node.Verification)
+	evidenceNodes := map[plan.NodeID]bool{request.Node.ID: true}
+	for _, dependency := range request.Plan.Dependencies {
+		if dependency.NodeID == request.Node.ID {
+			evidenceNodes[dependency.DependsOn] = true
+		}
+	}
+	var evidence []string
+	for _, item := range request.Plan.Evidence {
+		if evidenceNodes[item.NodeID] {
+			evidence = append(evidence, string(item.ID))
+		}
+	}
+	sort.Strings(evidence)
+	return fmt.Sprintf("Kind:\n%s\n\nObjective:\n%s\n\nScope boundary (not the task instruction):\n%s\n\nExpected artifacts:\n%s\n\nRisks:\n%s\n\nAssumptions:\n%s\n\nInvalidation triggers:\n%s\n\nRecovery class:\n%s\n\nContext references/evidence:\n%s\n\nVerification:\n%s",
+		request.Node.Kind, request.Node.Objective, request.Node.Scope,
+		strings.Join(request.Node.ExpectedArtifacts, "\n"), strings.Join(request.Node.Risks, "\n"),
+		strings.Join(request.Node.Assumptions, "\n"), strings.Join(request.Node.InvalidationTriggers, "\n"), request.Node.RecoveryClass,
+		strings.Join(append(contextLines, evidence...), "\n"), request.Node.Verification)
 }
 
 func mapNodeExecutionResult(request plan.NodeExecutionRequest, result ExecutionResult, err error) plan.NodeExecutionResult {

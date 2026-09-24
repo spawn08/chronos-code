@@ -74,6 +74,7 @@ func withContextWindow(info Info) Info {
 
 // Lookup returns the registered Info for (provider, model), if known.
 func Lookup(provider, model string) (Info, bool) {
+	provider = CanonicalProvider(provider)
 	for _, i := range registry {
 		if i.Provider == provider && i.Model == model {
 			return withContextWindow(i), true

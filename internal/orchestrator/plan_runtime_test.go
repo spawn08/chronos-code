@@ -37,7 +37,7 @@ func TestExecutePlanPersistsResumesAndSynthesizesWithPrimary(t *testing.T) {
 		planStore:     store,
 	}
 	orch.planController = plan.NewController(store, executor, nil, nil, plan.ControllerConfig{})
-	plannerJSON := []byte(`{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"implement","depends_on":[],"scope":"internal/orchestrator/plan_runtime.go","context_refs":[],"risks":["integration"],"verification":"go test ./internal/orchestrator"}]}`)
+	plannerJSON := []byte(`{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"implement","kind":"implement","objective":"implement the runtime change","depends_on":[],"scope":"internal/orchestrator/plan_runtime.go","context_refs":[],"expected_artifacts":["runtime patch"],"assumptions":[],"invalidation_triggers":[],"recovery_class":"replan","risks":["integration"],"verification":"go test ./internal/orchestrator"}]}`)
 	identity := PlanRuntimeIdentity{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", PlanID: "plan", Generation: "one"}
 
 	first, err := orch.ExecutePlan(ctx, plannerJSON, identity)
@@ -77,8 +77,8 @@ func TestExecutePlanResumesOnlyIncompleteNodes(t *testing.T) {
 	persisted := plan.Plan{
 		TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "resume", Generation: "one", State: plan.PlanActive,
 		Nodes: []plan.Node{
-			{ID: "done", State: plan.NodeCompleted, Scope: "done.go", Risks: []string{"risk"}, Verification: "verify done"},
-			{ID: "remaining", State: plan.NodePending, Scope: "remaining.go", Risks: []string{"risk"}, Verification: "verify remaining"},
+			{ID: "done", State: plan.NodeCompleted, Kind: plan.NodeImplement, Objective: "finish done", Scope: "done.go", ExpectedArtifacts: []string{"done patch"}, Assumptions: []string{}, InvalidationTriggers: []string{}, RecoveryClass: plan.RecoveryReplan, Risks: []string{"risk"}, Verification: "verify done"},
+			{ID: "remaining", State: plan.NodePending, Kind: plan.NodeVerify, Objective: "verify remaining", Scope: "remaining.go", ExpectedArtifacts: []string{"verification result"}, Assumptions: []string{}, InvalidationTriggers: []string{}, RecoveryClass: plan.RecoveryRetry, Risks: []string{"risk"}, Verification: "verify remaining"},
 		},
 		Dependencies: []plan.Dependency{{NodeID: "remaining", DependsOn: "done"}},
 		ContextRefs:  []plan.ContextRef{{ID: "source", NodeID: "done"}, {ID: "classifier", NodeID: "done"}},
@@ -94,7 +94,7 @@ func TestExecutePlanResumesOnlyIncompleteNodes(t *testing.T) {
 		capabilities:  RuntimeCapabilityManifest{Capabilities: []config.Capability{{Name: capabilityClosedLoopPPD}}}, planStore: store,
 	}
 	orch.planController = plan.NewController(store, executor, nil, nil, plan.ControllerConfig{})
-	plannerJSON := []byte(`{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"done","depends_on":[],"scope":"done.go","context_refs":[],"risks":["risk"],"verification":"verify done"},{"id":"remaining","depends_on":["done"],"scope":"remaining.go","context_refs":[],"risks":["risk"],"verification":"verify remaining"}]}`)
+	plannerJSON := []byte(`{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"done","kind":"implement","objective":"finish done","depends_on":[],"scope":"done.go","context_refs":[],"expected_artifacts":["done patch"],"assumptions":[],"invalidation_triggers":[],"recovery_class":"replan","risks":["risk"],"verification":"verify done"},{"id":"remaining","kind":"verify","objective":"verify remaining","depends_on":["done"],"scope":"remaining.go","context_refs":[],"expected_artifacts":["verification result"],"assumptions":[],"invalidation_triggers":[],"recovery_class":"retry","risks":["risk"],"verification":"verify remaining"}]}`)
 
 	result, err := orch.ExecutePlan(ctx, plannerJSON, PlanRuntimeIdentity{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", PlanID: "resume", Generation: "one"})
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos/engine/model"
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/sdk/harness"
 )
@@ -74,6 +75,7 @@ func claimTurnModelCall(ctx context.Context) error {
 
 type configuredAgentRunner struct {
 	agents    map[string]*agent.Agent
+	tools     *tool.Registry
 	models    *roleModelRegistry
 	fallback  harness.Runner
 	resources *subagentResources
@@ -202,6 +204,7 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	var result string
 	var err error
 	if configured := r.agents[spec.Name]; configured != nil {
+		runCtx = attenuateEffectGrant(runCtx, configured.Tools.List())
 		provider := configured.Model
 		if r.models != nil {
 			provider = r.models.provider(spec.Name)
@@ -221,6 +224,7 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		runCtx = agent.WithModelProvider(runCtx, provider)
 		result, err = configured.Execute(runCtx, task)
 	} else if r.fallback != nil {
+		runCtx = attenuateDynamicEffectGrant(runCtx, spec, r.tools)
 		result, err = r.fallback.Run(runCtx, spec, task)
 	} else {
 		err = fmt.Errorf("no dynamic subagent runner configured")
@@ -242,6 +246,44 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		}
 	}
 	return result, nil
+}
+
+func attenuateEffectGrant(ctx context.Context, definitions []*tool.Definition) context.Context {
+	parent, constrained := tool.EffectGrantFromContext(ctx)
+	if !constrained {
+		return ctx
+	}
+	allowed := make(map[tool.Effect]struct{})
+	for _, def := range definitions {
+		if def == nil {
+			continue
+		}
+		for _, effect := range def.Effects {
+			if _, ok := parent[effect]; ok {
+				allowed[effect] = struct{}{}
+			}
+		}
+	}
+	effects := make([]tool.Effect, 0, len(allowed))
+	for effect := range allowed {
+		effects = append(effects, effect)
+	}
+	return tool.WithEffectGrant(ctx, effects...)
+}
+
+func attenuateDynamicEffectGrant(ctx context.Context, spec harness.SubAgentSpec, registry *tool.Registry) context.Context {
+	if len(spec.ToolNames) == 0 {
+		return tool.WithEffectGrant(ctx)
+	}
+	definitions := make([]*tool.Definition, 0, len(spec.ToolNames))
+	if registry != nil {
+		for _, name := range spec.ToolNames {
+			if def, ok := registry.Get(name); ok {
+				definitions = append(definitions, def)
+			}
+		}
+	}
+	return attenuateEffectGrant(ctx, definitions)
 }
 
 // setupSubAgents registers only each role's declared children while retaining
@@ -274,6 +316,7 @@ func setupSubAgentsWithModels(agents map[string]*agent.Agent, models *roleModelR
 		}
 		harness.Attach(svc, &configuredAgentRunner{
 			agents:    agents,
+			tools:     parent.Tools,
 			models:    models,
 			fallback:  harness.NewInProcessRunner(svc),
 			resources: resources,

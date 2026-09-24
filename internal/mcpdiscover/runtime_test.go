@@ -189,7 +189,7 @@ func TestStartConfiguredDefinitionWinsAndClientsAreIndependent(t *testing.T) {
 	_ = runtimeB.Close()
 }
 
-func TestConnectServerApprovesPreviouslyPendingServer(t *testing.T) {
+func TestConnectServerUsesExactApprovedIdentity(t *testing.T) {
 	registry := tool.NewRegistry()
 	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
 	client := &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "read"}}}
@@ -201,7 +201,11 @@ func TestConnectServerApprovesPreviouslyPendingServer(t *testing.T) {
 	if statuses := runtime.Statuses(); len(statuses) != 1 || statuses[0].State != StateApprovalRequired {
 		t.Fatalf("statuses = %#v", runtime.Statuses())
 	}
-	if err := policy.AllowMCPServerSession("filesystem"); err != nil {
+	identity, ok := runtime.Identity("filesystem")
+	if !ok {
+		t.Fatal("server identity unavailable")
+	}
+	if err := policy.AllowMCPServerSessionIdentity(identity); err != nil {
 		t.Fatal(err)
 	}
 	status := runtime.ConnectServer(context.Background(), cfg, registry, policy, time.Second, func(mcp.ServerConfig) (RuntimeClient, error) {
@@ -225,7 +229,11 @@ func TestSessionApprovalDoesNotTrustChangedLaunchConfig(t *testing.T) {
 		return &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "read"}}}, nil
 	}
 	runtime := Start(context.Background(), nil, []mcp.ServerConfig{initial}, registry, policy, time.Second, factory)
-	if err := policy.AllowMCPServerSession("filesystem"); err != nil {
+	identity, ok := runtime.Identity("filesystem")
+	if !ok {
+		t.Fatal("server identity unavailable")
+	}
+	if err := policy.AllowMCPServerSessionIdentity(identity); err != nil {
 		t.Fatal(err)
 	}
 	if status := runtime.ConnectServer(context.Background(), initial, registry, policy, time.Second, factory); status.State != StateConnected {
@@ -240,6 +248,39 @@ func TestSessionApprovalDoesNotTrustChangedLaunchConfig(t *testing.T) {
 	}
 	if created != 1 {
 		t.Fatalf("created clients = %d, want 1", created)
+	}
+}
+
+func TestSessionApprovalDoesNotTrustChangedDiscoverySource(t *testing.T) {
+	registry := tool.NewRegistry()
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	cfg := mcp.ServerConfig{Name: "filesystem", Transport: mcp.TransportStdio, Command: "server"}
+	factory := func(mcp.ServerConfig) (RuntimeClient, error) {
+		return &fakeRuntimeClient{tools: []mcp.ToolInfo{{Name: "read"}}}, nil
+	}
+	runtime := Start(context.Background(), nil, []mcp.ServerConfig{cfg}, registry, policy, time.Second, factory)
+	runtime.SetDiscoveryMetadata(Snapshot{Servers: []mcp.ServerConfig{cfg}, Sources: []SourceStatus{{Path: "/repo/.mcp.json", State: SourceHealthy, Servers: []mcp.ServerConfig{cfg}}}}, nil)
+	identity, ok := runtime.Identity(cfg.Name)
+	if !ok {
+		t.Fatal("server identity unavailable")
+	}
+	if err := policy.AllowMCPServerSessionIdentity(identity); err != nil {
+		t.Fatal(err)
+	}
+	if status := runtime.ConnectServer(context.Background(), cfg, registry, policy, time.Second, factory); status.State != StateConnected {
+		t.Fatalf("approved status = %#v", status)
+	}
+
+	statuses := runtime.ReloadDiscovery(context.Background(), Snapshot{Servers: []mcp.ServerConfig{cfg}, Sources: []SourceStatus{{Path: "/home/user/.chronos-code/mcp.json", State: SourceHealthy, Servers: []mcp.ServerConfig{cfg}}}})
+	if len(statuses) != 1 || statuses[0].State != StateReloadFailed || !statuses[0].Retained {
+		t.Fatalf("changed-source status = %#v", statuses)
+	}
+	changedIdentity, ok := runtime.Identity(cfg.Name)
+	if !ok || changedIdentity.Digest() == identity.Digest() {
+		t.Fatal("changed source retained the approved identity")
+	}
+	if got := policy.DecideMCPServerIdentity(changedIdentity).Permission; got != security.MCPRequireApproval {
+		t.Fatalf("changed source decision = %q, want require_approval", got)
 	}
 }
 

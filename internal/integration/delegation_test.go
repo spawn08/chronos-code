@@ -23,7 +23,7 @@ func TestDelegation(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	policy := router.NewPPDPolicy(router.PPDConfig{
-		Version: "v1", Mode: router.PPDModeEnabled, Specialist: "ppd-planner", MaxPlannerCalls: 1,
+		Version: "v1", Mode: router.PPDModeEnabled, Specialist: "delivery-strategist", MaxPlannerCalls: 1,
 		Thresholds: router.PPDThresholds{MinFiles: 3, MinPackages: 2, MinEstimatedCalls: 5},
 	}, nil)
 	planner := delegationPlanner{store: store, fixture: fixture}

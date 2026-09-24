@@ -93,6 +93,7 @@ func codebaseContextTool(store *Store, root string) *tool.Definition {
 	var counterMu sync.Mutex
 	return &tool.Definition{
 		Name:        "codebase_context",
+		Effects:     []tool.Effect{tool.EffectRead},
 		Description: "Read-only, one-turn graph evidence: definitions, bounded source excerpts, direct callers and graph-reachable tests (depth 3). Exact/explicit matches precede FTS relevance; ties use source location. max_tokens bounds the complete compact JSON result using the SDK tokenizer plus overhead. Omissions and source freshness are explicit; relationships remain name-based.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{

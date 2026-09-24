@@ -1,20 +1,20 @@
 ---
 sidebar_position: 4
 title: Plan
-description: SQLStore.Graph, PlanScope, PlanRef, PlanGraph — durable PPD plan storage
+description: SQLStore.Graph, PlanScope, PlanRef, PlanGraph — durable work-plan storage
 ---
 
 # Plan
 
-The plan subsystem (`internal/plan`) provides durable storage for PPD (Plan-Prior-Do) plans
-used by the `ppd-planner` specialist. Plans are persisted in a SQLite database and survive
-process restarts.
+The plan subsystem (`internal/plan`) provides durable DAG storage and scheduling. Plans are
+persisted in SQLite and survive process restarts.
 
 ## Purpose
 
-PPD plans are used for high-risk or high-complexity work where changes span multiple packages,
-files, or call chains. The plan provides a structured, resumable decomposition that the
-`ppd-planner` agent works through in topological order.
+For high-risk or broad work, `delivery-strategist` can propose the next bounded frontier. It is
+read-only and does not execute nodes. A frontier contains at most six `investigate`, `decide`,
+`implement`, `verify`, or `integrate` nodes with explicit objectives, expected artifacts,
+assumptions, invalidation triggers, recovery classes, risks, and verification.
 
 ## Core Types
 
@@ -117,18 +117,12 @@ chronos-code plan show <id>            # show a plan graph
 chronos-code plan delete <id>          # delete a plan
 ```
 
-## PPD Routing Integration
+## Delivery Strategy Integration
 
-When `ppd.mode: enabled` in `routing.yaml`, the orchestrator routes qualifying work to
-`ppd-planner`. The planner:
-
-1. Creates a new `Plan` (Draft → Active) via `SQLStore`
-2. Works through nodes in topological order
-3. Updates node status after each step (`Running → Completed | Failed`)
-4. Marks the plan `completed` or `failed` when all nodes settle
-
-The plan survives context compaction — the `ppd-planner` can resume from `SQLStore` even if the
-conversation history was summarized.
+The `ppd` routing key remains for compatibility. Enabled mode delegates one turn to
+`delivery-strategist`; shadow mode records the same decision without invoking it. The durable
+controller can execute an explicitly admitted generation, but no production closed loop asks
+the strategist for successive rolling frontiers.
 
 ```bash
 # Resume a plan explicitly
@@ -137,7 +131,7 @@ chronos-code --resume <session-id>
 
 ## Shadow Mode
 
-When `ppd.mode: shadow`, routing decisions are logged without invoking `ppd-planner` or
+When `ppd.mode: shadow`, routing decisions are logged without invoking `delivery-strategist` or
 creating plan records:
 
 ```bash

@@ -3,6 +3,7 @@ package execution
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -84,19 +85,25 @@ func (b *TaskBudget) AddUsage(tokens, costMicrodollars int64) error {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if err := b.checkWallTimeLocked(time.Now()); err != nil {
-		return err
+	if tokens > math.MaxInt64-b.used.Tokens {
+		return fmt.Errorf("task budget %s usage overflow", BudgetTokens)
 	}
-	if err := checkLimit(BudgetTokens, b.used.Tokens, tokens, b.limits.Tokens); err != nil {
-		b.used.ExhaustedDimension = BudgetTokens
-		return err
-	}
-	if err := checkLimit(BudgetCost, b.used.CostMicrodollars, costMicrodollars, b.limits.CostMicrodollars); err != nil {
-		b.used.ExhaustedDimension = BudgetCost
-		return err
+	if costMicrodollars > math.MaxInt64-b.used.CostMicrodollars {
+		return fmt.Errorf("task budget %s usage overflow", BudgetCost)
 	}
 	b.used.Tokens += tokens
 	b.used.CostMicrodollars += costMicrodollars
+	if err := b.checkWallTimeLocked(time.Now()); err != nil {
+		return err
+	}
+	if b.limits.Tokens > 0 && b.used.Tokens > b.limits.Tokens {
+		b.used.ExhaustedDimension = BudgetTokens
+		return &BudgetExceededError{Dimension: BudgetTokens, Used: b.used.Tokens, Limit: b.limits.Tokens}
+	}
+	if b.limits.CostMicrodollars > 0 && b.used.CostMicrodollars > b.limits.CostMicrodollars {
+		b.used.ExhaustedDimension = BudgetCost
+		return &BudgetExceededError{Dimension: BudgetCost, Used: b.used.CostMicrodollars, Limit: b.limits.CostMicrodollars}
+	}
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/config"
@@ -44,11 +45,36 @@ func (h sessionUXHook) Before(ctx context.Context, evt *hooks.Event) error {
 	if evt == nil || evt.Type != hooks.EventToolCallBefore || h.orchestrator == nil {
 		return nil
 	}
-	if h.orchestrator.PlanMode() && mutatingTool(evt.Name) {
+	if _, constrained := tool.EffectGrantFromContext(ctx); !constrained && h.orchestrator.PlanMode() && mutatingTool(evt.Name) {
 		return fmt.Errorf("plan mode: %s is blocked until /plan off", evt.Name)
+	}
+	if err := authorizeSessionEffect(ctx, evt.Name); err != nil {
+		return err
 	}
 	if evt.Name == "file_write" {
 		return h.orchestrator.prepareWrite(evt.Input, h.editSession(ctx))
+	}
+	return nil
+}
+
+func authorizeSessionEffect(ctx context.Context, name string) error {
+	var effects []tool.Effect
+	switch {
+	case name == "file_write":
+		if tool.IsScratchWorkspace(ctx) {
+			effects = []tool.Effect{tool.EffectScratchWrite}
+		} else {
+			effects = []tool.Effect{tool.EffectDeliveryWrite}
+		}
+	case name == "shell" || name == "shell_auto":
+		effects = []tool.Effect{tool.EffectProcessExecution}
+	case strings.HasPrefix(name, runtimeMCPToolNamePrefix):
+		effects = []tool.Effect{tool.EffectNetwork, tool.EffectExternalMutation}
+	default:
+		return nil
+	}
+	if err := tool.RequireEffects(ctx, effects...); err != nil {
+		return fmt.Errorf("plan mode: %s is blocked: %w", name, err)
 	}
 	return nil
 }
