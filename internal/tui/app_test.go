@@ -69,10 +69,12 @@ func newTestAppModel(t *testing.T) *appModel {
 			Agents: []agent.AgentConfig{{
 				ID:   "coder",
 				Name: "Coder",
+				// No APIKey: AuthorizedProviders must not see this agent's
+				// config-based key as a credential — the env vars are cleared
+				// above and this agent is never called in TUI unit tests.
 				Model: agent.ModelConfig{
 					Provider: "openai",
 					Model:    "gpt-4o-mini",
-					APIKey:   "test-key",
 				},
 			}},
 		},
