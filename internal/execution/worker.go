@@ -58,6 +58,16 @@ func (w *Worker) LastError() error {
 	return w.lastErr
 }
 
+// CanRunCapped reports whether the installed executor provides durable
+// per-call reservation and reconciliation before a capped delivery is queued.
+func (w *Worker) CanRunCapped() bool {
+	if w == nil {
+		return false
+	}
+	capable, ok := w.executor.(interface{ SupportsCappedDelivery() bool })
+	return ok && capable.SupportsCappedDelivery()
+}
+
 func NewWorker(store *DeliveryStore, executor Executor, config WorkerConfig) (*Worker, error) {
 	if store == nil || executor == nil || config.OwnerID == "" || config.Concurrency < 1 || config.LeaseDuration <= 0 || config.HeartbeatEvery <= 0 || config.HeartbeatEvery >= config.LeaseDuration || config.PollEvery <= 0 {
 		return nil, ErrInvalidDelivery
@@ -140,6 +150,11 @@ func (w *Worker) RunOnce(workerCtx context.Context) error {
 	if err != nil {
 		return err
 	}
+	started := time.Now()
+	priorUsage, err := w.store.Usage(workerCtx, lease.Delivery.DeliveryScope, lease.Delivery.ID)
+	if err != nil {
+		return fmt.Errorf("load usage before delivery attempt: %w", err)
+	}
 	executionCtx, cancelExecution := context.WithCancel(workerCtx)
 	defer cancelExecution()
 	heartbeatDone := make(chan struct{})
@@ -176,6 +191,17 @@ func (w *Worker) RunOnce(workerCtx context.Context) error {
 	if workerCtx.Err() != nil {
 		return workerCtx.Err()
 	}
+	usage, err := w.store.Usage(workerCtx, lease.Delivery.DeliveryScope, lease.Delivery.ID)
+	if err != nil {
+		return fmt.Errorf("load usage after delivery attempt: %w", err)
+	}
+	active := time.Since(started).Nanoseconds()
+	if providerWait := usage.ProviderNanoseconds - priorUsage.ProviderNanoseconds; providerWait >= active {
+		active = 0
+	} else if providerWait > 0 {
+		active -= providerWait
+	}
+	outcome.ActiveNanoseconds = active
 	if _, err := w.store.Finalize(workerCtx, lease, outcome); err != nil {
 		return fmt.Errorf("apply delivery executor outcome: %w", err)
 	}

@@ -47,6 +47,7 @@ type inspectionOverlay struct {
 type inspectionEntry struct{ title, content string }
 
 func (m *appModel) openInspection(title, content string) {
+	m.diffRequestID++ // A newer inspection supersedes an in-flight /diff snapshot.
 	m.inspection = &inspectionOverlay{title: title, content: limitInspection(content), viewport: viewport.New(), entry: -1}
 	m.inspection.overview = m.inspection.content
 	m.inspection.resize(m.width, m.inspectionHeight())
@@ -244,6 +245,9 @@ func activityDetails(item turnItem) string {
 			fmt.Fprintf(&b, "\n%s:\n%s\n", field.name, field.text)
 		}
 	}
+	if item.editApplied && item.editPreview != "" {
+		fmt.Fprintf(&b, "\nedit diff (captured replacement):\n%s\n", item.editPreview)
+	}
 	return limitInspection(b.String())
 }
 
@@ -301,9 +305,13 @@ func (m *appModel) inspectTurn(filter string) {
 			heading = item.toolName + " " + item.callID
 		}
 		metadata := item
-		metadata.args, metadata.result, metadata.failure = "", "", ""
+		metadata.args, metadata.result, metadata.failure, metadata.editPreview = "", "", "", ""
 		m.inspection.entries = append(m.inspection.entries, inspectionEntry{heading, activityDetails(metadata)})
-		for _, field := range []struct{ name, text string }{{"arguments", item.args}, {"result", item.result}, {"error", item.failure}} {
+		edit := ""
+		if item.editApplied {
+			edit = item.editPreview
+		}
+		for _, field := range []struct{ name, text string }{{"edit", edit}, {"arguments", item.args}, {"result", item.result}, {"error", item.failure}} {
 			if field.text != "" {
 				m.inspection.entries = append(m.inspection.entries, inspectionEntry{heading + " · " + field.name, field.text})
 			}
@@ -725,6 +733,72 @@ func RenderFileWriteDiff(args map[string]any) string {
 		b.WriteString(styleDiffAdded.Render("+ "+line) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// file_write replaces an exact block, so its successful arguments describe
+// the edit without consulting the (possibly already changed) working tree.
+func editDiffPreview(args map[string]any) string {
+	oldContent, _ := args["old_content"].(string)
+	create, _ := args["create"].(bool)
+	if !create && oldContent == "" {
+		return ""
+	}
+	bounded := make(map[string]any, len(args))
+	for k, v := range args {
+		bounded[k] = v
+	}
+	cut := false
+	for _, key := range []string{"old_content", "new_content"} {
+		text, _ := bounded[key].(string)
+		if len(text) > 4096 {
+			text = text[:4096]
+			for !utf8.ValidString(text) {
+				text = text[:len(text)-1]
+			}
+			bounded[key] = text
+			cut = true
+		}
+	}
+	preview := ansi.Strip(RenderFileWriteDiff(bounded))
+	if cut {
+		preview += "\n[preview truncated; /inspect changes shows captured arguments]"
+	}
+	return preview
+}
+
+// Inline details are intentionally short; /inspect keeps the captured full
+// fields available with independent scrolling and copying.
+func (m *appModel) renderToolExcerpt(label, text string) string {
+	const maxBytes = 1400
+	cut := len(text) > maxBytes
+	if cut {
+		text = text[:maxBytes]
+		for !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+	}
+	lines := strings.Split(ansi.Strip(text), "\n")
+	if len(lines) > 10 {
+		lines = lines[:10]
+		cut = true
+	}
+	var b strings.Builder
+	b.WriteString(truncateToWidth(styleDim.Render("    "+label), m.viewport.Width()))
+	for _, line := range lines {
+		b.WriteByte('\n')
+		style := styleDim
+		if strings.HasPrefix(line, "+") {
+			style = styleDiffAdded
+		} else if strings.HasPrefix(line, "-") {
+			style = styleDiffRemoved
+		}
+		b.WriteString(truncateToWidth(style.Render("    "+line), m.viewport.Width()))
+	}
+	if cut {
+		b.WriteByte('\n')
+		b.WriteString(truncateToWidth(styleDim.Render("    … /inspect for more"), m.viewport.Width()))
+	}
+	return b.String()
 }
 
 // RenderShellPreview renders a shell tool call, surfacing the command and

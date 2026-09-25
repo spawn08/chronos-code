@@ -11,6 +11,7 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 
 	"github.com/spawn08/chronos-code/internal/budget"
+	"github.com/spawn08/chronos-code/internal/claims"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
 )
@@ -24,6 +25,7 @@ type taskRuntime struct {
 	taskID           execution.TaskID
 	workspaceRoot    string
 	ledger           *execution.Ledger
+	claims           *claims.Store
 	budget           *execution.TaskBudget
 	usageMu          sync.Mutex
 	usage            model.Usage
@@ -42,10 +44,15 @@ func newTaskRuntimeWithLimits(taskID, workspaceRoot string, limits execution.Tas
 	if err != nil {
 		return nil, fmt.Errorf("task runtime: resolve workspace root: %w", err)
 	}
+	store, err := claims.NewStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("task runtime: %w", err)
+	}
 	return &taskRuntime{
 		taskID:        execution.TaskID(taskID),
 		workspaceRoot: root,
 		ledger:        execution.NewLedger(execution.TaskID(taskID)),
+		claims:        store,
 		budget:        execution.NewTaskBudget(limits, time.Now()),
 	}, nil
 }

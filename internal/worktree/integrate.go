@@ -17,6 +17,11 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 	if err := m.validateOwned(manifest); err != nil {
 		return Result{}, err
 	}
+	unlock, err := m.lockIntegration(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	if len(selected) == 0 {
 		return Result{}, fmt.Errorf("at least one changed path must be selected")
 	}
@@ -33,13 +38,28 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 			return Result{}, err
 		}
 	}
+	persisted, err := readManifest(manifest.ManifestPath)
+	if err != nil {
+		return Result{}, fmt.Errorf("load integration manifest: %w", err)
+	}
+	if persisted.ID != manifest.ID || persisted.RepoRoot != manifest.RepoRoot || persisted.WorktreePath != manifest.WorktreePath {
+		return Result{}, fmt.Errorf("integration manifest does not match the owned worktree")
+	}
+	manifest = persisted
+	if manifest.Integration != nil {
+		return m.recoverIntegration(ctx, Handle{Manifest: manifest}, selected)
+	}
 
 	head, err := m.git(ctx, manifest.RepoRoot, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return Result{}, fmt.Errorf("validate parent revision: %w", err)
 	}
-	if current := strings.TrimSpace(string(head.Stdout)); current != manifest.BaseRevision {
-		return Result{}, fmt.Errorf("stale base: parent HEAD is %s, attempt is based on %s", current, manifest.BaseRevision)
+	parentBase := manifest.BaseRevision
+	if manifest.ParentRevision != "" {
+		parentBase = manifest.ParentRevision
+	}
+	if current := strings.TrimSpace(string(head.Stdout)); current != parentBase {
+		return Result{}, fmt.Errorf("stale base: parent HEAD is %s, attempt is based on %s", current, parentBase)
 	}
 	dirtyResult, err := m.git(ctx, manifest.RepoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
@@ -54,6 +74,12 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 			if pathsOverlap(candidate, parentPath) {
 				return Result{}, fmt.Errorf("parent dirty path %q overlaps selected path %q", parentPath, candidate)
 			}
+		}
+	}
+	for path, expected := range manifest.InputDirty {
+		current, err := fingerprintFile(manifest.RepoRoot, path)
+		if err != nil || current != expected {
+			return Result{}, fmt.Errorf("authorized dirty input %q changed after snapshot", path)
 		}
 	}
 
@@ -101,11 +127,29 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 	if err != nil {
 		return Result{}, fmt.Errorf("selected patch conflicts with parent: %w", err)
 	}
+	if err := m.StoreArtifact(ctx, result); err != nil {
+		return Result{}, fmt.Errorf("retain selected artifact before integration: %w", err)
+	}
+	result.ArtifactID = result.FinalHash
+	result.ReceiptID = manifest.ID
+	if err := m.prepareIntegration(&manifest, selected, actualPaths, result.ArtifactID); err != nil {
+		return Result{}, fmt.Errorf("prepare integration journal: %w", err)
+	}
 	if _, err := m.runner.Run(ctx, Command{Dir: manifest.RepoRoot, Args: []string{"apply", "--binary", "--whitespace=nowarn", "-"}, Stdin: patch.Stdout}); err != nil {
-		return Result{}, fmt.Errorf("apply selected patch after successful validation: %w", err)
+		result.Cleanup.State = string(CleanupPending)
+		return result, fmt.Errorf("apply selected patch; journal retained for reconciliation: %w", err)
+	}
+	manifest.Integration.State = "applied"
+	if err := m.persist(manifest); err != nil {
+		result.Cleanup.State = string(CleanupPending)
+		return result, fmt.Errorf("changes applied but integration receipt pending: %w", err)
+	}
+	if err := m.retainReceipt(manifest); err != nil {
+		result.Cleanup.State = string(CleanupPending)
+		return result, fmt.Errorf("changes applied but undo receipt pending: %w", err)
 	}
 
-	if err := m.cleanup(ctx, handle); err != nil {
+	if err := m.cleanup(ctx, Handle{Manifest: manifest}); err != nil {
 		result.Cleanup.State = string(CleanupPending)
 		return result, fmt.Errorf("changes applied but isolated cleanup is pending: %w", err)
 	}

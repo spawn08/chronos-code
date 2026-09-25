@@ -73,8 +73,58 @@ func TestDeliveryToolEffectIsJournaledBeforeAndAfterRealAgentToolLoop(t *testing
 		t.Fatalf("tool events = %+v, error = %v", events, err)
 	}
 	provider.calls = 0
-	if _, err := a.Chat(ctx, "try the same call again"); (!errors.Is(err, execution.ErrEffectNeedsReconciliation) && !errors.Is(err, execution.ErrOperationConflict)) || writes != 1 {
-		t.Fatalf("duplicate effect: writes = %d, error = %v", writes, err)
+	if replayed, err := a.Chat(ctx, "try the same call again"); err != nil || replayed.Content != "finished" || writes != 1 {
+		t.Fatalf("observed write replay = %+v, writes = %d, error = %v", replayed, writes, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "output"), []byte("later edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider.calls = 0
+	if _, err := a.Chat(ctx, "try the same call after another edit"); (!errors.Is(err, execution.ErrEffectNeedsReconciliation) && !errors.Is(err, execution.ErrOperationConflict)) || writes != 1 {
+		t.Fatalf("changed file replay: writes = %d, error = %v", writes, err)
+	}
+}
+
+func TestObservedExternalEffectReturnsStoredReceiptForSameCall(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", Goal: execution.Goal{Statement: "inspect", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls, effects int
+	provider := resourceProvider{chat: func(_ context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+		calls++
+		if calls%2 == 1 {
+			return &model.ChatResponse{StopReason: model.StopReasonToolCall, ToolCalls: []model.ToolCall{{ID: "call-1", Name: "external_mutate", Arguments: `{"target":"fixture"}`}}}, nil
+		}
+		return resourceReply("done"), nil
+	}}
+	a := newExecutionTestAgent("worker", provider)
+	a.Tools.Register(&tool.Definition{Name: "external_mutate", Permission: tool.PermAllow, Effects: []tool.Effect{tool.EffectExternalMutation}, Handler: func(context.Context, map[string]any) (any, error) {
+		effects++
+		return map[string]any{"receipt": "observed"}, nil
+	}})
+	wrapDeliveryOperations(a)
+	ctx = agent.WithRunIdentity(ctx, agent.RunIdentity{TaskID: "delivery", RoleID: "worker", InvocationID: "run"})
+	ctx = security.WithEffectGrant(ctx, security.EffectExternalMutation)
+	ctx = execution.WithOperationLease(ctx, store, lease)
+	for range 2 {
+		response, err := a.Chat(ctx, "same request")
+		if err != nil || response.Content != "done" {
+			t.Fatalf("observed operation response = %+v, error = %v", response, err)
+		}
+	}
+	if effects != 1 || calls != 4 {
+		t.Fatalf("effect executions = %d, model calls = %d", effects, calls)
 	}
 }
 

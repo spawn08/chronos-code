@@ -55,6 +55,33 @@ func TestSchedulerClaimHasOneWinner(t *testing.T) {
 	}
 }
 
+func TestSchedulerDefaultsBoundClaimsAndRetries(t *testing.T) {
+	ctx, scheduler, p := schedulerPlan(t, []Node{{ID: "a", State: NodePending}, {ID: "b", State: NodePending}, {ID: "c", State: NodePending}, {ID: "d", State: NodePending}}, nil, SchedulerConfig{})
+	for _, id := range []string{"a", "b", "c"} {
+		if _, err := scheduler.Claim(ctx, p, claimRequest(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := scheduler.Claim(ctx, p, claimRequest("d")); !errors.Is(err, ErrNoReadyNode) {
+		t.Fatalf("unbounded default concurrency: %v", err)
+	}
+	if err := scheduler.Retry(ctx, p, "a", "lease-a", "retry-a", "retry-a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"a-second", "a-third"} {
+		if _, err := scheduler.Claim(ctx, p, claimRequest(id)); err != nil {
+			t.Fatal(err)
+		}
+		if err := scheduler.Retry(ctx, p, "a", LeaseID("lease-"+id), EventID("retry-"+id), IdempotencyKey("retry-"+id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := scheduler.store.Load(ctx, p)
+	if err != nil || loaded.Nodes[0].State != NodeFailed || loaded.State != PlanFailed {
+		t.Fatalf("default attempt exhaustion = %+v, error = %v", loaded, err)
+	}
+}
+
 func TestSchedulerCompletionDerivesPlanState(t *testing.T) {
 	ctx, scheduler, p := schedulerPlan(t, []Node{{ID: "a", State: NodePending}, {ID: "b", State: NodePending}}, []Dependency{{NodeID: "b", DependsOn: "a"}}, SchedulerConfig{})
 	claimAndStart(t, ctx, scheduler, p, "a")

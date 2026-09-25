@@ -170,14 +170,14 @@ type EventIdentity struct {
 }
 
 type Admission struct {
-	Scope           DeliveryScope
-	DeliveryID      DeliveryID
-	AdmissionKey    AdmissionKey
-	Goal            Goal
-	Requirements    []Requirement
-	PolicyReference string
+	Scope               DeliveryScope
+	DeliveryID          DeliveryID
+	AdmissionKey        AdmissionKey
+	Goal                Goal
+	Requirements        []Requirement
+	PolicyReference     string
 	MaxCostMicrodollars int64
-	Event           EventIdentity
+	Event               EventIdentity
 }
 
 func (s DeliveryScope) Validate() error {

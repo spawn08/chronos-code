@@ -93,6 +93,7 @@ type Plan struct {
 	Attempts     []Attempt
 	ContextRefs  []ContextRef
 	Evidence     []Evidence
+	Artifacts    []Artifact
 	Leases       []Lease
 	Events       []Event
 }
@@ -131,6 +132,13 @@ type ContextRef struct {
 type Evidence struct {
 	ID     EvidenceID
 	NodeID NodeID
+}
+
+// Artifact binds an accepted, content-addressed patch to the completed node
+// that produced it; dependency execution may use only these persisted inputs.
+type Artifact struct {
+	NodeID NodeID `json:"node_id"`
+	ID     string `json:"artifact_id"`
 }
 
 type Lease struct {
@@ -323,6 +331,11 @@ func (p Plan) NewGeneration(generation GenerationID, nodes []Node, dependencies 
 	for _, evidence := range p.Evidence {
 		if _, ok := preserved[evidence.NodeID]; ok {
 			next.Evidence = append(next.Evidence, evidence)
+		}
+	}
+	for _, artifact := range p.Artifacts {
+		if _, ok := preserved[artifact.NodeID]; ok {
+			next.Artifacts = append(next.Artifacts, artifact)
 		}
 	}
 	if err := next.ValidateDAG(); err != nil {

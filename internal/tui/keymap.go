@@ -54,7 +54,8 @@ Commands:
   /session           Show current session and recent history
   /session list      Search sessions; Enter resumes, Tab inspects metadata
   /inspect [context|changes|operational]
-                     Inspect captured tool/context/edit details; Esc closes
+                     Browse full tool inputs/results and captured edits; Esc closes
+  /diff              Inspect current workspace diff (tracked and untracked)
   /status            Show immutable operational state and VCS changes
   /task retry|resume Continue an eligible stopped task without replaying its request
   /resume [id]       Resume the latest (or given) session
@@ -98,7 +99,7 @@ Keys:
   ctrl+r             Search message history
   ctrl+y, ctrl+shift+c Copy the last assistant response (visible output if none)
   ctrl+shift+x       Copy the last fenced code block from the reply
-  ctrl+o             Expand or collapse tool-call details
+  ctrl+o             Expand or collapse tool inputs, results, and edit previews
   tab                Complete the selected slash command, /model, agent, or @file
   mouse wheel        Scroll conversation history
   pgup / pgdown      Scroll conversation history

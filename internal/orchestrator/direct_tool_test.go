@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
 
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
 )
@@ -169,5 +171,59 @@ func TestExecuteToolReturnsAfterHookFailure(t *testing.T) {
 	}
 	if result == nil || hook.before != 1 || hook.after != 1 {
 		t.Fatalf("result = %#v, hooks = before %d after %d", result, hook.before, hook.after)
+	}
+}
+
+func TestDirectSubagentUsesToolHooksAndInheritsWorkerContext(t *testing.T) {
+	parent := resourceAgent(t, "parent", resourceProvider{chat: func(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
+		return resourceReply("parent"), nil
+	}})
+	var childCtx context.Context
+	child := resourceAgent(t, "child", resourceProvider{chat: func(ctx context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+		childCtx = ctx
+		return resourceReply("done"), nil
+	}})
+	child.Tools.Register(&tool.Definition{Name: "inspect", Effects: []tool.Effect{tool.EffectRead}, Handler: func(context.Context, map[string]any) (any, error) {
+		return "inspected", nil
+	}})
+	parent.SubAgents = []*agent.Agent{child}
+	if err := setupSubAgents(map[string]*agent.Agent{"parent": parent, "child": child}); err != nil {
+		t.Fatal(err)
+	}
+	hook := &directToolHook{}
+	parent.Hooks = append(parent.Hooks, hook)
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"parent": parent, "child": child}, active: "parent", sessions: map[string]string{"parent": "session"}}
+	runtime, err := newTaskRuntime("delivery", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := agent.RunIdentity{TenantID: "tenant", RepositoryID: "repo", DeliveryID: "delivery", TaskID: "delivery", RoleID: "parent", InvocationID: "worker-run"}
+	ctx := withTaskRuntime(context.Background(), runtime)
+	ctx = agent.WithRunIdentity(ctx, worker)
+	ctx = authorization.WithRequest(ctx, authorization.Request{PrincipalID: "worker", TenantID: "tenant", RepositoryID: "repo", Action: "delivery.execute"})
+	ctx = tool.WithEffectGrant(ctx, tool.EffectRead)
+	result, err := orch.RunSubagent(ctx, map[string]any{"agent": "child", "task": "inspect"})
+	if err != nil || result != "done" {
+		t.Fatalf("RunSubagent() = %q, %v", result, err)
+	}
+	if hook.before != 1 || hook.after != 1 || hook.toolError != nil {
+		t.Fatalf("spawn hooks: before=%d after=%d error=%v", hook.before, hook.after, hook.toolError)
+	}
+	identity, ok := agent.RunIdentityFromContext(childCtx)
+	if !ok || identity.TaskID != "delivery" || identity.DeliveryID != "delivery" || identity.ParentInvocationID != worker.InvocationID || identity.RoleID != "child" {
+		t.Fatalf("child identity = %+v, ok=%v", identity, ok)
+	}
+	if inherited, ok := taskRuntimeFromContext(childCtx); !ok || inherited != runtime {
+		t.Fatal("child did not inherit worker task runtime")
+	}
+	grant, ok := tool.EffectGrantFromContext(childCtx)
+	if !ok || len(grant) != 1 {
+		t.Fatalf("child effect grant = %v, ok=%v", grant, ok)
+	}
+	if _, ok := grant[tool.EffectRead]; !ok {
+		t.Fatalf("child lost read grant: %v", grant)
+	}
+	if hook.context == nil || TaskIDFromContext(hook.context) != "delivery" {
+		t.Fatal("spawn hook did not receive worker task identity")
 	}
 }

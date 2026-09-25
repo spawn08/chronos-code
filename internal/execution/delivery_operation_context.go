@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -18,6 +19,16 @@ func (e *Execution) OperationContext(ctx context.Context) context.Context {
 
 func (e *Execution) PriorOperations(ctx context.Context) ([]Operation, error) {
 	return e.store.Operations(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
+}
+
+// ReconcileOperation accepts only host-observed evidence under the current
+// worker lease; tool/model arguments cannot invoke this method.
+func (e *Execution) ReconcileOperation(ctx context.Context, id, proof, fingerprint string, result json.RawMessage) (Operation, error) {
+	return e.store.ReconcileOperation(ctx, e.Lease, id, proof, fingerprint, result)
+}
+
+func (e *Execution) CumulativeUsage(ctx context.Context) (CumulativeUsage, error) {
+	return e.store.Usage(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
 }
 
 // WithOperationLease is for host-owned workers and bounded integration tests;

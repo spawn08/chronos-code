@@ -137,6 +137,8 @@ type turnItem struct {
 	args          string
 	result        string
 	failure       string
+	editPreview   string
+	editApplied   bool
 	started       time.Time
 	duration      time.Duration
 	observedTime  bool
@@ -370,6 +372,7 @@ type appModel struct {
 	lastTurnBlockIdx    int
 	hasLastTurn         bool
 	toolsExpanded       bool
+	diffRequestID       uint64
 	activeRequest       string // Original request only; never replayed after failure.
 	budgetRetried       bool   // Legacy state retained for compatibility; no whole-task retry.
 	lastUsage           model.Usage
@@ -680,6 +683,17 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.finalizeTurn(msg.err)
 
+	case diffSnapshotMsg:
+		if msg.id != m.diffRequestID {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.openInspection("Workspace diff · read-only", msg.err.Error())
+		} else {
+			m.openInspection("Workspace diff · read-only", msg.content)
+		}
+		return m, nil
+
 	case operationalSnapshotMsg:
 		m.operational = msg.snapshot
 		if m.inspection != nil {
@@ -915,7 +929,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.input.Reset()
 		m.completionIdx = 0
 		m.resizeViewport()
-		if strings.Fields(line)[0] == "/inspect" || line == "/session list" {
+		if strings.Fields(line)[0] == "/inspect" || line == "/session list" || line == "/diff" {
 			return m.handleSubmit(line)
 		}
 		if m.sending {
@@ -1682,6 +1696,11 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		item := &m.activeTurnItems[m.activityIndex[activityKey]]
 		item.toolName, item.agentID, item.callID = toolName, agentID, callID
 		item.args = m.captureActivityValue(data["args"])
+		if toolName == "file_write" {
+			if args, ok := data["args"].(map[string]any); ok {
+				item.editPreview = editDiffPreview(args)
+			}
+		}
 		item.started = time.Now()
 	case chronosstream.EventToolResult:
 		line := RenderToolActivity(label, toolName, m.activityArgs[activityKey], true, data["error"])
@@ -1694,6 +1713,11 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		item := &m.activeTurnItems[m.activityIndex[activityKey]]
 		item.toolName, item.agentID, item.callID = toolName, agentID, callID
 		item.result, item.failure = m.captureActivityValue(data["result"]), m.captureActivityValue(data["error"])
+		if data["error"] != nil {
+			item.editPreview = ""
+		} else {
+			item.editApplied = true
+		}
 		if duration, ok := data["duration_ms"].(float64); ok {
 			item.duration = time.Duration(duration * float64(time.Millisecond))
 		} else if duration, ok := data["duration_ms"].(int64); ok {
@@ -2131,6 +2155,12 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.inspectTurn(arg)
 		return m, nil
+	case "/diff":
+		if arg != "" {
+			m.appendError(fmt.Errorf("usage: /diff"))
+			break
+		}
+		return m, m.openWorkspaceDiff()
 	case "/usage":
 		m.appendSystem(m.usageSummary())
 	case "/status":
@@ -3116,7 +3146,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	source := &transcriptSource{items: cloneTurnItems(m.lastTurnItems), name: m.displayAgentName(),
 		interrupted: interrupted, err: err, width: m.viewport.Width()}
 	for _, item := range source.items {
-		source.bytes += len(item.content) + len(item.args) + len(item.result) + len(item.failure)
+		source.bytes += len(item.content) + len(item.args) + len(item.result) + len(item.failure) + len(item.editPreview)
 	}
 	m.setBlockSource(source)
 	m.hasLastTurn = true
@@ -3365,6 +3395,9 @@ func (m *appModel) renderExpandedItems(items []turnItem) string {
 				b.WriteByte('\n')
 			}
 		}
+		if item.kind == turnItemActivity && item.activity == activityTool && (i == 0 || items[i-1].kind != turnItemActivity || items[i-1].activity != activityTool) {
+			b.WriteString(truncateToWidth(styleDim.Render("  ctrl+o collapse · /inspect · /diff"), m.viewport.Width()) + "\n")
+		}
 		b.WriteString(m.renderOneItem(item))
 	}
 	return b.String()
@@ -3395,6 +3428,7 @@ func (m *appModel) renderCollapsedItems(items []turnItem) string {
 				b.WriteByte('\n')
 			}
 		}
+		b.WriteString(truncateToWidth(styleDim.Render("  ctrl+o expand · /inspect · /diff"), m.viewport.Width()) + "\n")
 		b.WriteString(m.renderActivityRun(items[i:j]))
 		wrote = true
 		i = j
@@ -3407,16 +3441,19 @@ func (m *appModel) renderActivityRun(run []turnItem) string {
 		return m.renderOneItem(&run[0])
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "  %s %s %s",
+	fmt.Fprintf(&b, "  %s %s",
 		styleTool.Render("▸"),
-		styleBold.Render(fmt.Sprintf("%d tool calls", len(run))),
-		styleDim.Render("· ctrl+o expand"))
+		styleBold.Render(fmt.Sprintf("%d tool calls", len(run))))
 	seenLast := false
 	for i := range run {
 		if activityNeedsPeek(run[i].content) || i == len(run)-1 {
 			if i == len(run)-1 {
 				seenLast = true
 			}
+			b.WriteByte('\n')
+			b.WriteString(m.renderOneItem(&run[i]))
+		}
+		if run[i].editApplied && run[i].editPreview != "" && i != len(run)-1 && !activityNeedsPeek(run[i].content) {
 			b.WriteByte('\n')
 			b.WriteString(m.renderOneItem(&run[i]))
 		}
@@ -3434,7 +3471,22 @@ func (m *appModel) renderOneItem(item *turnItem) string {
 		return styleDim.Render(wrapText(content, m.viewport.Width()))
 	}
 	if item.kind == turnItemActivity {
-		return truncateToWidth(content, m.viewport.Width())
+		line := truncateToWidth(content, m.viewport.Width())
+		if item.editApplied && item.editPreview != "" {
+			line += "\n" + m.renderToolExcerpt("edit diff (captured replacement):", item.editPreview)
+		}
+		if m.toolsExpanded && item.activity == activityTool {
+			if item.args != "" && (!item.editApplied || item.editPreview == "") {
+				line += "\n" + m.renderToolExcerpt("arguments:", item.args)
+			}
+			if item.result != "" {
+				line += "\n" + m.renderToolExcerpt("result:", item.result)
+			}
+			if item.failure != "" {
+				line += "\n" + m.renderToolExcerpt("error:", item.failure)
+			}
+		}
+		return line
 	}
 	width := m.viewport.Width()
 	if item.rendered != "" && item.renderedWidth == width {

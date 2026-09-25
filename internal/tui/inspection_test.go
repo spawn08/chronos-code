@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spawn08/chronos/engine/model"
 	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/storage"
@@ -222,6 +223,89 @@ func TestInspectionToolDetailsScrollAndWidths(t *testing.T) {
 				t.Fatal("Esc changed live turn/plan state")
 			}
 		})
+	}
+}
+
+func TestToolEditsVisibleAndResultsExpandable(t *testing.T) {
+	m := newTestAppModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.sending = true
+	events := []chronosstream.Event{
+		{Type: chronosstream.EventToolCall, Data: map[string]any{"id": "write-1", "agent": "coder", "tool": "file_write", "args": map[string]any{"path": "source.go", "old_content": "old line", "new_content": "new line"}}},
+		{Type: chronosstream.EventToolResult, Data: map[string]any{"id": "write-1", "agent": "coder", "tool": "file_write", "result": "edit applied"}},
+		{Type: chronosstream.EventToolCall, Data: map[string]any{"id": "read-1", "agent": "coder", "tool": "file_read", "args": map[string]any{"path": "other.go"}}},
+		{Type: chronosstream.EventToolResult, Data: map[string]any{"id": "read-1", "agent": "coder", "tool": "file_read", "result": "contents of other.go"}},
+	}
+	for _, event := range events {
+		m.handleActivity(activityMsg{ctx: m.ctx, event: event})
+	}
+	got := ansi.Strip(m.renderTranscript())
+	for _, want := range []string{"2 tool calls", "- old line", "+ new line", "ctrl+o expand", "/inspect"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("collapsed transcript missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "contents of other.go") {
+		t.Fatal("collapsed transcript exposed full result")
+	}
+	m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	got = ansi.Strip(m.renderTranscript())
+	for _, want := range []string{"other.go", "arguments:", "result:", "contents of other.go", "edit applied", "- old line", "+ new line"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expanded transcript missing %q: %s", want, got)
+		}
+	}
+	m.finalizeTurn(nil)
+	if got := ansi.Strip(m.renderTranscript()); !strings.Contains(got, "+ new line") || !strings.Contains(got, "contents of other.go") {
+		t.Fatalf("completed turn lost details: %s", got)
+	}
+	m.inspectTurn("changes")
+	if !strings.Contains(m.inspection.content, "edit diff (captured replacement)") || !strings.Contains(m.inspection.content, "new line") {
+		t.Fatal("changes inspector lost edit preview")
+	}
+}
+
+func TestFailedWriteDoesNotShowProposedEditAsApplied(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.handleActivity(activityMsg{ctx: m.ctx, event: chronosstream.Event{Type: chronosstream.EventToolCall, Data: map[string]any{"id": "write-1", "tool": "file_write", "args": map[string]any{"path": "source.go", "old_content": "old", "new_content": "new"}}}})
+	m.handleActivity(activityMsg{ctx: m.ctx, event: chronosstream.Event{Type: chronosstream.EventToolResult, Data: map[string]any{"id": "write-1", "tool": "file_write", "error": "no matching block"}}})
+	if got := ansi.Strip(m.renderTranscript()); strings.Contains(got, "edit diff (captured replacement)") {
+		t.Fatalf("failed edit shown as applied: %s", got)
+	}
+	m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if got := ansi.Strip(m.renderTranscript()); !strings.Contains(got, "no matching block") {
+		t.Fatalf("failed edit error hidden: %s", got)
+	}
+}
+
+func TestToolPreviewBoundedAtNarrowWidth(t *testing.T) {
+	m := newTestAppModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	m.sending = true
+	m.handleActivity(activityMsg{ctx: m.ctx, event: chronosstream.Event{Type: chronosstream.EventToolCall, Data: map[string]any{"id": "new-1", "tool": "file_write", "args": map[string]any{"path": "source.go", "create": true, "new_content": strings.Repeat("世界", 5000)}}}})
+	if got := ansi.Strip(m.renderTranscript()); strings.Contains(got, "edit diff (captured replacement)") {
+		t.Fatalf("in-flight edit shown as applied: %s", got)
+	}
+	m.handleActivity(activityMsg{ctx: m.ctx, event: chronosstream.Event{Type: chronosstream.EventToolResult, Data: map[string]any{"id": "new-1", "tool": "file_write", "result": strings.Repeat("many result lines\n", 500)}}})
+	m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	got := m.renderTranscript()
+	if lipgloss.Width(got) > 40 || len(got) > maxRenderBytes || !strings.Contains(got, "/inspect for more") {
+		t.Fatalf("expanded preview bounds: width=%d bytes=%d content=%s", lipgloss.Width(got), len(got), got)
+	}
+	m.inspectTurn("changes")
+	if !strings.Contains(m.inspection.content, "世界") || !strings.Contains(m.inspection.content, "new file") || !strings.Contains(m.inspection.content, "preview truncated") {
+		t.Fatal("new-file arguments and preview unavailable in inspector")
+	}
+}
+
+func TestLargeWriteStillHasBoundedEditPreview(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.handleActivity(activityMsg{ctx: m.ctx, event: chronosstream.Event{Type: chronosstream.EventToolCall, Data: map[string]any{"id": "large", "tool": "file_write", "args": map[string]any{"path": "source.go", "create": true, "new_content": strings.Repeat("x", maxInspectionBytes+1)}}}})
+	m.handleActivity(activityMsg{ctx: m.ctx, event: chronosstream.Event{Type: chronosstream.EventToolResult, Data: map[string]any{"id": "large", "tool": "file_write"}}})
+	if got := ansi.Strip(m.renderTranscript()); !strings.Contains(got, "+++ new file") || !strings.Contains(got, "/inspect for more") {
+		t.Fatal("large write lost bounded preview")
 	}
 }
 

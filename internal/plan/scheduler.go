@@ -3,9 +3,11 @@ package plan
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -23,6 +25,11 @@ type SchedulerConfig struct {
 }
 
 const defaultPlanLeaseDuration = 15 * time.Minute
+
+const (
+	defaultPlanMaxConcurrent = 3
+	defaultPlanMaxAttempts   = 3
+)
 
 func (s *Scheduler) now() time.Time {
 	if s.config.Now != nil {
@@ -53,6 +60,12 @@ type Scheduler struct {
 }
 
 func NewScheduler(store *SQLStore, config SchedulerConfig) *Scheduler {
+	if config.MaxConcurrent <= 0 {
+		config.MaxConcurrent = defaultPlanMaxConcurrent
+	}
+	if config.MaxAttempts <= 0 {
+		config.MaxAttempts = defaultPlanMaxAttempts
+	}
 	return &Scheduler{store: store, config: config}
 }
 
@@ -189,19 +202,40 @@ func (s *Scheduler) Complete(ctx context.Context, p Plan, nodeID NodeID, leaseID
 
 // CompleteWithEvidence commits evidence references and node completion in one transaction.
 func (s *Scheduler) CompleteWithEvidence(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, evidenceIDs []EvidenceID) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCompleted, "complete", evidenceIDs)
+	return s.CompleteWithArtifact(ctx, p, nodeID, leaseID, eventID, key, evidenceIDs, "")
+}
+
+// CompleteWithArtifact binds the accepted patch to its node in the same fenced
+// transaction that commits node completion and releases the owner lease.
+func (s *Scheduler) CompleteWithArtifact(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, evidenceIDs []EvidenceID, artifactID string) error {
+	if artifactID != "" {
+		if err := validateArtifactID(artifactID); err != nil {
+			return err
+		}
+	}
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCompleted, "complete", evidenceIDs, artifactID)
+}
+
+func validateArtifactID(artifactID string) error {
+	if !strings.HasPrefix(artifactID, "sha256:") || len(artifactID) != 71 {
+		return fmt.Errorf("invalid plan artifact identity")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(artifactID, "sha256:")); err != nil {
+		return fmt.Errorf("invalid plan artifact identity: %w", err)
+	}
+	return nil
 }
 
 func (s *Scheduler) Block(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeBlocked, "block", nil)
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeBlocked, "block", nil, "")
 }
 
 func (s *Scheduler) Fail(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeFailed, "fail", nil)
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeFailed, "fail", nil, "")
 }
 
 func (s *Scheduler) Cancel(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCanceled, "cancel", nil)
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCanceled, "cancel", nil, "")
 }
 
 // Stop atomically persists a typed terminal result and its plan stop state.
@@ -315,7 +349,7 @@ func (s *Scheduler) transitionLeased(ctx context.Context, p Plan, nodeID NodeID,
 	return nil
 }
 
-func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, next NodeState, operation string, evidenceIDs []EvidenceID) error {
+func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, next NodeState, operation string, evidenceIDs []EvidenceID, artifactID string) error {
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin %s node: %w", operation, err)
@@ -333,6 +367,11 @@ func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID L
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_evidence (tenant_id, repository_id, task_id, plan_id, generation_id, evidence_id, node_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), evidenceID, nodeID)...); err != nil {
 			return fmt.Errorf("insert plan evidence: %w", err)
+		}
+	}
+	if artifactID != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_artifacts (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, artifact_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), nodeID, artifactID)...); err != nil {
+			return fmt.Errorf("persist accepted plan artifact: %w", err)
 		}
 	}
 	if err := updateNode(ctx, tx, p, nodeID, next); err != nil {

@@ -34,21 +34,25 @@ const (
 )
 
 type Operation struct {
-	ID                string
-	EffectKey         string
-	Kind              string
-	ReplayClass       ReplayClass
-	InputFingerprint  string
-	OutputFingerprint string
-	GoalRevision      GoalRevision
-	Status            OperationStatus
-	OwnerID           string
-	LeaseEpoch        int64
-	Attempt           int64
-	PreparedAt        time.Time
-	UpdatedAt         time.Time
-	Result            json.RawMessage
-	Error             string
+	ID                        string
+	EffectKey                 string
+	Kind                      string
+	ReplayClass               ReplayClass
+	InputFingerprint          string
+	ArgumentsFingerprint      string
+	ObservationPath           string
+	InputStateFingerprint     string
+	ExpectedOutputFingerprint string
+	OutputFingerprint         string
+	GoalRevision              GoalRevision
+	Status                    OperationStatus
+	OwnerID                   string
+	LeaseEpoch                int64
+	Attempt                   int64
+	PreparedAt                time.Time
+	UpdatedAt                 time.Time
+	Result                    json.RawMessage
+	Error                     string
 }
 
 // PrepareOperation durably records intent under a live lease before any effect.
@@ -76,7 +80,14 @@ func (s *DeliveryStore) PrepareOperation(ctx context.Context, lease Lease, op Op
 	}
 	existing, err := loadOperation(ctx, tx, lease, op.ID)
 	if err == nil {
-		if existing.EffectKey != op.EffectKey || existing.Kind != op.Kind || existing.ReplayClass != op.ReplayClass || existing.InputFingerprint != op.InputFingerprint || existing.GoalRevision != revision {
+		if existing.EffectKey != op.EffectKey || existing.Kind != op.Kind || existing.ReplayClass != op.ReplayClass || existing.GoalRevision != revision ||
+			existing.ArgumentsFingerprint != op.ArgumentsFingerprint || existing.ObservationPath != op.ObservationPath || existing.ExpectedOutputFingerprint != op.ExpectedOutputFingerprint {
+			return Operation{}, ErrOperationConflict
+		}
+		if existing.InputFingerprint != op.InputFingerprint && !(existing.ReplayClass == ReplayFingerprintedWrite &&
+			(existing.Status == OperationObserved || existing.Status == OperationReconciled) &&
+			existing.ExpectedOutputFingerprint != "" && existing.OutputFingerprint == existing.ExpectedOutputFingerprint &&
+			op.InputStateFingerprint == existing.ExpectedOutputFingerprint) {
 			return Operation{}, ErrOperationConflict
 		}
 		if existing.Status == OperationRunning {
@@ -95,7 +106,7 @@ func (s *DeliveryStore) PrepareOperation(ctx context.Context, lease Lease, op Op
 	}
 	now := s.clock.Now().UTC()
 	op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, op.GoalRevision, op.PreparedAt, op.UpdatedAt = OperationPrepared, lease.OwnerID, lease.Epoch, lease.Attempt, revision, now, now
-	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_operations (tenant_id, repository_id, delivery_id, operation_id, effect_key, kind, replay_class, input_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, op.ID, op.EffectKey, op.Kind, op.ReplayClass, op.InputFingerprint, op.GoalRevision, op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, timestamp(now), timestamp(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_operations (tenant_id, repository_id, delivery_id, operation_id, effect_key, kind, replay_class, input_fingerprint, arguments_fingerprint, observation_path, input_state_fingerprint, expected_output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, op.ID, op.EffectKey, op.Kind, op.ReplayClass, op.InputFingerprint, op.ArgumentsFingerprint, op.ObservationPath, op.InputStateFingerprint, op.ExpectedOutputFingerprint, op.GoalRevision, op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, timestamp(now), timestamp(now)); err != nil {
 		return Operation{}, fmt.Errorf("persist prepared operation: %w", err)
 	}
 	if err := appendOperationEvent(ctx, tx, lease, op, DeliveryEventOperationPrepared); err != nil {
@@ -236,7 +247,7 @@ func (s *DeliveryStore) Operations(ctx context.Context, scope DeliveryScope, del
 func loadOperation(ctx context.Context, db queryer, lease Lease, id string) (Operation, error) {
 	var op Operation
 	var prepared, updated, result string
-	err := db.QueryRowContext(ctx, `SELECT operation_id, effect_key, kind, replay_class, input_fingerprint, output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at, result_json, error_text FROM delivery_operations WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND operation_id = ?`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, id).Scan(&op.ID, &op.EffectKey, &op.Kind, &op.ReplayClass, &op.InputFingerprint, &op.OutputFingerprint, &op.GoalRevision, &op.Status, &op.OwnerID, &op.LeaseEpoch, &op.Attempt, &prepared, &updated, &result, &op.Error)
+	err := db.QueryRowContext(ctx, `SELECT operation_id, effect_key, kind, replay_class, input_fingerprint, arguments_fingerprint, observation_path, input_state_fingerprint, expected_output_fingerprint, output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at, result_json, error_text FROM delivery_operations WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND operation_id = ?`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, id).Scan(&op.ID, &op.EffectKey, &op.Kind, &op.ReplayClass, &op.InputFingerprint, &op.ArgumentsFingerprint, &op.ObservationPath, &op.InputStateFingerprint, &op.ExpectedOutputFingerprint, &op.OutputFingerprint, &op.GoalRevision, &op.Status, &op.OwnerID, &op.LeaseEpoch, &op.Attempt, &prepared, &updated, &result, &op.Error)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Operation{}, ErrOperationNotFound
 	}

@@ -27,6 +27,8 @@ type Result struct {
 	BaseRevision string   `json:"base_revision"`
 	FinalTree    string   `json:"final_tree"`
 	FinalHash    string   `json:"final_hash"`
+	ArtifactID   string   `json:"artifact_id,omitempty"`
+	ReceiptID    string   `json:"receipt_id,omitempty"`
 	ChangedPaths []string `json:"changed_paths"`
 	Patch        []byte   `json:"patch"`
 	Checks       []Check  `json:"checks,omitempty"`

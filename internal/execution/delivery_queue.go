@@ -57,12 +57,13 @@ const (
 )
 
 type Outcome struct {
-	Kind      OutcomeKind
-	Result    json.RawMessage
-	Err       error
-	RetryAt   time.Time
-	WaitState DeliveryState
-	Signal    string
+	Kind              OutcomeKind
+	Result            json.RawMessage
+	Err               error
+	RetryAt           time.Time
+	WaitState         DeliveryState
+	Signal            string
+	ActiveNanoseconds int64
 }
 
 // QueueAdmitted promotes an already persisted admission only after a worker
@@ -261,6 +262,9 @@ func (s *DeliveryStore) Release(ctx context.Context, lease Lease) error {
 
 // Finalize is the fenced final write for one worker attempt.
 func (s *DeliveryStore) Finalize(ctx context.Context, lease Lease, outcome Outcome) (Delivery, error) {
+	if outcome.ActiveNanoseconds < 0 {
+		return Delivery{}, ErrInvalidDelivery
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Delivery{}, fmt.Errorf("begin delivery outcome: %w", err)
@@ -288,7 +292,7 @@ func (s *DeliveryStore) Finalize(ctx context.Context, lease Lease, outcome Outco
 		errorText = outcome.Err.Error()
 	}
 	resultJSON := string(outcome.Result)
-	attemptResult, err := tx.ExecContext(ctx, `UPDATE delivery_worker_attempts SET finished_at = ?, outcome = ?, result_json = CASE WHEN ? = '' THEN result_json ELSE ? END, error_text = ? WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt = ? AND owner_id = ? AND lease_epoch = ?`, timestamp(now), outcome.Kind, resultJSON, resultJSON, errorText, delivery.TenantID, delivery.RepositoryID, delivery.ID, lease.Attempt, lease.OwnerID, lease.Epoch)
+	attemptResult, err := tx.ExecContext(ctx, `UPDATE delivery_worker_attempts SET finished_at = ?, outcome = ?, result_json = CASE WHEN ? = '' THEN result_json ELSE ? END, error_text = ?, active_nanoseconds = ? WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt = ? AND owner_id = ? AND lease_epoch = ?`, timestamp(now), outcome.Kind, resultJSON, resultJSON, errorText, outcome.ActiveNanoseconds, delivery.TenantID, delivery.RepositoryID, delivery.ID, lease.Attempt, lease.OwnerID, lease.Epoch)
 	if err != nil {
 		return Delivery{}, fmt.Errorf("finish delivery attempt: %w", err)
 	}

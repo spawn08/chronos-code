@@ -21,19 +21,45 @@ const (
 
 // Manifest is the durable recovery record written before a worktree is created.
 type Manifest struct {
-	Version          int          `json:"version"`
-	ID               string       `json:"id"`
-	TaskID           string       `json:"task_id"`
-	AttemptID        string       `json:"attempt_id"`
-	RepoRoot         string       `json:"repo_root"`
-	BaseRevision     string       `json:"base_revision"`
-	DirtyPolicy      DirtyPolicy  `json:"dirty_policy"`
-	ParentDirtyPaths []string     `json:"parent_dirty_paths,omitempty"`
-	WorktreePath     string       `json:"worktree_path"`
-	Ref              string       `json:"ref"`
-	CleanupState     CleanupState `json:"cleanup_state"`
-	CreatedAt        time.Time    `json:"created_at"`
-	ManifestPath     string       `json:"-"`
+	Version          int                        `json:"version"`
+	ID               string                     `json:"id"`
+	TaskID           string                     `json:"task_id"`
+	AttemptID        string                     `json:"attempt_id"`
+	RepoRoot         string                     `json:"repo_root"`
+	BaseRevision     string                     `json:"base_revision"`
+	ParentRevision   string                     `json:"parent_revision,omitempty"`
+	InputArtifacts   []string                   `json:"input_artifacts,omitempty"`
+	DirtyPolicy      DirtyPolicy                `json:"dirty_policy"`
+	ParentDirtyPaths []string                   `json:"parent_dirty_paths,omitempty"`
+	InputDirty       map[string]FileFingerprint `json:"input_dirty,omitempty"`
+	WorktreePath     string                     `json:"worktree_path"`
+	Ref              string                     `json:"ref"`
+	CleanupState     CleanupState               `json:"cleanup_state"`
+	Integration      *IntegrationJournal        `json:"integration,omitempty"`
+	CreatedAt        time.Time                  `json:"created_at"`
+	ManifestPath     string                     `json:"-"`
+}
+
+// IntegrationJournal is persisted before applying a patch to the parent. Its
+// per-path fingerprints distinguish an applied patch from an unresolved effect
+// when a process dies before the final receipt or cleanup is persisted.
+type IntegrationJournal struct {
+	State      string            `json:"state"`
+	ArtifactID string            `json:"artifact_id"`
+	Selected   []string          `json:"selected"`
+	Files      []IntegrationFile `json:"files"`
+}
+
+type IntegrationFile struct {
+	Path   string          `json:"path"`
+	Before FileFingerprint `json:"before"`
+	After  FileFingerprint `json:"after"`
+}
+
+type FileFingerprint struct {
+	Exists bool   `json:"exists"`
+	Hash   string `json:"hash,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`
 }
 
 func (m *Manager) manifestDir() string { return filepath.Join(m.dataDir, "worktrees", "manifests") }

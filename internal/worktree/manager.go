@@ -23,9 +23,11 @@ const (
 )
 
 type CreateOptions struct {
-	TaskID      string
-	AttemptID   string
-	DirtyPolicy DirtyPolicy
+	TaskID               string
+	AttemptID            string
+	DirtyPolicy          DirtyPolicy
+	AcceptedArtifacts    []string // accepted, content-addressed predecessor patches
+	AuthorizedDirtyPaths []string // trusted read-approved initial parent paths
 }
 
 type Handle struct{ Manifest Manifest }
@@ -97,6 +99,10 @@ func (m *Manager) Create(ctx context.Context, repo string, options CreateOptions
 	if options.DirtyPolicy == DirtyReject && len(dirty) > 0 {
 		return Handle{}, fmt.Errorf("parent worktree is dirty (%d paths); use preserve policy to isolate from it", len(dirty))
 	}
+	inputs, err := captureAuthorizedDirty(root, dirty, options.AuthorizedDirtyPaths)
+	if err != nil {
+		return Handle{}, err
+	}
 
 	manifest, err := m.allocate(options, root, base, dirty)
 	if err != nil {
@@ -113,6 +119,20 @@ func (m *Manager) Create(ctx context.Context, repo string, options CreateOptions
 		manifest.CleanupState = CleanupPending
 		_ = m.persist(manifest)
 		return Handle{Manifest: manifest}, fmt.Errorf("create isolated worktree (recovery manifest retained): %w", err)
+	}
+	if len(options.AcceptedArtifacts) > 0 {
+		if err := m.composeAccepted(ctx, &manifest, options.AcceptedArtifacts); err != nil {
+			manifest.CleanupState = CleanupPending
+			_ = m.persist(manifest)
+			return Handle{Manifest: manifest}, fmt.Errorf("compose accepted predecessor snapshot: %w", err)
+		}
+	}
+	if len(inputs) > 0 {
+		if err := m.composeDirty(ctx, &manifest, inputs); err != nil {
+			manifest.CleanupState = CleanupPending
+			_ = m.persist(manifest)
+			return Handle{Manifest: manifest}, fmt.Errorf("compose authorized dirty input: %w", err)
+		}
 	}
 	manifest.CleanupState = CleanupActive
 	if err := m.persist(manifest); err != nil {
@@ -213,6 +233,14 @@ func (m *Manager) cleanup(ctx context.Context, handle Handle) error {
 	if err := m.validateOwned(manifest); err != nil {
 		return err
 	}
+	if persisted, err := readManifest(manifest.ManifestPath); err == nil {
+		manifest = persisted
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if manifest.Integration != nil && manifest.Integration.State == "prepared" {
+		return fmt.Errorf("integration outcome is not reconciled; worktree manifest retained")
+	}
 	manifest.CleanupState = CleanupPending
 	if err := m.persist(manifest); err != nil {
 		return err
@@ -252,6 +280,9 @@ func (m *Manager) Prune(ctx context.Context) error {
 		}
 	}
 	for _, handle := range handles {
+		if handle.Manifest.Integration != nil && handle.Manifest.Integration.State == "prepared" {
+			continue
+		}
 		if handle.Manifest.CleanupState == CleanupPending || !fileExists(handle.Manifest.WorktreePath) {
 			if err := m.cleanup(ctx, handle); err != nil {
 				return err

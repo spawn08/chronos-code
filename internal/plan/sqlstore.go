@@ -21,7 +21,7 @@ var (
 	ErrInvalidPlanRef     = errors.New("invalid plan reference")
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const (
 	schemaV1Checksum = "c6f8c0da8c42f04a"
@@ -38,6 +38,7 @@ var planMigrations = []struct {
 	{version: 2, checksum: schemaV2Checksum, sql: schemaV2SQL},
 	{version: 3, checksum: schemaV3Checksum, sql: schemaV3SQL},
 	{version: 4, checksum: planSchemaChecksum(schemaV4SQL), sql: schemaV4SQL},
+	{version: 5, checksum: planSchemaChecksum(schemaV5SQL), sql: schemaV5SQL},
 }
 
 // SQLStore is the SQLite-backed durable plan repository.
@@ -85,6 +86,7 @@ type PlanView struct {
 	Attempts     []AttemptRecord `json:"attempts"`
 	ContextRefs  []ContextRef    `json:"context_refs"`
 	Evidence     []Evidence      `json:"evidence"`
+	Artifacts    []Artifact      `json:"artifacts"`
 	Leases       []Lease         `json:"leases"`
 	Events       []EventRecord   `json:"events"`
 }
@@ -291,6 +293,18 @@ func (s *SQLStore) Create(ctx context.Context, p Plan) error {
 			return fmt.Errorf("insert evidence: %w", err)
 		}
 	}
+	for _, artifact := range p.Artifacts {
+		if err := validateArtifactID(artifact.ID); err != nil {
+			return err
+		}
+		inserted, err := tx.ExecContext(ctx, `INSERT INTO plan_artifacts (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, artifact_id) SELECT tenant_id, repository_id, task_id, plan_id, generation_id, node_id, ? FROM plan_nodes WHERE tenant_id = ? AND repository_id = ? AND task_id = ? AND plan_id = ? AND generation_id = ? AND node_id = ? AND state = 'completed'`, append([]any{artifact.ID}, append(planArgs(p), artifact.NodeID)...)...)
+		if err != nil {
+			return fmt.Errorf("insert preserved plan artifact: %w", err)
+		}
+		if count, err := inserted.RowsAffected(); err != nil || count != 1 {
+			return fmt.Errorf("insert preserved plan artifact: node %q is not completed", artifact.NodeID)
+		}
+	}
 	for _, e := range p.Events {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_events (tenant_id, repository_id, task_id, plan_id, generation_id, event_id, node_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, p.TenantID, p.RepositoryID, p.TaskID, p.ID, p.Generation, e.ID, e.NodeID, e.IdempotencyKey); err != nil {
 			return fmt.Errorf("insert event: %w", err)
@@ -404,6 +418,14 @@ func (s *SQLStore) loadRelated(ctx context.Context, p *Plan) error {
 				return err
 			}
 			p.Evidence = append(p.Evidence, x)
+			return nil
+		}},
+		{planWhere(`SELECT node_id, artifact_id FROM plan_artifacts`) + ` ORDER BY node_id`, func(rows *sql.Rows) error {
+			var x Artifact
+			if err := rows.Scan(&x.NodeID, &x.ID); err != nil {
+				return err
+			}
+			p.Artifacts = append(p.Artifacts, x)
 			return nil
 		}},
 		{planWhere(`SELECT lease_id, attempt_id FROM plan_leases`) + ` ORDER BY lease_id`, func(rows *sql.Rows) error {
@@ -761,7 +783,7 @@ func (s *SQLStore) Prune(ctx context.Context, request PruneRequest) (PruneResult
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM plans WHERE `+filter, args...).Scan(&result.Plans); err != nil {
 		return PruneResult{}, fmt.Errorf("count pruned plans: %w", err)
 	}
-	for _, table := range []string{"plan_leases", "plan_events", "plan_evidence", "plan_context_refs", "plan_attempts", "plan_edges", "plan_nodes", "plans"} {
+	for _, table := range []string{"plan_leases", "plan_events", "plan_artifacts", "plan_evidence", "plan_context_refs", "plan_attempts", "plan_edges", "plan_nodes", "plans"} {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE `+filter, args...).Scan(&count); err != nil {
 			return PruneResult{}, fmt.Errorf("count pruned %s: %w", table, err)
@@ -800,7 +822,7 @@ func scopedPlan(scope PlanScope, ref PlanRef) (Plan, error) {
 }
 
 func planView(p Plan, version int64) PlanView {
-	view := PlanView{PlanSummary: PlanSummary{PlanRef: PlanRef{TaskID: p.TaskID, PlanID: p.ID, Generation: p.Generation}, State: p.State, StopReason: p.StopReason, Version: version}, Nodes: p.Nodes, Dependencies: p.Dependencies, ContextRefs: p.ContextRefs, Evidence: p.Evidence, Leases: p.Leases}
+	view := PlanView{PlanSummary: PlanSummary{PlanRef: PlanRef{TaskID: p.TaskID, PlanID: p.ID, Generation: p.Generation}, State: p.State, StopReason: p.StopReason, Version: version}, Nodes: p.Nodes, Dependencies: p.Dependencies, ContextRefs: p.ContextRefs, Evidence: p.Evidence, Artifacts: p.Artifacts, Leases: p.Leases}
 	for _, attempt := range p.Attempts {
 		view.Attempts = append(view.Attempts, AttemptRecord{ID: attempt.ID, NodeID: attempt.NodeID})
 	}
@@ -836,10 +858,10 @@ func validatePlanDatabase(ctx context.Context, db *sql.DB) (int, error) {
 	if version > schemaVersion {
 		return 0, ErrUnsupportedSchema
 	}
-	if version != schemaVersion || checksum != planSchemaChecksum(schemaV4SQL) {
+	if version != schemaVersion || checksum != planSchemaChecksum(schemaV5SQL) {
 		return 0, ErrIncompatibleSchema
 	}
-	for _, table := range []string{"plans", "plan_nodes", "plan_edges", "plan_attempts", "plan_context_refs", "plan_evidence", "plan_events", "plan_leases"} {
+	for _, table := range []string{"plans", "plan_nodes", "plan_edges", "plan_attempts", "plan_context_refs", "plan_evidence", "plan_artifacts", "plan_events", "plan_leases"} {
 		var exists int
 		if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)`, table).Scan(&exists); err != nil {
 			return 0, fmt.Errorf("inspect plan database table %s: %w", table, err)
@@ -889,6 +911,8 @@ ALTER TABLE plan_nodes ADD COLUMN recovery_class TEXT NOT NULL DEFAULT '';
 UPDATE plan_nodes SET kind = 'implement', objective = scope, expected_artifacts = '["legacy node result"]', recovery_class = 'replan';`
 
 const schemaV4SQL = `ALTER TABLE plan_leases ADD COLUMN expires_at TEXT NOT NULL DEFAULT '';`
+
+const schemaV5SQL = `CREATE TABLE plan_artifacts (tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, task_id TEXT NOT NULL, plan_id TEXT NOT NULL, generation_id TEXT NOT NULL, node_id TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id), FOREIGN KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id) REFERENCES plan_nodes);`
 
 func planSchemaChecksum(schema string) string {
 	checksum := sha256.Sum256([]byte(schema))

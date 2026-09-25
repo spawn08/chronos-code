@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
@@ -53,19 +56,49 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			before := fileState{}
 			path, _ := args["path"].(string)
 			class := execution.ReplayUnknown
+			observationPath, expectedFingerprint := "", ""
 			if wrapped.Name == "file_write" {
-				class = execution.ReplayFingerprintedWrite
-				before = readFileState(root, path)
+				if safe, ok := safeObservationPath(root, path); ok {
+					class, observationPath = execution.ReplayFingerprintedWrite, safe
+					before = readFileState(root, safe)
+					content, _ := args["content"].(string)
+					hash := sha256.Sum256([]byte(content))
+					expectedFingerprint = hex.EncodeToString(hash[:])
+				}
 			}
 			fingerprint, err := operationFingerprint(wrapped.Name, args, before.hash)
 			if err != nil {
 				return nil, execution.EffectJournalError{Err: err}
 			}
+			argumentsFingerprint, err := operationFingerprint(wrapped.Name, args, "")
+			if err != nil {
+				return nil, execution.EffectJournalError{Err: err}
+			}
 			operationID := identity.InvocationID + ":" + callID
-			operation := execution.Operation{ID: operationID, EffectKey: operationID, Kind: wrapped.Name, ReplayClass: class, InputFingerprint: fingerprint}
+			operation := execution.Operation{
+				ID: operationID, EffectKey: operationID, Kind: wrapped.Name, ReplayClass: class,
+				InputFingerprint: fingerprint, ArgumentsFingerprint: argumentsFingerprint,
+				ObservationPath: observationPath, InputStateFingerprint: before.hash, ExpectedOutputFingerprint: expectedFingerprint,
+			}
 			prepared, err := lease.Store.PrepareOperation(ctx, lease.Lease, operation)
 			if err != nil {
 				return nil, execution.EffectJournalError{Err: err}
+			}
+			if prepared.Status == execution.OperationObserved || prepared.Status == execution.OperationReconciled {
+				if prepared.ReplayClass == execution.ReplayFingerprintedWrite {
+					current := readFileState(root, prepared.ObservationPath)
+					if prepared.ObservationPath == "" || !current.exists || current.hash != prepared.OutputFingerprint || current.hash != prepared.ExpectedOutputFingerprint {
+						return nil, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
+					}
+				}
+				if len(prepared.Result) == 0 {
+					return nil, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
+				}
+				var observed any
+				if err := json.Unmarshal(prepared.Result, &observed); err != nil {
+					return nil, execution.EffectJournalError{Err: fmt.Errorf("decode observed effect receipt: %w", err)}
+				}
+				return observed, nil
 			}
 			if prepared.Status != execution.OperationPrepared {
 				return nil, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
@@ -86,9 +119,12 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			}
 			outputHash := sha256.Sum256(output)
 			fingerprint = hex.EncodeToString(outputHash[:])
-			if wrapped.Name == "file_write" {
-				after := readFileState(root, path)
+			if class == execution.ReplayFingerprintedWrite {
+				after := readFileState(root, observationPath)
 				if !after.exists {
+					return result, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
+				}
+				if after.hash != expectedFingerprint {
 					return result, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
 				}
 				fingerprint = after.hash
@@ -100,6 +136,27 @@ func wrapDeliveryOperations(a *agent.Agent) {
 		}
 		a.Tools.Register(&wrapped)
 	}
+}
+
+// safeObservationPath accepts only regular workspace-relative paths with no
+// symlink traversal. An unsupported path can still be executed by the tool's
+// own policy, but its effect remains unknown on recovery.
+func safeObservationPath(root, path string) (string, bool) {
+	if root == "" || path == "" || filepath.IsAbs(path) || filepath.Clean(path) != path || path == "." || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	current := root
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return "", false
+		}
+	}
+	return path, true
 }
 
 func invokeJournaledTool(ctx context.Context, handler tool.Handler, args map[string]any) (result any, err error) {

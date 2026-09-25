@@ -37,6 +37,8 @@ import (
 type executionTestProvider struct {
 	name    string
 	modelID string
+	usage   model.Usage
+	known   bool
 
 	mu       sync.Mutex
 	requests []*model.ChatRequest
@@ -56,7 +58,7 @@ func (h *executionContextHook) After(context.Context, *hooks.Event) error { retu
 
 func (p *executionTestProvider) Chat(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 	p.record(ctx, req)
-	return &model.ChatResponse{Role: model.RoleAssistant, Content: p.name}, nil
+	return &model.ChatResponse{Role: model.RoleAssistant, Content: p.name, Usage: p.usage, UsageKnown: p.known}, nil
 }
 
 func (p *executionTestProvider) StreamChat(ctx context.Context, req *model.ChatRequest) (<-chan *model.ChatResponse, error) {
@@ -130,6 +132,23 @@ func TestExecuteAttachesHostRunIdentity(t *testing.T) {
 	identity, ok := agent.RunIdentityFromContext(provider.executionContext(0))
 	if !ok || identity.TenantID != "tenant-1" || identity.RepositoryID != "repo-1" || identity.TaskID != result.TaskID || identity.SessionID != result.SessionID || identity.RoleID != result.AgentID || identity.InvocationID == "" || identity.ParentInvocationID != "" {
 		t.Fatalf("run identity = %+v, ok=%v, result=%+v", identity, ok, result)
+	}
+}
+
+func TestExecutePreservesTrustedParentDeliveryAndNodeIdentity(t *testing.T) {
+	provider := &executionTestProvider{name: "coder", modelID: "test-model"}
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)}, active: "coder", workspace: &workspace.Info{Root: t.TempDir()}}
+	parent := agent.RunIdentity{
+		TenantID: "tenant", RepositoryID: "repo", DeliveryID: "delivery", TaskID: "delivery", NodeID: "node", AttemptID: "attempt",
+		GoalRevision: "goal", ArtifactSnapshot: "artifact", PolicyRevision: "policy", RoleID: "worker", InvocationID: "parent-run",
+	}
+	ctx := agent.WithRunIdentity(context.Background(), parent)
+	if _, err := orch.Execute(ctx, ExecutionRequest{Message: "inspect", RequestedAgent: "coder", TaskID: "node-task"}); err != nil {
+		t.Fatal(err)
+	}
+	child, ok := agent.RunIdentityFromContext(provider.executionContext(0))
+	if !ok || child.TenantID != parent.TenantID || child.RepositoryID != parent.RepositoryID || child.DeliveryID != parent.DeliveryID || child.NodeID != parent.NodeID || child.AttemptID != parent.AttemptID || child.GoalRevision != parent.GoalRevision || child.ArtifactSnapshot != parent.ArtifactSnapshot || child.PolicyRevision != parent.PolicyRevision || child.TaskID != "node-task" || child.RoleID != "coder" || child.ParentInvocationID != parent.InvocationID || child.InvocationID == parent.InvocationID {
+		t.Fatalf("child identity = %+v, ok=%v", child, ok)
 	}
 }
 

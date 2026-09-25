@@ -425,7 +425,11 @@ func (c *Controller) runClaimed(ctx context.Context, p Plan, claimed Node, reque
 	if result.Status != NodeCompleted || result.StopReason != "" || result.Verification != VerificationPassed {
 		return c.stopClaimed(ctx, p, claimed.ID, request, StopVerificationFailed)
 	}
-	return c.scheduler.CompleteWithEvidence(ctx, p, claimed.ID, request.LeaseID, EventID("complete-"+string(request.AttemptID)), IdempotencyKey("complete-"+string(request.AttemptID)), result.EvidenceIDs)
+	artifactID := ""
+	if result.Workspace != nil {
+		artifactID = result.Workspace.ArtifactID
+	}
+	return c.scheduler.CompleteWithArtifact(ctx, p, claimed.ID, request.LeaseID, EventID("complete-"+string(request.AttemptID)), IdempotencyKey("complete-"+string(request.AttemptID)), result.EvidenceIDs, artifactID)
 }
 
 func validateNodeExecutionResult(result NodeExecutionResult, nodeID NodeID, attemptID AttemptID) error {

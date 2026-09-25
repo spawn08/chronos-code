@@ -11,10 +11,12 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/plan"
+	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos-code/internal/worktree"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
+	"github.com/spawn08/chronos/sdk/agent"
 )
 
 type executionRunner interface {
@@ -44,6 +46,7 @@ type planNodeExecutor struct {
 	worktrees           planWorktreeManager
 	repositoryRoot      string
 	implementationAgent string
+	permissionChecker   *security.PermissionChecker
 }
 
 func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecutionRequest) (plan.NodeExecutionResult, error) {
@@ -60,8 +63,22 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 			Err:    &IsolationCapabilityError{Reason: "mutating plan nodes require a worktree manager and repository root"},
 		}
 	}
+	if len(access.Paths) == 0 {
+		return plan.NodeExecutionResult{}, &plan.StopError{Reason: plan.StopCapabilityMissing, Err: fmt.Errorf("mutating plan node %q has no exact authorized scope", request.Node.ID)}
+	}
+	predecessors, err := request.Plan.AcceptedArtifactIDs(request.Node.ID)
+	if err != nil {
+		return plan.NodeExecutionResult{}, &plan.StopError{Reason: plan.StopAmbiguity, Err: fmt.Errorf("resolve plan node inputs: %w", err)}
+	}
+	var allowedDirty []string
+	for _, path := range access.Paths {
+		if e.permissionChecker != nil && e.permissionChecker.CheckContext(builtins.WithWorkspaceRoot(ctx, e.repositoryRoot), "file_read", map[string]any{"path": path}, false) == security.Auto {
+			allowedDirty = append(allowedDirty, path)
+		}
+	}
 	handle, err := e.worktrees.Create(ctx, e.repositoryRoot, worktree.CreateOptions{
 		TaskID: string(request.Plan.TaskID), AttemptID: string(request.Attempt), DirtyPolicy: worktree.DirtyPreserve,
+		AcceptedArtifacts: predecessors, AuthorizedDirtyPaths: allowedDirty,
 	})
 	if err != nil {
 		if handle.Manifest.ID != "" {
@@ -90,6 +107,18 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 	}
 	mapped.Workspace = &collected
 	mapped.ChangedPaths = append([]string(nil), collected.ChangedPaths...)
+	for _, path := range collected.ChangedPaths {
+		allowed := false
+		for _, scope := range access.Paths {
+			if path == scope || strings.HasPrefix(path, scope+"/") {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return mapped, errors.Join(&plan.StopError{Reason: plan.StopApprovalDenied, Err: fmt.Errorf("plan node wrote outside declared scope: %s", path)}, e.cancel(handle))
+		}
+	}
 	if !passed {
 		cancelErr := e.cancel(handle)
 		return mapped, errors.Join(runErr, cancelErr)
@@ -103,10 +132,15 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 	}
 	integrated, err := e.worktrees.Integrate(ctx, handle, collected.ChangedPaths)
 	if err != nil {
+		if integrated.Cleanup.State == string(worktree.CleanupPending) && integrated.ArtifactID != "" {
+			mapped.Workspace = &integrated
+			return mapped, &plan.StopError{Reason: plan.StopAmbiguity, Err: fmt.Errorf("plan node changes applied but cleanup pending: %w", err)}
+		}
 		cancelErr := e.cancel(handle)
 		return mapped, errors.Join(fmt.Errorf("integrate plan node worktree: %w", err), cancelErr)
 	}
 	mapped.ChangedPaths = append([]string(nil), integrated.ChangedPaths...)
+	mapped.Workspace.ArtifactID = integrated.ArtifactID
 	mapped.Workspace.Cleanup = integrated.Cleanup
 	return mapped, nil
 }
@@ -114,6 +148,11 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 func (e *planNodeExecutor) execute(ctx context.Context, request plan.NodeExecutionRequest, paths []string) (plan.NodeExecutionResult, error) {
 	if len(paths) == 0 {
 		paths = []string{"."}
+	}
+	if identity, ok := agent.RunIdentityFromContext(ctx); ok {
+		identity.NodeID = string(request.Node.ID)
+		identity.AttemptID = string(request.Attempt)
+		ctx = agent.WithRunIdentity(ctx, identity)
 	}
 	result, err := e.runner.Execute(ctx, ExecutionRequest{
 		Message:          nodeImplementationPrompt(request),

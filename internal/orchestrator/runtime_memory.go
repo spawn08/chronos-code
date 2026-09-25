@@ -19,7 +19,9 @@ import (
 	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/memory"
+	"github.com/spawn08/chronos-code/internal/security"
 )
 
 // snapshotLegacyDatabase snapshots committed SQLite state, including live WAL
@@ -292,6 +294,17 @@ func (r *runtimeMemory) recordEpisode(ctx context.Context, request, outcome stri
 	if err != nil {
 		contextSourceOmitted(ctx, ContextSourceMemory, ContextOmittedSourceError)
 	}
+}
+
+func (o *Orchestrator) recordEpisode(ctx context.Context, request, outcome string, executionErr error) {
+	if _, durable := execution.OperationLeaseFromContext(ctx); durable {
+		if grant, constrained := security.EffectGrantFromContext(ctx); constrained {
+			if _, write := grant[security.EffectDeliveryWrite]; !write {
+				return
+			}
+		}
+	}
+	o.runtimeMemory.recordEpisode(ctx, request, outcome, executionErr)
 }
 
 // observeStream is the sole downstream consumer. It forwards each response to

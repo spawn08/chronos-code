@@ -216,6 +216,22 @@ func (p ModelPrice) cost(inputTokens, outputTokens int) (Microdollars, error) {
 	return Microdollars(inputCost + outputCost), nil
 }
 
+// ReserveCost prices a bounded request before it is sent to the provider.
+func (p ModelPrice) ReserveCost(inputTokens, maxOutputTokens int) (Microdollars, error) {
+	if p.InputMicrodollarsPerToken <= 0 || p.OutputMicrodollarsPerToken <= 0 {
+		return 0, ErrUnknownModel
+	}
+	return p.cost(inputTokens, maxOutputTokens)
+}
+
+// IncurredCost includes cache-read and cache-creation rates for actual usage.
+func (p ModelPrice) IncurredCost(usage model.Usage) (Microdollars, error) {
+	if p.InputMicrodollarsPerToken <= 0 || p.OutputMicrodollarsPerToken <= 0 || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.CacheReadTokens < 0 || usage.CacheCreationTokens < 0 {
+		return 0, ErrUnknownModel
+	}
+	return p.costWithCache(usage)
+}
+
 func (p ModelPrice) costWithCache(usage model.Usage) (Microdollars, error) {
 	uncached := usage.UncachedPromptTokens()
 	base, err := p.cost(uncached, usage.CompletionTokens)

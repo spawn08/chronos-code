@@ -9,6 +9,7 @@ import (
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool/builtins"
+	"github.com/spawn08/chronos/sdk/agent"
 
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/plan"
@@ -21,21 +22,25 @@ type fakeExecutionRunner struct {
 	result   ExecutionResult
 	err      error
 	root     string
+	identity agent.RunIdentity
 }
 
 func (r *fakeExecutionRunner) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	r.requests = append(r.requests, request)
 	r.root, _ = builtins.WorkspaceRootFromContext(ctx)
+	r.identity, _ = agent.RunIdentityFromContext(ctx)
 	return r.result, r.err
 }
 
 type fakePlanWorktrees struct {
-	handle     worktree.Handle
-	collected  worktree.Result
-	created    worktree.CreateOptions
-	integrated []string
-	canceled   bool
-	removed    bool
+	handle            worktree.Handle
+	collected         worktree.Result
+	created           worktree.CreateOptions
+	integrated        []string
+	canceled          bool
+	removed           bool
+	integrationError  error
+	integrationResult worktree.Result
 }
 
 func (m *fakePlanWorktrees) Create(_ context.Context, _ string, options worktree.CreateOptions) (worktree.Handle, error) {
@@ -51,6 +56,9 @@ func (m *fakePlanWorktrees) Collect(_ context.Context, _ worktree.Handle, checks
 
 func (m *fakePlanWorktrees) Integrate(_ context.Context, _ worktree.Handle, paths []string) (worktree.Result, error) {
 	m.integrated = append([]string(nil), paths...)
+	if m.integrationError != nil {
+		return m.integrationResult, m.integrationError
+	}
 	return worktree.Result{ChangedPaths: append([]string(nil), paths...), Cleanup: worktree.Cleanup{State: "complete"}}, nil
 }
 
@@ -77,12 +85,13 @@ func TestPlanNodeExecutorUsesBoundedBlockingExecutionAndMapsRuntimeEvidence(t *t
 	}
 	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
 	request := plan.NodeExecutionRequest{
-		Plan:    plan.Plan{ID: "plan", TaskID: "task", ContextRefs: []plan.ContextRef{{ID: "source", NodeID: "node"}}, Dependencies: []plan.Dependency{{NodeID: "node", DependsOn: "prior"}}, Evidence: []plan.Evidence{{ID: "evidence-prior", NodeID: "prior"}}},
+		Plan:    plan.Plan{ID: "plan", TaskID: "task", Nodes: []plan.Node{{ID: "prior", State: plan.NodeCompleted}, {ID: "node", State: plan.NodeRunning}}, ContextRefs: []plan.ContextRef{{ID: "source", NodeID: "node"}}, Dependencies: []plan.Dependency{{NodeID: "node", DependsOn: "prior"}}, Evidence: []plan.Evidence{{ID: "evidence-prior", NodeID: "prior"}}},
 		Node:    plan.Node{ID: "node", Kind: plan.NodeImplement, Objective: "implement durable node metadata", Scope: "internal/plan/controller.go", ExpectedArtifacts: []string{"controller patch"}, Assumptions: []string{"store migration is present"}, InvalidationTriggers: []string{"node schema changes"}, RecoveryClass: plan.RecoveryReplan, Risks: []string{"metadata may be lost"}, Verification: "go test ./internal/plan"},
 		Attempt: "attempt", Context: plan.RestartContext{Entries: []plan.ContextEntry{{ID: "ctx", Content: "bounded context"}}},
 	}
 
-	result, err := executor.Execute(context.Background(), request)
+	parent := agent.RunIdentity{DeliveryID: "delivery", NodeID: "previous", AttemptID: "previous", RoleID: "worker", InvocationID: "worker-run"}
+	result, err := executor.Execute(agent.WithRunIdentity(context.Background(), parent), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +100,9 @@ func TestPlanNodeExecutorUsesBoundedBlockingExecutionAndMapsRuntimeEvidence(t *t
 	}
 	if runner.root != "/isolated/workspace" || worktrees.created.DirtyPolicy != worktree.DirtyPreserve {
 		t.Fatalf("runtime root = %q, create options = %#v", runner.root, worktrees.created)
+	}
+	if runner.identity.DeliveryID != parent.DeliveryID || runner.identity.NodeID != "node" || runner.identity.AttemptID != "attempt" || runner.identity.InvocationID != parent.InvocationID {
+		t.Fatalf("plan node identity = %+v", runner.identity)
 	}
 	got := runner.requests[0]
 	if got.Mode != ExecutionBlocking || got.RequestedAgent != "coder" || got.PPD != nil || !got.BoundedContext {
@@ -135,7 +147,7 @@ func TestPlanNodeExecutorCancelsIsolationAfterVerificationFailure(t *testing.T) 
 	}
 	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
 	result, err := executor.Execute(context.Background(), plan.NodeExecutionRequest{
-		Plan: plan.Plan{TaskID: "task", ID: "plan"}, Node: plan.Node{ID: "node", Scope: "changed.go", Verification: "go test ./..."}, Attempt: "attempt",
+		Plan: plan.Plan{TaskID: "task", ID: "plan", Nodes: []plan.Node{{ID: "node", State: plan.NodeRunning}}}, Node: plan.Node{ID: "node", Scope: "changed.go", Verification: "go test ./..."}, Attempt: "attempt",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -154,5 +166,59 @@ func TestPlanNodeExecutorRequiresIsolationForMutatingNodes(t *testing.T) {
 	var capability *IsolationCapabilityError
 	if !errors.As(err, &capability) {
 		t.Fatalf("error = %v, want IsolationCapabilityError", err)
+	}
+}
+
+func TestPlanNodeExecutorParksAppliedPatchWhenCleanupFails(t *testing.T) {
+	runner := &fakeExecutionRunner{result: ExecutionResult{StopReason: execution.StopSuccess, Verification: verification.Decision{Allowed: true}}}
+	worktrees := &fakePlanWorktrees{
+		handle:            worktree.Handle{Manifest: worktree.Manifest{ID: "workspace", WorktreePath: "/isolated/workspace"}},
+		collected:         worktree.Result{ChangedPaths: []string{"changed.go"}},
+		integrationResult: worktree.Result{ArtifactID: "sha256:accepted", ChangedPaths: []string{"changed.go"}, Cleanup: worktree.Cleanup{State: string(worktree.CleanupPending)}},
+		integrationError:  errors.New("cleanup failed after patch applied"),
+	}
+	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
+	result, err := executor.Execute(context.Background(), plan.NodeExecutionRequest{Plan: plan.Plan{TaskID: "task", Nodes: []plan.Node{{ID: "node", State: plan.NodeRunning}}}, Node: plan.Node{ID: "node", Scope: "changed.go", Verification: "go test ./..."}, Attempt: "attempt"})
+	var stopped *plan.StopError
+	if !errors.As(err, &stopped) || stopped.Reason != plan.StopAmbiguity || worktrees.canceled || result.Workspace == nil || result.Workspace.ArtifactID != "sha256:accepted" {
+		t.Fatalf("applied patch outcome = %+v, error = %v, canceled = %v", result, err, worktrees.canceled)
+	}
+}
+
+func TestPlanNodeExecutorComposesAcceptedPredecessorsFromPersistedPlan(t *testing.T) {
+	runner := &fakeExecutionRunner{result: ExecutionResult{StopReason: execution.StopSuccess, Verification: verification.Decision{Allowed: true}}}
+	worktrees := &fakePlanWorktrees{
+		handle:    worktree.Handle{Manifest: worktree.Manifest{ID: "workspace", WorktreePath: "/isolated/workspace"}},
+		collected: worktree.Result{},
+	}
+	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
+	request := plan.NodeExecutionRequest{
+		Plan: plan.Plan{TaskID: "task", Nodes: []plan.Node{{ID: "a", State: plan.NodeCompleted}, {ID: "b", State: plan.NodeCompleted}, {ID: "c", State: plan.NodeRunning}, {ID: "unrelated", State: plan.NodeCompleted}},
+			Dependencies: []plan.Dependency{{NodeID: "c", DependsOn: "b"}, {NodeID: "b", DependsOn: "a"}},
+			Artifacts:    []plan.Artifact{{NodeID: "a", ID: "sha256:first"}, {NodeID: "b", ID: "sha256:second"}, {NodeID: "unrelated", ID: "sha256:excluded"}}},
+		Node: plan.Node{ID: "c", Scope: "changed.go", Verification: "go test ./..."}, Attempt: "attempt",
+	}
+	if _, err := executor.Execute(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(worktrees.created.AcceptedArtifacts, []string{"sha256:first", "sha256:second"}) {
+		t.Fatalf("private predecessor snapshot = %v", worktrees.created.AcceptedArtifacts)
+	}
+}
+
+func TestPlanNodeExecutorRejectsOutOfScopeMutationBeforeIntegration(t *testing.T) {
+	runner := &fakeExecutionRunner{result: ExecutionResult{StopReason: execution.StopSuccess, Verification: verification.Decision{Allowed: true}}}
+	worktrees := &fakePlanWorktrees{
+		handle:    worktree.Handle{Manifest: worktree.Manifest{ID: "workspace", WorktreePath: "/isolated/workspace"}},
+		collected: worktree.Result{ChangedPaths: []string{"private.txt"}},
+	}
+	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
+	_, err := executor.Execute(context.Background(), plan.NodeExecutionRequest{
+		Plan: plan.Plan{TaskID: "task", Nodes: []plan.Node{{ID: "node", State: plan.NodeRunning}}},
+		Node: plan.Node{ID: "node", Scope: "allowed.go", Verification: "go test ./..."}, Attempt: "attempt",
+	})
+	var stopped *plan.StopError
+	if !errors.As(err, &stopped) || stopped.Reason != plan.StopApprovalDenied || !worktrees.canceled || len(worktrees.integrated) != 0 {
+		t.Fatalf("out-of-scope patch = %v, canceled=%t integrated=%v", err, worktrees.canceled, worktrees.integrated)
 	}
 }

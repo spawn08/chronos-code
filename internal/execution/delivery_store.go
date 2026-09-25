@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const deliverySchemaVersion = 5
+const deliverySchemaVersion = 8
 
 var deliveryMigrations = []struct {
 	version  int
@@ -25,6 +25,9 @@ var deliveryMigrations = []struct {
 	{version: 3, checksum: deliverySchemaChecksum(deliverySchemaV3), sql: deliverySchemaV3},
 	{version: 4, checksum: deliverySchemaChecksum(deliverySchemaV4), sql: deliverySchemaV4},
 	{version: 5, checksum: deliverySchemaChecksum(deliverySchemaV5), sql: deliverySchemaV5},
+	{version: 6, checksum: deliverySchemaChecksum(deliverySchemaV6), sql: deliverySchemaV6},
+	{version: 7, checksum: deliverySchemaChecksum(deliverySchemaV7), sql: deliverySchemaV7},
+	{version: 8, checksum: deliverySchemaChecksum(deliverySchemaV8), sql: deliverySchemaV8},
 }
 
 // DeliveryStore is the SQLite-backed durable delivery repository.
@@ -1348,3 +1351,13 @@ CREATE TABLE delivery_usage_calls (
   FOREIGN KEY (tenant_id, repository_id, delivery_id) REFERENCES delivery_deliveries ON DELETE CASCADE
 );
 CREATE INDEX idx_delivery_usage_calls_status ON delivery_usage_calls (tenant_id, repository_id, delivery_id, status);`
+
+const deliverySchemaV6 = `
+ALTER TABLE delivery_operations ADD COLUMN arguments_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE delivery_operations ADD COLUMN observation_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE delivery_operations ADD COLUMN input_state_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE delivery_operations ADD COLUMN expected_output_fingerprint TEXT NOT NULL DEFAULT '';`
+
+const deliverySchemaV7 = `ALTER TABLE delivery_usage_calls ADD COLUMN provider_nanoseconds INTEGER NOT NULL DEFAULT 0 CHECK (provider_nanoseconds >= 0);`
+
+const deliverySchemaV8 = `ALTER TABLE delivery_worker_attempts ADD COLUMN active_nanoseconds INTEGER NOT NULL DEFAULT 0 CHECK (active_nanoseconds >= 0);`

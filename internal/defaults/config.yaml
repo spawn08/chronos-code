@@ -61,6 +61,20 @@ repair:
   # enforcement opt-in; the other cumulative repair limits remain active.
   max_cost_microdollars: 0
 
+# Durable evidence ledger for long-horizon tasks. When enabled, executions
+# with an explicit task ID (plan nodes, resumed tasks) keep verification
+# evidence across turns and restarts under <project>/ledgers/. Files changed
+# outside the agent between executions invalidate overlapping evidence.
+ledger:
+  persist: false
+
+# Self-invalidating working memory: ranged file reads are recorded as claims
+# anchored to content hashes. Writes, mutating shell commands, and task
+# continuation re-check them; outdated reads are flagged to the model and
+# every status change is appended to the evidence ledger.
+claims:
+  enabled: false
+
 defaults:
   model:
     provider: "anthropic"

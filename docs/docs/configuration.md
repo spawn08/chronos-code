@@ -175,6 +175,34 @@ defaults:
     summary: true          # stream thinking summaries in the TUI
 ```
 
+### Durable Evidence Ledger
+
+Long-horizon work spans many turns, restarts, and resumes. With `ledger.persist` enabled, executions that carry an explicit task ID (durable plan nodes, resumed tasks) replay and extend one append-only evidence ledger instead of starting empty. Verification evidence from an earlier turn therefore still satisfies completion obligations later, as long as it is current.
+
+```yaml
+ledger:
+  persist: false   # opt in; generated one-off task IDs are never persisted
+```
+
+- Storage: `<project data dir>/ledgers/<sha256(task id)>.jsonl`, one fsynced JSON record per event. Events are persisted before they are committed in memory.
+- A record cut off by a crash mid-append is truncated when the ledger reopens. Any other malformed or out-of-order history fails closed and is not replayed.
+- When the ledger reopens, each file the task wrote is hashed again. If a file changed outside the agent, the runtime records a synthetic write, so evidence that overlaps that file is no longer current.
+
+### Self-Invalidating Claims
+
+With `claims.enabled`, every ranged `file_read` (one with `start_line`/`end_line`) is recorded as a claim anchored to the content hash of the lines read. The runtime re-checks those anchors so the model is told when something it read earlier no longer matches the workspace.
+
+```yaml
+claims:
+  enabled: false   # opt in
+```
+
+- Claim states: `live` (the lines still match; a span that only moved is relocated), `stale` (the lines changed or were removed), and `doubted` (the lines match but a claim it was derived from is no longer live).
+- Re-checks run after `file_write` (the written file), after mutating or unclassified shell commands (all claims), and when an execution continues a task with the same explicit task ID (all claims, catching edits made outside the agent).
+- A mutating shell command whose effects invalidate claims returns a `claims_invalidated` list in its tool result.
+- When a task is continued, a `[Working claims]` block is added to the turn: outdated spans first (re-read before relying on them), then spans to re-check, then spans that are still current.
+- Every status change is appended to the evidence ledger as a `claim` event (audit only; it does not affect verification). Claim stores are kept in memory, with at most 256 claims per task and 64 continued tasks.
+
 ## Routing Config (`routing.yaml`)
 
 ```yaml

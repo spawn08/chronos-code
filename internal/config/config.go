@@ -35,6 +35,8 @@ type Config struct {
 	Learning     LearningConfig              `yaml:"learning,omitempty"`
 	Verification VerificationConfig          `yaml:"verification,omitempty"`
 	Repair       RepairConfig                `yaml:"repair,omitempty"`
+	Ledger       LedgerConfig                `yaml:"ledger,omitempty"`
+	Claims       ClaimsConfig                `yaml:"claims,omitempty"`
 	RuntimeCaps  CapabilityManifest          `yaml:"runtime_capabilities,omitempty"`
 	Server       ServerConfig                `yaml:"server,omitempty"`
 	Retention    RetentionConfig             `yaml:"retention,omitempty"`
@@ -342,6 +344,21 @@ type ToolsConfig struct {
 // are reported or enforced. It does not collect verification evidence.
 type VerificationConfig struct {
 	Mode verification.Mode `yaml:"mode,omitempty"`
+}
+
+// LedgerConfig controls durability of the per-task evidence ledger. When
+// Persist is true, executions with an explicit task ID (durable plan nodes,
+// resumed tasks) replay and extend the same ledger across turns and restarts.
+type LedgerConfig struct {
+	Persist bool `yaml:"persist,omitempty"`
+}
+
+// ClaimsConfig controls self-invalidating working memory. When Enabled is
+// true, ranged file reads become content-anchored claims that are re-checked
+// after writes, mutating shell commands, and when a task is continued; stale
+// claims are reported to the model instead of silently trusted.
+type ClaimsConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
 }
 
 // RepairConfig bounds verification-driven continuation across the complete
@@ -752,6 +769,8 @@ func mergeConfig(base, overlay *Config, source string) {
 	mergeTypedSection(&base.Learning, overlay.Learning, overlay.set, "learning")
 	mergeTypedSection(&base.Verification, overlay.Verification, overlay.set, "verification")
 	mergeTypedSection(&base.Repair, overlay.Repair, overlay.set, "repair")
+	mergeTypedSection(&base.Ledger, overlay.Ledger, overlay.set, "ledger")
+	mergeTypedSection(&base.Claims, overlay.Claims, overlay.set, "claims")
 	mergeTypedSection(&base.RuntimeCaps, overlay.RuntimeCaps, overlay.set, "runtime_capabilities")
 	mergeTypedSection(&base.Server, overlay.Server, overlay.set, "server")
 	mergeTypedSection(&base.Retention, overlay.Retention, overlay.set, "retention")

@@ -62,8 +62,15 @@ func wrapVerificationEvidence(a *agent.Agent) {
 					if _, recordErr := runtime.recordWrite(evidencePath, after.hash, after.size, execution.ProvenanceRuntime, completedAt); recordErr != nil {
 						return result, errors.Join(err, fmt.Errorf("record file write evidence: %w", recordErr))
 					}
+					if refreshErr := runtime.refreshClaims(completedAt, evidencePath); refreshErr != nil {
+						return result, errors.Join(err, refreshErr)
+					}
 				} else if err == nil && !after.exists {
 					return result, fmt.Errorf("record file write evidence: written file %q is unavailable", path)
+				}
+			case "file_read":
+				if err == nil {
+					runtime.recordReadClaim(args, result)
 				}
 			case "shell", "shell_auto":
 				if recordErr := recordShellEvidence(runtime, ctx, args, result, err, startedAt, completedAt); recordErr != nil {
@@ -110,8 +117,11 @@ func recordShellEvidence(runtime *taskRuntime, ctx context.Context, args map[str
 		terminal = execution.TerminalSpawnFailed
 	}
 	if class == execution.CommandMutation || class == execution.CommandUnknown {
-		_, err := runtime.recordWorkspaceMutation(command, completedAt)
-		return err
+		if _, err := runtime.recordWorkspaceMutation(command, completedAt); err != nil {
+			return err
+		}
+		// A mutating or unclassified command may have touched any file.
+		return runtime.refreshClaims(completedAt)
 	}
 	_, err := runtime.recordCommand(command, class, exitCode, terminal, nil, execution.ProvenanceRuntime, startedAt, completedAt)
 	return err

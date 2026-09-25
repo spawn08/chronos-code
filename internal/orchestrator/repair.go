@@ -62,6 +62,7 @@ func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) str
 	if len(changed) > 0 {
 		lines = append(lines, "Changed paths: "+strings.Join(changed, ", "))
 	}
+	lines = append(lines, runtime.claimsDigest()...)
 	snapshot := runtime.budget.Snapshot()
 	lines = append(lines, fmt.Sprintf("Remaining limits: repairs=%d model_calls=%d tool_calls=%d tokens=%d cost_microdollars=%d",
 		remainingInt(snapshot.Limits.RepairAttempts, snapshot.RepairAttempts),

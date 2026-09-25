@@ -212,7 +212,7 @@ var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/think", "/login", "/logout", "/whoami",
 	"/context", "/usage", "/status", "/task", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace",
 	"/skills", "/mcp", "/subagent", "/copy", "/mouse", "/clear", "/perf", "/help", "/quit",
-	"/session list", "/inspect",
+	"/session list", "/inspect", "/diff",
 }
 
 func newCommandPalette() *picker {

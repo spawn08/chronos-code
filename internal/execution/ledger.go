@@ -52,6 +52,9 @@ const (
 	EventToolCall     EventType = "tool_call"
 	EventVerification EventType = "verification"
 	EventUncertainty  EventType = "uncertainty"
+	// EventClaim records a working-memory claim status transition. It is
+	// audit-only and never affects verification currency.
+	EventClaim EventType = "claim"
 )
 
 const (
@@ -129,6 +132,7 @@ type Ledger struct {
 	events   []Event
 	nextID   uint64
 	revision uint64
+	sink     EventSink
 }
 
 // NewLedger creates a ledger that accepts events for taskID only.
@@ -189,6 +193,12 @@ func (l *Ledger) appendLocked(event Event) error {
 	}
 	if l.taskID != "" && state.TaskID != l.taskID {
 		return fmt.Errorf("%w: got %q, want %q", ErrTaskMismatch, event.TaskID, l.taskID)
+	}
+	if l.sink != nil {
+		// Persist before committing so durable history is never behind memory.
+		if err := l.sink.AppendEvent(cloneEvent(event)); err != nil {
+			return fmt.Errorf("persist evidence event %q: %w", event.ID, err)
+		}
 	}
 	if l.taskID == "" {
 		l.taskID = state.TaskID
@@ -301,7 +311,7 @@ func validateEvent(event Event) error {
 		}
 	}
 	switch event.Type {
-	case EventRequirement, EventAssumption, EventUncertainty:
+	case EventRequirement, EventAssumption, EventUncertainty, EventClaim:
 		return nil
 	case EventWrite:
 		if len(event.Paths) == 0 && len(event.Scopes) == 0 {

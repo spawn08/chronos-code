@@ -13,6 +13,7 @@ type Command struct {
 	Dir   string
 	Args  []string
 	Stdin []byte
+	Env   []string
 }
 
 // CommandResult preserves stdout and stderr independently, including binary output.
@@ -37,6 +38,7 @@ func (ExecRunner) Run(ctx context.Context, command Command) (CommandResult, erro
 		"GIT_EDITOR=true",
 		"GIT_SEQUENCE_EDITOR=true",
 	)
+	cmd.Env = append(cmd.Env, command.Env...)
 	cmd.Stdin = bytes.NewReader(command.Stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
@@ -224,6 +225,9 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		runCtx = agent.WithModelProvider(runCtx, provider)
 		result, err = configured.Execute(runCtx, task)
 	} else if r.fallback != nil {
+		if _, durable := execution.OperationLeaseFromContext(runCtx); durable {
+			return "", fmt.Errorf("dynamic delivery subagent has no durable usage hook: %w", execution.ErrUsageOutcomeUnknown)
+		}
 		runCtx = attenuateDynamicEffectGrant(runCtx, spec, r.tools)
 		result, err = r.fallback.Run(runCtx, spec, task)
 	} else {

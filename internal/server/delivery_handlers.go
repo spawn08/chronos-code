@@ -17,29 +17,29 @@ type deliveryAdmissionRequest struct {
 	Goal                string `json:"goal"`
 	RunReadOnly         bool   `json:"run_read_only,omitempty"`
 	MaxCostMicrodollars int64  `json:"max_cost_microdollars,omitempty"`
-	Requirements []struct {
+	Requirements        []struct {
 		Statement string   `json:"statement"`
 		Checks    []string `json:"checks"`
 	} `json:"requirements,omitempty"`
 }
 
 type deliveryResponse struct {
-	ID                  execution.DeliveryID    `json:"id"`
-	State               execution.DeliveryState `json:"state"`
-	Version             int64                   `json:"version"`
-	CurrentGoalRevision execution.GoalRevision  `json:"current_goal_revision"`
-	MaxCostMicrodollars int64                   `json:"max_cost_microdollars,omitempty"`
+	ID                  execution.DeliveryID      `json:"id"`
+	State               execution.DeliveryState   `json:"state"`
+	Version             int64                     `json:"version"`
+	CurrentGoalRevision execution.GoalRevision    `json:"current_goal_revision"`
+	MaxCostMicrodollars int64                     `json:"max_cost_microdollars,omitempty"`
 	Usage               execution.CumulativeUsage `json:"usage"`
-	Goal                execution.Goal          `json:"goal"`
-	Requirements        []execution.Requirement `json:"requirements"`
-	CreatedAt           time.Time               `json:"created_at"`
+	Goal                execution.Goal            `json:"goal"`
+	Requirements        []execution.Requirement   `json:"requirements"`
+	CreatedAt           time.Time                 `json:"created_at"`
 }
 
 func responseForDelivery(delivery execution.Delivery) deliveryResponse {
 	return deliveryResponse{
 		ID: delivery.ID, State: delivery.State, Version: delivery.Version,
 		CurrentGoalRevision: delivery.CurrentGoalRevision, MaxCostMicrodollars: delivery.MaxCostMicrodollars,
-		Goal: delivery.Goals[len(delivery.Goals)-1],
+		Goal:         delivery.Goals[len(delivery.Goals)-1],
 		Requirements: delivery.Requirements, CreatedAt: delivery.CreatedAt,
 	}
 }
@@ -73,7 +73,7 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_cost_microdollars must be non-negative"})
 		return
 	}
-	if request.RunReadOnly && request.MaxCostMicrodollars > 0 {
+	if request.RunReadOnly && request.MaxCostMicrodollars > 0 && (s.cfg.DeliveryWorker == nil || !s.cfg.DeliveryWorker.CanRunCapped()) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delivery spending caps require durable model-call admission"})
 		return
 	}

@@ -87,8 +87,12 @@ func TestDependentWorktreeCharacterizesMissingPredecessorSnapshot(t *testing.T) 
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(predecessor.Manifest.WorktreePath, "tracked.txt"), []byte("accepted predecessor\n"))
-	if _, err := manager.Integrate(ctx, predecessor, []string{"tracked.txt"}); err != nil {
+	accepted, err := manager.Integrate(ctx, predecessor, []string{"tracked.txt"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if accepted.ArtifactID == "" {
+		t.Fatal("accepted predecessor patch was not retained")
 	}
 
 	dependent, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "dependent", DirtyPolicy: DirtyPreserve})
@@ -105,6 +109,135 @@ func TestDependentWorktreeCharacterizesMissingPredecessorSnapshot(t *testing.T) 
 	}
 	if parent, err := os.ReadFile(filepath.Join(repo, "tracked.txt")); err != nil || string(parent) != "accepted predecessor\n" {
 		t.Fatalf("parent predecessor content = %q, %v", parent, err)
+	}
+	withPredecessor, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "accepted-dependent", DirtyPolicy: DirtyPreserve, AcceptedArtifacts: []string{accepted.ArtifactID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Cancel(context.Background(), withPredecessor) })
+	contents, err := os.ReadFile(filepath.Join(withPredecessor.Manifest.WorktreePath, "tracked.txt"))
+	if err != nil || string(contents) != "accepted predecessor\n" || withPredecessor.Manifest.ParentRevision == "" || withPredecessor.Manifest.BaseRevision == withPredecessor.Manifest.ParentRevision {
+		t.Fatalf("accepted dependent snapshot = %q, manifest = %+v, error = %v", contents, withPredecessor.Manifest, err)
+	}
+}
+
+func TestDependentWorktreeCompilesAgainstUncommittedAcceptedAPI(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	manager, err := New(filepath.Join(t.TempDir(), "project-data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "api", DirtyPolicy: DirtyPreserve})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(first.Manifest.WorktreePath, "go.mod"), []byte("module example.com/fixture\n\ngo 1.26\n"))
+	mustWrite(t, filepath.Join(first.Manifest.WorktreePath, "api.go"), []byte("package fixture\n\nfunc API() int { return 42 }\n"))
+	accepted, err := manager.Integrate(ctx, first, []string{"api.go", "go.mod"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "consumer", DirtyPolicy: DirtyPreserve, AcceptedArtifacts: []string{accepted.ArtifactID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(second.Manifest.WorktreePath, "consumer_test.go"), []byte("package fixture\n\nimport \"testing\"\n\nfunc TestAPI(t *testing.T) { if API() != 42 { t.Fatal(\"missing predecessor\") } }\n"))
+	command := exec.CommandContext(ctx, "go", "test", "./...")
+	command.Dir = second.Manifest.WorktreePath
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("dependent did not compile against accepted API: %s: %v", output, err)
+	}
+	result, err := manager.Integrate(ctx, second, []string{"consumer_test.go"})
+	if err != nil || !reflectStrings(result.ChangedPaths, []string{"consumer_test.go"}) {
+		t.Fatalf("dependent integration = %+v, error = %v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "consumer_test.go")); err != nil {
+		t.Fatalf("dependent result was not integrated: %v", err)
+	}
+}
+
+func TestAuthorizedDirtySnapshotDoesNotExposeDeniedContentOrMutateParentIndex(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	mustWrite(t, filepath.Join(repo, "tracked.txt"), []byte("authorized user edit\n"))
+	mustWrite(t, filepath.Join(repo, "secret.txt"), []byte("private user bytes\n"))
+	before := gitTest(t, repo, "status", "--porcelain=v1")
+	manager, err := New(filepath.Join(t.TempDir(), "data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := manager.Create(ctx, repo, CreateOptions{
+		TaskID: "task", AttemptID: "authorized", DirtyPolicy: DirtyPreserve,
+		AuthorizedDirtyPaths: []string{"tracked.txt"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(handle.Manifest.WorktreePath, "tracked.txt")); err != nil || string(got) != "authorized user edit\n" {
+		t.Fatalf("authorized private input = %q, error = %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(handle.Manifest.WorktreePath, "secret.txt")); !os.IsNotExist(err) {
+		t.Fatalf("denied content entered private workspace: %v", err)
+	}
+	if string(gitTest(t, repo, "status", "--porcelain=v1")) != string(before) {
+		t.Fatal("snapshot modified parent index or worktree")
+	}
+	mustWrite(t, filepath.Join(handle.Manifest.WorktreePath, "result.go"), []byte("package fixture\n"))
+	if _, err := manager.Integrate(ctx, handle, []string{"result.go"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(repo, "secret.txt")); err != nil || string(got) != "private user bytes\n" {
+		t.Fatalf("denied parent content changed = %q, error = %v", got, err)
+	}
+}
+
+func TestAuthorizedDirtyInputChangeInvalidatesIntegration(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	mustWrite(t, filepath.Join(repo, "tracked.txt"), []byte("original dirty input\n"))
+	manager, err := New(filepath.Join(t.TempDir(), "data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "changed", DirtyPolicy: DirtyPreserve, AuthorizedDirtyPaths: []string{"tracked.txt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Cancel(ctx, handle) })
+	mustWrite(t, filepath.Join(handle.Manifest.WorktreePath, "result.go"), []byte("package fixture\n"))
+	mustWrite(t, filepath.Join(repo, "tracked.txt"), []byte("later user edit\n"))
+	if _, err := manager.Integrate(ctx, handle, []string{"result.go"}); err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
+		t.Fatalf("stale input integration = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "result.go")); !os.IsNotExist(err) {
+		t.Fatalf("stale input was integrated: %v", err)
+	}
+}
+
+func TestAuthorizedDirtyCannotOverrideAcceptedPredecessor(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	manager, err := New(filepath.Join(t.TempDir(), "data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "first", DirtyPolicy: DirtyReject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(first.Manifest.WorktreePath, "tracked.txt"), []byte("accepted version\n"))
+	accepted, err := manager.Integrate(ctx, first, []string{"tracked.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(repo, "tracked.txt"), []byte("different user version\n"))
+	handle, err := manager.Create(ctx, repo, CreateOptions{
+		TaskID: "task", AttemptID: "second", DirtyPolicy: DirtyPreserve,
+		AcceptedArtifacts: []string{accepted.ArtifactID}, AuthorizedDirtyPaths: []string{"tracked.txt"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicts with accepted predecessor") {
+		t.Fatalf("ambiguous predecessor input = %+v, error = %v", handle, err)
 	}
 }
 

@@ -50,7 +50,10 @@ func TestPlanLegacyLeaseIsParkedInsteadOfAutomaticallyReplayed(t *testing.T) {
 	if _, err := scheduler.store.db.ExecContext(ctx, `ALTER TABLE plan_leases DROP COLUMN expires_at`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := scheduler.store.db.ExecContext(ctx, `DELETE FROM plan_schema_migrations WHERE version = 4`); err != nil {
+	if _, err := scheduler.store.db.ExecContext(ctx, `DROP TABLE plan_artifacts`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scheduler.store.db.ExecContext(ctx, `DELETE FROM plan_schema_migrations WHERE version IN (4, 5)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := scheduler.store.Close(); err != nil {

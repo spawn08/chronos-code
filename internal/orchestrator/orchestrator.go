@@ -486,7 +486,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		}
 	}
 	orch.planController = plan.NewController(planStore, &planNodeExecutor{
-		runner: orch, worktrees: worktreeManager, repositoryRoot: root, implementationAgent: implementationAgent,
+		runner: orch, worktrees: worktreeManager, repositoryRoot: root, implementationAgent: implementationAgent, permissionChecker: orch.permissionChecker,
 	}, nil, nil, plan.ControllerConfig{})
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
@@ -497,9 +497,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List()), contextGuardOptions{
 			ContextLimit: a.ContextCfg.MaxContextTokens,
 		}))
-		// Keep the budget hook last: if it reserves, no later Before hook can
-		// abort the call and strand the reservation.
-		a.Hooks = append(a.Hooks, budgetHook{tracker: tracker, orchestrator: orch, agentID: a.ID})
+		// Admit both session and durable delivery budgets as one final hook.
+		// If the second reservation fails before the provider call, undo the first.
+		a.Hooks = append(a.Hooks, deliveryBudgetHook{session: budgetHook{tracker: tracker, orchestrator: orch, agentID: a.ID}})
 	}
 	if cfg.MCP.DiscoveryEnabled() {
 		orch.mcpWatcher, err = mcpdiscover.Watch(ctx, root, orch.reloadMCPDiscovery)
@@ -1765,6 +1765,17 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	ctx = context.WithValue(ctx, taskIDKey{}, taskID)
 	runIdentity := agent.RunIdentity{TaskID: taskID, RoleID: agentID, SessionID: sessionID, InvocationID: session.NewSessionID()}
+	if parent, ok := agent.RunIdentityFromContext(ctx); ok {
+		runIdentity.TenantID = parent.TenantID
+		runIdentity.RepositoryID = parent.RepositoryID
+		runIdentity.DeliveryID = parent.DeliveryID
+		runIdentity.NodeID = parent.NodeID
+		runIdentity.AttemptID = parent.AttemptID
+		runIdentity.GoalRevision = parent.GoalRevision
+		runIdentity.ArtifactSnapshot = parent.ArtifactSnapshot
+		runIdentity.PolicyRevision = parent.PolicyRevision
+		runIdentity.ParentInvocationID = parent.InvocationID
+	}
 	if authorized, ok := authorization.FromContext(ctx); ok {
 		runIdentity.TenantID = authorized.TenantID
 		runIdentity.RepositoryID = authorized.RepositoryID
@@ -1780,7 +1791,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	ctx = builtins.WithWorkspaceRoot(ctx, workspaceRoot)
 	ctx = executionEffectContext(ctx, o.PlanMode())
-	taskRuntime, err := newTaskRuntimeWithLimits(taskID, workspaceRoot, taskLimits(o.cfg))
+	taskRuntime, err := o.openTaskRuntime(taskID, request.TaskID != "", workspaceRoot)
 	if err != nil {
 		return ExecutionResult{}, err
 	}
@@ -1868,7 +1879,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			if taskCancel != nil {
 				taskCancel()
 			}
-			o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
+			o.recordEpisode(ctx, request.Message, "", err)
 		}
 		result.ContextReport = o.contextReport(collector)
 		return result, err
@@ -1880,14 +1891,14 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	result.ContextReport = o.contextReport(collector)
 	if err != nil {
 		populateRuntimeResult(&result, taskRuntime)
-		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
+		o.recordEpisode(ctx, request.Message, "", err)
 		return result, err
 	}
 	result.Response, result.Verification, result.StopReason, err = o.repairBlocking(ctx, a, sessionID, request, classification, taskRuntime, result.Response)
 	result.Budget = taskRuntime.budget.Snapshot()
 	populateRuntimeResult(&result, taskRuntime)
 	if err != nil {
-		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
+		o.recordEpisode(ctx, request.Message, "", err)
 		return result, err
 	}
 	decision := result.Verification
@@ -1897,11 +1908,11 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			result.StopReason = execution.StopVerificationFailed
 		}
 		err := &execution.TerminalError{Reason: result.StopReason, Err: fmt.Errorf("verification does not support successful completion")}
-		o.runtimeMemory.recordEpisode(ctx, request.Message, "", err)
+		o.recordEpisode(ctx, request.Message, "", err)
 		return result, err
 	}
 	if result.Response != nil {
-		o.runtimeMemory.recordEpisode(ctx, request.Message, result.Response.Content, result.Response.Err)
+		o.recordEpisode(ctx, request.Message, result.Response.Content, result.Response.Err)
 	}
 	return result, nil
 }
@@ -3078,13 +3089,9 @@ func (o *Orchestrator) reloadMCPDiscovery(snapshot mcpdiscover.Snapshot) {
 // supplied arguments use the tool's public schema: task plus either agent, or
 // system_prompt and an optional tools list for a dynamic subagent.
 func (o *Orchestrator) RunSubagent(ctx context.Context, args map[string]any) (string, error) {
-	active := o.ActiveAgent()
-	if active == nil {
-		return "", fmt.Errorf("no active agent")
-	}
 	task, _ := args["task"].(string)
 	ctx = o.turnContext(ctx, task)
-	result, err := active.Tools.Execute(ctx, harness.SpawnToolName, args)
+	result, err := o.ExecuteTool(ctx, harness.SpawnToolName, args)
 	if err != nil {
 		return "", err
 	}
@@ -3300,6 +3307,11 @@ func (o *Orchestrator) RunTeam(ctx context.Context, teamID, message string) (str
 	t, ok := o.teams[teamID]
 	if !ok {
 		return "", fmt.Errorf("team %q not found (available: %v)", teamID, o.ListTeams())
+	}
+	var err error
+	ctx, err = o.executionTaskContext(ctx, "team:"+teamID)
+	if err != nil {
+		return "", err
 	}
 	return teambuilder.Run(ctx, t, message)
 }

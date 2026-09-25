@@ -156,6 +156,9 @@ func TestReadOnlyDeliveryAdmissionQueuesAtomicallyAndOutlivesRequest(t *testing.
 	}
 	config.DeliveryWorker = worker
 	handler := New(nil, config).Handler()
+	if capped := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "capped-read-only", `{"goal":"inspect changes","run_read_only":true,"max_cost_microdollars":50}`, "secret"); capped.Code != http.StatusServiceUnavailable {
+		t.Fatalf("capped execution without model-call accounting = %d", capped.Code)
+	}
 	response := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "read-only-key", body, "secret")
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("runnable admission = %d: %s", response.Code, response.Body.String())
@@ -174,5 +177,53 @@ func TestReadOnlyDeliveryAdmissionQueuesAtomicallyAndOutlivesRequest(t *testing.
 	}
 	if conflict := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "read-only-key", `{"goal":"inspect changes"}`, "secret"); conflict.Code != http.StatusConflict {
 		t.Fatalf("same key with changed execution mode = %d", conflict.Code)
+	}
+}
+
+type cappedParkedExecutor struct{ parkedDeliveryExecutor }
+
+func (cappedParkedExecutor) SupportsCappedDelivery() bool { return true }
+
+func TestCappedReadOnlyAdmissionNeedsAccountingCapableWorker(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	config := ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store}
+	worker, err := execution.NewWorker(store, cappedParkedExecutor{}, execution.WorkerConfig{OwnerID: "worker", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DeliveryWorker = worker
+	response := deliveryRequest(New(nil, config).Handler(), http.MethodPost, "/v1/deliveries", "capped", `{"goal":"inspect","run_read_only":true,"max_cost_microdollars":20000}`, "secret")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("capped admission = %d: %s", response.Code, response.Body.String())
+	}
+	if err := worker.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeliveryCostAuthorityIsScopedAndImmutableAtAdmission(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler := New(nil, ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store}).Handler()
+	request := `{"goal":"build feature","max_cost_microdollars":100}`
+	response := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "budget-key", request, "secret")
+	var admitted deliveryResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil || response.Code != http.StatusCreated || admitted.MaxCostMicrodollars != 100 || !admitted.Usage.CostKnown {
+		t.Fatalf("capped admission = %+v, status = %d, error = %v", admitted, response.Code, err)
+	}
+	if changed := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "budget-key", `{"goal":"build feature","max_cost_microdollars":200}`, "secret"); changed.Code != http.StatusConflict {
+		t.Fatalf("changed authority under same key = %d", changed.Code)
+	}
+	if invalid := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "invalid", `{"goal":"build feature","max_cost_microdollars":-1}`, "secret"); invalid.Code != http.StatusBadRequest {
+		t.Fatalf("negative authority accepted: %d", invalid.Code)
 	}
 }
