@@ -19,6 +19,7 @@ const debounceWindow = 300 * time.Millisecond
 type Watcher struct {
 	ix       *Indexer
 	fsw      *fsnotify.Watcher
+	notify   func([]string)
 	cancel   context.CancelFunc
 	done     chan struct{}
 	closeErr error
@@ -26,6 +27,14 @@ type Watcher struct {
 
 // Watch starts a background watcher for ix.Root. Call Close to stop it.
 func Watch(ctx context.Context, ix *Indexer) (*Watcher, error) {
+	return WatchNotify(ctx, ix, nil)
+}
+
+// WatchNotify is Watch that also reports every changed path under the root —
+// including files the graph does not index (docs, config, other languages) —
+// once per debounced burst, after the graph has been reconciled. notify runs
+// on the watcher goroutine and should hand work off quickly.
+func WatchNotify(ctx context.Context, ix *Indexer, notify func([]string)) (*Watcher, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -39,7 +48,7 @@ func Watch(ctx context.Context, ix *Indexer) (*Watcher, error) {
 	}
 
 	wctx, cancel := context.WithCancel(ctx)
-	w := &Watcher{ix: ix, fsw: fsw, cancel: cancel, done: make(chan struct{})}
+	w := &Watcher{ix: ix, fsw: fsw, notify: notify, cancel: cancel, done: make(chan struct{})}
 	go w.loop(wctx)
 	return w, nil
 }
@@ -56,6 +65,7 @@ func (w *Watcher) loop(ctx context.Context) {
 	defer func() { w.closeErr = w.fsw.Close() }()
 
 	pending := make(map[string]struct{})
+	changed := make(map[string]struct{})
 	var timer *time.Timer
 	defer func() {
 		if timer != nil {
@@ -87,12 +97,23 @@ func (w *Watcher) loop(ctx context.Context) {
 					}
 				}
 			}
+			if w.notify != nil && ev.Op != fsnotify.Chmod {
+				changed[ev.Name] = struct{}{}
+			}
 			// Removed/renamed directories no longer have stat information.
 			// Reconcile them too, including pre-populated directory creates.
-			if !graphExtension(ev.Name) && !graphConfigFile(ev.Name) && ev.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+			graphEvent := graphExtension(ev.Name) || graphConfigFile(ev.Name) || ev.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
+			if !graphEvent && len(changed) == 0 {
 				continue
 			}
-			pending[ev.Name] = struct{}{}
+			if graphEvent {
+				// Path listings are cached between scans; never let a create,
+				// delete or ignore-rule change wait on a directory mtime check.
+				if ev.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 || graphConfigFile(ev.Name) {
+					w.ix.invalidateScan()
+				}
+				pending[ev.Name] = struct{}{}
+			}
 			if timer == nil {
 				timer = time.NewTimer(debounceWindow)
 			} else {
@@ -106,6 +127,14 @@ func (w *Watcher) loop(ctx context.Context) {
 				delete(pending, p)
 			}
 			w.reindex(ctx, paths)
+			if len(changed) > 0 && ctx.Err() == nil {
+				all := make([]string, 0, len(changed))
+				for p := range changed {
+					all = append(all, p)
+					delete(changed, p)
+				}
+				w.notify(all)
+			}
 		case err, ok := <-w.fsw.Errors:
 			if !ok {
 				return

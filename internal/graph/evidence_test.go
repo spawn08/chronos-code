@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -278,5 +279,26 @@ func TestEvidenceValidationCancellationAndBatch(t *testing.T) {
 		if item.Source != nil {
 			t.Fatal("read excerpts despite include filter")
 		}
+	}
+}
+
+func TestReadGitHeadMatchesGit(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := exec.Command("git", "-C", root, "rev-parse", "--verify", "HEAD").Output()
+	if err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+	got, ok := readGitHead(root)
+	if !ok {
+		t.Skip("repository layout not readable without git (e.g. reftable)")
+	}
+	if got != strings.TrimSpace(string(want)) {
+		t.Fatalf("readGitHead = %q, git rev-parse = %q", got, want)
+	}
+	if _, ok := readGitHead(t.TempDir()); ok {
+		t.Fatal("readGitHead succeeded without a repository")
 	}
 }

@@ -625,6 +625,10 @@ func wrapUserToolHooks(a *agent.Agent, configured config.HooksConfig, runner *se
 		wrapped := *def
 		original := def.Handler
 		toolName := def.Name
+		// User hooks can mutate shared files even around a read-only tool.
+		if len(configured.PreToolCall)+len(configured.PostToolCall) > 0 {
+			wrapped.ParallelSafe = false
+		}
 		wrapped.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 			vars := map[string]any{
 				"tool_name":  toolName,
@@ -760,7 +764,7 @@ func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 	tracker := h.orchestrator.currentUSDBudget()
 	sessionID := storage.SessionFromContext(ctx)
 	id, err := tracker.Reserve(sessionID, modelID,
-		model.NewTokenCounter(modelID).CountTokens(req.Messages), req.MaxTokens)
+		tokenCounterForEvent(evt, modelID).CountTokens(req.Messages), req.MaxTokens)
 	if err != nil {
 		if errors.Is(err, budget.ErrUnknownModel) && !tracker.HasUSDCap() {
 			if evt.Metadata == nil {
@@ -1754,7 +1758,7 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 		}
 	}
 
-	requestScope := graph.NewRequestScope(graphStore, root)
+	requestScope := graph.NewRequestScopeForIndexer(ix)
 	for _, a := range agents {
 		for _, def := range requestScope.Tools() {
 			a.Tools.Register(def)

@@ -74,9 +74,9 @@ func impactAnalysisTool(store *Store) *tool.Definition {
 				tests := testsForSymbol(ctx, store, sym.Name, 3)
 
 				externalCaller := false
+				callerSyms, _ := store.SymbolsByQualified(ctx, callers)
 				for _, c := range callers {
-					callerSyms, _ := store.FindSymbols(ctx, c, "")
-					for _, cs := range callerSyms {
+					for _, cs := range callerSyms[c] {
 						if cs.Package != sym.Package {
 							externalCaller = true
 						}
@@ -197,26 +197,36 @@ func testsForSymbol(ctx context.Context, store *Store, name string, depth int) [
 	testSeen := map[string]bool{}
 
 	for d := 0; d < depth; d++ {
-		var next []string
+		callersOf, err := store.CallersOfMany(ctx, frontier)
+		if err != nil {
+			break
+		}
+		var next, candidates []string
 		for _, n := range frontier {
-			callers, err := store.CallersOf(ctx, n)
-			if err != nil {
-				continue
-			}
-			for _, c := range callers {
-				if seen[c] {
+			for _, c := range callersOf[n] {
+				// Callers are qualified identities; their own callers record
+				// the short name.
+				target := callTarget(c)
+				if seen[target] && seen[c] {
 					continue
 				}
 				seen[c] = true
-				next = append(next, c)
-
-				if strings.HasPrefix(c, "Test") {
-					if syms, err := store.FindSymbols(ctx, c, ""); err == nil {
-						for _, s := range syms {
-							if strings.HasSuffix(s.File, "_test.go") && !testSeen[c] {
-								testSeen[c] = true
-								tests = append(tests, c)
-							}
+				if !seen[target] {
+					seen[target] = true
+					next = append(next, target)
+				}
+				if strings.HasPrefix(target, "Test") && !testSeen[c] {
+					candidates = append(candidates, c)
+				}
+			}
+		}
+		if len(candidates) > 0 {
+			if syms, err := store.SymbolsByQualified(ctx, candidates); err == nil {
+				for _, c := range candidates {
+					for _, s := range syms[c] {
+						if strings.HasSuffix(s.File, "_test.go") && !testSeen[c] {
+							testSeen[c] = true
+							tests = append(tests, c)
 						}
 					}
 				}
@@ -231,8 +241,6 @@ func testsForSymbol(ctx context.Context, store *Store, name string, depth int) [
 	return tests
 }
 
-// coChangedFiles shells out to `git log` to find files that were modified in
-// the same commits as file, within the last days days, ranked by frequency.
 func coChangedFiles(root, file string, days int) ([]map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitLogTimeout)
 	defer cancel()

@@ -84,13 +84,21 @@ type evidenceResult struct {
 	IOBytes   int            `json:"io_bytes"`
 }
 
+// evidenceCounter is shared process-wide: building the BPE codec compiles a
+// large regexp, and request-scoped tool definitions are rebuilt per graph.
+// Counter access is serialized rather than assuming the SDK codec is safe for
+// concurrent calls. Source/SQLite work can still proceed concurrently.
+var evidenceCounter = sync.OnceValues(func() (model.TokenCounter, string) {
+	if bpe, err := model.NewBPECounter(""); err == nil {
+		return bpe, "sdk:o200k_base+10%+32"
+	}
+	// Never fall back to the SDK's default 4-bytes/token guess.
+	return &model.EstimatingCounter{CharsPerToken: 1}, "sdk:bytes+10%+32"
+})
+
+var evidenceCounterMu sync.Mutex
+
 func codebaseContextTool(store *Store, root string) *tool.Definition {
-	var once sync.Once
-	var counter model.TokenCounter
-	basis := "sdk:o200k_base+10%+32"
-	// Counter access is serialized rather than assuming the SDK codec is safe
-	// for concurrent calls. Source/SQLite work can still proceed concurrently.
-	var counterMu sync.Mutex
 	return &tool.Definition{
 		Name:        "codebase_context",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -125,23 +133,14 @@ func codebaseContextTool(store *Store, root string) *tool.Definition {
 			if err != nil {
 				return nil, err
 			}
-			once.Do(func() {
-				bpe, err := model.NewBPECounter("")
-				if err == nil {
-					counter = bpe
-				} else {
-					// Never fall back to the SDK's default 4-bytes/token guess.
-					counter = &model.EstimatingCounter{CharsPerToken: 1}
-					basis = "sdk:bytes+10%+32"
-				}
-			})
+			counter, basis := evidenceCounter()
 			result, err := collectEvidence(ctx, store, rootAbs, req)
 			if err != nil {
 				return nil, err
 			}
 			result.Counter = basis
-			counterMu.Lock()
-			defer counterMu.Unlock()
+			evidenceCounterMu.Lock()
+			defer evidenceCounterMu.Unlock()
 			if err := fitEvidence(ctx, result, counter); err != nil {
 				return nil, err
 			}
@@ -314,8 +313,16 @@ type evidenceMatch struct {
 
 const evidenceColumns = `s.id, s.name, s.kind, s.package, s.file, s.line, s.end_line, s.signature, '', s.receiver`
 
+// evidenceCallersQuery resolves callers of a short callee name to their
+// declarations. edges.from_name is the caller's qualified identity, joined
+// through the symbols expression index (see symbolQualifiedExpr) rather than a
+// disjunction SQLite can only evaluate by scanning every symbol per edge.
+var evidenceCallersQuery = `SELECT DISTINCT ` + evidenceColumns + `, 0 FROM edges e JOIN symbols s ON ` +
+	symbolQualified("s.") +
+	` = e.from_name AND (e.source_file = '' OR s.file = e.source_file) WHERE e.kind = 'call' AND e.to_name = ? ORDER BY s.file, s.line, s.name, s.id LIMIT 17`
+
 func evidenceQuery(ctx context.Context, store *Store, query string, args ...any) ([]evidenceMatch, error) {
-	rows, err := store.db.QueryContext(ctx, query, args...)
+	rows, err := store.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query graph evidence: %w", err)
 	}
@@ -332,6 +339,9 @@ func evidenceQuery(ctx context.Context, store *Store, query string, args ...any)
 }
 
 func evidenceRevision(ctx context.Context, root string) string {
+	if revision, ok := readGitHead(root); ok {
+		return revision
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	data, err := exec.CommandContext(ctx, "git", "--no-optional-locks", "-C", root, "rev-parse", "--verify", "HEAD").Output()
@@ -346,6 +356,78 @@ func evidenceRevision(ctx context.Context, root string) string {
 		return "unavailable"
 	}
 	return revision
+}
+
+// readGitHead resolves HEAD for a repository rooted exactly at root by reading
+// Git's files instead of spawning `git rev-parse` on every request. Loose refs
+// take precedence over packed-refs, as in Git. Anything unusual (no .git at
+// root, reftable, unborn branch) reports ok=false so the caller falls back to
+// the git binary.
+func readGitHead(root string) (string, bool) {
+	gitDir := filepath.Join(root, ".git")
+	info, err := os.Stat(gitDir)
+	if err != nil {
+		return "", false
+	}
+	if !info.IsDir() {
+		data, err := os.ReadFile(gitDir)
+		if err != nil {
+			return "", false
+		}
+		dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+		if !ok {
+			return "", false
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(root, dir)
+		}
+		gitDir = dir
+	}
+	commonDir := gitDir
+	if data, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		dir := strings.TrimSpace(string(data))
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(gitDir, dir)
+		}
+		commonDir = dir
+	}
+	if _, err := os.Stat(filepath.Join(commonDir, "reftable")); err == nil {
+		return "", false
+	}
+	head, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return "", false
+	}
+	value := strings.TrimSpace(string(head))
+	ref, symbolic := strings.CutPrefix(value, "ref: ")
+	if !symbolic {
+		return value, validGitRevision(value)
+	}
+	if !strings.HasPrefix(ref, "refs/") || strings.Contains(ref, "..") {
+		return "", false
+	}
+	if data, err := os.ReadFile(filepath.Join(commonDir, filepath.FromSlash(ref))); err == nil {
+		revision := strings.TrimSpace(string(data))
+		return revision, validGitRevision(revision)
+	}
+	packed, err := os.ReadFile(filepath.Join(commonDir, "packed-refs"))
+	if err != nil {
+		return "", false
+	}
+	for _, line := range strings.Split(string(packed), "\n") {
+		if revision, name, ok := strings.Cut(strings.TrimSpace(line), " "); ok && name == ref {
+			return revision, validGitRevision(revision)
+		}
+	}
+	return "", false
+}
+
+func validGitRevision(revision string) bool {
+	if len(revision) != 40 && len(revision) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(revision)
+	return err == nil
 }
 
 func collectEvidence(ctx context.Context, store *Store, root string, req evidenceRequest) (*evidenceResult, error) {
@@ -489,7 +571,7 @@ func collectEvidence(ctx context.Context, store *Store, root string, req evidenc
 					break
 				}
 				lookups++
-				callers, err := evidenceQuery(ctx, store, `SELECT DISTINCT `+evidenceColumns+`, 0 FROM edges e JOIN symbols s ON (s.name = e.from_name OR (s.receiver != '' AND ltrim(s.receiver, '*') || '.' || s.name = e.from_name)) AND (e.source_file = '' OR s.file = e.source_file) WHERE e.kind = 'call' AND e.to_name = ? ORDER BY s.file, s.line, s.name, s.id LIMIT 17`, target)
+				callers, err := evidenceQuery(ctx, store, evidenceCallersQuery, target)
 				if err != nil {
 					return nil, err
 				}
@@ -598,7 +680,7 @@ func (r *evidenceReader) Read(p []byte) (int, error) {
 func readEvidenceSource(ctx context.Context, store *Store, fs *os.Root, root, file string, start, end int, remaining *int) (*evidenceSource, string, error) {
 	source := &evidenceSource{Freshness: "unverified"}
 	var indexedMtime int64
-	err := store.db.QueryRowContext(ctx, `SELECT content_hash, mtime FROM files WHERE path IN (?, ?) ORDER BY path LIMIT 1`, file, filepath.Join(root, file)).Scan(&source.IndexedHash, &indexedMtime)
+	err := store.rdb.QueryRowContext(ctx, `SELECT content_hash, mtime FROM files WHERE path IN (?, ?) ORDER BY path LIMIT 1`, file, filepath.Join(root, file)).Scan(&source.IndexedHash, &indexedMtime)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, "", fmt.Errorf("read source provenance: %w", err)
 	}
@@ -729,10 +811,34 @@ func evidenceExcerptHash(source *evidenceSource) {
 	}
 }
 
-// Count the complete serialized result on every adjustment. The fixed reserve
-// plus 10% margin covers framing/tokenizer variation, not just source snippets.
-// All notices and provenance participate, and no later fields are appended.
+// The complete serialized result is the only thing that certifies the budget:
+// the fixed reserve plus 10% margin covers framing/tokenizer variation, not
+// just source snippets, and all notices and provenance participate. Exact
+// counts are expensive (BPE over the whole JSON), so between two exact checks
+// the shrink steps are applied until the tokens they removed — counted on the
+// removed JSON fragments only — cover the measured excess. The shrink order is
+// unchanged: halve the last remaining excerpt, then drop trailing items, then
+// compact omission counters.
 func fitEvidence(ctx context.Context, result *evidenceResult, counter model.TokenCounter) error {
+	// Shrinking empties excerpts back to front, so once the excerpts in front
+	// already need more tokens than the whole budget, every later excerpt is
+	// emptied before anything in front is touched. Skip tokenizing them.
+	spent := 0
+	for i := range result.Items {
+		source := result.Items[i].Source
+		if source == nil || source.Text == "" {
+			continue
+		}
+		if spent > result.MaxTokens+64 {
+			source.Text = ""
+			source.Truncated = true
+			evidenceExcerptHash(source)
+			result.Truncated = true
+			result.Omitted["output_budget"] = 1
+			continue
+		}
+		spent += evidenceFragmentTokens(counter, source.Text)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -741,45 +847,81 @@ func fitEvidence(ctx context.Context, result *evidenceResult, counter model.Toke
 		if err != nil {
 			return fmt.Errorf("serialize graph evidence: %w", err)
 		}
+		// Every byte-level BPE token covers at least one byte, so the byte
+		// length is an upper bound that accepts small results untokenized.
+		if _, bpe := counter.(*model.BPECounter); bpe {
+			if n := len(data); n+32+(n+9)/10 <= result.MaxTokens {
+				return nil
+			}
+		}
 		tokens := counter.CountString(string(data))
-		if tokens+32+(tokens+9)/10 <= result.MaxTokens {
+		excess := tokens + 32 + (tokens+9)/10 - result.MaxTokens
+		if excess <= 0 {
 			return nil
 		}
 		result.Truncated = true
 		result.Omitted["output_budget"] = 1
-		shortened := false
-		for i := len(result.Items) - 1; i >= 0; i-- {
-			source := result.Items[i].Source
-			if source == nil || source.Text == "" {
-				continue
+		for removed := 0; removed < excess; {
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			source.Text = evidenceClip(source.Text, len(source.Text)/2)
-			if newline := strings.LastIndexByte(source.Text, '\n'); newline >= 0 {
-				source.Text = source.Text[:newline+1]
+			// Without items only envelope compaction remains; re-measure
+			// before deciding the envelope itself cannot fit.
+			if len(result.Items) == 0 && removed > 0 {
+				break
 			}
-			source.Truncated = true
-			evidenceExcerptHash(source)
-			shortened = true
-			break
-		}
-		if shortened {
-			continue
-		}
-		if len(result.Items) > 0 {
-			result.Items = result.Items[:len(result.Items)-1]
-			result.Omitted["items_budget"]++
-			continue
-		}
-		// At the minimum supported budget, collapse detailed omission counters
-		// if the envelope itself is too large. The loss is explicit.
-		if len(result.Omitted) > 2 {
-			count := 0
-			for _, n := range result.Omitted {
-				count += n
+			gone, err := shrinkEvidence(result, counter)
+			if err != nil {
+				return err
 			}
-			result.Omitted = map[string]int{"output_budget": 1, "omissions_compacted": count}
-			continue
+			removed += gone
 		}
-		return fmt.Errorf("codebase_context: budget cannot hold result envelope")
 	}
+}
+
+// evidenceFragmentTokens counts the tokens of v's JSON encoding (at least 1).
+func evidenceFragmentTokens(counter model.TokenCounter, v any) int {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return 1
+	}
+	return max(1, counter.CountString(string(data)))
+}
+
+// shrinkEvidence applies one budget-reduction step and returns an estimate of
+// the tokens it removed. It fails only when nothing else can be removed.
+func shrinkEvidence(result *evidenceResult, counter model.TokenCounter) (int, error) {
+	fragmentTokens := func(v any) int { return evidenceFragmentTokens(counter, v) }
+	for i := len(result.Items) - 1; i >= 0; i-- {
+		source := result.Items[i].Source
+		if source == nil || source.Text == "" {
+			continue
+		}
+		before := source.Text
+		source.Text = evidenceClip(source.Text, len(source.Text)/2)
+		if newline := strings.LastIndexByte(source.Text, '\n'); newline >= 0 {
+			source.Text = source.Text[:newline+1]
+		}
+		source.Truncated = true
+		evidenceExcerptHash(source)
+		return fragmentTokens(before[len(source.Text):]), nil
+	}
+	if len(result.Items) > 0 {
+		last := result.Items[len(result.Items)-1]
+		result.Items = result.Items[:len(result.Items)-1]
+		result.Omitted["items_budget"]++
+		return fragmentTokens(last), nil
+	}
+	// At the minimum supported budget, collapse detailed omission counters
+	// if the envelope itself is too large. The loss is explicit.
+	if len(result.Omitted) > 2 {
+		before := fragmentTokens(result.Omitted)
+		count := 0
+		for _, n := range result.Omitted {
+			count += n
+		}
+		result.Omitted = map[string]int{"output_budget": 1, "omissions_compacted": count}
+		return max(1, before-fragmentTokens(result.Omitted)), nil
+	}
+	return 0, fmt.Errorf("codebase_context: budget cannot hold result envelope")
 }

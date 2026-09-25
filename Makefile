@@ -16,7 +16,7 @@ CGO_ENABLED ?= 1
 SIZE_LIMIT  := 41943040
 FULL_SIZE_LIMIT := 73400320
 
-.PHONY: build build-core build-full build-release test lint size-check size-check-core size-check-full fmt vet tidy clean install install-core eval
+.PHONY: build build-core build-full build-release test lint size-check size-check-core size-check-full fmt vet tidy clean install install-core eval bench-index
 
 build: build-full
 
@@ -66,6 +66,16 @@ test:
 # offline/deterministic — no API key or network access required.
 eval: build
 	$(BIN_DIR)/$(BINARY) eval run --md benchmark/eval/report.md
+
+# bench-index measures indexing and query latency of the code graph and the
+# chronos indexer on a private copy of this repo (docs/chronos-indexer.md,
+# "Measurement"). Indexing iterations are expensive, so they run a fixed
+# count; queries use -benchtime.
+BENCH_COUNT ?= 5
+bench-index:
+	go test ./internal/graph -run '^$$' -bench '^BenchmarkIndex' -benchtime=5x -count=$(BENCH_COUNT) -timeout 60m
+	go test ./internal/indexer -run '^$$' -bench '^BenchmarkIndex' -benchtime=20x -count=$(BENCH_COUNT) -timeout 30m
+	go test ./internal/graph -run '^$$' -bench '^Benchmark(Query|Scan)' -benchtime=1s -count=$(BENCH_COUNT) -benchmem
 
 fmt:
 	gofmt -s -w .

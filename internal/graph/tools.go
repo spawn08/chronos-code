@@ -223,22 +223,26 @@ func findCallersTool(store *Store) *tool.Definition {
 			if depth > 3 {
 				depth = 3
 			}
+			// Callers are recorded by qualified identity ("Recv.Method"); the
+			// next hop looks up their short name, which is what call sites
+			// record. One batched query answers each whole level.
 			frontier := []string{name}
 			seen := map[string]bool{name: true}
 			levels := make([]map[string][]string, 0, depth)
 			for d := 0; d < depth; d++ {
 				level := make(map[string][]string)
 				var next []string
+				callersOf, err := store.CallersOfMany(ctx, frontier)
+				if err != nil {
+					return nil, err
+				}
 				for _, n := range frontier {
-					callers, err := store.CallersOf(ctx, n)
-					if err != nil {
-						return nil, err
-					}
+					callers := callersOf[n]
 					level[n] = callers
 					for _, c := range callers {
-						if !seen[c] {
-							seen[c] = true
-							next = append(next, c)
+						if target := callTarget(c); !seen[target] {
+							seen[target] = true
+							next = append(next, target)
 						}
 					}
 				}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/spawn08/chronos-code/internal/tokencache"
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/sdk/agent"
@@ -21,6 +22,7 @@ import (
 type contextGuardHook struct {
 	modelID string
 	options contextGuardOptions
+	tokens  tokencache.Cache
 }
 
 // contextGuardOptions accepts a configured context ceiling, clamped to the live
@@ -87,7 +89,12 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 		contextLimit = model.ContextLimit(modelID, 0)
 	}
 
-	counter := guardTokenCounter{model.NewTokenCounter(modelID)}
+	baseCounter := h.tokens.ForModel(modelID)
+	if evt.Metadata == nil {
+		evt.Metadata = make(map[string]any)
+	}
+	evt.Metadata[tokenCounterMetadataKey] = requestTokenCounter{modelID: modelID, counter: baseCounter}
+	counter := guardTokenCounter{baseCounter}
 	schemaTokens := 0
 	if len(req.Tools) > 0 {
 		data, err := json.Marshal(req.Tools)
@@ -137,6 +144,22 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 
 func (h *contextGuardHook) After(_ context.Context, _ *hooks.Event) error {
 	return nil
+}
+
+const tokenCounterMetadataKey = "chronos_code.token_counter"
+
+type requestTokenCounter struct {
+	modelID string
+	counter model.TokenCounter
+}
+
+// Reuse preflight counts in both budget hooks, while counting the actual current
+// request (including any trimming or changes made by intervening hooks).
+func tokenCounterForEvent(evt *hooks.Event, modelID string) model.TokenCounter {
+	if cached, ok := evt.Metadata[tokenCounterMetadataKey].(requestTokenCounter); ok && cached.modelID == modelID {
+		return cached.counter
+	}
+	return model.NewTokenCounter(modelID)
 }
 
 // guardTokenCounter includes attachment text/data and call IDs omitted by the

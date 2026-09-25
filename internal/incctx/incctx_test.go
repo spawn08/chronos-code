@@ -793,14 +793,14 @@ func TestScanStopsAtRangeByteBudgetAndCancellation(t *testing.T) {
 	data := strings.Repeat("line\n", maxLineBytes)
 	t.Run("range", func(t *testing.T) {
 		r := &countingReader{r: strings.NewReader(data)}
-		_, err := scanLines(context.Background(), r, maxScanBytes, func(n int, line string) error { return errStopScan })
+		_, err := scanLines(context.Background(), r, maxScanBytes, func(n int, line []byte) error { return errStopScan })
 		if err != nil || r.bytes > maxLineBytes+1 {
 			t.Fatalf("read past bounded range: bytes=%d, err=%v", r.bytes, err)
 		}
 	})
 	t.Run("budget", func(t *testing.T) {
 		r := &countingReader{r: strings.NewReader(data)}
-		stats, err := scanLines(context.Background(), r, 100, func(n int, line string) error { return nil })
+		stats, err := scanLines(context.Background(), r, 100, func(n int, line []byte) error { return nil })
 		if !errors.Is(err, errScanLimit) || r.bytes != 100 || stats.bytes != 100 || stats.complete {
 			t.Fatalf("budget not enforced: %+v, bytes=%d, err=%v", stats, r.bytes, err)
 		}
@@ -809,7 +809,7 @@ func TestScanStopsAtRangeByteBudgetAndCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		visited := 0
-		_, err := scanLines(ctx, strings.NewReader(data), maxScanBytes, func(n int, line string) error {
+		_, err := scanLines(ctx, strings.NewReader(data), maxScanBytes, func(n int, line []byte) error {
 			visited++
 			cancel()
 			return nil
@@ -821,7 +821,7 @@ func TestScanStopsAtRangeByteBudgetAndCancellation(t *testing.T) {
 	t.Run("cancel during final IO", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		_, err := scanLines(ctx, cancelingReader{cancel: cancel}, maxScanBytes, func(n int, line string) error {
+		_, err := scanLines(ctx, cancelingReader{cancel: cancel}, maxScanBytes, func(n int, line []byte) error {
 			t.Fatal("must not publish content after canceled IO")
 			return errStopScan
 		})
@@ -891,7 +891,7 @@ func TestGrepCancellationDuringRecursiveScan(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	visited := 0
-	s := grepSearch{remaining: grepMaxScanBytes, matcher: func(string) bool {
+	s := grepSearch{remaining: grepMaxScanBytes, matcher: func([]byte) bool {
 		visited++
 		cancel()
 		return false
@@ -905,8 +905,8 @@ func TestGrepAggregateAndTraversalBudgets(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "a.txt", strings.Repeat("no match\n", 100))
 	for _, s := range []*grepSearch{
-		{remaining: 100, matcher: func(string) bool { return false }},
-		{remaining: grepMaxScanBytes, entries: grepMaxEntries, matcher: func(string) bool { t.Fatal("entry budget exceeded"); return false }},
+		{remaining: 100, matcher: func([]byte) bool { return false }},
+		{remaining: grepMaxScanBytes, entries: grepMaxEntries, matcher: func([]byte) bool { t.Fatal("entry budget exceeded"); return false }},
 	} {
 		if err := s.walk(context.Background(), dir, 0); err != nil || !s.truncated {
 			t.Fatalf("budget ignored: %+v, %v", s, err)

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/spawn08/chronos-code/internal/document"
@@ -88,6 +89,7 @@ func Wrap(a *agent.Agent, root string) {
 	if !ok {
 		return
 	}
+	def.ParallelSafe = true
 	def.Description += " Pass start_line/end_line (positive, 1-indexed, inclusive) for source ranges. Reads are bounded to 256 KiB output, 64 KiB per line and 8 MiB scanned; truncated results include a continuation line."
 	props := toolProperties(def)
 	props["start_line"] = map[string]any{
@@ -234,7 +236,7 @@ func readRange(ctx context.Context, path string, start, end int) (any, error) {
 	var content strings.Builder
 	last := start - 1
 	truncated := false
-	stats, err := scanFile(ctx, path, maxScanBytes, func(n int, line string) error {
+	stats, err := scanFile(ctx, path, maxScanBytes, func(n int, line []byte) error {
 		if n < start {
 			return nil
 		}
@@ -249,7 +251,7 @@ func readRange(ctx context.Context, path string, start, end int) (any, error) {
 		if separator != 0 {
 			content.WriteByte('\n')
 		}
-		content.WriteString(line)
+		content.Write(line)
 		last = n
 		if end != 0 && n == end {
 			return errStopScan
@@ -320,6 +322,7 @@ func WrapGrep(a *agent.Agent, root string) {
 	if !ok {
 		return
 	}
+	def.ParallelSafe = true
 	def.Description = "Search a file or directory recursively, skipping binary files, symlinks and .git/.hg/.svn/vendor/node_modules/.chronos-code/.venv/__pycache__ directories. Set regex=true for a regular expression; otherwise matches a literal substring. Bounded to 500 matches, 256 KiB output, 64 KiB lines, 8 MiB per file, 32 MiB total, 10000 entries and 64 directory levels. Check truncated for incomplete searches."
 	toolProperties(def)["regex"] = map[string]any{
 		"type":        "boolean",
@@ -348,15 +351,16 @@ func WrapGrep(a *agent.Agent, root string) {
 			return nil, fmt.Errorf("file_grep: %w", statErr)
 		}
 
-		var matcher func(line string) bool
+		var matcher func(line []byte) bool
 		if useRegex {
 			re, reErr := regexp.Compile(pattern)
 			if reErr != nil {
 				return nil, fmt.Errorf("file_grep: invalid regex pattern: %w", reErr)
 			}
-			matcher = re.MatchString
+			matcher = re.Match
 		} else {
-			matcher = func(line string) bool { return strings.Contains(line, pattern) }
+			literal := []byte(pattern)
+			matcher = func(line []byte) bool { return bytes.Contains(line, literal) }
 		}
 
 		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0)}
@@ -382,7 +386,7 @@ func WrapGrep(a *agent.Agent, root string) {
 }
 
 type grepSearch struct {
-	matcher   func(string) bool
+	matcher   func([]byte) bool
 	matches   []map[string]any
 	remaining int64
 	output    int
@@ -393,8 +397,8 @@ type grepSearch struct {
 
 func (s *grepSearch) file(ctx context.Context, path string, recursive bool) error {
 	before, outputBefore := len(s.matches), s.output
-	stats, err := scanFile(ctx, path, min(int64(maxScanBytes), s.remaining), func(n int, line string) error {
-		if strings.IndexByte(line, 0) >= 0 || !utf8.ValidString(line) {
+	stats, err := scanFile(ctx, path, min(int64(maxScanBytes), s.remaining), func(n int, line []byte) error {
+		if bytes.IndexByte(line, 0) >= 0 || !utf8.Valid(line) {
 			return errBinary
 		}
 		if !s.matcher(line) {
@@ -410,7 +414,7 @@ func (s *grepSearch) file(ctx context.Context, path string, recursive bool) erro
 			s.truncated, s.stopped = true, true
 			return errStopScan
 		}
-		m := map[string]any{"line_number": n, "content": line}
+		m := map[string]any{"line_number": n, "content": string(line)}
 		if recursive {
 			m["file"] = path
 		}
@@ -550,7 +554,7 @@ func openRegular(path string) (*os.File, error) {
 	return f, nil
 }
 
-func scanFile(ctx context.Context, path string, limit int64, visit func(int, string) error) (scanStats, error) {
+func scanFile(ctx context.Context, path string, limit int64, visit func(int, []byte) error) (scanStats, error) {
 	if err := ctx.Err(); err != nil {
 		return scanStats{}, err
 	}
@@ -562,10 +566,21 @@ func scanFile(ctx context.Context, path string, limit int64, visit func(int, str
 	return scanLines(ctx, f, limit, visit)
 }
 
-func scanLines(ctx context.Context, input io.Reader, limit int64, visit func(int, string) error) (stats scanStats, err error) {
+var scanReaders = sync.Pool{New: func() any {
+	return bufio.NewReaderSize(nil, maxLineBytes+1)
+}}
+
+// visit borrows each line until it returns. Only retained matches/output need a
+// copy; skipped lines never allocate. Readers are exclusive to one active scan.
+func scanLines(ctx context.Context, input io.Reader, limit int64, visit func(int, []byte) error) (stats scanStats, err error) {
 	r := &budgetReader{ctx: ctx, r: input, remaining: limit}
 	defer func() { stats.bytes = limit - r.remaining }()
-	reader := bufio.NewReaderSize(r, maxLineBytes+1)
+	reader := scanReaders.Get().(*bufio.Reader)
+	reader.Reset(r)
+	defer func() {
+		reader.Reset(nil)
+		scanReaders.Put(reader)
+	}()
 	for n := 1; ; n++ {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -585,7 +600,7 @@ func scanLines(ctx context.Context, input io.Reader, limit int64, visit func(int
 			return stats, errLongLine
 		}
 		stats.lines, stats.complete = n, readErr == io.EOF
-		visitErr := visit(n, string(line))
+		visitErr := visit(n, line)
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}

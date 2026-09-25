@@ -75,7 +75,7 @@ func (deliveryUsageHook) Before(ctx context.Context, event *hooks.Event) error {
 	if modelID == "" {
 		modelID = provider.Model()
 	}
-	input := model.NewTokenCounter(modelID).CountTokens(request.Messages)
+	input := tokenCounterForEvent(event, modelID).CountTokens(request.Messages)
 	if input < 0 || request.MaxTokens > math.MaxInt-input {
 		return execution.ErrInvalidDelivery
 	}

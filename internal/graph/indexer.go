@@ -1,12 +1,14 @@
 package graph
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"go/types"
 	"io"
@@ -15,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +35,7 @@ type Indexer struct {
 	Root      string
 	indexOnce sync.Once
 	indexing  chan struct{}
+	cache     *scanCache
 }
 
 // NewIndexer creates an indexer for the given store and workspace root.
@@ -39,7 +43,7 @@ func NewIndexer(store *Store, root string) *Indexer {
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
 	}
-	return &Indexer{Store: store, Root: root}
+	return &Indexer{Store: store, Root: root, cache: &scanCache{}}
 }
 
 func (ix *Indexer) beginIndex(ctx context.Context) error {
@@ -55,16 +59,17 @@ func (ix *Indexer) beginIndex(ctx context.Context) error {
 	}
 }
 
-func graphExtension(path string) bool {
-	if filepath.Ext(path) == ".go" {
-		return true
-	}
+var treeSitterExtensionSet = sync.OnceValue(func() map[string]bool {
+	set := make(map[string]bool)
 	for _, ext := range SupportedTreeSitterExtensions() {
-		if strings.EqualFold(filepath.Ext(path), ext) {
-			return true
-		}
+		set[strings.ToLower(ext)] = true
 	}
-	return false
+	return set
+})
+
+func graphExtension(path string) bool {
+	ext := filepath.Ext(path)
+	return ext == ".go" || treeSitterExtensionSet()[strings.ToLower(ext)]
 }
 
 func skipGraphDir(name string) bool {
@@ -142,9 +147,171 @@ type graphSnapshot struct {
 	fingerprint string
 }
 
+// scanRacyWindow bounds how recently a file or directory may have changed for
+// its cached stat to be trusted: a write landing in the same timestamp tick as
+// the observation could otherwise leave identical metadata (the racy-git
+// problem). Anything modified within the window is re-read.
+const scanRacyWindow = 2 * time.Second
+
+// scanCache lets repeated scans of an unchanged workspace skip the `git
+// ls-files` process and re-hashing unchanged sources. The path list is reused
+// while every directory that could gain or lose a listed file, every
+// .gitignore, and the Git index keep their modification times; a content hash is reused while the
+// file's size, mode and modification time are unchanged. Entries observed
+// within scanRacyWindow of their last change are always re-verified.
+type scanCache struct {
+	mu       sync.Mutex
+	paths    []string
+	dirs     map[string]time.Time // directories and ignore/index files -> mtime
+	listedAt time.Time
+	hashes   map[string]cachedHash
+}
+
+type cachedHash struct {
+	size   int64
+	mode   os.FileMode
+	mtime  time.Time
+	seenAt time.Time
+	hash   string
+}
+
+func (c *scanCache) listPaths(ctx context.Context, root string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.paths != nil && c.dirsUnchanged() {
+		return slices.Clone(c.paths), nil
+	}
+	listedAt := time.Now()
+	paths, err := graphPaths(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	dirs := make(map[string]time.Time)
+	watch := func(dir string) {
+		if _, ok := dirs[dir]; ok {
+			return
+		}
+		if info, err := os.Stat(dir); err == nil {
+			dirs[dir] = info.ModTime()
+		} else {
+			dirs[dir] = time.Time{}
+		}
+	}
+	watch(root)
+	for _, path := range paths {
+		for dir := filepath.Dir(path); len(dir) > len(root); dir = filepath.Dir(dir) {
+			if _, ok := dirs[dir]; ok {
+				break
+			}
+			watch(dir)
+		}
+	}
+	// A file created inside a directory that currently holds no listed file
+	// only touches that directory's mtime, so also watch the immediate
+	// subdirectories of every listed directory.
+	for _, dir := range slices.Collect(maps.Keys(dirs)) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && !skipGraphDir(entry.Name()) {
+				watch(filepath.Join(dir, entry.Name()))
+			}
+		}
+	}
+	// Ignore rules edited in place change no directory mtime.
+	for _, path := range paths {
+		if filepath.Base(path) == ".gitignore" {
+			watch(path)
+		}
+	}
+	for _, path := range gitIndexPaths(root) {
+		watch(path)
+	}
+	c.paths, c.dirs, c.listedAt = paths, dirs, listedAt
+	return slices.Clone(paths), nil
+}
+
+// invalidatePaths forces the next scan to list paths again. File-system
+// watchers call it for create/remove/rename events so a new file is never
+// hidden behind a cached listing.
+func (c *scanCache) invalidatePaths() {
+	c.mu.Lock()
+	c.paths = nil
+	c.mu.Unlock()
+}
+
+func (c *scanCache) dirsUnchanged() bool {
+	for dir, mtime := range c.dirs {
+		info, err := os.Stat(dir)
+		if err != nil {
+			if !mtime.IsZero() {
+				return false
+			}
+			continue
+		}
+		if !info.ModTime().Equal(mtime) || !mtime.Before(c.listedAt.Add(-scanRacyWindow)) {
+			return false
+		}
+	}
+	return true
+}
+
+// gitIndexPaths returns the files whose change means Git's view of tracked
+// and ignored paths may have changed (staging, checkout, worktree metadata).
+func gitIndexPaths(root string) []string {
+	// Not the .git directory itself: lock files created by any concurrent
+	// `git status` (editors poll it) would invalidate the listing constantly.
+	dotGit := filepath.Join(root, ".git")
+	paths := []string{filepath.Join(dotGit, "index"), filepath.Join(dotGit, "info", "exclude")}
+	if data, err := os.ReadFile(dotGit); err == nil {
+		if gitDir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: "); ok {
+			if !filepath.IsAbs(gitDir) {
+				gitDir = filepath.Join(root, gitDir)
+			}
+			paths = append(paths, filepath.Join(gitDir, "index"))
+		}
+	}
+	return paths
+}
+
+func (c *scanCache) hash(ctx context.Context, path string, info os.FileInfo, buffer []byte) (string, error) {
+	c.mu.Lock()
+	cached, ok := c.hashes[path]
+	c.mu.Unlock()
+	if ok && cached.size == info.Size() && cached.mode == info.Mode() && cached.mtime.Equal(info.ModTime()) &&
+		info.ModTime().Before(cached.seenAt.Add(-scanRacyWindow)) {
+		return cached.hash, nil
+	}
+	seenAt := time.Now()
+	hash, err := scanFileHash(ctx, path, buffer)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	if c.hashes == nil {
+		c.hashes = make(map[string]cachedHash)
+	}
+	c.hashes[path] = cachedHash{size: info.Size(), mode: info.Mode(), mtime: info.ModTime(), seenAt: seenAt, hash: hash}
+	c.mu.Unlock()
+	return hash, nil
+}
+
+// invalidateScan drops the cached path listing (content hashes stay, since
+// they are re-validated by stat on every scan).
+func (ix *Indexer) invalidateScan() {
+	if ix.cache != nil {
+		ix.cache.invalidatePaths()
+	}
+}
+
 func (ix *Indexer) scan(ctx context.Context) (graphSnapshot, error) {
 	snap := graphSnapshot{files: make(map[string]string)}
-	paths, err := graphPaths(ctx, ix.Root)
+	if ix.cache == nil {
+		ix.cache = &scanCache{}
+	}
+	paths, err := ix.cache.listPaths(ctx, ix.Root)
 	if err != nil {
 		return snap, fmt.Errorf("scan graph paths: %w", err)
 	}
@@ -200,7 +367,7 @@ func (ix *Indexer) scan(ctx context.Context) (graphSnapshot, error) {
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		hash, err := scanFileHash(ctx, path, buffer)
+		hash, err := ix.cache.hash(ctx, path, info, buffer)
 		if err != nil {
 			return snap, err
 		}
@@ -265,16 +432,34 @@ func (ix *Indexer) indexedFiles(ctx context.Context) (map[string]indexedGraphFil
 	return files, rows.Err()
 }
 
+// illTypedRecord stands in for the empty content hash of a file whose package
+// had type errors, so the rest of the index can still be certified.
+const illTypedRecord = "\x00ill-typed"
+
 func graphRecordsFingerprint(files map[string]indexedGraphFile) string {
 	hashes := make(map[string]string, len(files))
 	for path, file := range files {
-		// Partial type-error facts cannot certify a warm index.
-		if file.hash == "" {
-			return ""
+		hash := file.hash
+		if hash == "" {
+			hash = illTypedRecord
 		}
-		hashes[path] = file.pkg + "\x00" + file.hash
+		hashes[path] = file.pkg + "\x00" + hash
 	}
 	return DirMerkleHash(hashes)
+}
+
+// illTypedDirs returns the directories of Go files whose last facts came from
+// a package with type errors. Partial type-error facts never certify a warm
+// index; they are re-derived on the next pass by reloading only those
+// packages rather than forcing a full workspace load.
+func illTypedDirs(files map[string]indexedGraphFile, current map[string]string) map[string]bool {
+	dirs := make(map[string]bool)
+	for path, file := range files {
+		if file.hash == "" && filepath.Ext(path) == ".go" && current[path] != "" {
+			dirs[filepath.Dir(path)] = true
+		}
+	}
+	return dirs
 }
 
 // Completion is separate from file hashes: excluded build-tag files and build
@@ -283,6 +468,7 @@ func graphRecordsFingerprint(files map[string]indexedGraphFile) string {
 func (ix *Indexer) indexState(ctx context.Context) (fingerprint, config, records string, err error) {
 	_, err = ix.Store.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS graph_index_state (root TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, config TEXT NOT NULL, records TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS graph_index_inputs (root TEXT PRIMARY KEY, sources TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS graph_api_shapes (path TEXT PRIMARY KEY, shape TEXT NOT NULL);
 		CREATE INDEX IF NOT EXISTS idx_symbols_kind_package ON symbols(kind, package)`)
 	if err != nil {
 		return "", "", "", fmt.Errorf("create graph index state: %w", err)
@@ -332,6 +518,38 @@ func (ix *Indexer) writeIndexState(ctx context.Context, fingerprint, config, rec
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit graph index state: %w", err)
+	}
+	return nil
+}
+
+// writeAPIShapes records the API shapes of files re-planned by a certified
+// pass. A full pass replaces the table, so it never retains shapes for files
+// that no longer exist.
+func (ix *Indexer) writeAPIShapes(ctx context.Context, shapes map[string]string, full bool) error {
+	tx, err := ix.Store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin graph api shapes: %w", err)
+	}
+	defer tx.Rollback()
+	if full {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM graph_api_shapes`); err != nil {
+			return fmt.Errorf("reset graph api shapes: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `DELETE FROM graph_api_shapes WHERE path NOT IN (SELECT path FROM files)`); err != nil {
+		return fmt.Errorf("prune graph api shapes: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO graph_api_shapes (path, shape) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET shape = excluded.shape`)
+	if err != nil {
+		return fmt.Errorf("prepare graph api shapes: %w", err)
+	}
+	defer stmt.Close()
+	for path, shape := range shapes {
+		if _, err := stmt.ExecContext(ctx, path, shape); err != nil {
+			return fmt.Errorf("write graph api shape %s: %w", path, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit graph api shapes: %w", err)
 	}
 	return nil
 }
@@ -444,7 +662,8 @@ func (ix *Indexer) IndexAll(ctx context.Context) (*IndexStats, error) {
 	if err != nil {
 		return nil, err
 	}
-	if previous == snap.fingerprint && records != "" && records == graphRecordsFingerprint(oldFiles) {
+	illTyped := illTypedDirs(oldFiles, snap.files)
+	if previous == snap.fingerprint && records != "" && records == graphRecordsFingerprint(oldFiles) && len(illTyped) == 0 {
 		return &IndexStats{Skipped: len(oldFiles), Elapsed: time.Since(start)}, nil
 	}
 	inputs, err := ix.indexInputs(ctx)
@@ -452,9 +671,12 @@ func (ix *Indexer) IndexAll(ctx context.Context) (*IndexStats, error) {
 		return nil, err
 	}
 	full := config != snap.config || previous == "" || inputs == nil || records == "" || records != graphRecordsFingerprint(oldFiles)
-	dirs, err := ix.changedGoDirs(ctx, oldFiles, inputs, snap.files, full)
+	dirs, shapes, err := ix.changedGoDirs(ctx, oldFiles, inputs, snap.files, full)
 	if err != nil {
 		return nil, err
+	}
+	for dir := range illTyped {
+		dirs[dir] = true
 	}
 	var oldTypes []string
 	if !full && len(dirs) > 0 {
@@ -598,12 +820,24 @@ func (ix *Indexer) IndexAll(ctx context.Context) (*IndexStats, error) {
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(ix.Root, path)
 		}
-		if graphExtension(path) && snap.files[abs] != file.hash {
+		// Ill-typed files (empty hash) were re-derived from this snapshot;
+		// they are retried by illTypedDirs rather than blocking certification.
+		if graphExtension(path) && file.hash != "" && snap.files[abs] != file.hash {
 			complete = false
 		}
 	}
 	if complete {
 		if err := ix.writeIndexState(ctx, snap.fingerprint, snap.config, graphRecordsFingerprint(current), snap.files); err != nil {
+			return nil, err
+		}
+		if err := ix.writeAPIShapes(ctx, shapes, full); err != nil {
+			return nil, err
+		}
+	}
+	// Refresh planner statistics when the graph was (re)built wholesale;
+	// incremental passes keep the distribution close to the analyzed one.
+	if full && stats.Files > 0 {
+		if err := ix.Store.Optimize(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -665,20 +899,41 @@ func (ix *Indexer) IndexFile(ctx context.Context, path string) (*IndexStats, err
 }
 
 // Plan from persisted file ownership/imports before type checking anything.
-func (ix *Indexer) changedGoDirs(ctx context.Context, old map[string]indexedGraphFile, inputs, files map[string]string, full bool) (map[string]bool, error) {
-	dirs := make(map[string]bool)
+// Reverse dependents are reloaded only for packages whose declared API broke
+// (see goAPIShape and apiShapeBreaks): a dependent's facts are name-based, so
+// body edits and added declarations cannot change them. shapes holds the new API shape of every changed file
+// whose shape could be computed from exactly the scanned content.
+func (ix *Indexer) changedGoDirs(ctx context.Context, old map[string]indexedGraphFile, inputs, files map[string]string, full bool) (dirs map[string]bool, shapes map[string]string, err error) {
+	dirs = make(map[string]bool)
+	shapes = make(map[string]string)
+	apiDirs := make(map[string]bool)
+	var stored map[string]string
+	if !full {
+		if stored, err = ix.storedAPIShapes(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
 	for path, hash := range files {
-		if filepath.Ext(path) == ".go" && (full || inputs[path] != hash) {
-			dirs[filepath.Dir(path)] = true
+		if filepath.Ext(path) != ".go" || (!full && inputs[path] == hash) {
+			continue
+		}
+		dirs[filepath.Dir(path)] = true
+		shape, ok := goFileAPIShape(path, hash)
+		if ok {
+			shapes[path] = shape
+		}
+		if !ok || stored[path] == "" || apiShapeBreaks(stored[path], shape) {
+			apiDirs[filepath.Dir(path)] = true
 		}
 	}
 	for path := range inputs {
 		if filepath.Ext(path) == ".go" && files[path] == "" {
 			dirs[filepath.Dir(path)] = true
+			apiDirs[filepath.Dir(path)] = true
 		}
 	}
-	if full || len(dirs) == 0 {
-		return dirs, nil
+	if full || len(apiDirs) == 0 {
+		return dirs, shapes, nil
 	}
 	pkgDirs := make(map[string]string)
 	for path, file := range old {
@@ -689,37 +944,129 @@ func (ix *Indexer) changedGoDirs(ctx context.Context, old map[string]indexedGrap
 	imports := make(map[string][]string)
 	rows, err := ix.Store.db.QueryContext(ctx, `SELECT name, imports FROM packages`)
 	if err != nil {
-		return nil, fmt.Errorf("read package dependencies: %w", err)
+		return nil, nil, fmt.Errorf("read package dependencies: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var pkg, list string
 		if err := rows.Scan(&pkg, &list); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if pkgDirs[pkg] != "" {
 			imports[pkg] = strings.Split(list, ",")
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for changed := true; changed; {
 		changed = false
 		for pkg, deps := range imports {
-			if dirs[pkgDirs[pkg]] {
+			if apiDirs[pkgDirs[pkg]] {
 				continue
 			}
 			for _, dep := range deps {
-				if dirs[pkgDirs[dep]] {
-					dirs[pkgDirs[pkg]] = true
+				if apiDirs[pkgDirs[dep]] {
+					apiDirs[pkgDirs[pkg]] = true
 					changed = true
 					break
 				}
 			}
 		}
 	}
-	return dirs, nil
+	for dir := range apiDirs {
+		dirs[dir] = true
+	}
+	return dirs, shapes, nil
+}
+
+// goFileAPIShape reads path and returns its API shape if the bytes read still
+// match the scanned content hash.
+func goFileAPIShape(path, hash string) (string, bool) {
+	src, err := os.ReadFile(path)
+	if err != nil || fmt.Sprintf("%016x", xxhash.Sum64(src)) != hash {
+		return "", false
+	}
+	return goAPIShape(src)
+}
+
+// goAPIShape summarizes what a Go file declares, with every function body
+// removed: a hash of the header (build constraints and package clause) plus a
+// sorted hash per top-level declaration (imports, types, vars, consts, and all
+// function and method signatures). Bodies cannot change any type another
+// package observes (Go has no return-type inference; package-level
+// initializers are kept). Files using cgo report no shape, so they are always
+// treated as API changes.
+func goAPIShape(src []byte) (string, bool) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", src, parser.SkipObjectResolution)
+	if err != nil {
+		return "", false
+	}
+	for _, spec := range file.Imports {
+		if spec.Path != nil && spec.Path.Value == `"C"` {
+			return "", false
+		}
+	}
+	header := xxhash.New()
+	_, _ = header.Write(src[:fset.Position(file.Package).Offset])
+	_, _ = header.Write([]byte("package " + file.Name.Name))
+	decls := make([]string, 0, len(file.Decls))
+	var buf bytes.Buffer
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			fn.Body = nil
+		}
+		buf.Reset()
+		if err := printer.Fprint(&buf, fset, decl); err != nil {
+			return "", false
+		}
+		decls = append(decls, fmt.Sprintf("%016x", xxhash.Sum64(buf.Bytes())))
+	}
+	sort.Strings(decls)
+	return fmt.Sprintf("v2:%016x;%s", header.Sum64(), strings.Join(decls, ",")), true
+}
+
+// apiShapeBreaks reports whether moving from the old to the new shape can
+// change facts derived in dependent packages: a changed header, or any
+// declaration removed or modified. Pure additions cannot — dependents could
+// not have referenced a declaration that did not exist without being
+// ill-typed, and ill-typed packages are re-derived by illTypedDirs. Method
+// set growth is still covered by the type-shape expansion in IndexAll.
+func apiShapeBreaks(old, new string) bool {
+	oldHeader, oldDecls, ok1 := strings.Cut(strings.TrimPrefix(old, "v2:"), ";")
+	newHeader, newDecls, ok2 := strings.Cut(strings.TrimPrefix(new, "v2:"), ";")
+	if !strings.HasPrefix(old, "v2:") || !ok1 || !ok2 || oldHeader != newHeader {
+		return true
+	}
+	present := make(map[string]int)
+	for _, decl := range strings.Split(newDecls, ",") {
+		present[decl]++
+	}
+	for _, decl := range strings.Split(oldDecls, ",") {
+		if present[decl] == 0 {
+			return true
+		}
+		present[decl]--
+	}
+	return false
+}
+
+func (ix *Indexer) storedAPIShapes(ctx context.Context) (map[string]string, error) {
+	rows, err := ix.Store.db.QueryContext(ctx, `SELECT path, shape FROM graph_api_shapes`)
+	if err != nil {
+		return nil, fmt.Errorf("read graph api shapes: %w", err)
+	}
+	defer rows.Close()
+	shapes := make(map[string]string)
+	for rows.Next() {
+		var path, shape string
+		if err := rows.Scan(&path, &shape); err != nil {
+			return nil, err
+		}
+		shapes[path] = shape
+	}
+	return shapes, rows.Err()
 }
 
 func (ix *Indexer) loadDirs(ctx context.Context, dirs map[string]bool, files map[string]string, full bool) ([]*packages.Package, map[*ast.File]string, error) {
@@ -1210,10 +1557,11 @@ func calleeName(pkg *packages.Package, fun ast.Expr) string {
 type namedTypes struct {
 	interfaces map[string]*types.Named // qualified name -> type
 	concretes  map[string]*types.Named
+	byPackage  map[string][]string // package path -> qualified concrete names
 }
 
 func collectNamedTypes(pkgs []*packages.Package) namedTypes {
-	nt := namedTypes{interfaces: map[string]*types.Named{}, concretes: map[string]*types.Named{}}
+	nt := namedTypes{interfaces: map[string]*types.Named{}, concretes: map[string]*types.Named{}, byPackage: map[string][]string{}}
 	for _, pkg := range pkgs {
 		if pkg.Types == nil {
 			continue
@@ -1233,6 +1581,7 @@ func collectNamedTypes(pkgs []*packages.Package) namedTypes {
 				nt.interfaces[key] = named
 			} else {
 				nt.concretes[key] = named
+				nt.byPackage[pkg.PkgPath] = append(nt.byPackage[pkg.PkgPath], key)
 			}
 		}
 	}
@@ -1245,7 +1594,8 @@ func collectNamedTypes(pkgs []*packages.Package) namedTypes {
 // checked, since every type trivially satisfies interface{}.
 func implementsEdges(nt namedTypes, pkgPath string) []Edge {
 	var edges []Edge
-	for cKey, concrete := range nt.concretes {
+	for _, cKey := range nt.byPackage[pkgPath] {
+		concrete := nt.concretes[cKey]
 		if concrete.Obj().Pkg().Path() != pkgPath {
 			continue
 		}

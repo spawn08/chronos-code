@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"unicode/utf8"
 
-	"github.com/spawn08/chronos/engine/model"
+	"github.com/spawn08/chronos-code/internal/tokencache"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
@@ -70,6 +70,7 @@ func WrapDynamicForTool(a *agent.Agent, thresholdFn func(context.Context, string
 	}
 	agentID := a.ID
 	store := a.Storage
+	var counters tokencache.Cache
 
 	for _, def := range a.Tools.List() {
 		if def.Name == ReadStoredResultTool || def.Handler == nil {
@@ -87,8 +88,13 @@ func WrapDynamicForTool(a *agent.Agent, thresholdFn func(context.Context, string
 				thresholdTokens = DefaultThresholdTokens
 			}
 			data, mErr := json.Marshal(result)
-			counter := model.NewTokenCounter(a.Model.Model())
-			if mErr != nil || counter.CountString(string(data)) <= thresholdTokens {
+			// Byte-level BPE cannot produce more tokens than input bytes. Tiny
+			// results (especially write receipts) need no tokenizer or cache entry.
+			if mErr != nil || len(data) <= thresholdTokens {
+				return result, nil
+			}
+			counter := counters.ForModel(a.Model.Model())
+			if counter.CountString(string(data)) <= thresholdTokens {
 				return result, nil
 			}
 			sessionID := sessionOrAgent(ctx, agentID)
@@ -118,10 +124,11 @@ func RegisterReader(a *agent.Agent) {
 	}
 	store, agentID := a.Storage, a.ID
 	a.Tools.Register(&tool.Definition{
-		Name:        ReadStoredResultTool,
-		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Retrieve a bounded chunk of a compressed tool result. Continue with next_offset only when more content is necessary.",
-		Permission:  tool.PermAllow,
+		Name:         ReadStoredResultTool,
+		ParallelSafe: true,
+		Effects:      []tool.Effect{tool.EffectRead},
+		Description:  "Retrieve a bounded chunk of a compressed tool result. Continue with next_offset only when more content is necessary.",
+		Permission:   tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

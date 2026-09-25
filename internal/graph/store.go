@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -83,42 +84,73 @@ type Edge struct {
 	ToName   string
 }
 
-// Store is the SQLite-backed graph store. It is safe for concurrent readers;
-// writes are serialized by capping the pool to a single connection, which is
-// the standard workaround for modernc.org/sqlite's lack of built-in
-// multi-writer locking.
+// Store is the SQLite-backed graph store. Writes are serialized by capping the
+// write pool to a single connection, the standard workaround for
+// modernc.org/sqlite's lack of built-in multi-writer locking. File-backed
+// stores also keep a separate query_only pool so WAL readers (agent tools) are
+// never queued behind an indexing pass on the writer connection.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	rdb *sql.DB
 
 	mu              sync.RWMutex
 	currentFilePath string
 }
 
+// symbolQualifiedExpr is the caller identity recorded in edges.from_name:
+// "Recv.Name" for methods and "Name" for everything else (see
+// qualifiedFuncName). It backs an expression index, so queries must use this
+// exact text.
+var symbolQualifiedExpr = symbolQualified("")
+
+// symbolQualified renders symbolQualifiedExpr with an optional table prefix
+// (for example "s.") so joins still match the expression index. The CAST gives
+// the expression TEXT affinity; without it SQLite cannot use the index for an
+// equality join against the TEXT column edges.from_name.
+func symbolQualified(prefix string) string {
+	return `CAST(CASE WHEN ` + prefix + `receiver != '' THEN ltrim(` + prefix + `receiver, '*') || '.' || ` + prefix + `name ELSE ` + prefix + `name END AS TEXT)`
+}
+
+// storePragmas apply to every pooled connection. WAL + synchronous=NORMAL
+// trade a small durability window (an OS crash mid-write can lose the last
+// few commits) for avoiding an fsync on every commit — the graph store is a
+// rebuildable derived index, not a source of truth. Statement journals and
+// sorter spills stay in memory instead of temp files.
+const storePragmas = "_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16384)"
+
 // OpenStore opens (creating if needed) the graph database at path.
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	pooled := path != ":memory:" && !strings.HasPrefix(path, "file:") && !strings.ContainsRune(path, '?')
+	dsn := path
+	if pooled {
+		dsn = path + "?" + storePragmas
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open graph store: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	// WAL + synchronous=NORMAL trade a small durability window (an OS crash
-	// mid-write can lose the last few commits) for avoiding an fsync on
-	// every single INSERT — the graph store is a rebuildable derived index,
-	// not a source of truth, so that tradeoff is free. Without it, a full
-	// reindex's tens of thousands of per-symbol/per-edge autocommit inserts
-	// are dominated by fsync latency rather than actual work.
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set graph store journal mode: %w", err)
+	if !pooled {
+		for _, pragma := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, `PRAGMA temp_store=MEMORY`} {
+			if _, err := db.Exec(pragma); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("configure graph store (%s): %w", pragma, err)
+			}
+		}
 	}
-	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set graph store synchronous mode: %w", err)
-	}
-	s := &Store{db: db}
+	s := &Store{db: db, rdb: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if pooled {
+		rdb, err := sql.Open("sqlite", dsn+"&_query_only=1")
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("open graph store readers: %w", err)
+		}
+		rdb.SetMaxOpenConns(4)
+		s.rdb = rdb
 	}
 	return s, nil
 }
@@ -129,9 +161,12 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("begin graph migration: %w", err)
 	}
 	defer tx.Rollback()
-	var ftsObjects int
+	var ftsObjects, trigramObjects int
 	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('symbols_fts', 'symbols_ai', 'symbols_ad')`).Scan(&ftsObjects); err != nil {
 		return fmt.Errorf("inspect symbols fts schema: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('symbols_tri', 'symbols_tri_ai', 'symbols_tri_ad')`).Scan(&trigramObjects); err != nil {
+		return fmt.Errorf("inspect symbols trigram schema: %w", err)
 	}
 	_, err = tx.Exec(`
 		CREATE TABLE IF NOT EXISTS files (
@@ -166,8 +201,6 @@ func (s *Store) migrate() error {
 			to_name   TEXT NOT NULL,
 			source_file TEXT NOT NULL DEFAULT ''
 		);
-		CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(kind, from_name);
-		CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(kind, to_name);
 		CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 			name, signature, doc, package, file,
 			content='symbols', content_rowid='id'
@@ -179,6 +212,15 @@ func (s *Store) migrate() error {
 		CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
 			INSERT INTO symbols_fts(symbols_fts, rowid, name, signature, doc, package, file)
 			VALUES ('delete', old.id, old.name, old.signature, old.doc, old.package, old.file);
+		END;
+		CREATE VIRTUAL TABLE IF NOT EXISTS symbols_tri USING fts5(
+			name, content='symbols', content_rowid='id', tokenize='trigram'
+		);
+		CREATE TRIGGER IF NOT EXISTS symbols_tri_ai AFTER INSERT ON symbols BEGIN
+			INSERT INTO symbols_tri(rowid, name) VALUES (new.id, new.name);
+		END;
+		CREATE TRIGGER IF NOT EXISTS symbols_tri_ad AFTER DELETE ON symbols BEGIN
+			INSERT INTO symbols_tri(symbols_tri, rowid, name) VALUES ('delete', old.id, old.name);
 		END;
 	`)
 	if err != nil {
@@ -196,11 +238,31 @@ func (s *Store) migrate() error {
 	if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_identity ON edges(kind, from_name, to_name, source_file)`); err != nil {
 		return fmt.Errorf("create edge identity index: %w", err)
 	}
+	// Caller lookups (kind, to_name) -> from_name are answered from one covering
+	// index; callee lookups use the identity index prefix. The older
+	// single-purpose indexes are redundant and only slow writes (and without
+	// statistics SQLite preferred scanning the identity index for callers).
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_edges_to_from ON edges(kind, to_name, from_name)`,
+		`DROP INDEX IF EXISTS idx_edges_to`,
+		`DROP INDEX IF EXISTS idx_edges_from`,
+		`CREATE INDEX IF NOT EXISTS idx_symbols_caller ON symbols(` + symbolQualifiedExpr + `)`,
+		`CREATE INDEX IF NOT EXISTS idx_files_package ON files(package)`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate graph indexes: %w", err)
+		}
+	}
 	// Only backfill when introducing FTS or repairing missing sync triggers.
 	// The schema and backfill commit together, so interrupted upgrades retry.
 	if ftsObjects != 3 {
 		if _, err := tx.Exec(`INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')`); err != nil {
 			return fmt.Errorf("rebuild symbols fts: %w", err)
+		}
+	}
+	if trigramObjects != 3 {
+		if _, err := tx.Exec(`INSERT INTO symbols_tri(symbols_tri) VALUES ('rebuild')`); err != nil {
+			return fmt.Errorf("rebuild symbols trigram index: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -270,7 +332,25 @@ func (s *Store) addContentHashColumn(tx *sql.Tx) error {
 
 // Close closes the underlying database handle.
 func (s *Store) Close() error {
-	return s.db.Close()
+	var readErr error
+	if s.rdb != nil && s.rdb != s.db {
+		readErr = s.rdb.Close()
+	}
+	if err := s.db.Close(); err != nil {
+		return err
+	}
+	return readErr
+}
+
+// Optimize refreshes planner statistics for the graph tables after an
+// indexing pass. Without statistics SQLite scans the edge identity index for
+// caller lookups. Only the graph's own tables are analyzed: statistics on the
+// FTS5 shadow tables make FTS lookups measurably slower.
+func (s *Store) Optimize(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `ANALYZE symbols; ANALYZE edges; ANALYZE files`); err != nil {
+		return fmt.Errorf("optimize graph store: %w", err)
+	}
+	return nil
 }
 
 // Reset clears all indexed data (used before a full reindex).
@@ -445,13 +525,16 @@ func (s *Store) RemovePackage(ctx context.Context, name string) error {
 // PruneStaleEdges removes edges whose from_name or to_name no longer
 // matches any indexed symbol. Previously IndexAll's full Reset provided
 // this cleanup for free every pass; incremental IndexAll no longer wipes
-// the edges table, so this replaces that guarantee explicitly.
+// the edges table, so this replaces that guarantee explicitly. Callers are
+// recorded by qualified name ("Recv.Method" for methods, see
+// qualifiedFuncName), so from_name is checked against that identity too;
+// otherwise every call made from inside a method would be pruned.
 func (s *Store) PruneStaleEdges(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM edges
 		WHERE (source_file != '' AND source_file NOT IN (SELECT path FROM files))
 		   OR (kind = 'import' AND (from_name NOT IN (SELECT name FROM packages) OR to_name NOT IN (SELECT name FROM packages)))
-		   OR (kind != 'import' AND (from_name NOT IN (SELECT name FROM symbols) OR to_name NOT IN (SELECT name FROM symbols)))
+		   OR (kind != 'import' AND (from_name NOT IN (SELECT name FROM symbols UNION SELECT `+symbolQualifiedExpr+` FROM symbols) OR to_name NOT IN (SELECT name FROM symbols)))
 	`)
 	if err != nil {
 		return fmt.Errorf("prune stale edges: %w", err)
@@ -477,7 +560,7 @@ func (s *Store) UpsertFileHash(ctx context.Context, path, hash string) error {
 // recorded hash (never indexed, or indexed before this column existed).
 func (s *Store) FileHash(ctx context.Context, path string) (string, error) {
 	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT content_hash FROM files WHERE path = ?`, path).Scan(&hash)
+	err := s.rdb.QueryRowContext(ctx, `SELECT content_hash FROM files WHERE path = ?`, path).Scan(&hash)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -574,8 +657,22 @@ func (s *Store) FindSymbols(ctx context.Context, name, kind string) ([]Symbol, e
 	return s.querySymbols(ctx, query, args...)
 }
 
-// FindSymbolsFuzzy looks up symbols whose name contains the given substring.
+// FindSymbolsQualified looks up symbols by caller identity: "Recv.Method" for
+// methods or the plain name otherwise, as recorded in edges.from_name.
+func (s *Store) FindSymbolsQualified(ctx context.Context, name string) ([]Symbol, error) {
+	return s.querySymbols(ctx, `SELECT id, name, kind, package, file, line, end_line, signature, doc, receiver
+		FROM symbols WHERE `+symbolQualifiedExpr+` = ?`, name)
+}
+
+// FindSymbolsFuzzy looks up symbols whose name contains the given substring
+// (case-insensitively). Substrings of three or more characters use the
+// trigram index instead of scanning every symbol name.
 func (s *Store) FindSymbolsFuzzy(ctx context.Context, substr string) ([]Symbol, error) {
+	if utf8.RuneCountInString(substr) >= 3 {
+		return s.querySymbols(ctx, `SELECT s.id, s.name, s.kind, s.package, s.file, s.line, s.end_line, s.signature, s.doc, s.receiver
+			FROM symbols_tri JOIN symbols s ON s.id = symbols_tri.rowid
+			WHERE symbols_tri MATCH ? ORDER BY s.name LIMIT 25`, `"`+strings.ReplaceAll(substr, `"`, `""`)+`"`)
+	}
 	return s.querySymbols(ctx, `SELECT id, name, kind, package, file, line, end_line, signature, doc, receiver
 		FROM symbols WHERE name LIKE ? ESCAPE '\' ORDER BY name LIMIT 25`, "%"+escapeLike(substr)+"%")
 }
@@ -611,7 +708,7 @@ func (s *Store) Search(ctx context.Context, query string, topK int) ([]SearchRes
 	if match == "" {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT s.id, s.name, s.kind, s.package, s.file, s.line, s.end_line,
 			s.signature, s.doc, s.receiver, bm25(symbols_fts)
 		FROM symbols_fts
@@ -685,7 +782,7 @@ func (s *Store) SymbolsInPackage(ctx context.Context, pkg string) ([]Symbol, err
 
 // FilesInPackage returns all files recorded for pkg, ordered by path.
 func (s *Store) FilesInPackage(ctx context.Context, pkg string) ([]FileRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT path, package
 		FROM files WHERE package = ? ORDER BY path
 	`, pkg)
@@ -715,7 +812,7 @@ func (s *Store) SymbolsInFile(ctx context.Context, file string) ([]Symbol, error
 }
 
 func (s *Store) querySymbols(ctx context.Context, query string, args ...any) ([]Symbol, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query symbols: %w", err)
 	}
@@ -736,6 +833,80 @@ func (s *Store) querySymbols(ctx context.Context, query string, args ...any) ([]
 // CallersOf returns the distinct from_name values of "call" edges targeting name.
 func (s *Store) CallersOf(ctx context.Context, name string) ([]string, error) {
 	return s.edgeNames(ctx, `SELECT DISTINCT from_name FROM edges WHERE kind = ? AND to_name = ?`, string(EdgeCall), name)
+}
+
+// CallersOfMany answers CallersOf for a whole traversal frontier with one
+// query per chunk of names instead of one query per node.
+func (s *Store) CallersOfMany(ctx context.Context, names []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(names))
+	const chunk = 500
+	for start := 0; start < len(names); start += chunk {
+		batch := names[start:min(len(names), start+chunk)]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, string(EdgeCall))
+		for _, name := range batch {
+			args = append(args, name)
+		}
+		rows, err := s.rdb.QueryContext(ctx, `SELECT DISTINCT to_name, from_name FROM edges WHERE kind = ? AND to_name IN (?`+strings.Repeat(",?", len(batch)-1)+`) ORDER BY to_name, from_name`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("query callers: %w", err)
+		}
+		for rows.Next() {
+			var to, from string
+			if err := rows.Scan(&to, &from); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan caller: %w", err)
+			}
+			out[to] = append(out[to], from)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, fmt.Errorf("query callers: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// SymbolsByQualified resolves caller identities (edges.from_name values) to
+// their declarations in one query per chunk.
+func (s *Store) SymbolsByQualified(ctx context.Context, names []string) (map[string][]Symbol, error) {
+	out := make(map[string][]Symbol, len(names))
+	const chunk = 500
+	for start := 0; start < len(names); start += chunk {
+		batch := names[start:min(len(names), start+chunk)]
+		args := make([]any, len(batch))
+		for i, name := range batch {
+			args[i] = name
+		}
+		syms, err := s.querySymbols(ctx, `SELECT id, name, kind, package, file, line, end_line, signature, doc, receiver
+			FROM symbols WHERE `+symbolQualifiedExpr+` IN (?`+strings.Repeat(",?", len(batch)-1)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, sym := range syms {
+			key := qualifiedFuncName(sym)
+			out[key] = append(out[key], sym)
+		}
+	}
+	return out, nil
+}
+
+// CallTarget maps a caller identity ("Recv.Method" or "Func", as returned by
+// CallersOf) to the short name its own callers record, for the next hop of a
+// caller traversal.
+func CallTarget(name string) string { return callTarget(name) }
+
+// CallerIdentity is sym's identity in edges.from_name, for CalleesOf.
+func CallerIdentity(sym Symbol) string { return qualifiedFuncName(sym) }
+
+// callTarget maps a caller identity ("Recv.Method" or "Func") to the short
+// name its own callers record in edges.to_name.
+func callTarget(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 // CalleesOf returns the distinct to_name values of "call" edges originating from name.
@@ -761,7 +932,7 @@ func (s *Store) ImportersOf(ctx context.Context, pkg string) ([]string, error) {
 }
 
 func (s *Store) edgeNames(ctx context.Context, query string, args ...any) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query edges: %w", err)
 	}
@@ -780,7 +951,7 @@ func (s *Store) edgeNames(ctx context.Context, query string, args ...any) ([]str
 // PackageImports returns the comma-joined import list recorded for pkg.
 func (s *Store) PackageImports(ctx context.Context, pkg string) (string, error) {
 	var imports string
-	err := s.db.QueryRowContext(ctx, `SELECT imports FROM packages WHERE name = ?`, pkg).Scan(&imports)
+	err := s.rdb.QueryRowContext(ctx, `SELECT imports FROM packages WHERE name = ?`, pkg).Scan(&imports)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -792,7 +963,7 @@ func (s *Store) PackageImports(ctx context.Context, pkg string) (string, error) 
 
 // Packages returns all distinct package names recorded in the store.
 func (s *Store) Packages(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM packages ORDER BY name`)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT name FROM packages ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("query packages: %w", err)
 	}
@@ -819,16 +990,16 @@ type Stats struct {
 // Stats returns row counts for each table, for reporting and diagnostics.
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var st Stats
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&st.Files); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM files`).Scan(&st.Files); err != nil {
 		return st, fmt.Errorf("count files: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM packages`).Scan(&st.Packages); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM packages`).Scan(&st.Packages); err != nil {
 		return st, fmt.Errorf("count packages: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols`).Scan(&st.Symbols); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM symbols`).Scan(&st.Symbols); err != nil {
 		return st, fmt.Errorf("count symbols: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&st.Edges); err != nil {
+	if err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&st.Edges); err != nil {
 		return st, fmt.Errorf("count edges: %w", err)
 	}
 	return st, nil

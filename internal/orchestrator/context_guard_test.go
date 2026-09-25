@@ -16,6 +16,27 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 )
 
+func TestPreflightCounterReusedWithoutStaleRequestCounts(t *testing.T) {
+	h := newContextGuardHook("gpt-4o", 0)
+	req := &model.ChatRequest{Model: "gpt-4o", Messages: []model.Message{{Role: model.RoleUser, Content: "hello"}}}
+	event := &hooks.Event{Type: hooks.EventModelCallBefore, Input: req}
+	if err := h.Before(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	counter := tokenCounterForEvent(event, req.Model)
+	if counter != event.Metadata[tokenCounterMetadataKey].(requestTokenCounter).counter {
+		t.Fatal("budget did not reuse preflight counter")
+	}
+	req.Messages[0].Content = strings.Repeat("changed request ", 100)
+	if got, want := counter.CountTokens(req.Messages), model.NewTokenCounter(req.Model).CountTokens(req.Messages); got != want {
+		t.Fatalf("stale request count: got %d want %d", got, want)
+	}
+	other := tokenCounterForEvent(event, "gpt-4")
+	if got, want := other.CountTokens(req.Messages), model.NewTokenCounter("gpt-4").CountTokens(req.Messages); got != want {
+		t.Fatalf("wrong model count: got %d want %d", got, want)
+	}
+}
+
 func TestContextGuardTrimsMessagesOverLimit(t *testing.T) {
 	guard := newContextGuardHook("claude-haiku-4-5", 10)
 
