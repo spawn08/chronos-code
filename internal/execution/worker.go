@@ -68,6 +68,14 @@ func (w *Worker) CanRunCapped() bool {
 	return ok && capable.SupportsCappedDelivery()
 }
 
+func (w *Worker) CanRunCheckpointedTeam() bool {
+	if w == nil {
+		return false
+	}
+	capable, ok := w.executor.(interface{ SupportsCheckpointedTeam() bool })
+	return ok && capable.SupportsCheckpointedTeam()
+}
+
 func NewWorker(store *DeliveryStore, executor Executor, config WorkerConfig) (*Worker, error) {
 	if store == nil || executor == nil || config.OwnerID == "" || config.Concurrency < 1 || config.LeaseDuration <= 0 || config.HeartbeatEvery <= 0 || config.HeartbeatEvery >= config.LeaseDuration || config.PollEvery <= 0 {
 		return nil, ErrInvalidDelivery

@@ -2,7 +2,9 @@ package execution
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +39,9 @@ type Operation struct {
 	ID                        string
 	EffectKey                 string
 	Kind                      string
+	RoleID                    string
+	NodeID                    string
+	ObservationDescriptor     string
 	ReplayClass               ReplayClass
 	InputFingerprint          string
 	ArgumentsFingerprint      string
@@ -60,7 +65,8 @@ type Operation struct {
 // outcome and may not be executed again without explicit reconciliation.
 func (s *DeliveryStore) PrepareOperation(ctx context.Context, lease Lease, op Operation) (Operation, error) {
 	if op.ID == "" || op.EffectKey == "" || op.Kind == "" || op.InputFingerprint == "" ||
-		!stateInReplay(op.ReplayClass) {
+		!stateInReplay(op.ReplayClass) || len(op.ObservationDescriptor) > 4096 ||
+		(op.ReplayClass == ReplayIdempotentExternal && (op.RoleID == "" || op.ObservationDescriptor == "")) {
 		return Operation{}, ErrInvalidDelivery
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -80,7 +86,7 @@ func (s *DeliveryStore) PrepareOperation(ctx context.Context, lease Lease, op Op
 	}
 	existing, err := loadOperation(ctx, tx, lease, op.ID)
 	if err == nil {
-		if existing.EffectKey != op.EffectKey || existing.Kind != op.Kind || existing.ReplayClass != op.ReplayClass || existing.GoalRevision != revision ||
+		if existing.EffectKey != op.EffectKey || existing.Kind != op.Kind || existing.RoleID != op.RoleID || existing.NodeID != op.NodeID || existing.ObservationDescriptor != op.ObservationDescriptor || existing.ReplayClass != op.ReplayClass || existing.GoalRevision != revision ||
 			existing.ArgumentsFingerprint != op.ArgumentsFingerprint || existing.ObservationPath != op.ObservationPath || existing.ExpectedOutputFingerprint != op.ExpectedOutputFingerprint {
 			return Operation{}, ErrOperationConflict
 		}
@@ -106,7 +112,7 @@ func (s *DeliveryStore) PrepareOperation(ctx context.Context, lease Lease, op Op
 	}
 	now := s.clock.Now().UTC()
 	op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, op.GoalRevision, op.PreparedAt, op.UpdatedAt = OperationPrepared, lease.OwnerID, lease.Epoch, lease.Attempt, revision, now, now
-	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_operations (tenant_id, repository_id, delivery_id, operation_id, effect_key, kind, replay_class, input_fingerprint, arguments_fingerprint, observation_path, input_state_fingerprint, expected_output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, op.ID, op.EffectKey, op.Kind, op.ReplayClass, op.InputFingerprint, op.ArgumentsFingerprint, op.ObservationPath, op.InputStateFingerprint, op.ExpectedOutputFingerprint, op.GoalRevision, op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, timestamp(now), timestamp(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_operations (tenant_id, repository_id, delivery_id, operation_id, effect_key, kind, role_id, node_id, observation_descriptor, replay_class, input_fingerprint, arguments_fingerprint, observation_path, input_state_fingerprint, expected_output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, op.ID, op.EffectKey, op.Kind, op.RoleID, op.NodeID, op.ObservationDescriptor, op.ReplayClass, op.InputFingerprint, op.ArgumentsFingerprint, op.ObservationPath, op.InputStateFingerprint, op.ExpectedOutputFingerprint, op.GoalRevision, op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, timestamp(now), timestamp(now)); err != nil {
 		return Operation{}, fmt.Errorf("persist prepared operation: %w", err)
 	}
 	if err := appendOperationEvent(ctx, tx, lease, op, DeliveryEventOperationPrepared); err != nil {
@@ -176,6 +182,24 @@ func (s *DeliveryStore) advanceOperation(ctx context.Context, lease Lease, id st
 	}
 	if from == OperationRunning && to != OperationReconciled && (op.OwnerID != lease.OwnerID || op.LeaseEpoch != lease.Epoch || op.Attempt != lease.Attempt) {
 		return Operation{}, ErrEffectNeedsReconciliation
+	}
+	if to == OperationReconciled {
+		switch op.ReplayClass {
+		case ReplayFingerprintedWrite:
+			if op.ObservationPath == "" || op.ExpectedOutputFingerprint == "" || outputFingerprint != op.ExpectedOutputFingerprint || errorText != "file-content:"+outputFingerprint || len(result) == 0 {
+				return Operation{}, ErrEffectNeedsReconciliation
+			}
+		case ReplayIdempotentExternal:
+			if op.RoleID == "" || op.ObservationDescriptor == "" || len(result) == 0 {
+				return Operation{}, ErrEffectNeedsReconciliation
+			}
+			hash := sha256.Sum256(result)
+			if outputFingerprint != hex.EncodeToString(hash[:]) || errorText != "destination:"+outputFingerprint {
+				return Operation{}, ErrEffectNeedsReconciliation
+			}
+		default:
+			return Operation{}, ErrEffectNeedsReconciliation
+		}
 	}
 	op.Status, op.OwnerID, op.LeaseEpoch, op.Attempt, op.UpdatedAt = to, lease.OwnerID, lease.Epoch, lease.Attempt, now
 	op.OutputFingerprint, op.Result, op.Error = outputFingerprint, result, errorText
@@ -247,7 +271,7 @@ func (s *DeliveryStore) Operations(ctx context.Context, scope DeliveryScope, del
 func loadOperation(ctx context.Context, db queryer, lease Lease, id string) (Operation, error) {
 	var op Operation
 	var prepared, updated, result string
-	err := db.QueryRowContext(ctx, `SELECT operation_id, effect_key, kind, replay_class, input_fingerprint, arguments_fingerprint, observation_path, input_state_fingerprint, expected_output_fingerprint, output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at, result_json, error_text FROM delivery_operations WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND operation_id = ?`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, id).Scan(&op.ID, &op.EffectKey, &op.Kind, &op.ReplayClass, &op.InputFingerprint, &op.ArgumentsFingerprint, &op.ObservationPath, &op.InputStateFingerprint, &op.ExpectedOutputFingerprint, &op.OutputFingerprint, &op.GoalRevision, &op.Status, &op.OwnerID, &op.LeaseEpoch, &op.Attempt, &prepared, &updated, &result, &op.Error)
+	err := db.QueryRowContext(ctx, `SELECT operation_id, effect_key, kind, role_id, node_id, observation_descriptor, replay_class, input_fingerprint, arguments_fingerprint, observation_path, input_state_fingerprint, expected_output_fingerprint, output_fingerprint, goal_revision, status, owner_id, lease_epoch, attempt, prepared_at, updated_at, result_json, error_text FROM delivery_operations WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND operation_id = ?`, lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, id).Scan(&op.ID, &op.EffectKey, &op.Kind, &op.RoleID, &op.NodeID, &op.ObservationDescriptor, &op.ReplayClass, &op.InputFingerprint, &op.ArgumentsFingerprint, &op.ObservationPath, &op.InputStateFingerprint, &op.ExpectedOutputFingerprint, &op.OutputFingerprint, &op.GoalRevision, &op.Status, &op.OwnerID, &op.LeaseEpoch, &op.Attempt, &prepared, &updated, &result, &op.Error)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Operation{}, ErrOperationNotFound
 	}

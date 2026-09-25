@@ -666,8 +666,55 @@ func TestBudgetFailedCallReleasesReservation(t *testing.T) {
 	}
 }
 
+func TestBudgetUnpricedModelCountsTokensAndFlagsCost(t *testing.T) {
+	provider := &budgetTestProvider{
+		modelID: "unpriced-test-model",
+		response: &model.ChatResponse{
+			Role:  model.RoleAssistant,
+			Usage: model.Usage{PromptTokens: 40, CompletionTokens: 3},
+		},
+	}
+	orch := newBudgetTestOrchestrator(provider)
+
+	if _, err := orch.Chat(context.Background(), "hello"); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	want := budget.SessionCost{InputTokens: 40, OutputTokens: 3, UnpricedCalls: 1}
+	if got := orch.SessionCost(); got != want {
+		t.Fatalf("SessionCost() = %+v, want %+v", got, want)
+	}
+}
+
+func TestBudgetFailedUnpricedCallRecordsNothing(t *testing.T) {
+	provider := &budgetTestProvider{modelID: "unpriced-test-model", err: errors.New("provider failed")}
+	orch := newBudgetTestOrchestrator(provider)
+
+	if _, err := orch.Chat(context.Background(), "hello"); err == nil {
+		t.Fatal("Chat() error = nil, want provider failure")
+	}
+	if got := orch.SessionCost(); got != (budget.SessionCost{}) {
+		t.Fatalf("SessionCost() = %+v, want nothing recorded for a failed call", got)
+	}
+}
+
+func TestEffectiveModelInfoTracksRoutedModelUntilSwitch(t *testing.T) {
+	provider := &budgetTestProvider{modelID: "claude-sonnet-4-6"}
+	orch := newBudgetTestOrchestrator(provider)
+	if _, got := orch.EffectiveModelInfo(); got != "claude-sonnet-4-6" {
+		t.Fatalf("EffectiveModelInfo() before any request = %q, want configured model", got)
+	}
+	orch.recordResolvedModel("coder", "anthropic", "claude-sonnet-5")
+	if _, got := orch.EffectiveModelInfo(); got != "claude-sonnet-5" {
+		t.Fatalf("EffectiveModelInfo() after routing = %q, want routed model", got)
+	}
+	orch.recordResolvedModel("researcher", "anthropic", "claude-haiku-4-5")
+	if _, got := orch.EffectiveModelInfo(); got != "claude-sonnet-5" {
+		t.Fatalf("EffectiveModelInfo() = %q, want only the active agent's model", got)
+	}
+}
+
 func TestBudgetUnknownModelRequiresPriceOnlyWithUSDCap(t *testing.T) {
-	request := &model.ChatRequest{Model: "claude-sonnet-5", Messages: []model.Message{{Role: model.RoleUser, Content: "hello"}}}
+	request := &model.ChatRequest{Model: "unpriced-test-model", Messages: []model.Message{{Role: model.RoleUser, Content: "hello"}}}
 	for _, tt := range []struct {
 		name    string
 		cap     budget.Microdollars

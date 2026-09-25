@@ -21,7 +21,7 @@ var (
 	ErrInvalidPlanRef     = errors.New("invalid plan reference")
 )
 
-const schemaVersion = 5
+const schemaVersion = 7
 
 const (
 	schemaV1Checksum = "c6f8c0da8c42f04a"
@@ -39,6 +39,8 @@ var planMigrations = []struct {
 	{version: 3, checksum: schemaV3Checksum, sql: schemaV3SQL},
 	{version: 4, checksum: planSchemaChecksum(schemaV4SQL), sql: schemaV4SQL},
 	{version: 5, checksum: planSchemaChecksum(schemaV5SQL), sql: schemaV5SQL},
+	{version: 6, checksum: planSchemaChecksum(schemaV6SQL), sql: schemaV6SQL},
+	{version: 7, checksum: planSchemaChecksum(schemaV7SQL), sql: schemaV7SQL},
 }
 
 // SQLStore is the SQLite-backed durable plan repository.
@@ -297,7 +299,13 @@ func (s *SQLStore) Create(ctx context.Context, p Plan) error {
 		if err := validateArtifactID(artifact.ID); err != nil {
 			return err
 		}
-		inserted, err := tx.ExecContext(ctx, `INSERT INTO plan_artifacts (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, artifact_id) SELECT tenant_id, repository_id, task_id, plan_id, generation_id, node_id, ? FROM plan_nodes WHERE tenant_id = ? AND repository_id = ? AND task_id = ? AND plan_id = ? AND generation_id = ? AND node_id = ? AND state = 'completed'`, append([]any{artifact.ID}, append(planArgs(p), artifact.NodeID)...)...)
+		if err := validateReceiptID(artifact.ReceiptID); err != nil {
+			return err
+		}
+		if artifact.Undone {
+			return fmt.Errorf("cannot carry an undone artifact into a completed generation")
+		}
+		inserted, err := tx.ExecContext(ctx, `INSERT INTO plan_artifacts (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, artifact_id, receipt_id) SELECT tenant_id, repository_id, task_id, plan_id, generation_id, node_id, ?, ? FROM plan_nodes WHERE tenant_id = ? AND repository_id = ? AND task_id = ? AND plan_id = ? AND generation_id = ? AND node_id = ? AND state = 'completed'`, append([]any{artifact.ID, artifact.ReceiptID}, append(planArgs(p), artifact.NodeID)...)...)
 		if err != nil {
 			return fmt.Errorf("insert preserved plan artifact: %w", err)
 		}
@@ -420,9 +428,9 @@ func (s *SQLStore) loadRelated(ctx context.Context, p *Plan) error {
 			p.Evidence = append(p.Evidence, x)
 			return nil
 		}},
-		{planWhere(`SELECT node_id, artifact_id FROM plan_artifacts`) + ` ORDER BY node_id`, func(rows *sql.Rows) error {
+		{planWhere(`SELECT node_id, artifact_id, receipt_id, undone FROM plan_artifacts`) + ` ORDER BY node_id`, func(rows *sql.Rows) error {
 			var x Artifact
-			if err := rows.Scan(&x.NodeID, &x.ID); err != nil {
+			if err := rows.Scan(&x.NodeID, &x.ID, &x.ReceiptID, &x.Undone); err != nil {
 				return err
 			}
 			p.Artifacts = append(p.Artifacts, x)
@@ -858,7 +866,7 @@ func validatePlanDatabase(ctx context.Context, db *sql.DB) (int, error) {
 	if version > schemaVersion {
 		return 0, ErrUnsupportedSchema
 	}
-	if version != schemaVersion || checksum != planSchemaChecksum(schemaV5SQL) {
+	if version != schemaVersion || checksum != planSchemaChecksum(schemaV7SQL) {
 		return 0, ErrIncompatibleSchema
 	}
 	for _, table := range []string{"plans", "plan_nodes", "plan_edges", "plan_attempts", "plan_context_refs", "plan_evidence", "plan_artifacts", "plan_events", "plan_leases"} {
@@ -913,6 +921,10 @@ UPDATE plan_nodes SET kind = 'implement', objective = scope, expected_artifacts 
 const schemaV4SQL = `ALTER TABLE plan_leases ADD COLUMN expires_at TEXT NOT NULL DEFAULT '';`
 
 const schemaV5SQL = `CREATE TABLE plan_artifacts (tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, task_id TEXT NOT NULL, plan_id TEXT NOT NULL, generation_id TEXT NOT NULL, node_id TEXT NOT NULL, artifact_id TEXT NOT NULL, PRIMARY KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id), FOREIGN KEY (tenant_id, repository_id, task_id, plan_id, generation_id, node_id) REFERENCES plan_nodes);`
+
+const schemaV6SQL = `ALTER TABLE plan_artifacts ADD COLUMN receipt_id TEXT NOT NULL DEFAULT '';`
+
+const schemaV7SQL = `ALTER TABLE plan_artifacts ADD COLUMN undone INTEGER NOT NULL DEFAULT 0 CHECK (undone IN (0, 1));`
 
 func planSchemaChecksum(schema string) string {
 	checksum := sha256.Sum256([]byte(schema))

@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/spawn08/chronos/engine/model"
 )
@@ -72,12 +73,42 @@ func withContextWindow(info Info) Info {
 	return info
 }
 
-// Lookup returns the registered Info for (provider, model), if known.
+// catalogModels holds models from an external catalog (models.dev), merged
+// with the static registry by every lookup.
+var catalogModels atomic.Pointer[[]Info]
+
+// inferableProviders are the first-party providers whose catalog models may
+// be matched by LookupByModel. Aggregators (openrouter, together, groq, ...)
+// re-host the same model IDs, so including them would make common IDs
+// ambiguous and break provider inference for a bare model name.
+var inferableProviders = map[string]bool{"anthropic": true, "openai": true, "gemini": true, "mistral": true, "deepseek": true}
+
+// SetCatalogModels replaces the catalog layer. Providers must use chronos
+// canonical names (e.g. "gemini", not models.dev's "google"). nil clears it.
+func SetCatalogModels(models []Info) {
+	if models == nil {
+		catalogModels.Store(nil)
+		return
+	}
+	copied := append([]Info(nil), models...)
+	catalogModels.Store(&copied)
+}
+
+func catalog() []Info {
+	if models := catalogModels.Load(); models != nil {
+		return *models
+	}
+	return nil
+}
+
+// Lookup returns the registered or catalog Info for (provider, model), if known.
 func Lookup(provider, model string) (Info, bool) {
 	provider = CanonicalProvider(provider)
-	for _, i := range registry {
-		if i.Provider == provider && i.Model == model {
-			return withContextWindow(i), true
+	for _, source := range [][]Info{registry, catalog()} {
+		for _, i := range source {
+			if i.Provider == provider && i.Model == model {
+				return withContextWindow(i), true
+			}
 		}
 	}
 	return Info{}, false
@@ -86,17 +117,24 @@ func Lookup(provider, model string) (Info, bool) {
 // LookupByModel finds a registered Info by model ID alone, for the common
 // case where a user types just a model name (e.g. "/model gpt-4o") without
 // specifying its provider. Returns ok=false if the model ID is unknown or
-// ambiguous (registered under more than one provider).
+// ambiguous (registered under more than one provider). Catalog models count
+// only for first-party providers (see inferableProviders).
 func LookupByModel(modelID string) (Info, bool) {
 	var found Info
-	matches := 0
+	providers := make(map[string]bool)
 	for _, i := range registry {
 		if i.Model == modelID {
 			found = i
-			matches++
+			providers[i.Provider] = true
 		}
 	}
-	return withContextWindow(found), matches == 1
+	for _, i := range catalog() {
+		if i.Model == modelID && inferableProviders[i.Provider] && !providers[i.Provider] {
+			found = i
+			providers[i.Provider] = true
+		}
+	}
+	return withContextWindow(found), len(providers) == 1
 }
 
 // All returns every registered Info, grouped by provider then sorted by
@@ -108,6 +146,16 @@ func LookupByModel(modelID string) (Info, bool) {
 // deployment someone's AZURE_OPENAI_* env vars already point at.
 func All() []Info {
 	out := append([]Info(nil), registry...)
+	seen := make(map[[2]string]bool, len(out))
+	for _, i := range out {
+		seen[[2]string{i.Provider, i.Model}] = true
+	}
+	for _, i := range catalog() {
+		if key := [2]string{i.Provider, i.Model}; !seen[key] {
+			seen[key] = true
+			out = append(out, i)
+		}
+	}
 	if dep := strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT")); dep != "" {
 		if _, ok := Lookup("azure", dep); !ok {
 			out = append(out, Info{Provider: "azure", Model: dep})

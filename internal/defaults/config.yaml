@@ -75,6 +75,17 @@ ledger:
 claims:
   enabled: false
 
+# models.dev catalog: supplies model prices, context windows, and /model
+# picker entries. Cached at ~/.chronos-code/cache/models.json and refreshed in
+# the background (never blocking startup) when older than 24h;
+# `chronos-code models refresh` forces a refresh. Set auto_refresh: false or
+# CHRONOS_CODE_DISABLE_MODELS_FETCH=1 to stop automatic network fetches.
+# pricing.yaml overlays still take precedence over catalog prices, and
+# defaults.context.max_tokens still caps the context window.
+models_catalog:
+  auto_refresh: true
+  url: "https://models.dev"
+
 defaults:
   model:
     provider: "anthropic"

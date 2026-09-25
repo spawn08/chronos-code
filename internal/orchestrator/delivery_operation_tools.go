@@ -1,12 +1,14 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +49,11 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			if !hasDeliveryEffect(effects) {
 				return original(ctx, args)
 			}
+			for _, effect := range effects {
+				if effect == tool.EffectExternalMutation && wrapped.Recovery == nil {
+					return nil, execution.EffectJournalError{Err: fmt.Errorf("external effect %s has no destination observer: %w", wrapped.Name, execution.ErrEffectNeedsReconciliation)}
+				}
+			}
 			callID, ok := agent.ToolCallIDFromContext(ctx)
 			identity, identityOK := agent.RunIdentityFromContext(ctx)
 			if !ok || !identityOK || identity.InvocationID == "" {
@@ -56,14 +63,30 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			before := fileState{}
 			path, _ := args["path"].(string)
 			class := execution.ReplayUnknown
+			operationID := identity.InvocationID + ":" + callID
+			descriptor := ""
 			observationPath, expectedFingerprint := "", ""
 			if wrapped.Name == "file_write" {
 				if safe, ok := safeObservationPath(root, path); ok {
-					class, observationPath = execution.ReplayFingerprintedWrite, safe
-					before = readFileState(root, safe)
-					content, _ := args["content"].(string)
-					hash := sha256.Sum256([]byte(content))
-					expectedFingerprint = hex.EncodeToString(hash[:])
+					if inspected, err := observeFileState(root, safe); err == nil {
+						class, observationPath, before = execution.ReplayFingerprintedWrite, safe, inspected
+						content, _ := args["content"].(string)
+						hash := sha256.Sum256([]byte(content))
+						expectedFingerprint = hex.EncodeToString(hash[:])
+					}
+				}
+			}
+			if wrapped.Recovery != nil {
+				for _, effect := range effects {
+					if effect == tool.EffectExternalMutation {
+						var err error
+						descriptor, err = wrapped.Recovery.Prepare(ctx, args, operationID)
+						if err != nil || descriptor == "" || len(descriptor) > 4096 {
+							return nil, execution.EffectJournalError{Err: fmt.Errorf("prepare destination observation for %s: %w", wrapped.Name, errors.Join(err, execution.ErrInvalidDelivery))}
+						}
+						class = execution.ReplayIdempotentExternal
+						break
+					}
 				}
 			}
 			fingerprint, err := operationFingerprint(wrapped.Name, args, before.hash)
@@ -74,9 +97,8 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			if err != nil {
 				return nil, execution.EffectJournalError{Err: err}
 			}
-			operationID := identity.InvocationID + ":" + callID
 			operation := execution.Operation{
-				ID: operationID, EffectKey: operationID, Kind: wrapped.Name, ReplayClass: class,
+				ID: operationID, EffectKey: operationID, Kind: wrapped.Name, RoleID: identity.RoleID, NodeID: identity.NodeID, ObservationDescriptor: descriptor, ReplayClass: class,
 				InputFingerprint: fingerprint, ArgumentsFingerprint: argumentsFingerprint,
 				ObservationPath: observationPath, InputStateFingerprint: before.hash, ExpectedOutputFingerprint: expectedFingerprint,
 			}
@@ -85,9 +107,26 @@ func wrapDeliveryOperations(a *agent.Agent) {
 				return nil, execution.EffectJournalError{Err: err}
 			}
 			if prepared.Status == execution.OperationObserved || prepared.Status == execution.OperationReconciled {
+				if prepared.ReplayClass == execution.ReplayIdempotentExternal {
+					if wrapped.Recovery == nil {
+						return nil, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
+					}
+					confirmed, observed, err := wrapped.Recovery.Observe(ctx, prepared.ObservationDescriptor, prepared.EffectKey)
+					if err != nil || !observed {
+						return nil, execution.EffectJournalError{Err: errors.Join(err, execution.ErrEffectNeedsReconciliation)}
+					}
+					data, err := json.Marshal(confirmed)
+					if err != nil {
+						return nil, execution.EffectJournalError{Err: err}
+					}
+					hash := sha256.Sum256(data)
+					if hex.EncodeToString(hash[:]) != prepared.OutputFingerprint {
+						return nil, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
+					}
+				}
 				if prepared.ReplayClass == execution.ReplayFingerprintedWrite {
-					current := readFileState(root, prepared.ObservationPath)
-					if prepared.ObservationPath == "" || !current.exists || current.hash != prepared.OutputFingerprint || current.hash != prepared.ExpectedOutputFingerprint {
+					current, err := observeFileState(root, prepared.ObservationPath)
+					if err != nil || !current.exists || current.hash != prepared.OutputFingerprint || current.hash != prepared.ExpectedOutputFingerprint {
 						return nil, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
 					}
 				}
@@ -106,7 +145,11 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			if _, err := lease.Store.BeginOperation(ctx, lease.Lease, operationID); err != nil {
 				return nil, execution.EffectJournalError{Err: err}
 			}
-			result, callErr := invokeJournaledTool(ctx, original, args)
+			callCtx := ctx
+			if class == execution.ReplayIdempotentExternal {
+				callCtx = tool.WithEffectKey(ctx, operation.EffectKey)
+			}
+			result, callErr := invokeJournaledTool(callCtx, original, args)
 			if callErr != nil {
 				return result, execution.EffectJournalError{Err: errors.Join(callErr, execution.ErrEffectNeedsReconciliation)}
 			}
@@ -119,9 +162,19 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			}
 			outputHash := sha256.Sum256(output)
 			fingerprint = hex.EncodeToString(outputHash[:])
+			if class == execution.ReplayIdempotentExternal {
+				confirmed, observed, err := wrapped.Recovery.Observe(ctx, descriptor, operation.EffectKey)
+				if err != nil || !observed {
+					return result, execution.EffectJournalError{Err: errors.Join(err, execution.ErrEffectNeedsReconciliation)}
+				}
+				proof, err := json.Marshal(confirmed)
+				if err != nil || !bytes.Equal(proof, output) {
+					return result, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
+				}
+			}
 			if class == execution.ReplayFingerprintedWrite {
-				after := readFileState(root, observationPath)
-				if !after.exists {
+				after, err := observeFileState(root, observationPath)
+				if err != nil || !after.exists {
 					return result, execution.EffectJournalError{Err: execution.ErrEffectNeedsReconciliation}
 				}
 				if after.hash != expectedFingerprint {
@@ -157,6 +210,38 @@ func safeObservationPath(root, path string) (string, bool) {
 		}
 	}
 	return path, true
+}
+
+func observeFileState(root, path string) (fileState, error) {
+	if _, ok := safeObservationPath(root, path); !ok {
+		return fileState{}, fmt.Errorf("unsafe file observation path %q", path)
+	}
+	fs, err := os.OpenRoot(root)
+	if err != nil {
+		return fileState{}, fmt.Errorf("open observation root: %w", err)
+	}
+	defer fs.Close()
+	file, err := fs.Open(path)
+	if os.IsNotExist(err) {
+		return fileState{}, nil
+	}
+	if err != nil {
+		return fileState{}, fmt.Errorf("open observed file: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return fileState{}, fmt.Errorf("observed file %q is not regular", path)
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return fileState{}, fmt.Errorf("hash observed file: %w", err)
+	}
+	if _, ok := safeObservationPath(root, path); !ok {
+		return fileState{}, fmt.Errorf("observed file %q changed during inspection", path)
+	}
+	return fileState{hash: hex.EncodeToString(hash.Sum(nil)), size: size, exists: true}, nil
 }
 
 func invokeJournaledTool(ctx context.Context, handler tool.Handler, args map[string]any) (result any, err error) {

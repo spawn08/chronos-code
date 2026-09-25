@@ -208,12 +208,37 @@ func (s *Scheduler) CompleteWithEvidence(ctx context.Context, p Plan, nodeID Nod
 // CompleteWithArtifact binds the accepted patch to its node in the same fenced
 // transaction that commits node completion and releases the owner lease.
 func (s *Scheduler) CompleteWithArtifact(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, evidenceIDs []EvidenceID, artifactID string) error {
+	return s.CompleteWithArtifactReceipt(ctx, p, nodeID, leaseID, eventID, key, evidenceIDs, artifactID, "")
+}
+
+// CompleteWithArtifactReceipt atomically binds a durable operator undo receipt
+// to the accepted patch and the fenced node completion.
+func (s *Scheduler) CompleteWithArtifactReceipt(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, evidenceIDs []EvidenceID, artifactID, receiptID string) error {
+	if err := validateReceiptID(receiptID); err != nil {
+		return err
+	}
+	if artifactID == "" && receiptID != "" {
+		return fmt.Errorf("undo receipt requires an accepted artifact")
+	}
 	if artifactID != "" {
 		if err := validateArtifactID(artifactID); err != nil {
 			return err
 		}
 	}
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCompleted, "complete", evidenceIDs, artifactID)
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCompleted, "complete", evidenceIDs, artifactID, receiptID)
+}
+
+func validateReceiptID(id string) error {
+	if id == "" {
+		return nil // legacy accepted artifacts have no operator undo receipt
+	}
+	if len(id) != 32 {
+		return fmt.Errorf("invalid plan integration receipt")
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		return fmt.Errorf("invalid plan integration receipt: %w", err)
+	}
+	return nil
 }
 
 func validateArtifactID(artifactID string) error {
@@ -227,15 +252,15 @@ func validateArtifactID(artifactID string) error {
 }
 
 func (s *Scheduler) Block(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeBlocked, "block", nil, "")
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeBlocked, "block", nil, "", "")
 }
 
 func (s *Scheduler) Fail(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeFailed, "fail", nil, "")
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeFailed, "fail", nil, "", "")
 }
 
 func (s *Scheduler) Cancel(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey) error {
-	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCanceled, "cancel", nil, "")
+	return s.finish(ctx, p, nodeID, leaseID, eventID, key, NodeCanceled, "cancel", nil, "", "")
 }
 
 // Stop atomically persists a typed terminal result and its plan stop state.
@@ -349,7 +374,7 @@ func (s *Scheduler) transitionLeased(ctx context.Context, p Plan, nodeID NodeID,
 	return nil
 }
 
-func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, next NodeState, operation string, evidenceIDs []EvidenceID, artifactID string) error {
+func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID LeaseID, eventID EventID, key IdempotencyKey, next NodeState, operation string, evidenceIDs []EvidenceID, artifactID, receiptID string) error {
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin %s node: %w", operation, err)
@@ -370,7 +395,7 @@ func (s *Scheduler) finish(ctx context.Context, p Plan, nodeID NodeID, leaseID L
 		}
 	}
 	if artifactID != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_artifacts (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, artifact_id) VALUES (?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), nodeID, artifactID)...); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO plan_artifacts (tenant_id, repository_id, task_id, plan_id, generation_id, node_id, artifact_id, receipt_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, append(planArgs(p), nodeID, artifactID, receiptID)...); err != nil {
 			return fmt.Errorf("persist accepted plan artifact: %w", err)
 		}
 	}

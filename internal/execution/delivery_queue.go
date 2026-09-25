@@ -132,8 +132,12 @@ ORDER BY available_at, created_at, delivery_id LIMIT 1`, timestamp(now), timesta
 	expires := now.Add(leaseDuration)
 	err = tx.QueryRowContext(ctx, `UPDATE delivery_queue SET status = 'leased', waiting_signal = '', lease_owner_id = ?,
 lease_epoch = lease_epoch + 1, lease_acquired_at = ?, lease_expires_at = ?, lease_heartbeat_at = ?, updated_at = ?
-WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ?
-RETURNING lease_epoch, lease_acquired_at`, ownerID, timestamp(now), timestamp(expires), timestamp(now), timestamp(now), scope.TenantID, scope.RepositoryID, id).Scan(&epoch, &acquiredAt)
+	WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ?
+	AND (((status = 'ready' OR (status = 'waiting' AND waiting_signal = 'retry')) AND available_at <= ?) OR (status = 'leased' AND lease_expires_at <= ?))
+	RETURNING lease_epoch, lease_acquired_at`, ownerID, timestamp(now), timestamp(expires), timestamp(now), timestamp(now), scope.TenantID, scope.RepositoryID, id, timestamp(now), timestamp(now)).Scan(&epoch, &acquiredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Lease{}, ErrNoRunnableDelivery
+	}
 	if err != nil {
 		return Lease{}, fmt.Errorf("lease delivery: %w", err)
 	}

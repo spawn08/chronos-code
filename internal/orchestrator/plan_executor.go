@@ -130,17 +130,27 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 		mapped.Workspace.Cleanup.State = "complete"
 		return mapped, nil
 	}
-	integrated, err := e.worktrees.Integrate(ctx, handle, collected.ChangedPaths)
+	var integrated worktree.Result
+	if lease, ok := execution.OperationLeaseFromContext(ctx); ok {
+		err = lease.Store.WithLeaseEffect(ctx, lease.Lease, 2*time.Minute, func(effectCtx context.Context) error {
+			var applyErr error
+			integrated, applyErr = e.worktrees.Integrate(effectCtx, handle, collected.ChangedPaths)
+			return applyErr
+		})
+	} else {
+		integrated, err = e.worktrees.Integrate(ctx, handle, collected.ChangedPaths)
+	}
 	if err != nil {
-		if integrated.Cleanup.State == string(worktree.CleanupPending) && integrated.ArtifactID != "" {
+		if integrated.ArtifactID != "" && (integrated.Cleanup.State == string(worktree.CleanupPending) || integrated.Cleanup.State == "complete") {
 			mapped.Workspace = &integrated
-			return mapped, &plan.StopError{Reason: plan.StopAmbiguity, Err: fmt.Errorf("plan node changes applied but cleanup pending: %w", err)}
+			return mapped, &plan.StopError{Reason: plan.StopAmbiguity, Err: fmt.Errorf("plan node integration needs receipt reconciliation: %w", err)}
 		}
 		cancelErr := e.cancel(handle)
 		return mapped, errors.Join(fmt.Errorf("integrate plan node worktree: %w", err), cancelErr)
 	}
 	mapped.ChangedPaths = append([]string(nil), integrated.ChangedPaths...)
 	mapped.Workspace.ArtifactID = integrated.ArtifactID
+	mapped.Workspace.ReceiptID = integrated.ReceiptID
 	mapped.Workspace.Cleanup = integrated.Cleanup
 	return mapped, nil
 }

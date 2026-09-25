@@ -2,16 +2,20 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/sdk/team"
 
 	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/budget"
@@ -221,6 +225,59 @@ func TestWorkerRestartParksPriorUnknownEffectBeforeModelReplay(t *testing.T) {
 	}
 }
 
+func TestWorkerRestartDoesNotResubmitCompletedUncheckpointedModelCall(t *testing.T) {
+	ctx := context.Background()
+	clock := &deliveryClock{}
+	clock.timestamp.Store(time.Now().Add(time.Second).UnixNano())
+	path := filepath.Join(t.TempDir(), "deliveries.db")
+	store, err := execution.OpenDeliveryStoreWithClock(ctx, path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "request", Goal: execution.Goal{Statement: "inspect", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Claim(ctx, "old", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveUsage(ctx, scope, "delivery", execution.UsageReservation{CallID: "old-model", Provider: "fixture", Model: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileUsage(ctx, scope, "delivery", "old-model", execution.IncurredUsage{InputTokens: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock.timestamp.Add(int64(time.Minute + time.Second))
+	store, err = execution.OpenDeliveryStoreWithClock(ctx, path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	provider := &executionTestProvider{name: "should-not-run", modelID: "fixture"}
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"reader": newExecutionTestAgent("reader", provider)}, active: "reader", workspace: &workspace.Info{Root: t.TempDir()}}
+	executor, err := NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "replacement", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.contexts) != 0 {
+		t.Fatal("uncheckpointed model call was submitted a second time")
+	}
+	loaded, err := store.Load(ctx, scope, "delivery")
+	if err != nil || loaded.State != execution.DeliveryWaitingDecision {
+		t.Fatalf("uncheckpointed model outcome = %+v, error = %v", loaded, err)
+	}
+}
+
 func TestWorkerRestartObservesCompletedFileWriteWithoutReplayingIt(t *testing.T) {
 	ctx := context.Background()
 	clock := &deliveryClock{}
@@ -360,5 +417,293 @@ func TestReadOnlyDeliveryDoesNotPersistEpisodeOutsideEffectGrant(t *testing.T) {
 	records, err := layers.Recall(ctx, orch.runtimeMemory.options, memory.LayerQuery{Scope: memory.ScopeProject, Kind: memory.KindEpisodic})
 	if err != nil || len(records) != 0 {
 		t.Fatalf("read-only worker wrote episodic memory = %+v, error = %v", records, err)
+	}
+}
+
+func testDurableTeamOrchestrator(t *testing.T, root string) (*Orchestrator, *executionTestProvider, *executionTestProvider, *agent.Agent) {
+	t.Helper()
+	first := &executionTestProvider{name: "first", modelID: "claude-sonnet-4-6", usage: model.Usage{PromptTokens: 2, CompletionTokens: 1}, known: true}
+	second := &executionTestProvider{name: "second", modelID: "claude-sonnet-4-6", usage: model.Usage{PromptTokens: 3, CompletionTokens: 1}, known: true}
+	firstAgent := newExecutionTestAgent("first", first)
+	secondAgent := newExecutionTestAgent("second", second)
+	roles := map[string]*agent.Agent{"first": firstAgent, "second": secondAgent}
+	members := team.New("pair", "Pair", team.StrategySequential).AddAgent(firstAgent).AddAgent(secondAgent)
+	orch := &Orchestrator{agents: roles, active: "first", teams: map[string]*team.Team{"pair": members}, workspace: &workspace.Info{Root: root}}
+	for id, a := range roles {
+		a.Hooks = append(a.Hooks, deliveryBudgetHook{session: budgetHook{tracker: budget.NewTracker(0, 0), orchestrator: orch, agentID: id}})
+	}
+	return orch, first, second, secondAgent
+}
+
+func TestReadOnlyTeamWorkerCheckpointsMembersAndParksResult(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "team-delivery", AdmissionKey: "key", MaxCostMicrodollars: 20000, PolicyReference: execution.ReadOnlyTeamPolicyPrefix + "pair", Goal: execution.Goal{Statement: "inspect together", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	orch, first, second, _ := testDurableTeamOrchestrator(t, t.TempDir())
+	executor, err := NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "worker", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.contexts) != 1 || len(second.contexts) != 1 {
+		t.Fatalf("team member calls = first %d second %d", len(first.contexts), len(second.contexts))
+	}
+	identity, ok := agent.RunIdentityFromContext(second.executionContext(0))
+	if !ok || identity.DeliveryID != "team-delivery" || identity.NodeID != "team:pair:1" || identity.RoleID != "second" || identity.ParentInvocationID == "" {
+		t.Fatalf("second member identity = %+v, ok=%v", identity, ok)
+	}
+	attempts, err := store.Attempts(ctx, scope, "team-delivery")
+	var checkpoint teamCheckpoint
+	if err != nil || len(attempts) != 1 || json.Unmarshal(attempts[0].Checkpoint, &checkpoint) != nil || len(checkpoint.Responses) != 2 || checkpoint.Responses[1] != "second" || checkpoint.ReconciledCalls != 2 {
+		t.Fatalf("persisted team receipt = %+v, attempts = %+v, error = %v", checkpoint, attempts, err)
+	}
+	loaded, err := store.Load(ctx, scope, "team-delivery")
+	if err != nil || loaded.State != execution.DeliveryWaitingDecision {
+		t.Fatalf("team result = %+v, error = %v", loaded, err)
+	}
+}
+
+type cancelTeamMemberHook struct{ cancel context.CancelFunc }
+
+func (h cancelTeamMemberHook) Before(_ context.Context, event *hooks.Event) error {
+	if event.Type == hooks.EventModelCallBefore {
+		h.cancel()
+	}
+	return nil
+}
+func (cancelTeamMemberHook) After(context.Context, *hooks.Event) error { return nil }
+
+func TestReadOnlyTeamWorkerRestartSkipsCheckpointedMember(t *testing.T) {
+	clock := &deliveryClock{}
+	clock.timestamp.Store(time.Now().Add(time.Second).UnixNano())
+	path := filepath.Join(t.TempDir(), "deliveries.db")
+	store, err := execution.OpenDeliveryStoreWithClock(context.Background(), path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(context.Background(), execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", PolicyReference: execution.ReadOnlyTeamPolicyPrefix + "pair", Goal: execution.Goal{Statement: "inspect together", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	orch, first, second, secondAgent := testDurableTeamOrchestrator(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	secondAgent.Hooks = append(hooks.Chain{cancelTeamMemberHook{cancel: cancel}}, secondAgent.Hooks...)
+	executor, err := NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "old-worker", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupted team attempt = %v", err)
+	}
+	attempts, err := store.Attempts(context.Background(), scope, "delivery")
+	var checkpoint teamCheckpoint
+	if err != nil || len(attempts) != 1 || json.Unmarshal(attempts[0].Checkpoint, &checkpoint) != nil || len(checkpoint.Responses) != 1 || checkpoint.ReconciledCalls != 1 {
+		t.Fatalf("interrupted team checkpoint = %+v, attempts=%+v, error=%v", checkpoint, attempts, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock.timestamp.Add(int64(time.Minute + time.Second))
+	store, err = execution.OpenDeliveryStoreWithClock(context.Background(), path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secondAgent.Hooks = secondAgent.Hooks[1:]
+	executor, err = NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "replacement", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.contexts) != 1 || len(second.contexts) != 1 {
+		t.Fatalf("resumed team reexecuted a completed member: first=%d second=%d", len(first.contexts), len(second.contexts))
+	}
+	loaded, err := store.Load(context.Background(), scope, "delivery")
+	if err != nil || loaded.State != execution.DeliveryWaitingDecision {
+		t.Fatalf("resumed team = %+v, error = %v", loaded, err)
+	}
+}
+
+type cancelAfterTeamModelHook struct{ cancel context.CancelFunc }
+
+func (cancelAfterTeamModelHook) Before(context.Context, *hooks.Event) error { return nil }
+func (h cancelAfterTeamModelHook) After(_ context.Context, event *hooks.Event) error {
+	if event.Type == hooks.EventModelCallAfter {
+		h.cancel()
+	}
+	return nil
+}
+
+func TestReadOnlyTeamWorkerParksUncheckpointedModelCallAfterRestart(t *testing.T) {
+	clock := &deliveryClock{}
+	clock.timestamp.Store(time.Now().Add(time.Second).UnixNano())
+	path := filepath.Join(t.TempDir(), "deliveries.db")
+	store, err := execution.OpenDeliveryStoreWithClock(context.Background(), path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(context.Background(), execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", PolicyReference: execution.ReadOnlyTeamPolicyPrefix + "pair", Goal: execution.Goal{Statement: "inspect together", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	orch, first, second, secondAgent := testDurableTeamOrchestrator(t, t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	secondAgent.Hooks = append(hooks.Chain{cancelAfterTeamModelHook{cancel: cancel}}, secondAgent.Hooks...)
+	executor, err := NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "old", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("interrupt between model and checkpoint = %v", err)
+	}
+	usage, err := store.Usage(context.Background(), scope, "delivery")
+	if err != nil || usage.ReconciledCalls != 2 || len(first.contexts) != 1 || len(second.contexts) != 1 {
+		t.Fatalf("observed but uncheckpointed step = %+v, first=%d second=%d error=%v", usage, len(first.contexts), len(second.contexts), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	clock.timestamp.Add(int64(time.Minute + time.Second))
+	store, err = execution.OpenDeliveryStoreWithClock(context.Background(), path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secondAgent.Hooks = secondAgent.Hooks[1:]
+	executor, err = NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "replacement", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.contexts) != 1 || len(second.contexts) != 1 {
+		t.Fatalf("uncheckpointed prior model call was replayed: first=%d second=%d", len(first.contexts), len(second.contexts))
+	}
+	attempts, err := store.Attempts(context.Background(), scope, "delivery")
+	if err != nil || len(attempts) != 2 || attempts[1].Error == "" {
+		t.Fatalf("recovery decision = %+v, error=%v", attempts, err)
+	}
+}
+
+type externalReceiptAdapter struct {
+	receipts map[string]map[string]any
+	observed int
+}
+
+func (a *externalReceiptAdapter) Prepare(_ context.Context, args map[string]any, _ string) (string, error) {
+	resource, _ := args["resource"].(string)
+	return resource, nil
+}
+
+func (a *externalReceiptAdapter) Observe(_ context.Context, descriptor, key string) (any, bool, error) {
+	a.observed++
+	if descriptor != "item" {
+		return nil, false, nil
+	}
+	receipt, ok := a.receipts[key]
+	return receipt, ok, nil
+}
+
+func TestWorkerRestartObservesExternalDestinationBeforeReceiptReplay(t *testing.T) {
+	clock := &deliveryClock{}
+	clock.timestamp.Store(time.Now().Add(time.Second).UnixNano())
+	path := filepath.Join(t.TempDir(), "deliveries.db")
+	store, err := execution.OpenDeliveryStoreWithClock(context.Background(), path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(context.Background(), execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", Goal: execution.Goal{Statement: "create remote item", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.Claim(context.Background(), "old", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := &externalReceiptAdapter{receipts: map[string]map[string]any{}}
+	providerCalls, effectCalls := 0, 0
+	provider := resourceProvider{chat: func(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
+		providerCalls++
+		if providerCalls == 1 {
+			return &model.ChatResponse{StopReason: model.StopReasonToolCall, ToolCalls: []model.ToolCall{{ID: "call-1", Name: "external_mutate", Arguments: `{"resource":"item"}`}}}, nil
+		}
+		return resourceReply("done"), nil
+	}}
+	writer := newExecutionTestAgent("writer", provider)
+	writer.Tools.Register(&tool.Definition{Name: "external_mutate", Permission: tool.PermAllow, Effects: []tool.Effect{tool.EffectExternalMutation}, Recovery: remote,
+		Handler: func(ctx context.Context, _ map[string]any) (any, error) {
+			effectCalls++
+			key, ok := tool.EffectKeyFromContext(ctx)
+			if !ok {
+				return nil, errors.New("missing host idempotency key")
+			}
+			receipt := map[string]any{"receipt": "observed"}
+			remote.receipts[key] = receipt
+			return receipt, store.Close() // destination accepted; local receipt lost
+		},
+	})
+	wrapDeliveryOperations(writer)
+	ctx := security.WithEffectGrant(context.Background(), security.EffectExternalMutation)
+	ctx = agent.WithRunIdentity(execution.WithOperationLease(ctx, store, lease), agent.RunIdentity{TaskID: "delivery", RoleID: "writer", InvocationID: "old-invocation"})
+	if _, err := writer.Chat(ctx, "create"); err == nil || providerCalls != 1 || effectCalls != 1 {
+		t.Fatalf("ambiguous external effect: calls=%d effects=%d error=%v", providerCalls, effectCalls, err)
+	}
+	clock.timestamp.Add(int64(time.Minute + time.Second))
+	store, err = execution.OpenDeliveryStoreWithClock(context.Background(), path, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	reader := &executionTestProvider{name: "reader", modelID: "fixture"}
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"writer": writer, "reader": newExecutionTestAgent("reader", reader)}, active: "reader", workspace: &workspace.Info{Root: t.TempDir()}}
+	executor, err := NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "replacement", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	op, err := store.Operation(context.Background(), scope, "delivery", "old-invocation:call-1")
+	if err != nil || op.Status != execution.OperationReconciled || op.ReplayClass != execution.ReplayIdempotentExternal || op.ObservationDescriptor != "item" || op.RoleID != "writer" || remote.observed != 2 || effectCalls != 1 || len(reader.contexts) != 0 {
+		t.Fatalf("external recovery = %+v, error=%v observed=%d effects=%d reader calls=%d", op, err, remote.observed, effectCalls, len(reader.contexts))
+	}
+	if _, err := store.ReconcileOperation(context.Background(), lease, op.ID, "late", op.OutputFingerprint, op.Result); !errors.Is(err, execution.ErrStaleLease) {
+		t.Fatalf("stale owner reconciled external effect: %v", err)
 	}
 }

@@ -84,10 +84,11 @@ func (r *taskRuntime) recordModelUsage(modelID string, usage model.Usage) error 
 	var cost int64
 	price, priceErr := budget.PriceForModel(modelID)
 	if priceErr == nil {
-		cost = int64(price.InputMicrodollarsPerToken)*int64(usage.UncachedPromptTokens()) +
-			int64(price.InputMicrodollarsPerToken)*int64(usage.CacheReadTokens)/10 +
-			int64(price.InputMicrodollarsPerToken)*int64(usage.CacheCreationTokens)*5/4 +
-			int64(price.OutputMicrodollarsPerToken)*int64(usage.CompletionTokens)
+		incurred, err := price.IncurredCost(usage)
+		if err != nil {
+			return fmt.Errorf("price model usage: %w", err)
+		}
+		cost = int64(incurred)
 	} else if r.budget.Snapshot().Limits.CostMicrodollars > 0 {
 		return priceErr
 	}

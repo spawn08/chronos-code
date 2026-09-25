@@ -22,6 +22,9 @@ func (p Plan) AcceptedArtifactIDs(nodeID NodeID) ([]string, error) {
 	}
 	artifacts := make(map[NodeID]string, len(p.Artifacts))
 	for _, artifact := range p.Artifacts {
+		if artifact.Undone {
+			continue
+		}
 		if _, ok := states[artifact.NodeID]; !ok || artifact.ID == "" || artifacts[artifact.NodeID] != "" {
 			return nil, fmt.Errorf("resolve predecessor artifacts: invalid accepted artifact for %q", artifact.NodeID)
 		}

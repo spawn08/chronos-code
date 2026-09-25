@@ -85,7 +85,7 @@ func TestDeliveryToolEffectIsJournaledBeforeAndAfterRealAgentToolLoop(t *testing
 	}
 }
 
-func TestObservedExternalEffectReturnsStoredReceiptForSameCall(t *testing.T) {
+func TestObservedUnknownProcessEffectReturnsStoredReceiptForSameCall(t *testing.T) {
 	ctx := context.Background()
 	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
 	if err != nil {
@@ -109,13 +109,13 @@ func TestObservedExternalEffectReturnsStoredReceiptForSameCall(t *testing.T) {
 		return resourceReply("done"), nil
 	}}
 	a := newExecutionTestAgent("worker", provider)
-	a.Tools.Register(&tool.Definition{Name: "external_mutate", Permission: tool.PermAllow, Effects: []tool.Effect{tool.EffectExternalMutation}, Handler: func(context.Context, map[string]any) (any, error) {
+	a.Tools.Register(&tool.Definition{Name: "external_mutate", Permission: tool.PermAllow, Effects: []tool.Effect{tool.EffectProcessExecution}, Handler: func(context.Context, map[string]any) (any, error) {
 		effects++
 		return map[string]any{"receipt": "observed"}, nil
 	}})
 	wrapDeliveryOperations(a)
 	ctx = agent.WithRunIdentity(ctx, agent.RunIdentity{TaskID: "delivery", RoleID: "worker", InvocationID: "run"})
-	ctx = security.WithEffectGrant(ctx, security.EffectExternalMutation)
+	ctx = security.WithEffectGrant(ctx, security.EffectProcessExecution)
 	ctx = execution.WithOperationLease(ctx, store, lease)
 	for range 2 {
 		response, err := a.Chat(ctx, "same request")
@@ -125,6 +125,56 @@ func TestObservedExternalEffectReturnsStoredReceiptForSameCall(t *testing.T) {
 	}
 	if effects != 1 || calls != 4 {
 		t.Fatalf("effect executions = %d, model calls = %d", effects, calls)
+	}
+}
+
+func TestDurableExternalMutationWithoutObserverCannotReachDestination(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", Goal: execution.Goal{Statement: "mutate remote", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := resourceProvider{chat: func(context.Context, *model.ChatRequest) (*model.ChatResponse, error) {
+		return &model.ChatResponse{StopReason: model.StopReasonToolCall, ToolCalls: []model.ToolCall{{ID: "call-1", Name: "external_mutate", Arguments: `{"resource":"item"}`}}}, nil
+	}}
+	effects := 0
+	a := newExecutionTestAgent("worker", provider)
+	a.Tools.Register(&tool.Definition{Name: "external_mutate", Permission: tool.PermAllow, Effects: []tool.Effect{tool.EffectExternalMutation}, Handler: func(context.Context, map[string]any) (any, error) {
+		effects++
+		return map[string]any{"ok": true}, nil
+	}})
+	wrapDeliveryOperations(a)
+	ctx = execution.WithOperationLease(ctx, store, lease)
+	ctx = agent.WithRunIdentity(ctx, agent.RunIdentity{TaskID: "delivery", RoleID: "worker", InvocationID: "run"})
+	ctx = security.WithEffectGrant(ctx, security.EffectExternalMutation)
+	if _, err := a.Chat(ctx, "mutate"); !errors.Is(err, execution.ErrEffectNeedsReconciliation) || effects != 0 {
+		t.Fatalf("unadapted external effect = %v, destination calls=%d", err, effects)
+	}
+	if _, err := store.Operation(ctx, scope, "delivery", "run:call-1"); !errors.Is(err, execution.ErrOperationNotFound) {
+		t.Fatalf("unsafe external intent was prepared: %v", err)
+	}
+}
+
+func TestFileObservationRejectsSymlinkOutsideWorkerWorkspace(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	state, err := observeFileState(root, "escape/secret")
+	if err == nil || state.exists {
+		t.Fatalf("worker observed an out-of-workspace file: %+v, error=%v", state, err)
 	}
 }
 

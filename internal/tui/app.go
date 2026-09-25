@@ -2701,7 +2701,7 @@ func (m *appModel) handleWhoamiCommand(arg string) {
 // handleContextCommand implements /context: model and usage details followed
 // by the latest metadata-only context composition report.
 func (m *appModel) handleContextCommand() {
-	provider, modelID := m.orch.ActiveModelInfo()
+	provider, modelID := m.orch.EffectiveModelInfo()
 	var b strings.Builder
 	fmt.Fprintf(&b, "model: %s / %s\n", provider, modelID)
 	if info, ok := modelinfo.Lookup(provider, modelID); ok {
@@ -2782,10 +2782,14 @@ func (m *appModel) usageSummary() string {
 	if contextTokens == 0 {
 		contextTokens = input + cacheRead + cacheWrite + output
 	}
-	return fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ context %d │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ output %d │ cost %s",
-		input, cacheRead, cacheWrite, output, contextTokens, m.formatCost(m.lastTurnCost.SpentMicrodollars), m.lastModelCalls, m.lastSubagents,
+	summary := fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ context %d │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ output %d │ cost %s",
+		input, cacheRead, cacheWrite, output, contextTokens, formatCost(m.lastTurnCost.SpentMicrodollars, m.lastTurnCost.UnpricedCalls), m.lastModelCalls, m.lastSubagents,
 		session.InputTokens, session.CacheReadTokens, session.OutputTokens,
-		m.formatCost(session.SpentMicrodollars))
+		formatCost(session.SpentMicrodollars, session.UnpricedCalls))
+	if session.UnpricedCalls > 0 {
+		summary += fmt.Sprintf("\nunpriced: %d model calls this session have no price entry; add the model to .chronos-code/pricing.yaml", session.UnpricedCalls)
+	}
+	return summary
 }
 
 func (m *appModel) usageStatus() string {
@@ -2802,13 +2806,16 @@ func (m *appModel) usageStatus() string {
 		}
 		status += fmt.Sprintf(" · %d %s", m.lastSubagents, label)
 	}
-	return status + " · " + m.formatCost(m.lastTurnCost.SpentMicrodollars)
+	return status + " · " + formatCost(m.lastTurnCost.SpentMicrodollars, m.lastTurnCost.UnpricedCalls)
 }
 
 func (m *appModel) turnUsageCounts() (input, output, cacheRead, cacheWrite int64) {
 	input, output = m.lastTurnCost.InputTokens, m.lastTurnCost.OutputTokens
 	cacheRead, cacheWrite = m.lastTurnCost.CacheReadTokens, m.lastTurnCost.CacheCreationTokens
-	if input == 0 && output == 0 && cacheRead == 0 && cacheWrite == 0 {
+	// Fall back to streamed usage only for a turn that made model calls the
+	// cost tracker did not see; a turn with no calls must not show the
+	// previous turn's usage.
+	if input == 0 && output == 0 && cacheRead == 0 && cacheWrite == 0 && m.lastModelCalls > 0 {
 		input = int64(m.lastKnownUsage.UncachedPromptTokens())
 		output = int64(m.lastKnownUsage.CompletionTokens)
 		cacheRead = int64(m.lastKnownUsage.CacheReadTokens)
@@ -2817,12 +2824,29 @@ func (m *appModel) turnUsageCounts() (input, output, cacheRead, cacheWrite int64
 	return input, output, cacheRead, cacheWrite
 }
 
-func (m *appModel) formatCost(cost budget.Microdollars) string {
-	_, modelID := m.orch.ActiveModelInfo()
-	if _, err := budget.PriceForModel(modelID); err != nil {
-		return "n/a"
+// formatCost renders spend from the calls that actually ran. Unpriced calls
+// make the figure a lower bound ("≥$…"), or "unpriced" if nothing was priced.
+func formatCost(cost budget.Microdollars, unpricedCalls int64) string {
+	usd := fmt.Sprintf("$%.4f", float64(cost)/1_000_000)
+	switch {
+	case unpricedCalls == 0:
+		return usd
+	case cost == 0:
+		return "unpriced"
+	default:
+		return "≥" + usd
 	}
-	return fmt.Sprintf("$%.6f", float64(cost)/1_000_000)
+}
+
+// sessionCostSegment is the always-visible status bar session cost, or ""
+// before the session has made any model call.
+func (m *appModel) sessionCostSegment() string {
+	session := m.orch.SessionCost()
+	if session.InputTokens == 0 && session.OutputTokens == 0 && session.CacheReadTokens == 0 &&
+		session.CacheCreationTokens == 0 && session.UnpricedCalls == 0 {
+		return ""
+	}
+	return formatCost(session.SpentMicrodollars, session.UnpricedCalls)
 }
 
 func (m *appModel) transcriptBytes() int {
@@ -2876,7 +2900,7 @@ func (m *appModel) contextUsageSegment() string {
 	if used == 0 {
 		return ""
 	}
-	provider, modelID := m.orch.ActiveModelInfo()
+	provider, modelID := m.orch.EffectiveModelInfo()
 	info, ok := modelinfo.Lookup(provider, modelID)
 	if !ok || info.ContextWindow <= 0 {
 		return "ctx " + formatTokenCount(used)
@@ -3166,12 +3190,11 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		CacheReadTokens:     cost.CacheReadTokens - m.turnCostStart.CacheReadTokens,
 		CacheCreationTokens: cost.CacheCreationTokens - m.turnCostStart.CacheCreationTokens,
 		SpentMicrodollars:   cost.SpentMicrodollars - m.turnCostStart.SpentMicrodollars,
+		UnpricedCalls:       cost.UnpricedCalls - m.turnCostStart.UnpricedCalls,
 	}
-	if turnCost.InputTokens > 0 || turnCost.OutputTokens > 0 || turnCost.CacheReadTokens > 0 || turnCost.CacheCreationTokens > 0 {
-		m.lastTurnCost = turnCost
-		m.lastModelCalls = m.turnModelCalls
-		m.lastSubagents = m.turnSubagents
-	}
+	m.lastTurnCost = turnCost
+	m.lastModelCalls = m.turnModelCalls
+	m.lastSubagents = m.turnSubagents
 	if interrupted {
 		m.statusMsg = "interrupted"
 	} else if err != nil {
@@ -3849,9 +3872,14 @@ func (m *appModel) renderStatusBar() string {
 	if m.orch.PlanMode() {
 		leftText += " │ plan"
 	}
-	if _, modelID := m.orch.ActiveModelInfo(); modelID != "" {
+	if _, modelID := m.orch.EffectiveModelInfo(); modelID != "" {
 		leftText += " │ "
 		highlight(&leftText, styleStatusModel.Style, func() string { return modelID })
+	}
+	// Session cost sits beside the model, ahead of optional segments, so
+	// left-segment truncation on narrow terminals drops it last.
+	if costSeg := m.sessionCostSegment(); costSeg != "" {
+		leftText += " │ " + costSeg
 	}
 	if m.width >= 100 {
 		if think := m.orch.ThinkingLevel(); think != "off" {

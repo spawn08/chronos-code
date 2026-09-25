@@ -3,9 +3,11 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool/builtins"
@@ -220,5 +222,33 @@ func TestPlanNodeExecutorRejectsOutOfScopeMutationBeforeIntegration(t *testing.T
 	var stopped *plan.StopError
 	if !errors.As(err, &stopped) || stopped.Reason != plan.StopApprovalDenied || !worktrees.canceled || len(worktrees.integrated) != 0 {
 		t.Fatalf("out-of-scope patch = %v, canceled=%t integrated=%v", err, worktrees.canceled, worktrees.integrated)
+	}
+}
+
+func TestPlanNodeExecutorCannotIntegrateAfterDeliveryLeaseExpires(t *testing.T) {
+	ctx := context.Background()
+	clock := &deliveryClock{}
+	clock.timestamp.Store(time.Now().Add(time.Second).UnixNano())
+	store, err := execution.OpenDeliveryStoreWithClock(ctx, filepath.Join(t.TempDir(), "delivery.db"), clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", Goal: execution.Goal{Statement: "edit", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.Claim(ctx, "old", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.timestamp.Add(int64(time.Minute + time.Second))
+	worktrees := &fakePlanWorktrees{handle: worktree.Handle{Manifest: worktree.Manifest{ID: "workspace", WorktreePath: "/isolated/workspace"}}, collected: worktree.Result{ChangedPaths: []string{"changed.go"}}}
+	runner := &fakeExecutionRunner{result: ExecutionResult{StopReason: execution.StopSuccess, Verification: verification.Decision{Allowed: true}}}
+	executor := &planNodeExecutor{runner: runner, worktrees: worktrees, repositoryRoot: "/parent", implementationAgent: "coder"}
+	ctx = execution.WithOperationLease(ctx, store, lease)
+	_, err = executor.Execute(ctx, plan.NodeExecutionRequest{Plan: plan.Plan{TaskID: "task", Nodes: []plan.Node{{ID: "node", State: plan.NodeRunning}}}, Node: plan.Node{ID: "node", Scope: "changed.go", Verification: "verified"}, Attempt: "attempt"})
+	if !errors.Is(err, execution.ErrStaleLease) || len(worktrees.integrated) != 0 || !worktrees.canceled {
+		t.Fatalf("stale plan integration = %v, integrated=%v, canceled=%v", err, worktrees.integrated, worktrees.canceled)
 	}
 }

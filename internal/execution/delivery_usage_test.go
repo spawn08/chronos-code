@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestDeliveryUsageRecordsActualOverageOnceAcrossRestart(t *testing.T) {
@@ -250,5 +251,39 @@ func TestDeliveryUsageSeparatesProviderWaitFromActiveComputeAcrossRestart(t *tes
 	usage, err = store.Usage(ctx, admission.Scope, admission.DeliveryID)
 	if err != nil || usage.ProviderNanoseconds != 5000 {
 		t.Fatalf("duplicate completion changed wait time = %+v, error = %v", usage, err)
+	}
+}
+
+func TestDeliveryUsageProviderAdmissionFencesReclaimedWorker(t *testing.T) {
+	ctx := context.Background()
+	clock := newControlledClock()
+	store := openQueueTestStore(t, filepath.Join(t.TempDir(), "deliveries.db"), clock)
+	admission := testAdmission("tenant", "repo", "delivery", "key")
+	if _, err := store.AdmitRunnable(ctx, admission); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.Claim(ctx, "old", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute + time.Second)
+	request := UsageReservation{CallID: "old-call", Provider: "p", Model: "m", KnownPrice: true, ReservedMicrodollars: 10}
+	if _, err := store.ReserveUsageLease(ctx, old, request); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("expired owner admitted a provider call: %v", err)
+	}
+	current, err := store.Claim(ctx, "replacement", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveUsageLease(ctx, old, request); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("superseded owner admitted a provider call: %v", err)
+	}
+	request.CallID = "replacement-call"
+	if _, err := store.ReserveUsageLease(ctx, current, request); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := store.Usage(ctx, admission.Scope, admission.DeliveryID)
+	if err != nil || usage.OutstandingCalls != 1 || usage.ReservedMicrodollars != 10 {
+		t.Fatalf("replacement usage = %+v, error = %v", usage, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/router"
@@ -56,6 +57,9 @@ func (o *Orchestrator) ExecutePlan(ctx context.Context, strategistJSON []byte, i
 	if err != nil {
 		return PlanExecutionResult{}, err
 	}
+	if err := o.validatePlanArtifactReceipts(persisted); err != nil {
+		return PlanExecutionResult{}, err
+	}
 	persisted, err = o.planController.Run(ctx, persisted)
 	result := PlanExecutionResult{Plan: persisted}
 	if err != nil {
@@ -75,6 +79,62 @@ func (o *Orchestrator) ExecutePlan(ctx context.Context, strategistJSON []byte, i
 		return result, fmt.Errorf("synthesize completed plan: %w", err)
 	}
 	return result, nil
+}
+
+func (o *Orchestrator) validatePlanArtifactReceipts(p plan.Plan) error {
+	if o.worktreeManager == nil {
+		return nil
+	}
+	for _, artifact := range p.Artifacts {
+		if artifact.ReceiptID == "" {
+			continue
+		}
+		receipt, err := o.worktreeManager.LoadReceipt(artifact.ReceiptID)
+		if err != nil {
+			return fmt.Errorf("load accepted node %q integration receipt: %w", artifact.NodeID, err)
+		}
+		if receipt.ArtifactID != artifact.ID || artifact.Undone != (receipt.State == "undone") || receipt.State == "undo_prepared" {
+			return fmt.Errorf("plan node %q artifact state requires reconciliation", artifact.NodeID)
+		}
+	}
+	return nil
+}
+
+// UndoPlanArtifact is an authorized compensating action for an accepted leaf.
+// It never attempts to reverse API/process effects or completed descendants.
+// A crash after the file undo but before its plan transition can be retried
+// with the same receipt, which remains durable in the worktree manager.
+func (o *Orchestrator) UndoPlanArtifact(ctx context.Context, identity PlanRuntimeIdentity, nodeID plan.NodeID) error {
+	auth, ok := authorization.FromContext(ctx)
+	if !ok || auth.Action != "plan.undo" || auth.TenantID != string(identity.TenantID) || auth.RepositoryID != string(identity.RepositoryID) {
+		return authorization.ErrDenied
+	}
+	if o.planStore == nil || o.worktreeManager == nil || o.workspace == nil {
+		return fmt.Errorf("plan artifact undo runtime is unavailable")
+	}
+	ref := plan.Plan{TenantID: identity.TenantID, RepositoryID: identity.RepositoryID, TaskID: identity.TaskID, ID: identity.PlanID, Generation: identity.Generation}
+	loaded, err := o.planStore.Load(ctx, ref)
+	if err != nil {
+		return err
+	}
+	var receiptID string
+	for _, artifact := range loaded.Artifacts {
+		if artifact.NodeID == nodeID {
+			receiptID = artifact.ReceiptID
+			break
+		}
+	}
+	if receiptID == "" {
+		return plan.ErrArtifactUndoBlocked
+	}
+	version, err := o.planStore.ArtifactUndoEligible(ctx, ref, nodeID, receiptID)
+	if err != nil {
+		return err
+	}
+	if err := o.worktreeManager.Undo(ctx, o.workspace.Root, receiptID); err != nil {
+		return err
+	}
+	return o.planStore.RecordArtifactUndo(ctx, ref, nodeID, receiptID, version)
 }
 
 func (o *Orchestrator) closedLoopPPDEnabled() bool {

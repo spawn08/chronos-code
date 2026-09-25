@@ -11,11 +11,13 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/execution"
+	"github.com/spawn08/chronos/sdk/team"
 )
 
 type deliveryAdmissionRequest struct {
 	Goal                string `json:"goal"`
 	RunReadOnly         bool   `json:"run_read_only,omitempty"`
+	TeamID              string `json:"team_id,omitempty"`
 	MaxCostMicrodollars int64  `json:"max_cost_microdollars,omitempty"`
 	Requirements        []struct {
 		Statement string   `json:"statement"`
@@ -73,6 +75,21 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_cost_microdollars must be non-negative"})
 		return
 	}
+	if request.TeamID != "" {
+		if !request.RunReadOnly || strings.TrimSpace(request.TeamID) != request.TeamID || s.orch == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "team_id requires a configured read-only delivery worker"})
+			return
+		}
+		configured, ok := s.orch.GetTeam(request.TeamID)
+		if !ok || configured == nil || configured.Strategy != team.StrategySequential || len(configured.Order) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "team_id must identify a configured sequential team"})
+			return
+		}
+		if s.cfg.DeliveryWorker == nil || !s.cfg.DeliveryWorker.CanRunCheckpointedTeam() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "checkpointed team worker is unavailable"})
+			return
+		}
+	}
 	if request.RunReadOnly && request.MaxCostMicrodollars > 0 && (s.cfg.DeliveryWorker == nil || !s.cfg.DeliveryWorker.CanRunCapped()) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delivery spending caps require durable model-call admission"})
 		return
@@ -106,6 +123,9 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 	policyReference := "admission-v1"
 	if request.RunReadOnly {
 		policyReference = "admission-readonly-v1"
+		if request.TeamID != "" {
+			policyReference = execution.ReadOnlyTeamPolicyPrefix + request.TeamID
+		}
 	}
 	admission := execution.Admission{
 		Scope: scope, DeliveryID: id, AdmissionKey: execution.AdmissionKey(key),

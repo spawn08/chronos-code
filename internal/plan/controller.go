@@ -338,7 +338,16 @@ func (c *Controller) claim(ctx context.Context, p Plan, expected Node) (Node, Cl
 	}
 	suffix := fmt.Sprintf("%s-%d", expected.ID, attempt)
 	request := ClaimRequest{AttemptID: AttemptID("controller-" + suffix), LeaseID: LeaseID("controller-" + suffix), EventID: EventID("controller-" + suffix), IdempotencyKey: IdempotencyKey("controller-" + suffix)}
-	claimed, err := c.scheduler.Claim(ctx, p, request)
+	var claimed Node
+	if guard := admissionGuardFromContext(ctx); guard != nil {
+		err = guard(ctx, func(guarded context.Context) error {
+			var claimErr error
+			claimed, claimErr = c.scheduler.Claim(guarded, p, request)
+			return claimErr
+		})
+	} else {
+		claimed, err = c.scheduler.Claim(ctx, p, request)
+	}
 	if err != nil {
 		return Node{}, ClaimRequest{}, err
 	}
@@ -426,10 +435,12 @@ func (c *Controller) runClaimed(ctx context.Context, p Plan, claimed Node, reque
 		return c.stopClaimed(ctx, p, claimed.ID, request, StopVerificationFailed)
 	}
 	artifactID := ""
+	receiptID := ""
 	if result.Workspace != nil {
 		artifactID = result.Workspace.ArtifactID
+		receiptID = result.Workspace.ReceiptID
 	}
-	return c.scheduler.CompleteWithArtifact(ctx, p, claimed.ID, request.LeaseID, EventID("complete-"+string(request.AttemptID)), IdempotencyKey("complete-"+string(request.AttemptID)), result.EvidenceIDs, artifactID)
+	return c.scheduler.CompleteWithArtifactReceipt(ctx, p, claimed.ID, request.LeaseID, EventID("complete-"+string(request.AttemptID)), IdempotencyKey("complete-"+string(request.AttemptID)), result.EvidenceIDs, artifactID, receiptID)
 }
 
 func validateNodeExecutionResult(result NodeExecutionResult, nodeID NodeID, attemptID AttemptID) error {

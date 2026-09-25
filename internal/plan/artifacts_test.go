@@ -27,14 +27,15 @@ func TestCompletedPlanArtifactIsAtomicAndFenced(t *testing.T) {
 	ctx, scheduler, p := schedulerPlan(t, []Node{{ID: "a", State: NodePending}, {ID: "b", State: NodePending}}, []Dependency{{NodeID: "b", DependsOn: "a"}}, SchedulerConfig{})
 	claimAndStart(t, ctx, scheduler, p, "a")
 	const artifact = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	if err := scheduler.CompleteWithArtifact(ctx, p, "a", "lease-a", "complete-a", "complete-a", []EvidenceID{"verified-a"}, artifact); err != nil {
+	const receipt = "0123456789abcdef0123456789abcdef"
+	if err := scheduler.CompleteWithArtifactReceipt(ctx, p, "a", "lease-a", "complete-a", "complete-a", []EvidenceID{"verified-a"}, artifact, receipt); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := scheduler.store.Load(ctx, p)
-	if err != nil || len(loaded.Artifacts) != 1 || loaded.Artifacts[0] != (Artifact{NodeID: "a", ID: artifact}) || loaded.Nodes[0].State != NodeCompleted || loaded.Nodes[1].State != NodeReady {
+	if err != nil || len(loaded.Artifacts) != 1 || loaded.Artifacts[0] != (Artifact{NodeID: "a", ID: artifact, ReceiptID: receipt}) || loaded.Nodes[0].State != NodeCompleted || loaded.Nodes[1].State != NodeReady {
 		t.Fatalf("completed artifact = %+v, error = %v", loaded, err)
 	}
-	if err := scheduler.CompleteWithArtifact(ctx, p, "a", "lease-a", "stale", "stale", nil, artifact); !errors.Is(err, ErrLeaseLost) {
+	if err := scheduler.CompleteWithArtifactReceipt(ctx, p, "a", "lease-a", "stale", "stale", nil, artifact, receipt); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("stale artifact completion = %v", err)
 	}
 }
@@ -42,12 +43,13 @@ func TestCompletedPlanArtifactIsAtomicAndFenced(t *testing.T) {
 func TestNewGenerationKeepsOnlyPreservedCompletedArtifacts(t *testing.T) {
 	const accepted = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	const discarded = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	const receipt = "0123456789abcdef0123456789abcdef"
 	p := Plan{TenantID: "tenant", RepositoryID: "repo", TaskID: "task", ID: "plan", Generation: "one", State: PlanReplanning,
 		Nodes:     []Node{{ID: "a", State: NodeCompleted}, {ID: "old", State: NodeBlocked}},
-		Artifacts: []Artifact{{NodeID: "a", ID: accepted}, {NodeID: "old", ID: discarded}},
+		Artifacts: []Artifact{{NodeID: "a", ID: accepted, ReceiptID: receipt}, {NodeID: "old", ID: discarded}},
 	}
 	next, err := p.NewGeneration("two", []Node{{ID: "a", State: NodePending}, {ID: "new", State: NodePending}}, []Dependency{{NodeID: "new", DependsOn: "a"}})
-	if err != nil || !reflect.DeepEqual(next.Artifacts, []Artifact{{NodeID: "a", ID: accepted}}) {
+	if err != nil || !reflect.DeepEqual(next.Artifacts, []Artifact{{NodeID: "a", ID: accepted, ReceiptID: receipt}}) {
 		t.Fatalf("successor artifacts = %+v, error = %v", next.Artifacts, err)
 	}
 	store := openTestSQLStore(t)

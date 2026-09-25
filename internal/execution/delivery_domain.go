@@ -58,6 +58,14 @@ const (
 	RequirementWaived    RequirementStatus = "waived"
 )
 
+// ReadOnlyTeamPolicyPrefix identifies an authenticated admission to a
+// checkpointed sequential team, never a model-supplied routing instruction.
+const ReadOnlyTeamPolicyPrefix = "admission-readonly-team:"
+
+// InternalPlanPolicyReference is reserved for a host-created plan already
+// persisted under this delivery ID. Public admission never selects this route.
+const InternalPlanPolicyReference = "internal-plan-worker-v1"
+
 const (
 	DeliveryEventAdmitted            DeliveryEventType = "admitted"
 	DeliveryEventTransitioned        DeliveryEventType = "transitioned"

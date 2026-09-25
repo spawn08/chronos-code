@@ -29,6 +29,9 @@ func (a *WorktreeAdapter) Inventory(context.Context) ([]Item, error) {
 	var items []Item
 	for _, handle := range handles {
 		manifest := handle.Manifest
+		if manifest.Integration != nil && manifest.Integration.State == "prepared" {
+			continue // an ambiguous apply outcome must retain its evidence
+		}
 		_, statErr := os.Lstat(manifest.WorktreePath)
 		if manifest.CleanupState != worktree.CleanupPending && !os.IsNotExist(statErr) {
 			continue

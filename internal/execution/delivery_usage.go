@@ -49,11 +49,23 @@ type CumulativeUsage struct {
 	CostKnown            bool  `json:"cost_known"`
 	UnknownCalls         int64 `json:"unknown_calls"`
 	OutstandingCalls     int64 `json:"outstanding_calls"`
+	ReconciledCalls      int64 `json:"reconciled_calls"`
 }
 
 // ReserveUsage records a stable call before contacting a provider. Competing
 // children share the same durable cap; no worker may reset it on a new window.
 func (s *DeliveryStore) ReserveUsage(ctx context.Context, scope DeliveryScope, id DeliveryID, request UsageReservation) (UsageReservation, error) {
+	return s.reserveUsage(ctx, scope, id, nil, request)
+}
+
+// ReserveUsageLease is the worker admission path. The lease fence and spending
+// reservation commit in one SQLite transaction; a reclaimed owner cannot
+// admit another provider request under the previous epoch.
+func (s *DeliveryStore) ReserveUsageLease(ctx context.Context, lease Lease, request UsageReservation) (UsageReservation, error) {
+	return s.reserveUsage(ctx, lease.Delivery.DeliveryScope, lease.Delivery.ID, &lease, request)
+}
+
+func (s *DeliveryStore) reserveUsage(ctx context.Context, scope DeliveryScope, id DeliveryID, lease *Lease, request UsageReservation) (UsageReservation, error) {
 	if err := validateDeliveryRef(scope, id); err != nil || request.CallID == "" || request.Provider == "" || request.Model == "" || request.EstimateTokens < 0 || request.ReservedMicrodollars < 0 || !request.KnownPrice && request.ReservedMicrodollars != 0 {
 		return UsageReservation{}, ErrInvalidDelivery
 	}
@@ -62,6 +74,11 @@ func (s *DeliveryStore) ReserveUsage(ctx context.Context, scope DeliveryScope, i
 		return UsageReservation{}, fmt.Errorf("begin usage reservation: %w", err)
 	}
 	defer tx.Rollback()
+	if lease != nil {
+		if err := verifyLease(ctx, tx, *lease, s.clock.Now().UTC()); err != nil {
+			return UsageReservation{}, err
+		}
+	}
 	delivery, err := loadDelivery(ctx, tx, scope, id)
 	if err != nil {
 		return UsageReservation{}, err
@@ -292,6 +309,10 @@ func loadCumulativeUsage(ctx context.Context, db queryer, scope DeliveryScope, i
 		if status != "reconciled" {
 			continue
 		}
+		if usage.ReconciledCalls == math.MaxInt64 {
+			return CumulativeUsage{}, ErrUsageOverflow
+		}
+		usage.ReconciledCalls++
 		for _, item := range []struct{ value, sum *int64 }{{&input, &usage.InputTokens}, {&output, &usage.OutputTokens}, {&cacheRead, &usage.CacheReadTokens}, {&cacheCreation, &usage.CacheCreationTokens}, {&cost, &usage.SpentMicrodollars}, {&active, &usage.ActiveNanoseconds}, {&providerWait, &usage.ProviderNanoseconds}} {
 			if *item.value < 0 {
 				return CumulativeUsage{}, ErrInvalidDelivery

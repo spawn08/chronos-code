@@ -58,14 +58,7 @@ func (a *FileAdapter) Inventory(ctx context.Context) ([]Item, error) {
 		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("retention path escapes data root: %s", path)
 		}
-		active := a.ActiveKeys[rel]
-		for _, prefix := range a.ActivePrefixes {
-			if rel == prefix || strings.HasPrefix(rel, prefix+string(filepath.Separator)) {
-				active = true
-				break
-			}
-		}
-		if active {
+		if a.protected(rel) {
 			return nil
 		}
 		items = append(items, Item{Scope: a.Name, Key: filepath.ToSlash(rel), UpdatedAt: info.ModTime().UTC(), Bytes: info.Size()})
@@ -88,6 +81,9 @@ func (a *FileAdapter) Delete(ctx context.Context, items []Item) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(errs, err)...)
 		}
+		if a.protected(filepath.FromSlash(item.Key)) {
+			continue
+		}
 		path, err := containedRegular(root, item.Key)
 		if err != nil {
 			errs = append(errs, err)
@@ -105,6 +101,18 @@ func (a *FileAdapter) Delete(ctx context.Context, items []Item) error {
 		}
 	}
 	return joinErrors(errs)
+}
+
+func (a *FileAdapter) protected(key string) bool {
+	if a.ActiveKeys[key] {
+		return true
+	}
+	for _, prefix := range a.ActivePrefixes {
+		if key == prefix || strings.HasPrefix(key, prefix+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Recover removes rename-first tombstones left by interrupted cleanup. It is

@@ -14,13 +14,17 @@ import (
 
 func TestBundledModelPricing(t *testing.T) {
 	tests := []struct {
-		model  string
-		input  Microdollars
-		output Microdollars
+		model string
+		want  Rates
 	}{
-		{model: "claude-haiku-4-5", input: 1, output: 5},
-		{model: "claude-sonnet-4-6", input: 3, output: 15},
-		{model: "claude-opus-4-8", input: 5, output: 25},
+		{model: "claude-haiku-4-5", want: Rates{1_000_000, 5_000_000, 100_000, 1_250_000, 2_000_000}},
+		{model: "claude-sonnet-4-6", want: Rates{3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000}},
+		{model: "claude-sonnet-5", want: Rates{2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000}},
+		{model: "claude-opus-4-8", want: Rates{5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000}},
+		// Sub-dollar rates must be exact; cache writes default to input.
+		{model: "gpt-5-nano", want: Rates{50_000, 400_000, 5_000, 50_000, 50_000}},
+		// Omitted cache rates default to the input rate.
+		{model: "mistral-large-latest", want: Rates{500_000, 1_500_000, 500_000, 500_000, 500_000}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {
@@ -28,14 +32,158 @@ func TestBundledModelPricing(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PriceForModel() error = %v", err)
 			}
-			if got.InputMicrodollarsPerToken != tt.input || got.OutputMicrodollarsPerToken != tt.output {
-				t.Errorf("PriceForModel() = %+v, want input=%d output=%d", got, tt.input, tt.output)
+			if got.Rates != tt.want {
+				t.Errorf("PriceForModel() = %+v, want %+v", got.Rates, tt.want)
 			}
 		})
 	}
 
 	if _, err := PriceForModel("unpriced-model"); !errors.Is(err, ErrUnknownModel) {
 		t.Fatalf("PriceForModel(unknown) error = %v, want ErrUnknownModel", err)
+	}
+}
+
+// Every model the bundled routing table or /model picker offers by default
+// must be priced, or the TUI can only report its cost as unpriced.
+func TestDefaultRoutedModelsArePriced(t *testing.T) {
+	for _, id := range []string{"claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-5", "claude-opus-4-8",
+		"claude-opus-4-7", "claude-fable-5", "claude-sonnet-4-5", "gpt-5", "gpt-5-mini", "gpt-4o", "gpt-4o-mini", "o3"} {
+		if _, err := PriceForModel(id); err != nil {
+			t.Errorf("PriceForModel(%q) error = %v", id, err)
+		}
+	}
+}
+
+func TestPriceForModelNormalizesProviderForms(t *testing.T) {
+	want, err := PriceForModel("claude-sonnet-4-5")
+	if err != nil {
+		t.Fatalf("PriceForModel() error = %v", err)
+	}
+	for _, id := range []string{
+		"Claude-Sonnet-4-5",
+		"anthropic/claude-sonnet-4-5",
+		"anthropic/claude-sonnet-4.5",
+		"claude-sonnet-4-5-20250929",
+		"claude-sonnet-4-5@20250929",
+		"us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+	} {
+		got, err := PriceForModel(id)
+		if err != nil || got.Rates != want.Rates {
+			t.Errorf("PriceForModel(%q) = %+v, %v; want %+v", id, got, err, want)
+		}
+	}
+	// Dotted IDs that are themselves entries must not be dash-normalized.
+	if got, err := PriceForModel("openai/gpt-5.5"); err != nil || got.InputPerMillion != 5_000_000 {
+		t.Errorf("PriceForModel(openai/gpt-5.5) = %+v, %v", got, err)
+	}
+}
+
+func TestLoadPricingOverlaysMergeAndValidate(t *testing.T) {
+	t.Cleanup(func() {
+		if err := LoadPricing(); err != nil {
+			t.Fatalf("reset pricing: %v", err)
+		}
+	})
+	err := LoadPricing(
+		PricingOverlay{Source: "user", Data: []byte("models:\n  my-local-model: { input: 0.1, output: 0.2 }\n  claude-sonnet-5: { input: 9, output: 9 }\n")},
+		PricingOverlay{Source: "project", Data: []byte("models:\n  Claude-Sonnet-5: { input: 4, output: 8, cache_read: 0.4 }\n")},
+	)
+	if err != nil {
+		t.Fatalf("LoadPricing() error = %v", err)
+	}
+	if got, _ := PriceForModel("claude-sonnet-5"); got.Rates != (Rates{4_000_000, 8_000_000, 400_000, 4_000_000, 4_000_000}) {
+		t.Errorf("project overlay did not win: %+v", got)
+	}
+	if got, err := PriceForModel("my-local-model"); err != nil || got.InputPerMillion != 100_000 {
+		t.Errorf("user overlay model = %+v, %v", got, err)
+	}
+	if _, err := PriceForModel("claude-haiku-4-5"); err != nil {
+		t.Errorf("bundled entry lost after overlay: %v", err)
+	}
+
+	for _, bad := range []string{
+		"models:\n  x: { output: 1 }\n",
+		"models:\n  x: { input: -1, output: 1 }\n",
+		"models:\n  x: { input: 0, output: 1 }\n",
+		"models: [",
+		"models:\n  x: { input: 1, output: 1, tiers: [{ above: 0, input: 2, output: 2 }] }\n",
+		"models:\n  x: { input: 1, output: 1, tiers: [{ above: 9, input: 2, output: 2 }, { above: 5, input: 3, output: 3 }] }\n",
+		"models:\n  x: { input: 1, output: 1, tiers: [{ above: 9, output: 2 }] }\n",
+	} {
+		if err := LoadPricing(PricingOverlay{Source: "project", Data: []byte(bad)}); err == nil {
+			t.Errorf("LoadPricing(%q) error = nil, want validation error", bad)
+		}
+	}
+	// A rejected overlay leaves the previously loaded table active.
+	if got, _ := PriceForModel("claude-sonnet-5"); got.InputPerMillion != 4_000_000 {
+		t.Errorf("failed LoadPricing replaced the active table: %+v", got)
+	}
+}
+
+func TestIncurredCostUsesModelCacheRatesAndRounds(t *testing.T) {
+	price, err := PriceForModel("gpt-4o")
+	if err != nil {
+		t.Fatalf("PriceForModel() error = %v", err)
+	}
+	// OpenAI-style: 10_000 prompt tokens of which 8_000 cached.
+	// 2000*2.5 + 8000*1.25 + 100*10 = 5000 + 10000 + 1000 = 16000 µ$.
+	got, err := price.IncurredCost(model.Usage{PromptTokens: 10_000, CacheReadTokens: 8_000, CompletionTokens: 100, CacheReadInPrompt: true})
+	if err != nil || got != 16_000 {
+		t.Fatalf("IncurredCost() = %d, %v; want 16000", got, err)
+	}
+	nano, _ := PriceForModel("gpt-5-nano")
+	// 3 tokens * $0.05/M = 0.15 µ$ rounds to 0; a reservation rounds up to 1.
+	if got, _ := nano.IncurredCost(model.Usage{PromptTokens: 3}); got != 0 {
+		t.Errorf("IncurredCost(3 nano tokens) = %d, want 0", got)
+	}
+	if got, _ := nano.ReserveCost(3, 0); got != 1 {
+		t.Errorf("ReserveCost(3 nano tokens) = %d, want 1", got)
+	}
+}
+
+func TestLongContextTierAppliesToWholeCall(t *testing.T) {
+	price, err := PriceForModel("gpt-5.5")
+	if err != nil {
+		t.Fatalf("PriceForModel() error = %v", err)
+	}
+	// At the threshold: base rates. 272000*5 + 1000*30 = 1_390_000 µ$.
+	if got, _ := price.IncurredCost(model.Usage{PromptTokens: 272_000, CompletionTokens: 1_000, CacheReadInPrompt: true}); got != 1_390_000 {
+		t.Errorf("IncurredCost(at threshold) = %d, want 1390000", got)
+	}
+	// One token over, counting cache hits: every token at tier rates.
+	// uncached 72001*10 + cached 200000*1 + out 1000*45 = 720010 + 200000 + 45000.
+	usage := model.Usage{PromptTokens: 272_001, CacheReadTokens: 200_000, CompletionTokens: 1_000, CacheReadInPrompt: true}
+	if got, _ := price.IncurredCost(usage); got != 965_010 {
+		t.Errorf("IncurredCost(over threshold) = %d, want 965010", got)
+	}
+	// Reservations pick the tier from the estimated input.
+	if got, _ := price.ReserveCost(300_000, 0); got != 3_000_000 {
+		t.Errorf("ReserveCost(over threshold) = %d, want 3000000", got)
+	}
+}
+
+func TestOneHourCacheWritesUseTheirOwnRate(t *testing.T) {
+	price, err := PriceForModel("claude-sonnet-4-6")
+	if err != nil {
+		t.Fatalf("PriceForModel() error = %v", err)
+	}
+	// 1000 writes, 400 of them 1h: 600*3.75 + 400*6 = 2250 + 2400 = 4650 µ$.
+	got, err := price.IncurredCost(model.Usage{CacheCreationTokens: 1_000, CacheCreation1hTokens: 400})
+	if err != nil || got != 4_650 {
+		t.Fatalf("IncurredCost() = %d, %v; want 4650", got, err)
+	}
+	// A 1h count larger than total writes is clamped, never double-billed.
+	if got, _ := price.IncurredCost(model.Usage{CacheCreationTokens: 100, CacheCreation1hTokens: 500}); got != 600 {
+		t.Errorf("IncurredCost(clamped) = %d, want 600", got)
+	}
+}
+
+func TestRecordUnpricedCountsTokensNotCost(t *testing.T) {
+	tr := NewTrackerWithUSDCap(0, 0, 0)
+	tr.RecordUnpriced("s1", model.Usage{PromptTokens: 100, CompletionTokens: 7, CacheReadTokens: 50, CacheCreationTokens: 5})
+	want := SessionCost{InputTokens: 100, OutputTokens: 7, CacheReadTokens: 50, CacheCreationTokens: 5, UnpricedCalls: 1}
+	if got := tr.Cost("s1"); got != want {
+		t.Fatalf("Cost() = %+v, want %+v", got, want)
 	}
 }
 
@@ -267,9 +415,10 @@ func TestAfterCountsBilledTokensNotCachedPromptWindow(t *testing.T) {
 	openaiStyle := &hooks.Event{
 		Type: hooks.EventModelCallAfter,
 		Output: &model.ChatResponse{Usage: model.Usage{
-			PromptTokens:     10400,
-			CompletionTokens: 20,
-			CacheReadTokens:  10000,
+			PromptTokens:      10400,
+			CompletionTokens:  20,
+			CacheReadTokens:   10000,
+			CacheReadInPrompt: true,
 		}},
 	}
 	if err := tr.After(ctx, openaiStyle); err != nil {

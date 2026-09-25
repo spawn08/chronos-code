@@ -137,8 +137,10 @@ type Evidence struct {
 // Artifact binds an accepted, content-addressed patch to the completed node
 // that produced it; dependency execution may use only these persisted inputs.
 type Artifact struct {
-	NodeID NodeID `json:"node_id"`
-	ID     string `json:"artifact_id"`
+	NodeID    NodeID `json:"node_id"`
+	ID        string `json:"artifact_id"`
+	ReceiptID string `json:"receipt_id,omitempty"`
+	Undone    bool   `json:"undone,omitempty"`
 }
 
 type Lease struct {

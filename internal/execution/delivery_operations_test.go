@@ -63,21 +63,20 @@ func TestOperationJournalNeverReplaysAnAmbiguousEffect(t *testing.T) {
 	if _, err := store.ReconcileOperation(ctx, replacement, request.ID, "", "after", nil); !errors.Is(err, ErrInvalidDelivery) {
 		t.Fatalf("unproven reconciliation = %v", err)
 	}
-	reconciled, err := store.ReconcileOperation(ctx, replacement, request.ID, "inspected external state", "after", json.RawMessage(`{"ok":true}`))
-	if err != nil || reconciled.Status != OperationReconciled || reconciled.OutputFingerprint != "after" {
-		t.Fatalf("reconciliation = %+v, error = %v", reconciled, err)
+	if _, err := store.ReconcileOperation(ctx, replacement, request.ID, "inspected external state", "after", json.RawMessage(`{"ok":true}`)); !errors.Is(err, ErrEffectNeedsReconciliation) {
+		t.Fatalf("arbitrary shell assertion became a receipt: %v", err)
 	}
-	if _, err := store.PrepareOperation(ctx, replacement, request); err != nil {
-		t.Fatalf("reconciled operation lookup: %v", err)
+	if _, err := store.PrepareOperation(ctx, replacement, request); !errors.Is(err, ErrEffectNeedsReconciliation) {
+		t.Fatalf("unobserved shell effect replay: %v", err)
 	}
-	if _, err := store.BeginOperation(ctx, replacement, request.ID); !errors.Is(err, ErrInvalidDeliveryTransition) {
-		t.Fatalf("reconciled operation started again: %v", err)
+	if _, err := store.BeginOperation(ctx, replacement, request.ID); !errors.Is(err, ErrEffectNeedsReconciliation) {
+		t.Fatalf("unknown shell operation started again: %v", err)
 	}
 	if _, err := store.Operation(ctx, DeliveryScope{TenantID: "other", RepositoryID: "repo"}, admission.DeliveryID, request.ID); !errors.Is(err, ErrOperationNotFound) {
 		t.Fatalf("cross-tenant operation lookup = %v", err)
 	}
 	events, err := store.Events(ctx, admission.Scope, admission.DeliveryID)
-	if err != nil || len(events) != 6 || events[3].Type != DeliveryEventOperationPrepared || events[4].Type != DeliveryEventOperationRunning || events[5].Type != DeliveryEventOperationReconciled {
+	if err != nil || len(events) != 5 || events[3].Type != DeliveryEventOperationPrepared || events[4].Type != DeliveryEventOperationRunning {
 		t.Fatalf("operation event lineage = %+v, error = %v", events, err)
 	}
 }

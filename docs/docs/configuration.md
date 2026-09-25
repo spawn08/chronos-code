@@ -203,6 +203,41 @@ claims:
 - When a task is continued, a `[Working claims]` block is added to the turn: outdated spans first (re-read before relying on them), then spans to re-check, then spans that are still current.
 - Every status change is appended to the evidence ledger as a `claim` event (audit only; it does not affect verification). Claim stores are kept in memory, with at most 256 claims per task and 64 continued tasks.
 
+### Model Catalog and Pricing
+
+Model prices, context windows, and `/model` picker entries come from the [models.dev](https://models.dev) catalog (the open database opencode also uses), cached at `~/.chronos-code/cache/models.json`.
+
+```yaml
+models_catalog:
+  auto_refresh: true            # refresh a cache older than 24h in the background
+  url: "https://models.dev"     # catalog is fetched from <url>/api.json
+```
+
+- Startup applies the cached catalog before the first model call and never waits on the network. A missing or stale cache is refreshed in the background and used from the next start (or immediately for later calls in a long session).
+- `chronos-code models refresh` fetches the catalog on demand; it ignores `auto_refresh` and `CHRONOS_CODE_DISABLE_MODELS_FETCH`, which only stop automatic fetches.
+- Only providers chronos-code can build are cached (anthropic, openai, google → `gemini`, mistral, deepseek, groq, together, fireworks, perplexity, openrouter). When a model ID appears under several providers, the first-party provider's price and window win. Picker entries exclude deprecated and non-tool-calling models.
+- Context windows use the model's usable input limit when models.dev publishes one smaller than the full window (for example gpt-5: 272K of 400K). `defaults.context.max_tokens` (128000 by default) still caps compaction and the context guard.
+
+Prices resolve in this order, later layers winning per model ID:
+
+1. Bundled `pricing.yaml` (the offline fallback)
+2. The models.dev catalog
+3. `~/.chronos-code/pricing.yaml` (user)
+4. `<project>/.chronos-code/pricing.yaml` (project)
+
+```yaml
+# pricing.yaml: USD per 1M tokens
+models:
+  my-model: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, cache_write_1h: 6 }
+  long-context-model:
+    input: 5
+    output: 30
+    tiers:
+      - { above: 272000, input: 10, output: 45 }   # whole call billed at these rates past 272K prompt tokens
+```
+
+Omitted `cache_read`/`cache_write` default to `input`, and `cache_write_1h` defaults to `cache_write`. models.dev does not publish Anthropic's 1-hour cache-write rate, so catalog Anthropic models use 2× input. A model with no price in any layer is reported as `unpriced` (or `≥$…` when only some calls were priced), never as $0.
+
 ## Routing Config (`routing.yaml`)
 
 ```yaml

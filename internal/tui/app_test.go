@@ -2018,6 +2018,60 @@ func TestUsageSummaryShowsCacheHits(t *testing.T) {
 	}
 }
 
+func TestFormatCostReportsUnpricedCalls(t *testing.T) {
+	for _, tt := range []struct {
+		cost     budget.Microdollars
+		unpriced int64
+		want     string
+	}{
+		{cost: 0, unpriced: 0, want: "$0.0000"},
+		{cost: 12_345, unpriced: 0, want: "$0.0123"},
+		{cost: 0, unpriced: 2, want: "unpriced"},
+		{cost: 12_345, unpriced: 1, want: "≥$0.0123"},
+	} {
+		if got := formatCost(tt.cost, tt.unpriced); got != tt.want {
+			t.Errorf("formatCost(%d, %d) = %q, want %q", tt.cost, tt.unpriced, got, tt.want)
+		}
+	}
+}
+
+func TestUsageShowsTurnCostAndUnpricedCalls(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastTurnCost = budget.SessionCost{InputTokens: 10, OutputTokens: 2, SpentMicrodollars: 45_000, UnpricedCalls: 1}
+	m.lastModelCalls = 2
+	if got := m.usageStatus(); !strings.HasSuffix(got, "· ≥$0.0450") {
+		t.Errorf("usageStatus() = %q, want partial turn cost suffix", got)
+	}
+	if got := m.usageSummary(); !strings.Contains(got, "cost ≥$0.0450") {
+		t.Errorf("usageSummary() = %q, want partial turn cost", got)
+	}
+}
+
+func TestFinalizeTurnDoesNotKeepPreviousTurnUsage(t *testing.T) {
+	m := newTestAppModel(t)
+	m.lastTurnCost = budget.SessionCost{InputTokens: 900, OutputTokens: 90, SpentMicrodollars: 7_000}
+	m.lastModelCalls = 4
+	m.lastKnownUsage = model.Usage{PromptTokens: 900, CompletionTokens: 90}
+	m.turnModelCalls = 0
+	m.sending = true
+
+	m.finalizeTurn(nil)
+
+	if m.lastTurnCost != (budget.SessionCost{}) || m.lastModelCalls != 0 {
+		t.Fatalf("lastTurnCost = %+v, lastModelCalls = %d; want this turn's (empty) usage", m.lastTurnCost, m.lastModelCalls)
+	}
+	if got := m.usageStatus(); strings.Contains(got, "900") || !strings.Contains(got, "· 0 calls ·") || !strings.HasSuffix(got, "$0.0000") {
+		t.Fatalf("usageStatus() = %q, want zero usage for a turn without model calls", got)
+	}
+}
+
+func TestStatusBarOmitsSessionCostBeforeAnyCall(t *testing.T) {
+	m := newTestAppModel(t)
+	if got := m.sessionCostSegment(); got != "" {
+		t.Fatalf("sessionCostSegment() = %q, want empty before any model call", got)
+	}
+}
+
 func TestLastNLinesKeepsTheTail(t *testing.T) {
 	got := lastNLines("a\nb\nc\nd", 3)
 	want := []string{"b", "c", "d"}

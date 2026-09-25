@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const deliverySchemaVersion = 8
+const deliverySchemaVersion = 10
 
 var deliveryMigrations = []struct {
 	version  int
@@ -28,6 +28,8 @@ var deliveryMigrations = []struct {
 	{version: 6, checksum: deliverySchemaChecksum(deliverySchemaV6), sql: deliverySchemaV6},
 	{version: 7, checksum: deliverySchemaChecksum(deliverySchemaV7), sql: deliverySchemaV7},
 	{version: 8, checksum: deliverySchemaChecksum(deliverySchemaV8), sql: deliverySchemaV8},
+	{version: 9, checksum: deliverySchemaChecksum(deliverySchemaV9), sql: deliverySchemaV9},
+	{version: 10, checksum: deliverySchemaChecksum(deliverySchemaV10), sql: deliverySchemaV10},
 }
 
 // DeliveryStore is the SQLite-backed durable delivery repository.
@@ -1361,3 +1363,9 @@ ALTER TABLE delivery_operations ADD COLUMN expected_output_fingerprint TEXT NOT 
 const deliverySchemaV7 = `ALTER TABLE delivery_usage_calls ADD COLUMN provider_nanoseconds INTEGER NOT NULL DEFAULT 0 CHECK (provider_nanoseconds >= 0);`
 
 const deliverySchemaV8 = `ALTER TABLE delivery_worker_attempts ADD COLUMN active_nanoseconds INTEGER NOT NULL DEFAULT 0 CHECK (active_nanoseconds >= 0);`
+
+const deliverySchemaV9 = `
+ALTER TABLE delivery_operations ADD COLUMN role_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE delivery_operations ADD COLUMN observation_descriptor TEXT NOT NULL DEFAULT '';`
+
+const deliverySchemaV10 = `ALTER TABLE delivery_operations ADD COLUMN node_id TEXT NOT NULL DEFAULT '';`

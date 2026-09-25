@@ -210,22 +210,11 @@ func (m *Manager) Cancel(ctx context.Context, handle Handle) error {
 	return m.cleanup(ctx, handle)
 }
 
-// Close removes worktrees created by this manager instance. Cleanup failures
-// leave their manifests in place for a later recovery pass.
-func (m *Manager) Close(ctx context.Context) error {
-	m.mu.Lock()
-	handles := make([]Handle, 0, len(m.active))
-	for _, handle := range m.active {
-		handles = append(handles, handle)
-	}
-	m.mu.Unlock()
-	var errs []error
-	for _, handle := range handles {
-		if err := m.cleanup(ctx, handle); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
+// Close relinquishes process ownership while retaining active manifests and
+// candidate worktrees for a restarted controller to reconcile. Explicit
+// Remove/Cancel and scoped retention remain the only cleanup paths.
+func (m *Manager) Close(context.Context) error {
+	return nil
 }
 
 func (m *Manager) cleanup(ctx context.Context, handle Handle) error {
@@ -240,6 +229,11 @@ func (m *Manager) cleanup(ctx context.Context, handle Handle) error {
 	}
 	if manifest.Integration != nil && manifest.Integration.State == "prepared" {
 		return fmt.Errorf("integration outcome is not reconciled; worktree manifest retained")
+	}
+	if manifest.Integration != nil && manifest.Integration.State == "applied" {
+		if err := m.retainReceipt(manifest); err != nil {
+			return fmt.Errorf("retain applied integration before cleanup: %w", err)
+		}
 	}
 	manifest.CleanupState = CleanupPending
 	if err := m.persist(manifest); err != nil {

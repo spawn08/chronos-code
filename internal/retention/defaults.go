@@ -56,7 +56,7 @@ func DefaultAdapters(paths config.ProjectPaths, activeSessionIDs []string) []Ada
 		&SQLiteResource{Name: ScopeTelemetry, Path: paths.TelemetryDB, Table: "sessions", TimeColumn: "started_at", SessionColumn: "id", SizeExpr: byteExpr("model", "repo_path"), Active: active},
 		&SQLiteResource{Name: ScopeLayeredMemory, Path: paths.MemoryDB, Table: "layer_memories", TimeColumn: "updated_at", SessionColumn: "session_id", SizeExpr: byteExpr("content", "steps"), Active: active},
 		&FileAdapter{Name: ScopeEditCheckpoints, Root: filepath.Join(paths.Dir, "edit-checkpoints"), ActivePrefixes: activeCheckpointDirs},
-		&FileAdapter{Name: ScopeInputArtifacts, Root: filepath.Join(paths.Dir, "artifacts")},
+		&FileAdapter{Name: ScopeInputArtifacts, Root: filepath.Join(paths.Dir, "artifacts"), ActivePrefixes: []string{"patches", "receipts"}},
 		ReadOnlyFileAdapter{Name: ScopePlanDB, Path: paths.PlansDB},
 	)
 	if manager, err := worktree.New(paths.Dir, nil); err == nil {

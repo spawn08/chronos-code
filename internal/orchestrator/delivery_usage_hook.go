@@ -107,7 +107,7 @@ func (deliveryUsageHook) Before(ctx context.Context, event *hooks.Event) error {
 		reserved = int64(cost)
 	}
 	callID := identity.InvocationID + ":" + callSeq
-	record, err := lease.Store.ReserveUsage(ctx, lease.Lease.Delivery.DeliveryScope, lease.Lease.Delivery.ID, execution.UsageReservation{
+	record, err := lease.Store.ReserveUsageLease(ctx, lease.Lease, execution.UsageReservation{
 		CallID: callID, Provider: provider.Name(), Model: modelID,
 		EstimateTokens: int64(estimate), ReservedMicrodollars: reserved, KnownPrice: known,
 	})
@@ -155,7 +155,8 @@ func (deliveryUsageHook) After(ctx context.Context, event *hooks.Event) error {
 		price, _ := event.Metadata["delivery_usage_price"].(budget.ModelPrice)
 		cost, err := price.IncurredCost(response.Usage)
 		if err != nil {
-			return errors.Join(fmt.Errorf("price incurred model usage: %w", err), execution.ErrUsageOutcomeUnknown)
+			_, recordErr := lease.Store.ReconcileUsage(accountingCtx, lease.Lease.Delivery.DeliveryScope, lease.Lease.Delivery.ID, callID, actual)
+			return errors.Join(fmt.Errorf("price incurred model usage: %w", err), execution.ErrUsageOutcomeUnknown, recordErr)
 		}
 		actual.CostKnown, actual.CostMicrodollars = true, int64(cost)
 	}

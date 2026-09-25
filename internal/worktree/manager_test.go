@@ -98,7 +98,7 @@ func TestParseStatusPathsIncludesBothRenameSides(t *testing.T) {
 	}
 }
 
-func TestManagerCloseCleansRecoverableHandles(t *testing.T) {
+func TestManagerCloseRetainsActiveHandleForRecovery(t *testing.T) {
 	repo := newTestRepo(t)
 	manager, err := New(filepath.Join(t.TempDir(), "data"), nil)
 	if err != nil {
@@ -111,8 +111,16 @@ func TestManagerCloseCleansRecoverableHandles(t *testing.T) {
 	if err := manager.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fileExists(handle.Manifest.WorktreePath) || fileExists(handle.Manifest.ManifestPath) {
-		t.Fatal("Close left a worktree or manifest")
+	if !fileExists(handle.Manifest.WorktreePath) || !fileExists(handle.Manifest.ManifestPath) {
+		t.Fatal("Close discarded an active worktree or manifest")
+	}
+	restarted, err := New(manager.dataDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handles, err := restarted.Recover()
+	if err != nil || len(handles) != 1 || handles[0].Manifest.ID != handle.Manifest.ID {
+		t.Fatalf("restarted worktree = %+v, error = %v", handles, err)
 	}
 }
 

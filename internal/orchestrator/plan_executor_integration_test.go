@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,9 +13,11 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool/builtins"
 
+	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/verification"
+	"github.com/spawn08/chronos-code/internal/workspace"
 	"github.com/spawn08/chronos-code/internal/worktree"
 )
 
@@ -110,14 +113,49 @@ func TestPlanControllerResumesDependentAgainstAcceptedArtifactNotHEAD(t *testing
 	runner := &acceptedChainRunner{}
 	controller := plan.NewController(store, &planNodeExecutor{runner: runner, worktrees: manager, repositoryRoot: repo, implementationAgent: "coder"}, nil, nil, plan.ControllerConfig{})
 	completed, err := controller.Run(ctx, p)
-	if err != nil || completed.State != plan.PlanCompleted || !runner.observedAPI || len(completed.Artifacts) != 2 {
+	if err != nil || completed.State != plan.PlanCompleted || !runner.observedAPI || len(completed.Artifacts) != 2 || completed.Artifacts[0].ReceiptID == "" || completed.Artifacts[1].ReceiptID == "" {
 		t.Fatalf("accepted dependent result = %+v, observed API = %v, error = %v", completed, runner.observedAPI, err)
+	}
+	for _, artifact := range completed.Artifacts {
+		if receipt, err := manager.LoadReceipt(artifact.ReceiptID); err != nil || receipt.ArtifactID != artifact.ID {
+			t.Fatalf("retained plan receipt = %+v, error = %v", receipt, err)
+		}
 	}
 	if output, err := os.ReadFile(filepath.Join(repo, "use.go")); err != nil || !strings.Contains(string(output), "API()") {
 		t.Fatalf("parent integration = %q, error = %v", output, err)
 	}
 	if again, err := controller.Run(ctx, p); err != nil || again.State != plan.PlanCompleted || len(again.Attempts) != 2 {
 		t.Fatalf("resumed completed plan = %+v, error = %v", again, err)
+	}
+	undoOrch := &Orchestrator{planStore: store, worktreeManager: manager, workspace: &workspace.Info{Root: repo}}
+	identity := PlanRuntimeIdentity{TenantID: p.TenantID, RepositoryID: p.RepositoryID, TaskID: p.TaskID, PlanID: p.ID, Generation: p.Generation}
+	operator := authorization.WithRequest(ctx, authorization.Request{PrincipalID: "operator", TenantID: "tenant", RepositoryID: "repo", Action: "plan.undo"})
+	if err := undoOrch.UndoPlanArtifact(operator, identity, "a"); !errors.Is(err, plan.ErrArtifactUndoBlocked) {
+		t.Fatalf("undo accepted predecessor before its dependent = %v", err)
+	}
+	if err := undoOrch.UndoPlanArtifact(ctx, identity, "b"); !errors.Is(err, authorization.ErrDenied) {
+		t.Fatalf("unauthorized plan undo = %v", err)
+	}
+	// Crash after the file slice is reverted but before the plan transaction:
+	// the next plan run must detect the mismatched receipt before claiming work.
+	if err := manager.Undo(ctx, repo, completed.Artifacts[1].ReceiptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := undoOrch.validatePlanArtifactReceipts(completed); err == nil {
+		t.Fatal("completed generation ignored the undone file receipt")
+	}
+	if err := undoOrch.UndoPlanArtifact(operator, identity, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := undoOrch.UndoPlanArtifact(operator, identity, "b"); err != nil {
+		t.Fatalf("repeat undo of already reconciled leaf: %v", err)
+	}
+	updated, err := store.Load(ctx, p)
+	if err != nil || updated.State != plan.PlanReplanning || updated.Nodes[1].State != plan.NodeBlocked || !updated.Artifacts[1].Undone || updated.Artifacts[0].Undone {
+		t.Fatalf("compensated plan generation = %+v, error = %v", updated, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "use.go")); !os.IsNotExist(err) {
+		t.Fatalf("undo left accepted dependent file: %v", err)
 	}
 }
 

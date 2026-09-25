@@ -11,7 +11,11 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/authorization"
+	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
+	"github.com/spawn08/chronos-code/internal/security"
+	"github.com/spawn08/chronos/sdk/agent"
 )
 
 func deliveryRequest(handler http.Handler, method, path, key, body, token string) *httptest.ResponseRecorder {
@@ -203,6 +207,55 @@ func TestCappedReadOnlyAdmissionNeedsAccountingCapableWorker(t *testing.T) {
 	}
 	if err := worker.RunOnce(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAuthenticatedTeamAdmissionBindsConfiguredCheckpointedWorker(t *testing.T) {
+	t.Setenv("CHRONOS_CODE_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	indexOnStart := false
+	agentConfig := func(id string) agent.AgentConfig {
+		return agent.AgentConfig{ID: id, Name: id, Model: agent.ModelConfig{Provider: "openai", Model: "gpt-4o-mini", APIKey: "test-key"}}
+	}
+	configured := &config.Config{FileConfig: agent.FileConfig{
+		Defaults: &agent.AgentConfig{Storage: agent.StorageConfig{Backend: "sqlite", DSN: filepath.Join(root, "sessions.db")}},
+		Agents:   []agent.AgentConfig{agentConfig("reader"), agentConfig("reviewer")},
+		Teams:    []agent.TeamConfig{{ID: "pair", Name: "Pair", Strategy: "sequential", Agents: []string{"reader", "reviewer"}}},
+	}, Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart}}
+	orch, err := orchestrator.New(context.Background(), configured, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer orch.Close()
+	store, err := execution.OpenDeliveryStore(context.Background(), filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	executor, err := orchestrator.NewReadOnlyDeliveryExecutor(orch, authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, executor, execution.WorkerConfig{OwnerID: "worker", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil || !worker.CanRunCheckpointedTeam() {
+		t.Fatalf("team worker = %+v, error = %v", worker, err)
+	}
+	handler := New(orch, ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store, DeliveryWorker: worker}).Handler()
+	response := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "team-key", `{"goal":"inspect together","run_read_only":true,"team_id":"pair"}`, "secret")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("team admission = %d: %s", response.Code, response.Body.String())
+	}
+	var admitted deliveryResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load(context.Background(), execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}, admitted.ID)
+	if err != nil || loaded.PolicyReference != execution.ReadOnlyTeamPolicyPrefix+"pair" || loaded.State != execution.DeliveryQueued {
+		t.Fatalf("trusted team route = %+v, error = %v", loaded, err)
+	}
+	invalid := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "unknown-team", `{"goal":"inspect","run_read_only":true,"team_id":"missing"}`, "secret")
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("unknown team admission = %d", invalid.Code)
 	}
 }
 

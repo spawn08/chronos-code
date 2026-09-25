@@ -42,6 +42,7 @@ type Config struct {
 	Retention    RetentionConfig             `yaml:"retention,omitempty"`
 	Hooks        HooksConfig                 `yaml:"hooks,omitempty"`
 	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
+	Models       ModelsCatalogConfig         `yaml:"models_catalog,omitempty"`
 
 	set                  map[string]struct{}
 	sources              map[string]string
@@ -454,6 +455,31 @@ func (c SessionConfig) ContextReportEnabled() bool {
 	return c.ContextReport == nil || *c.ContextReport
 }
 
+// DefaultModelsCatalogURL is the models.dev base URL; the catalog is fetched
+// from <url>/api.json.
+const DefaultModelsCatalogURL = "https://models.dev"
+
+// ModelsCatalogConfig controls the models.dev catalog that supplies model
+// prices, context windows, and /model picker entries.
+type ModelsCatalogConfig struct {
+	AutoRefresh *bool  `yaml:"auto_refresh,omitempty"`
+	URL         string `yaml:"url,omitempty"`
+}
+
+// AutoRefreshEnabled keeps the background catalog refresh on unless an
+// operator explicitly turns it off.
+func (c ModelsCatalogConfig) AutoRefreshEnabled() bool {
+	return c.AutoRefresh == nil || *c.AutoRefresh
+}
+
+// SourceURL returns the configured catalog base URL without a trailing slash.
+func (c ModelsCatalogConfig) SourceURL() string {
+	if url := strings.TrimRight(strings.TrimSpace(c.URL), "/"); url != "" {
+		return url
+	}
+	return DefaultModelsCatalogURL
+}
+
 type MCPConfig struct {
 	Discovery *bool `yaml:"discovery_enabled,omitempty"`
 }
@@ -774,6 +800,7 @@ func mergeConfig(base, overlay *Config, source string) {
 	mergeTypedSection(&base.RuntimeCaps, overlay.RuntimeCaps, overlay.set, "runtime_capabilities")
 	mergeTypedSection(&base.Server, overlay.Server, overlay.set, "server")
 	mergeTypedSection(&base.Retention, overlay.Retention, overlay.set, "retention")
+	mergeTypedSection(&base.Models, overlay.Models, overlay.set, "models_catalog")
 	if base.sources == nil {
 		base.sources = make(map[string]string)
 	}

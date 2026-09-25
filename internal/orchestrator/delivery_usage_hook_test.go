@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/execution"
@@ -208,5 +210,50 @@ func TestDeliveryModelHookPersistsBilledUsageAfterWorkerCancellation(t *testing.
 	usage, err := store.Usage(base, scope, "delivery")
 	if err != nil || usage.InputTokens != 3 || usage.OutputTokens != 2 || usage.OutstandingCalls != 0 || !usage.CostKnown {
 		t.Fatalf("cancelled incurred usage = %+v, error = %v", usage, err)
+	}
+}
+
+func TestDeliveryModelHookKeepsObservedTokensWhenPricingOverflows(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := store.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", MaxCostMicrodollars: 20000, Goal: execution.Goal{Statement: "inspect", Actor: "user"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = agent.WithRunIdentity(execution.WithOperationLease(ctx, store, lease), agent.RunIdentity{TaskID: "delivery", RoleID: "reader", InvocationID: "worker"})
+	provider := &executionTestProvider{name: "anthropic", modelID: "claude-sonnet-4-6"}
+	event := &hooks.Event{Type: hooks.EventModelCallBefore, Input: &model.ChatRequest{Model: provider.Model(), Messages: []model.Message{{Role: model.RoleUser, Content: "inspect"}}}, Metadata: map[string]any{"provider": model.Provider(provider), "correlation_id": "call"}}
+	hook := deliveryUsageHook{}
+	if err := hook.Before(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	event.Type, event.Output = hooks.EventModelCallAfter, &model.ChatResponse{UsageKnown: true, Usage: model.Usage{PromptTokens: math.MaxInt, CompletionTokens: math.MaxInt}}
+	if err := hook.After(ctx, event); !errors.Is(err, execution.ErrUsageOutcomeUnknown) {
+		t.Fatalf("overflowing model price = %v", err)
+	}
+	usage, err := store.Usage(ctx, scope, "delivery")
+	if err != nil || usage.InputTokens != math.MaxInt || usage.OutputTokens != math.MaxInt || usage.CostKnown || usage.OutstandingCalls != 0 {
+		t.Fatalf("retained unpriced actual usage = %+v, error = %v", usage, err)
+	}
+}
+
+func TestDurableModelWindowCannotSilentlyResetSpentTokens(t *testing.T) {
+	tracker := budget.NewTracker(1, 0)
+	ctx := storage.WithSession(context.Background(), "delivery")
+	if err := tracker.After(ctx, &hooks.Event{Type: hooks.EventModelCallAfter, Output: &model.ChatResponse{Usage: model.Usage{PromptTokens: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = execution.WithOperationLease(ctx, &execution.DeliveryStore{}, execution.Lease{Delivery: execution.Delivery{ID: "delivery"}})
+	err := (budgetHook{tracker: tracker}).Before(ctx, &hooks.Event{Type: hooks.EventModelCallBefore})
+	if err == nil || tracker.Ratio("delivery") != 2 {
+		t.Fatalf("durable window reset instead of stopping: ratio=%v error=%v", tracker.Ratio("delivery"), err)
 	}
 }

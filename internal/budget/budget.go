@@ -34,14 +34,50 @@ const (
 // model pricing deterministic and avoids floating-point rounding.
 type Microdollars int64
 
-// ModelPrice is a model's input and output price per token.
+// Rates are prices in microdollars per 1M tokens, so $3 per 1M tokens is
+// 3_000_000. Per-million units represent sub-dollar rates (e.g. $0.05/M)
+// exactly; per-token integer microdollars cannot. CacheWritePerMillion is the
+// default (Anthropic 5-minute) cache-write rate; CacheWrite1hPerMillion
+// applies to tokens written with the 1-hour TTL.
+type Rates struct {
+	InputPerMillion        Microdollars
+	OutputPerMillion       Microdollars
+	CacheReadPerMillion    Microdollars
+	CacheWritePerMillion   Microdollars
+	CacheWrite1hPerMillion Microdollars
+}
+
+// PriceTier replaces the base rates for an entire call whose prompt
+// (uncached input + cache reads + cache writes) exceeds AbovePromptTokens,
+// which is how long-context pricing is billed (e.g. gpt-5.5 above 272K).
+type PriceTier struct {
+	AbovePromptTokens int
+	Rates
+}
+
+// ModelPrice is a model's base rates plus optional long-context tiers sorted
+// by ascending AbovePromptTokens.
 type ModelPrice struct {
-	InputMicrodollarsPerToken  Microdollars
-	OutputMicrodollarsPerToken Microdollars
+	Rates
+	Tiers []PriceTier
+}
+
+// ratesFor returns the rates billed for a call with promptTokens of input:
+// the highest tier whose threshold is exceeded, else the base rates.
+func (p ModelPrice) ratesFor(promptTokens int) Rates {
+	rates := p.Rates
+	for _, tier := range p.Tiers {
+		if promptTokens > tier.AbovePromptTokens {
+			rates = tier.Rates
+		}
+	}
+	return rates
 }
 
 // SessionCost is an atomic snapshot of one session's reconciled usage and
-// outstanding pre-call reservations.
+// outstanding pre-call reservations. UnpricedCalls counts completed calls
+// whose model had no price entry: their tokens are included but their cost
+// is not, so SpentMicrodollars is a lower bound whenever it is non-zero.
 type SessionCost struct {
 	InputTokens          int64
 	OutputTokens         int64
@@ -49,6 +85,7 @@ type SessionCost struct {
 	CacheCreationTokens  int64
 	SpentMicrodollars    Microdollars
 	ReservedMicrodollars Microdollars
+	UnpricedCalls        int64
 }
 
 // ReservationID identifies an outstanding pre-call cost reservation.
@@ -64,19 +101,17 @@ var (
 	ErrUnknownReservation = errors.New("unknown cost reservation")
 )
 
-var bundledModelPrices = map[string]ModelPrice{
-	"claude-haiku-4-5":  {InputMicrodollarsPerToken: 1, OutputMicrodollarsPerToken: 5},
-	"claude-sonnet-4-6": {InputMicrodollarsPerToken: 3, OutputMicrodollarsPerToken: 15},
-	"claude-opus-4-8":   {InputMicrodollarsPerToken: 5, OutputMicrodollarsPerToken: 25},
-}
-
-// PriceForModel returns deterministic pricing for a bundled routing model.
+// PriceForModel returns pricing from the active table (embedded
+// pricing.yaml plus any LoadPricing overlays). See priceKeys for the model ID
+// forms that resolve to a bundled entry.
 func PriceForModel(modelID string) (ModelPrice, error) {
-	price, ok := bundledModelPrices[modelID]
-	if !ok {
-		return ModelPrice{}, fmt.Errorf("%w: %q", ErrUnknownModel, modelID)
+	table := activePriceTable()
+	for _, key := range priceKeys(modelID) {
+		if price, ok := table[key]; ok {
+			return price, nil
+		}
 	}
-	return price, nil
+	return ModelPrice{}, fmt.Errorf("%w: %q", ErrUnknownModel, modelID)
 }
 
 type reservation struct {
@@ -184,6 +219,21 @@ func (t *Tracker) ReconcileUsage(id ReservationID, usage model.Usage) error {
 	return nil
 }
 
+// RecordUnpriced accounts a completed call whose model has no price entry:
+// its tokens are added and UnpricedCalls is incremented so reporting can say
+// the session cost is incomplete instead of silently under-reporting it.
+func (t *Tracker) RecordUnpriced(sessionID string, usage model.Usage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	current := t.costs[sessionID]
+	current.InputTokens += int64(max(usage.UncachedPromptTokens(), 0))
+	current.OutputTokens += int64(max(usage.CompletionTokens, 0))
+	current.CacheReadTokens += int64(max(usage.CacheReadTokens, 0))
+	current.CacheCreationTokens += int64(max(usage.CacheCreationTokens, 0))
+	current.UnpricedCalls++
+	t.costs[sessionID] = current
+}
+
 // Cost returns an atomic cost and usage snapshot for sessionID.
 func (t *Tracker) Cost(sessionID string) SessionCost {
 	t.mu.Lock()
@@ -199,26 +249,28 @@ func (t *Tracker) HasUSDCap() bool {
 	return t.usdCap > 0
 }
 
+var errCostOverflow = errors.New("model cost overflows microdollars")
+
+// cost is the conservative pre-call reservation: input and maximum output at
+// full (tier-appropriate) rates, rounded up to the next microdollar.
 func (p ModelPrice) cost(inputTokens, outputTokens int) (Microdollars, error) {
 	if inputTokens < 0 || outputTokens < 0 {
 		return 0, fmt.Errorf("token counts must be non-negative: input %d, output %d", inputTokens, outputTokens)
 	}
-	input := int64(inputTokens)
-	output := int64(outputTokens)
-	if input > math.MaxInt64/int64(p.InputMicrodollarsPerToken) || output > math.MaxInt64/int64(p.OutputMicrodollarsPerToken) {
-		return 0, errors.New("model cost overflows microdollars")
+	rates := p.ratesFor(inputTokens)
+	scaled, err := sumScaled(
+		[2]int64{int64(inputTokens), int64(rates.InputPerMillion)},
+		[2]int64{int64(outputTokens), int64(rates.OutputPerMillion)},
+	)
+	if err != nil {
+		return 0, err
 	}
-	inputCost := input * int64(p.InputMicrodollarsPerToken)
-	outputCost := output * int64(p.OutputMicrodollarsPerToken)
-	if inputCost > math.MaxInt64-outputCost {
-		return 0, errors.New("model cost overflows microdollars")
-	}
-	return Microdollars(inputCost + outputCost), nil
+	return Microdollars((scaled + 999_999) / 1_000_000), nil
 }
 
 // ReserveCost prices a bounded request before it is sent to the provider.
 func (p ModelPrice) ReserveCost(inputTokens, maxOutputTokens int) (Microdollars, error) {
-	if p.InputMicrodollarsPerToken <= 0 || p.OutputMicrodollarsPerToken <= 0 {
+	if p.InputPerMillion <= 0 || p.OutputPerMillion <= 0 {
 		return 0, ErrUnknownModel
 	}
 	return p.cost(inputTokens, maxOutputTokens)
@@ -226,33 +278,55 @@ func (p ModelPrice) ReserveCost(inputTokens, maxOutputTokens int) (Microdollars,
 
 // IncurredCost includes cache-read and cache-creation rates for actual usage.
 func (p ModelPrice) IncurredCost(usage model.Usage) (Microdollars, error) {
-	if p.InputMicrodollarsPerToken <= 0 || p.OutputMicrodollarsPerToken <= 0 || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.CacheReadTokens < 0 || usage.CacheCreationTokens < 0 {
+	if p.InputPerMillion <= 0 || p.OutputPerMillion <= 0 || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.CacheReadTokens < 0 || usage.CacheCreationTokens < 0 || usage.CacheCreation1hTokens < 0 {
 		return 0, ErrUnknownModel
 	}
 	return p.costWithCache(usage)
 }
 
+// costWithCache prices actual usage with the model's own cache rates, using
+// the long-context tier selected by the call's full prompt size, rounded to
+// the nearest microdollar. 1-hour cache writes are a subset of
+// CacheCreationTokens and are billed at their own rate.
 func (p ModelPrice) costWithCache(usage model.Usage) (Microdollars, error) {
-	uncached := usage.UncachedPromptTokens()
-	base, err := p.cost(uncached, usage.CompletionTokens)
+	rates := p.ratesFor(usage.PromptWindowTokens())
+	write1h := min(max(usage.CacheCreation1hTokens, 0), usage.CacheCreationTokens)
+	scaled, err := sumScaled(
+		[2]int64{int64(usage.UncachedPromptTokens()), int64(rates.InputPerMillion)},
+		[2]int64{int64(usage.CompletionTokens), int64(rates.OutputPerMillion)},
+		[2]int64{int64(usage.CacheReadTokens), int64(rates.CacheReadPerMillion)},
+		[2]int64{int64(usage.CacheCreationTokens - write1h), int64(rates.CacheWritePerMillion)},
+		[2]int64{int64(write1h), int64(rates.CacheWrite1hPerMillion)},
+	)
 	if err != nil {
 		return 0, err
 	}
-	write := int64(usage.CacheCreationTokens)
-	read := int64(usage.CacheReadTokens)
-	inRate := int64(p.InputMicrodollarsPerToken)
-	if write > 0 && inRate > math.MaxInt64/write/5 {
-		return 0, errors.New("model cost overflows microdollars")
+	return Microdollars((scaled + 500_000) / 1_000_000), nil
+}
+
+// sumScaled returns Σ tokens*ratePerMillion with overflow checks. The result
+// is in microdollars × 1e6 and is divided once by the caller so per-term
+// rounding never accumulates.
+func sumScaled(terms ...[2]int64) (int64, error) {
+	var total int64
+	for _, term := range terms {
+		tokens, rate := term[0], term[1]
+		if tokens < 0 || rate < 0 {
+			return 0, fmt.Errorf("token counts and rates must be non-negative: tokens %d, rate %d", tokens, rate)
+		}
+		if tokens == 0 || rate == 0 {
+			continue
+		}
+		if tokens > math.MaxInt64/rate {
+			return 0, errCostOverflow
+		}
+		product := tokens * rate
+		if product > math.MaxInt64-999_999-total {
+			return 0, errCostOverflow
+		}
+		total += product
 	}
-	writeCost := write * inRate * 5 / 4
-	readCost := int64(0)
-	if read > 0 {
-		readCost = read * inRate / 10
-	}
-	if writeCost > math.MaxInt64-int64(base) || readCost > math.MaxInt64-int64(base)-writeCost {
-		return 0, errors.New("model cost overflows microdollars")
-	}
-	return base + Microdollars(writeCost+readCost), nil
+	return total, nil
 }
 
 func exceedsCap(spent, reserved, requested, cap Microdollars) bool {

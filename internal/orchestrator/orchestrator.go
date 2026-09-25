@@ -105,6 +105,7 @@ type Orchestrator struct {
 	lastExecMu         sync.Mutex
 	lastExecRoute      router.Classification
 	lastExecAgent      string
+	lastExecModels     map[string]resolvedModel
 	operationalMu      sync.RWMutex
 	operationalActive  map[string]*operationalExecution
 	operationalLast    ExecutionSnapshot
@@ -345,6 +346,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	orch.lspManager = languageServerManager
 
 	rt, routingConfig := setupRouter(ctx, cfg, projectDir, selectPrimaryAgent(agents, order))
+	setupPricing(projectDir, userDir)
 
 	policy, err := setupSecurity(projectDir, userDir, root, store, agents)
 	if err != nil {
@@ -692,11 +694,21 @@ type budgetHook struct {
 	agentID      string
 }
 
-const budgetReservationMetadataKey = "chronos_code_budget_reservation"
+const (
+	budgetReservationMetadataKey = "chronos_code_budget_reservation"
+	budgetUnpricedMetadataKey    = "chronos_code_budget_unpriced"
+)
 
 type budgetReservation struct {
 	tracker *budget.Tracker
 	id      budget.ReservationID
+}
+
+// budgetUnpriced marks a call to a model without a price entry so After can
+// still account its tokens and flag the session cost as incomplete.
+type budgetUnpriced struct {
+	tracker   *budget.Tracker
+	sessionID string
 }
 
 func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
@@ -709,7 +721,13 @@ func (h budgetHook) withFallbackSession(ctx context.Context) context.Context {
 func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 	ctx = h.withFallbackSession(ctx)
 	if evt.Type == hooks.EventModelCallBefore {
-		h.recoverTokenBudget(ctx, evt)
+		if _, durable := execution.OperationLeaseFromContext(ctx); durable {
+			if err := h.tracker.Before(ctx, evt); err != nil {
+				return fmt.Errorf("delivery model window: %w", err)
+			}
+		} else {
+			h.recoverTokenBudget(ctx, evt)
+		}
 		if err := claimTurnModelCall(ctx); err != nil {
 			return err
 		}
@@ -730,10 +748,15 @@ func (h budgetHook) Before(ctx context.Context, evt *hooks.Event) error {
 		}
 	}
 	tracker := h.orchestrator.currentUSDBudget()
-	id, err := tracker.Reserve(storage.SessionFromContext(ctx), modelID,
+	sessionID := storage.SessionFromContext(ctx)
+	id, err := tracker.Reserve(sessionID, modelID,
 		model.NewTokenCounter(modelID).CountTokens(req.Messages), req.MaxTokens)
 	if err != nil {
 		if errors.Is(err, budget.ErrUnknownModel) && !tracker.HasUSDCap() {
+			if evt.Metadata == nil {
+				evt.Metadata = make(map[string]any)
+			}
+			evt.Metadata[budgetUnpricedMetadataKey] = budgetUnpriced{tracker: tracker, sessionID: sessionID}
 			return nil
 		}
 		return fmt.Errorf("reserve model cost: %w", err)
@@ -771,6 +794,13 @@ func (h budgetHook) After(ctx context.Context, evt *hooks.Event) error {
 		return err
 	}
 	if evt.Type != hooks.EventModelCallAfter {
+		return nil
+	}
+	if unpriced, ok := evt.Metadata[budgetUnpricedMetadataKey].(budgetUnpriced); ok {
+		delete(evt.Metadata, budgetUnpricedMetadataKey)
+		if resp, ok := evt.Output.(*model.ChatResponse); ok && resp != nil && evt.Error == nil {
+			unpriced.tracker.RecordUnpriced(unpriced.sessionID, resp.Usage)
+		}
 		return nil
 	}
 	reservation, ok := evt.Metadata[budgetReservationMetadataKey].(budgetReservation)
@@ -1555,6 +1585,34 @@ func setupRouter(ctx context.Context, cfg *config.Config, projectDir string, def
 		}
 	}
 	return rt, rcfg
+}
+
+// setupPricing merges user then project pricing.yaml overlays onto the
+// embedded price table. Failures are warnings: cost reporting falls back to
+// the bundled prices rather than blocking startup.
+func setupPricing(projectDir, userDir string) {
+	overlays := make([]budget.PricingOverlay, 0, 2)
+	for _, candidate := range []struct{ source, dir string }{
+		{source: "user", dir: userDir},
+		{source: "project", dir: projectDir},
+	} {
+		if candidate.dir == "" {
+			continue
+		}
+		path := filepath.Join(candidate.dir, "pricing.yaml")
+		data, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: read %s: %v\n", path, err)
+			continue
+		}
+		overlays = append(overlays, budget.PricingOverlay{Source: path, Data: data})
+	}
+	if err := budget.LoadPricing(overlays...); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v (using bundled model prices)\n", err)
+	}
 }
 
 // setupGuardrails loads the guardrail YAML config (project override at
@@ -2387,6 +2445,7 @@ func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message 
 	if selected == nil {
 		return ctx
 	}
+	o.recordResolvedModel(agentID, selected.Name(), selected.Model())
 	ctx = agent.WithModelProvider(ctx, selected)
 	return context.WithValue(ctx, requestRoutingKey{}, requestRouting{
 		AgentID: agentID, Classification: classification, Provider: selected.Name(), Model: selected.Model(),
@@ -2503,6 +2562,31 @@ func (o *Orchestrator) ActiveModelInfo() (provider, modelID string) {
 	return a.Model.Name(), a.Model.Model()
 }
 
+type resolvedModel struct{ provider, model string }
+
+func (o *Orchestrator) recordResolvedModel(agentID, provider, modelID string) {
+	o.lastExecMu.Lock()
+	defer o.lastExecMu.Unlock()
+	if o.lastExecModels == nil {
+		o.lastExecModels = make(map[string]resolvedModel)
+	}
+	o.lastExecModels[agentID] = resolvedModel{provider: provider, model: modelID}
+}
+
+// EffectiveModelInfo returns the provider/model that served the active
+// agent's most recent request after request-time routing (routing.yaml may
+// send it to a different model than the configured one). Before the first
+// request, or after /model, it is the configured model.
+func (o *Orchestrator) EffectiveModelInfo() (provider, modelID string) {
+	o.lastExecMu.Lock()
+	resolved, ok := o.lastExecModels[o.active]
+	o.lastExecMu.Unlock()
+	if ok {
+		return resolved.provider, resolved.model
+	}
+	return o.ActiveModelInfo()
+}
+
 // AgentModelInfo returns the configured provider/model for a given agent ID
 // (typically a pre-registered subagent spawned via spawn_subagent), for
 // display alongside its activity in the status bar. ok is false if no such
@@ -2541,6 +2625,9 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 		o.modelOverrides = make(map[string]bool)
 	}
 	o.modelOverrides[o.active] = true
+	o.lastExecMu.Lock()
+	delete(o.lastExecModels, o.active)
+	o.lastExecMu.Unlock()
 	return nil
 }
 

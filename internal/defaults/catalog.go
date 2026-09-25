@@ -30,6 +30,7 @@ var catalog = map[string]Artifact{
 	"security.yaml":                   {Path: "security.yaml", Activation: RuntimeActive, Rationale: "loaded into every agent security hook"},
 	"routing.yaml":                    {Path: "routing.yaml", Activation: RuntimeActive, Rationale: "loaded by the message router"},
 	"learning.yaml":                   {Path: "learning.yaml", Activation: RuntimeActive, Rationale: "loaded by the learn command"},
+	"pricing.yaml":                    {Path: "pricing.yaml", Activation: RuntimeActive, Rationale: "loaded as the bundled model price table for cost reporting"},
 	"guardrails/default.yaml":         {Path: "guardrails/default.yaml", Activation: RuntimeActive, Rationale: "loaded into every agent guardrail engine"},
 	"skills/default-skills.yaml":      {Path: "skills/default-skills.yaml", Activation: RuntimeActive, Rationale: "loaded into the bundled skill catalog"},
 	"agents/architect.yaml":           {Path: "agents/architect.yaml", Activation: RuntimeActive, Rationale: "supplies the default architect prompt"},

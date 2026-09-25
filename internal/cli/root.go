@@ -311,6 +311,7 @@ Usage:
   chronos-code whoami [provider]   Show the effective credential source
   chronos-code providers          List built-in and resolvable providers
   chronos-code models [provider]  List live models, with an explicit static fallback
+  chronos-code models refresh     Refresh the models.dev catalog (prices, context windows, picker)
   chronos-code agents list        List resolved built-in, user, and project agents
   chronos-code config show        Print resolved configuration
   chronos-code config validate    Validate all config files
@@ -400,6 +401,7 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
 	}
+	initModelsCatalog(cfg, true)
 	ctx := context.Background()
 	orch, err := orchestrator.New(ctx, cfg, resumeSessionID)
 	if err != nil {
@@ -749,13 +751,17 @@ func runConfig() error {
 }
 
 func runModels() error {
+	if len(os.Args) >= 3 && os.Args[2] == "refresh" {
+		return runModelsRefresh()
+	}
 	if len(os.Args) > 3 {
-		return fmt.Errorf("usage: chronos-code models [provider]")
+		return fmt.Errorf("usage: chronos-code models [provider] | models refresh")
 	}
 	cfg, err := loadConfigWithModelSelection()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	initModelsCatalog(cfg, false)
 	requested := ""
 	if len(os.Args) == 3 {
 		requested = auth.CanonicalProvider(os.Args[2])
