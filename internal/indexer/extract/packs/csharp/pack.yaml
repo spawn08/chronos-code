@@ -1,0 +1,4 @@
+# C#.
+language: csharp
+grammar: c_sharp
+extensions: [.cs]

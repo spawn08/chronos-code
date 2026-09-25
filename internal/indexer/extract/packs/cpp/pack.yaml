@@ -1,0 +1,4 @@
+# C++ and C/C++ headers.
+language: cpp
+grammar: cpp
+extensions: [.cc, .cpp, .cxx, .c++, .hpp, .hh, .hxx, .h]

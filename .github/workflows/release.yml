@@ -104,7 +104,8 @@ jobs:
           LDFLAGS="-s -w -X '${MODULE}/internal/cli.Version=${VERSION}' -X '${MODULE}/internal/cli.Commit=${COMMIT}' -X '${MODULE}/internal/cli.BuildDate=${BUILD_DATE}'"
           BINARY="chronos-code"
           if [ "${{ matrix.goos }}" = "windows" ]; then BINARY="${BINARY}.exe"; fi
-          go build -ldflags "${LDFLAGS}" -trimpath -buildvcs=true -o "${BINARY}" ./cmd/chronos-code
+          TAGS="$(make -s grammar-tags)"
+          go build -tags "${TAGS}" -ldflags "${LDFLAGS}" -trimpath -buildvcs=true -o "${BINARY}" ./cmd/chronos-code
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@v0.17.0
         with:

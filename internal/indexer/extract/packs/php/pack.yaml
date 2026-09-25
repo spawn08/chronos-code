@@ -1,0 +1,4 @@
+# PHP.
+language: php
+grammar: php
+extensions: [.php]

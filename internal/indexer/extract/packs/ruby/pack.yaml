@@ -1,0 +1,4 @@
+# Ruby.
+language: ruby
+grammar: ruby
+extensions: [.rb]

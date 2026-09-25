@@ -1,0 +1,4 @@
+# Dart.
+language: dart
+grammar: dart
+extensions: [.dart]

@@ -1,0 +1,4 @@
+# Shell scripts.
+language: shell
+grammar: bash
+extensions: [.sh, .bash]

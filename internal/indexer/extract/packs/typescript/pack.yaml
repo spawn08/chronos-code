@@ -1,0 +1,4 @@
+# TypeScript. .tsx files use the tsx pack (same language, JSX grammar).
+language: typescript
+grammar: typescript
+extensions: [.ts, .mts, .cts]

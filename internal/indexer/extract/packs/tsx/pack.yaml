@@ -1,0 +1,4 @@
+# TypeScript with JSX.
+language: typescript
+grammar: tsx
+extensions: [.tsx]

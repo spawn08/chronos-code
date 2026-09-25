@@ -1,0 +1,4 @@
+# Kotlin.
+language: kotlin
+grammar: kotlin
+extensions: [.kt, .kts]

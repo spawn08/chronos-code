@@ -1,0 +1,4 @@
+# Objective-C.
+language: objc
+grammar: objc
+extensions: [.m, .mm]

@@ -1,0 +1,4 @@
+# Python.
+language: python
+grammar: python
+extensions: [.py, .pyi]

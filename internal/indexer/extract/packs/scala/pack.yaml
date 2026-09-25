@@ -1,0 +1,4 @@
+# Scala.
+language: scala
+grammar: scala
+extensions: [.scala, .sc]

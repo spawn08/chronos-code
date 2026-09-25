@@ -1,0 +1,4 @@
+# JavaScript. The grammar parses JSX.
+language: javascript
+grammar: javascript
+extensions: [.js, .jsx, .mjs, .cjs]

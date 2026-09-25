@@ -13,26 +13,35 @@ LDFLAGS  := -s -w \
 
 CGO_ENABLED ?= 1
 
+# Tree-sitter grammars embedded in the binary: one per language pack under
+# internal/indexer/extract/packs. Without these tags gotreesitter embeds all
+# of its ~200 grammars (about 18 MiB instead of 5 MiB); the build still works.
+GRAMMARS := bash c cpp c_sharp dart java javascript kotlin objc php python ruby rust scala swift tsx typescript
+GRAMMAR_TAGS := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
+
 SIZE_LIMIT  := 41943040
 FULL_SIZE_LIMIT := 73400320
 
-.PHONY: build build-core build-full build-release test lint size-check size-check-core size-check-full fmt vet tidy clean install install-core eval bench-index
+.PHONY: build build-core build-full build-release grammar-tags test lint size-check size-check-core size-check-full fmt vet tidy clean install install-core eval bench-index
 
 build: build-full
 
 build-full:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) go build -tags treesitter -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
+	CGO_ENABLED=$(CGO_ENABLED) go build -tags "treesitter $(GRAMMAR_TAGS)" -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
 
 build-core:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY)-core ./cmd/chronos-code
+	CGO_ENABLED=0 go build -tags "$(GRAMMAR_TAGS)" -ldflags "$(LDFLAGS)" -trimpath -o $(BIN_DIR)/$(BINARY)-core ./cmd/chronos-code
 
 build-release:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "$(GRAMMAR_TAGS)" -trimpath \
 		-ldflags="-s -w -X '$(MODULE)/internal/cli.Version=$(VERSION)' -X '$(MODULE)/internal/cli.Commit=$(COMMIT)' -X '$(MODULE)/internal/cli.BuildDate=$(BUILD_DATE)'" \
 		-o $(BIN_DIR)/$(BINARY) ./cmd/chronos-code
+
+grammar-tags:
+	@echo $(GRAMMAR_TAGS)
 
 lint:
 	golangci-lint run ./...
@@ -58,7 +67,7 @@ size-check-full: build-full
 	test "$$SIZE" -le "$(FULL_SIZE_LIMIT)"
 
 test:
-	go test ./... -race -count=1
+	go test -tags "$(GRAMMAR_TAGS)" ./... -race -count=1
 
 # eval runs the token-efficiency eval suite (PRD P3-006) against the
 # checked-in baseline (benchmark/eval/baseline.json) and fails if any task's
@@ -90,7 +99,7 @@ clean:
 	rm -rf $(BIN_DIR)
 
 install:
-	CGO_ENABLED=$(CGO_ENABLED) go install -tags treesitter -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code
+	CGO_ENABLED=$(CGO_ENABLED) go install -tags "treesitter $(GRAMMAR_TAGS)" -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code
 
 install-core:
-	CGO_ENABLED=0 go install -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code
+	CGO_ENABLED=0 go install -tags "$(GRAMMAR_TAGS)" -ldflags "$(LDFLAGS)" -trimpath ./cmd/chronos-code

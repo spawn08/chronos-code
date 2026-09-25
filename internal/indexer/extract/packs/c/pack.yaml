@@ -1,0 +1,4 @@
+# C. Headers (.h) go to the cpp pack, whose grammar also parses C.
+language: c
+grammar: c
+extensions: [.c]

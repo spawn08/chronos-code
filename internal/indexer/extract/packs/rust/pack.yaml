@@ -1,0 +1,4 @@
+# Rust.
+language: rust
+grammar: rust
+extensions: [.rs]

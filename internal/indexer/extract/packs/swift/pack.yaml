@@ -1,0 +1,4 @@
+# Swift.
+language: swift
+grammar: swift
+extensions: [.swift]

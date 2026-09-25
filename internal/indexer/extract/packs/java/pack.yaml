@@ -1,0 +1,4 @@
+# Java.
+language: java
+grammar: java
+extensions: [.java]
