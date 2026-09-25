@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"syscall"
 	"time"
 )
 
@@ -29,11 +28,11 @@ func (m *Manager) lockIntegration(ctx context.Context) (func(), error) {
 			lock.Close()
 			return nil, err
 		}
-		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-			return func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }, nil
-		} else if err != syscall.EWOULDBLOCK {
+		if ok, err := tryLockFile(lock); err != nil {
 			lock.Close()
 			return nil, fmt.Errorf("acquire integration lock: %w", err)
+		} else if ok {
+			return func() { _ = unlockFile(lock); _ = lock.Close() }, nil
 		}
 		select {
 		case <-ctx.Done():
