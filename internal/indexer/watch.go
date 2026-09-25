@@ -28,8 +28,33 @@ type Watcher struct {
 	fsw    *fsnotify.Watcher
 	cancel context.CancelFunc
 	done   chan struct{}
+	flush  chan chan struct{}
 	// OnUpdate, if set before events arrive, is called after every pass.
 	onUpdate func(Stats, error)
+}
+
+// Flush applies every change seen so far without waiting for the debounce,
+// and returns once it is visible in the engine's snapshots.
+func (w *Watcher) Flush(ctx context.Context) error {
+	if w.e.pending.Load() == 0 {
+		return nil
+	}
+	reply := make(chan struct{})
+	select {
+	case w.flush <- reply:
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-reply:
+		return nil
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Watch starts watching the workspace. Call Close to stop. onUpdate may be nil.
@@ -43,7 +68,8 @@ func (e *Engine) Watch(ctx context.Context, onUpdate func(Stats, error)) (*Watch
 		return nil, fmt.Errorf("watch %s: %w", e.opts.Root, err)
 	}
 	wctx, cancel := context.WithCancel(ctx)
-	w := &Watcher{e: e, fsw: fsw, cancel: cancel, done: make(chan struct{}), onUpdate: onUpdate}
+	w := &Watcher{e: e, fsw: fsw, cancel: cancel, done: make(chan struct{}), flush: make(chan chan struct{}), onUpdate: onUpdate}
+	e.watcher.Store(w)
 	go w.loop(wctx)
 	return w, nil
 }
@@ -52,6 +78,8 @@ func (e *Engine) Watch(ctx context.Context, onUpdate func(Stats, error)) (*Watch
 func (w *Watcher) Close() error {
 	w.cancel()
 	<-w.done
+	w.e.watcher.CompareAndSwap(w, nil)
+	w.e.pending.Store(0)
 	return w.fsw.Close()
 }
 
@@ -82,10 +110,11 @@ func (w *Watcher) loop(ctx context.Context) {
 		var err error
 		if overflow {
 			st, err = w.e.Reconcile(ctx)
-		} else {
+		} else if len(paths) > 0 {
 			st, err = w.e.Update(ctx, paths)
 		}
 		overflow = false
+		w.e.pending.Store(0)
 		if err != nil && ctx.Err() == nil {
 			w.e.opts.Logf("indexer: watch update: %v", err)
 		}
@@ -116,6 +145,7 @@ func (w *Watcher) loop(ctx context.Context) {
 			} else {
 				dirty[ev.Name] = struct{}{}
 			}
+			w.e.pending.Store(int64(max(len(dirty), 1)))
 			if quiet == nil {
 				quiet = time.NewTimer(watchDebounce)
 				deadline = time.NewTimer(watchMaxDelay)
@@ -127,6 +157,11 @@ func (w *Watcher) loop(ctx context.Context) {
 			flush()
 		case <-deadlineC:
 			flush()
+		case reply := <-w.flush:
+			if len(dirty) > 0 || overflow {
+				flush()
+			}
+			close(reply)
 		case err, ok := <-w.fsw.Errors:
 			if !ok {
 				return
@@ -134,6 +169,7 @@ func (w *Watcher) loop(ctx context.Context) {
 			// Typically an event queue overflow: events were lost.
 			w.e.opts.Logf("indexer: watch: %v; reconciling", err)
 			overflow = true
+			w.e.pending.Add(1)
 			if quiet == nil {
 				quiet = time.NewTimer(watchDebounce)
 				deadline = time.NewTimer(watchMaxDelay)

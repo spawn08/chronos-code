@@ -146,7 +146,14 @@ func (x *extractor) genDecl(d *ast.GenDecl) {
 				Name: s.Name.Name, Kind: kind, Signature: sig, Doc: docText(doc),
 				Line: x.line(s.Pos()), EndLine: x.line(s.End()), Exported: s.Name.IsExported(),
 			})
-			x.bodyCalls(s.Type, len(x.f.Symbols)-1)
+			idx := len(x.f.Symbols) - 1
+			switch t := s.Type.(type) {
+			case *ast.InterfaceType:
+				x.interfaceMembers(s.Name.Name, t, idx)
+			case *ast.StructType:
+				x.structEmbeds(t, idx)
+			}
+			x.bodyCalls(s.Type, idx)
 		case *ast.ValueSpec:
 			kind := facts.KindVar
 			if d.Tok == token.CONST {
@@ -179,6 +186,65 @@ func (x *extractor) genDecl(d *ast.GenDecl) {
 			}
 		}
 	}
+}
+
+// interfaceMembers records an interface's method specs (as methods whose
+// receiver is the interface) and its embedded types. Type-set terms of
+// constraint interfaces (~int | string) are not recorded.
+func (x *extractor) interfaceMembers(iface string, t *ast.InterfaceType, parent int) {
+	if t.Methods == nil {
+		return
+	}
+	for _, field := range t.Methods.List {
+		if len(field.Names) == 0 {
+			x.embed(field.Type, parent)
+			continue
+		}
+		ft, ok := field.Type.(*ast.FuncType)
+		if !ok {
+			continue
+		}
+		for _, name := range field.Names {
+			x.f.Symbols = append(x.f.Symbols, facts.Symbol{
+				Name: name.Name, Kind: facts.KindMethod, Receiver: iface,
+				Signature: name.Name + strings.TrimPrefix(x.render(ft), "func"),
+				Doc:       docText(field.Doc), Line: x.line(name.Pos()), EndLine: x.line(field.End()),
+				Exported: name.IsExported(), Container: parent + 1,
+			})
+		}
+	}
+}
+
+// structEmbeds records a struct's embedded fields, whose methods are promoted.
+func (x *extractor) structEmbeds(t *ast.StructType, parent int) {
+	if t.Fields == nil {
+		return
+	}
+	for _, field := range t.Fields.List {
+		if len(field.Names) == 0 {
+			x.embed(field.Type, parent)
+		}
+	}
+}
+
+func (x *extractor) embed(e ast.Expr, parent int) {
+	base := e
+	if star, ok := base.(*ast.StarExpr); ok {
+		base = star.X
+	}
+	name := ""
+	switch v := unwrapIndex(base).(type) {
+	case *ast.Ident:
+		name = v.Name
+	case *ast.SelectorExpr:
+		name = v.Sel.Name
+	default:
+		return
+	}
+	x.f.Symbols = append(x.f.Symbols, facts.Symbol{
+		Name: name, Kind: facts.KindEmbed, Signature: x.render(e),
+		Line: x.line(e.Pos()), EndLine: x.line(e.End()), Container: parent + 1,
+	})
 }
 
 // bodyCalls records calls inside type expressions (e.g. func literals in

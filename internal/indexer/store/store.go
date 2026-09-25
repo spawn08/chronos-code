@@ -18,7 +18,7 @@ import (
 )
 
 // FormatVersion is the manifest format; a mismatch discards the index.
-const FormatVersion = 1
+const FormatVersion = 2
 
 const (
 	manifestName = "manifest.json"

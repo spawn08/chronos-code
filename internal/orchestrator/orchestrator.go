@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,9 +66,8 @@ type Orchestrator struct {
 	primary    string
 	store      storage.Storage
 	cfg        *config.Config
-	graphStore *graph.Store
-	graphScope *graph.RequestScope
-	watcher    *graph.Watcher
+	graphStore graph.Backend
+	graphScope *graph.IndexScope
 
 	sessionMgr *session.Manager
 	sessions   map[string]string // agentID -> current sessionID
@@ -308,8 +308,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if err := migrateDefaultDatabase(ctx, paths, paths.GraphDB, "graph.db", configuredGraphDB); err != nil {
 		return nil, err
 	}
-	graphStore, graphScope, watcher := setupGraph(ctx, cfg, agents)
-	orch.graphStore, orch.graphScope, orch.watcher = graphStore, graphScope, watcher
+	graphStore, graphScope := setupGraph(ctx, cfg, agents)
+	orch.graphStore, orch.graphScope = graphStore, graphScope
 
 	root := cfg.Workspace.Root
 	if root == "" {
@@ -447,7 +447,6 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		cfg:                cfg,
 		graphStore:         graphStore,
 		graphScope:         graphScope,
-		watcher:            watcher,
 		sessionMgr:         sessionMgr,
 		sessions:           sessions,
 		router:             rt,
@@ -1717,13 +1716,14 @@ func readOverridableFile(projectDir, overridePath, embeddedName string) ([]byte,
 	return defaults.ReadFile(embeddedName)
 }
 
-// setupGraph opens the code graph store, indexes the workspace on start
-// (PRD P1-007), registers the T0 graph tools on every agent, and starts a
-// background watcher to keep the graph fresh. Any failure (e.g. no Go module
-// at the workspace root) is logged as a warning and treated as non-fatal —
-// the harness still works without the graph, just without the T0 navigation
-// tools.
-func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agent.Agent) (*graph.Store, *graph.RequestScope, *graph.Watcher) {
+// setupGraph opens the chronos code index, registers the T0 graph tools on
+// every agent, and (with workspace.index_on_start) reconciles the workspace
+// and starts a watcher in the background. It never blocks on indexing and
+// never type-checks: tools answer from the stored index while the first
+// reconcile runs, and wait only when no index exists yet. Any failure is
+// logged as a warning and treated as non-fatal — the harness still works
+// without the graph, just without the T0 navigation tools.
+func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agent.Agent) (graph.Backend, *graph.IndexScope) {
 	root := cfg.Workspace.Root
 	if root == "" {
 		root = config.WorkspaceRoot()
@@ -1733,51 +1733,34 @@ func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agen
 	if dbPath == "" {
 		dbPath = ".chronos-code/graph.db"
 	}
-	if dir := filepath.Dir(dbPath); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: create graph db dir %s: %v\n", dir, err)
-			return nil, nil, nil
-		}
-	}
-
-	graphStore, err := graph.OpenStore(dbPath)
+	dbPath, err := filepath.Abs(dbPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: open graph store: %v\n", err)
-		return nil, nil, nil
+		fmt.Fprintf(os.Stderr, "warning: resolve graph data dir: %v\n", err)
+		return nil, nil
+	}
+	dataDir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: create graph data dir %s: %v\n", dataDir, err)
+		return nil, nil
 	}
 
-	ix := graph.NewIndexer(graphStore, root)
 	indexOnStart := cfg.Workspace.IndexOnStart == nil || *cfg.Workspace.IndexOnStart
-	if indexOnStart {
-		stats, err := ix.IndexAll(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: index code graph: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "code graph: indexed %d files, %d symbols, %d edges in %s\n",
-				stats.Files, stats.Symbols, stats.Edges, stats.Elapsed.Round(1e6))
-		}
+	scope, err := graph.NewIndexScope(ctx, graph.IndexScopeOptions{
+		Root: root, DataDir: dataDir, GraphDB: dbPath, IndexOnStart: indexOnStart, Watch: indexOnStart,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: open code index: %v\n", err)
+		return nil, nil
 	}
-
-	requestScope := graph.NewRequestScopeForIndexer(ix)
 	for _, a := range agents {
-		for _, def := range requestScope.Tools() {
+		for _, def := range scope.Tools() {
 			a.Tools.Register(def)
 		}
-		for _, def := range requestScope.ImpactTools() {
+		for _, def := range scope.ImpactTools() {
 			a.Tools.Register(def)
 		}
 	}
-
-	var watcher *graph.Watcher
-	if indexOnStart {
-		watcher, err = graph.Watch(ctx, ix)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: start graph watcher: %v\n", err)
-			watcher = nil
-		}
-	}
-
-	return graphStore, requestScope, watcher
+	return scope.Live(), scope
 }
 
 // Execute prepares and runs one task through the selected agent. It is the
@@ -3251,9 +3234,9 @@ func (o *Orchestrator) Store() storage.Storage {
 	return o.store
 }
 
-// GraphStore returns the code graph store, or nil if indexing failed or was
-// disabled at startup.
-func (o *Orchestrator) GraphStore() *graph.Store {
+// GraphStore returns the code graph backend, or nil if the index could not
+// be opened at startup.
+func (o *Orchestrator) GraphStore() graph.Backend {
 	return o.graphStore
 }
 
@@ -3529,11 +3512,6 @@ func (o *Orchestrator) Close() error {
 				errs = append(errs, fmt.Errorf("close MCP watcher: %w", err))
 			}
 		}
-		if o.watcher != nil {
-			if err := o.watcher.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close graph watcher: %w", err))
-			}
-		}
 		if o.projectDocsWatcher != nil {
 			if err := o.projectDocsWatcher.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close project docs watcher: %w", err))
@@ -3546,11 +3524,11 @@ func (o *Orchestrator) Close() error {
 		}
 		if o.graphScope != nil {
 			if err := o.graphScope.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close request graph scope: %w", err))
+				errs = append(errs, fmt.Errorf("close code index: %w", err))
 			}
 		}
-		if o.graphStore != nil {
-			if err := o.graphStore.Close(); err != nil {
+		if closer, ok := o.graphStore.(io.Closer); ok && closer != nil {
+			if err := closer.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close graph store: %w", err))
 			}
 		}

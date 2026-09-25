@@ -269,3 +269,58 @@ func TestWatcherPicksUpEdits(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusReadyAndSync(t *testing.T) {
+	root, dir := newWorkspace(t)
+	e := openEngine(t, root, dir)
+	defer e.Close()
+	select {
+	case <-e.Ready():
+		t.Fatal("ready before the first reconcile")
+	default:
+	}
+	if st := e.Status(); st.Reconciled || st.Generation != 0 || !st.LastPass.IsZero() {
+		t.Fatalf("status before reconcile: %+v", st)
+	}
+	if err := e.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync without a watcher: %v", err)
+	}
+	if _, err := e.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-e.Ready():
+	default:
+		t.Fatal("not ready after reconcile")
+	}
+	st := e.Status()
+	if !st.Reconciled || st.Generation == 0 || st.Files != 2 || st.Pending != 0 || st.Busy || st.LastError != nil || st.LastPass.IsZero() {
+		t.Fatalf("status after reconcile: %+v", st)
+	}
+
+	w, err := e.Watch(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	writeFile(t, root, "a/fresh.go", "package a\n\nfunc Fresh() {}\n")
+	deadline := time.Now().Add(5 * time.Second)
+	for e.Status().Pending == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("watcher never saw the new file")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Sync applies the pending change now, without waiting for the debounce.
+	if err := e.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sn := e.Snapshot()
+	defer sn.Release()
+	if got := symbol(sn, "Fresh"); len(got) != 1 {
+		t.Fatalf("Sync returned before the change was visible: %v", got)
+	}
+	if p := e.Status().Pending; p != 0 {
+		t.Fatalf("pending after Sync = %d", p)
+	}
+}

@@ -22,7 +22,7 @@ const gitLogTimeout = 10 * time.Second
 // (blast radius before an edit), test_map (find tests covering a symbol or
 // file), and co_change (git-history co-change analysis). root is the
 // workspace/git root used to resolve file paths and run git.
-func ImpactTools(store *Store, root string) []*tool.Definition {
+func ImpactTools(store Backend, root string) []*tool.Definition {
 	return []*tool.Definition{
 		impactAnalysisTool(store),
 		testMapTool(store),
@@ -30,7 +30,7 @@ func ImpactTools(store *Store, root string) []*tool.Definition {
 	}
 }
 
-func impactAnalysisTool(store *Store) *tool.Definition {
+func impactAnalysisTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "impact_analysis",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -107,7 +107,7 @@ func impactAnalysisTool(store *Store) *tool.Definition {
 	}
 }
 
-func testMapTool(store *Store) *tool.Definition {
+func testMapTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "test_map",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -190,7 +190,7 @@ func coChangeTool(root string) *tool.Definition {
 // any caller that looks like a Go test function (name starts with "Test" and
 // its declaring file ends with "_test.go" — the file is recovered via
 // FindSymbols since CallersOf only returns names).
-func testsForSymbol(ctx context.Context, store *Store, name string, depth int) []string {
+func testsForSymbol(ctx context.Context, store Backend, name string, depth int) []string {
 	seen := map[string]bool{name: true}
 	frontier := []string{name}
 	var tests []string

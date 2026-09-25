@@ -30,8 +30,9 @@ const (
 	maxSummaryBytes      = 768
 )
 
-// graphReader keeps worker queries on the graph store's existing public API.
-type graphReader interface {
+// GraphReader is the part of a graph backend activation queries: the SQLite
+// *graph.Store and the chronos index (graph.IndexScope.Live) both satisfy it.
+type GraphReader interface {
 	FindSymbols(context.Context, string, string) ([]graph.Symbol, error)
 	FileHash(context.Context, string) (string, error)
 	CallersOf(context.Context, string) ([]string, error)
@@ -40,7 +41,7 @@ type graphReader interface {
 
 type prefetchJob struct {
 	ctx   context.Context
-	store graphReader
+	store GraphReader
 	name  string
 	key   string
 	done  chan struct{}
@@ -93,14 +94,14 @@ func NewBuffer(maxSize int) *Buffer {
 // buffer is closed, the request is canceled/invalid, or all 16 job slots are
 // occupied. Duplicate store/name requests share the first request's context.
 // A single lazy worker handles all jobs; each active job has a two-second limit.
-func (b *Buffer) Enqueue(ctx context.Context, store *graph.Store, name string) bool {
+func (b *Buffer) Enqueue(ctx context.Context, store GraphReader, name string) bool {
 	if store == nil {
 		return false
 	}
 	return b.enqueue(ctx, store, name) != nil
 }
 
-func (b *Buffer) enqueue(ctx context.Context, store graphReader, name string) *prefetchJob {
+func (b *Buffer) enqueue(ctx context.Context, store GraphReader, name string) *prefetchJob {
 	if ctx.Err() != nil || name == "" || len(name) > maxEntryBytes {
 		return nil
 	}
@@ -198,7 +199,7 @@ func (b *Buffer) Get(name string) (*Entry, bool) {
 	return e, ok
 }
 
-func (b *Buffer) entriesForName(ctx context.Context, store graphReader, name, kind string) ([]*Entry, bool) {
+func (b *Buffer) entriesForName(ctx context.Context, store GraphReader, name, kind string) ([]*Entry, bool) {
 	// Snapshot under the mutex; all SQL runs after releasing it. Validate the
 	// complete live result set as eviction or newly indexed declarations may
 	// otherwise turn an ambiguous name into a misleading partial cache hit.
@@ -329,11 +330,11 @@ func (b *Buffer) removeFromOrder(name string) {
 	}
 }
 
-func repositoryKey(store graphReader) string {
+func repositoryKey(store GraphReader) string {
 	return fmt.Sprintf("%p", store)
 }
 
-func entryKey(store graphReader, sym graph.Symbol, revision string) string {
+func entryKey(store GraphReader, sym graph.Symbol, revision string) string {
 	return repositoryKey(store) + "\x00" + sym.Package + "\x00" + sym.Name + "\x00" +
 		string(sym.Kind) + "\x00" + sym.File + "\x00" + sym.Receiver + "\x00" + itoa(sym.Line) + "\x00" + revision
 }
@@ -345,7 +346,7 @@ func entryKey(store graphReader, sym graph.Symbol, revision string) string {
 // caller/callee resolution). This waits on the same bounded queue as Enqueue;
 // when full, prefetch is skipped. Cancellation may return before worker cleanup;
 // Close is the join barrier.
-func (b *Buffer) Prefetch(ctx context.Context, store *graph.Store, name string) {
+func (b *Buffer) Prefetch(ctx context.Context, store GraphReader, name string) {
 	if store == nil {
 		return
 	}
@@ -360,7 +361,7 @@ func (b *Buffer) Prefetch(ctx context.Context, store *graph.Store, name string) 
 	}
 }
 
-func (b *Buffer) prefetch(ctx context.Context, store graphReader, name string) {
+func (b *Buffer) prefetch(ctx context.Context, store GraphReader, name string) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -454,7 +455,7 @@ func (b *Buffer) prefetch(ctx context.Context, store graphReader, name string) {
 //     neighbors are pre-fetched into the buffer in the background.
 //
 // The buffer owner must Close it before closing store.
-func Wrap(a *agent.Agent, store *graph.Store, buf *Buffer) {
+func Wrap(a *agent.Agent, store GraphReader, buf *Buffer) {
 	for _, def := range a.Tools.List() {
 		switch def.Name {
 		case "graph_query":
@@ -467,7 +468,7 @@ func Wrap(a *agent.Agent, store *graph.Store, buf *Buffer) {
 	}
 }
 
-func wrapGraphQuery(def *tool.Definition, store *graph.Store, buf *Buffer) {
+func wrapGraphQuery(def *tool.Definition, store GraphReader, buf *Buffer) {
 	orig := def.Handler
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 		name, _ := args["name"].(string)
@@ -513,7 +514,7 @@ func wrapGraphQuery(def *tool.Definition, store *graph.Store, buf *Buffer) {
 	}
 }
 
-func wrapResolveSymbol(def *tool.Definition, store *graph.Store, buf *Buffer) {
+func wrapResolveSymbol(def *tool.Definition, store GraphReader, buf *Buffer) {
 	orig := def.Handler
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 		result, err := orig(ctx, args)
@@ -528,7 +529,7 @@ func wrapResolveSymbol(def *tool.Definition, store *graph.Store, buf *Buffer) {
 	}
 }
 
-func wrapFindCallers(def *tool.Definition, store *graph.Store, buf *Buffer) {
+func wrapFindCallers(def *tool.Definition, store GraphReader, buf *Buffer) {
 	orig := def.Handler
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 		// A callee's file hash cannot validate edges owned by other files.
@@ -547,7 +548,7 @@ func wrapFindCallers(def *tool.Definition, store *graph.Store, buf *Buffer) {
 // resolves them in the graph, and returns pre-loaded L2 summaries as a
 // context block. This lets the model's first turn start with relevant code
 // context instead of spending 2-3 turns reading files.
-func PredictiveContext(ctx context.Context, store *graph.Store, buf *Buffer, message string) string {
+func PredictiveContext(ctx context.Context, store GraphReader, buf *Buffer, message string) string {
 	if store == nil || ctx.Err() != nil {
 		return ""
 	}

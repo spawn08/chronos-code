@@ -15,8 +15,8 @@ import (
 // Magic identifies a segment file; the last byte is the major format version.
 var Magic = [8]byte{'C', 'H', 'X', 'S', 'E', 'G', 0, 1}
 
-// Version is the current format version.
-const Version = 1
+// Version is the current format version. v2 added the symbol container.
+const Version = 2
 
 // Kind classifies a segment.
 type Kind uint16
@@ -34,7 +34,7 @@ const (
 	headerSize     = 64
 	sectionEntry   = 32
 	fileRecSize    = 96
-	symbolRecSize  = 48
+	symbolRecSize  = 56
 	importRecSize  = 24
 	callRecSize    = 32
 	strRefSize     = 8
@@ -80,7 +80,9 @@ func getRef(b []byte) strRef { return strRef{le.Uint32(b), le.Uint32(b[4:])} }
 //	88 flags u32   92 reserved
 //
 // Symbol record (symbolRecSize): 0 name 8 receiver 16 signature 24 doc,
-// 32 file u32, 36 line u32, 40 endLine u32, 44 kind u8, 45 flags u8.
+// 32 file u32, 36 line u32, 40 endLine u32, 44 kind u8, 45 flags u8,
+// 48 container u32 (segment symbol index of the enclosing symbol, in the
+// same file, or noCaller), 52 reserved.
 //
 // Header: 0 magic, 8 version u16, 10 kind u16, 12 sections u32,
 // 16 generation u64, 24 table offset u64, 32 table xxh64, 40 xxh64 of bytes 0-39.

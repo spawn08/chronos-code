@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -98,7 +97,7 @@ var evidenceCounter = sync.OnceValues(func() (model.TokenCounter, string) {
 
 var evidenceCounterMu sync.Mutex
 
-func codebaseContextTool(store *Store, root string) *tool.Definition {
+func codebaseContextTool(store Backend, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_context",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -321,21 +320,36 @@ var evidenceCallersQuery = `SELECT DISTINCT ` + evidenceColumns + `, 0 FROM edge
 	symbolQualified("s.") +
 	` = e.from_name AND (e.source_file = '' OR s.file = e.source_file) WHERE e.kind = 'call' AND e.to_name = ? ORDER BY s.file, s.line, s.name, s.id LIMIT 17`
 
-func evidenceQuery(ctx context.Context, store *Store, query string, args ...any) ([]evidenceMatch, error) {
-	rows, err := store.rdb.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query graph evidence: %w", err)
-	}
-	defer rows.Close()
-	var matches []evidenceMatch
-	for rows.Next() {
-		var m evidenceMatch
-		if err := rows.Scan(&m.ID, &m.Name, &m.Kind, &m.Package, &m.File, &m.Line, &m.EndLine, &m.Signature, &m.Doc, &m.Receiver, &m.score); err != nil {
-			return nil, fmt.Errorf("scan graph evidence: %w", err)
+// evidenceMatches orders symbols the way the evidence queries always have
+// (by package first unless byFile), keeps the first 17 (one past the
+// selection limit, so overflow is counted), and drops docs, which evidence
+// never reports.
+func evidenceMatches(syms []Symbol, byFile bool) []evidenceMatch {
+	sort.SliceStable(syms, func(i, j int) bool {
+		a, b := syms[i], syms[j]
+		if !byFile && a.Package != b.Package {
+			return a.Package < b.Package
 		}
-		matches = append(matches, m)
+		if a.File != b.File {
+			return a.File < b.File
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		return a.ID < b.ID
+	})
+	if len(syms) > evidenceSelectionLimit+1 {
+		syms = syms[:evidenceSelectionLimit+1]
 	}
-	return matches, rows.Err()
+	out := make([]evidenceMatch, len(syms))
+	for i, sym := range syms {
+		sym.Doc = ""
+		out[i] = evidenceMatch{Symbol: sym}
+	}
+	return out
 }
 
 func evidenceRevision(ctx context.Context, root string) string {
@@ -430,7 +444,7 @@ func validGitRevision(revision string) bool {
 	return err == nil
 }
 
-func collectEvidence(ctx context.Context, store *Store, root string, req evidenceRequest) (*evidenceResult, error) {
+func collectEvidence(ctx context.Context, store Backend, root string, req evidenceRequest) (*evidenceResult, error) {
 	result := &evidenceResult{Revision: evidenceRevision(ctx, root), MaxTokens: req.maxTokens, Items: []evidenceItem{}, Omitted: make(map[string]int)}
 	if result.Revision == "unavailable" {
 		result.Omitted["revision_unavailable"]++
@@ -447,10 +461,11 @@ func collectEvidence(ctx context.Context, store *Store, root string, req evidenc
 		}
 	}
 	exact := func(name string, tier int) error {
-		found, err := evidenceQuery(ctx, store, `SELECT `+evidenceColumns+`, 0 FROM symbols s WHERE s.name = ? ORDER BY s.package, s.file, s.line, s.name, s.id LIMIT 17`, name)
+		syms, err := store.FindSymbols(ctx, name, "")
 		if err != nil {
-			return err
+			return fmt.Errorf("query graph evidence: %w", err)
 		}
+		found := evidenceMatches(syms, false)
 		if len(found) == 0 && tier == 0 {
 			result.Omitted["not_found"]++
 		}
@@ -471,9 +486,14 @@ func collectEvidence(ctx context.Context, store *Store, root string, req evidenc
 			return nil, err
 		}
 		if query := fts5MatchQuery(req.query); query != "" {
-			found, err := evidenceQuery(ctx, store, `SELECT `+evidenceColumns+`, bm25(symbols_fts) FROM symbols_fts JOIN symbols s ON s.id = symbols_fts.rowid WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts), s.package, s.file, s.line, s.name, s.id LIMIT 17`, query)
+			results, err := store.Search(ctx, req.query, evidenceSelectionLimit+1)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("query graph evidence: %w", err)
+			}
+			found := make([]evidenceMatch, len(results))
+			for i, r := range results {
+				r.Doc = ""
+				found[i] = evidenceMatch{Symbol: r.Symbol, score: r.Rank}
 			}
 			addMatches(found, 2)
 		}
@@ -482,11 +502,19 @@ func collectEvidence(ctx context.Context, store *Store, root string, req evidenc
 		}
 	}
 	for _, span := range req.ranges {
-		found, err := evidenceQuery(ctx, store, `SELECT `+evidenceColumns+`, 0 FROM symbols s WHERE s.file IN (?, ?) AND s.line <= ? AND max(s.line, s.end_line) >= ? ORDER BY s.file, s.line, s.name, s.id LIMIT 17`, span.File, filepath.Join(root, span.File), span.EndLine, span.StartLine)
-		if err != nil {
-			return nil, err
+		var inRange []Symbol
+		for _, file := range []string{span.File, filepath.Join(root, span.File)} {
+			syms, err := store.SymbolsInFile(ctx, file)
+			if err != nil {
+				return nil, fmt.Errorf("query graph evidence: %w", err)
+			}
+			for _, sym := range syms {
+				if sym.Line <= span.EndLine && max(sym.Line, sym.EndLine) >= span.StartLine {
+					inRange = append(inRange, sym)
+				}
+			}
 		}
-		addMatches(found, 0)
+		addMatches(evidenceMatches(inRange, true), 0)
 		result.Items = append(result.Items, evidenceItem{Role: "range", File: filepath.ToSlash(span.File), StartLine: span.StartLine, EndLine: span.EndLine})
 	}
 	sort.Slice(matches, func(i, j int) bool {
@@ -571,9 +599,14 @@ func collectEvidence(ctx context.Context, store *Store, root string, req evidenc
 					break
 				}
 				lookups++
-				callers, err := evidenceQuery(ctx, store, evidenceCallersQuery, target)
+				callerSyms, err := store.CallerSymbols(ctx, target, evidenceSelectionLimit+1)
 				if err != nil {
 					return nil, err
+				}
+				callers := make([]evidenceMatch, len(callerSyms))
+				for i, sym := range callerSyms {
+					sym.Doc = ""
+					callers[i] = evidenceMatch{Symbol: sym}
 				}
 				if len(callers) > 16 {
 					result.Omitted["relationship_limit"]++
@@ -677,13 +710,13 @@ func (r *evidenceReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func readEvidenceSource(ctx context.Context, store *Store, fs *os.Root, root, file string, start, end int, remaining *int) (*evidenceSource, string, error) {
+func readEvidenceSource(ctx context.Context, store Backend, fs *os.Root, root, file string, start, end int, remaining *int) (*evidenceSource, string, error) {
 	source := &evidenceSource{Freshness: "unverified"}
-	var indexedMtime int64
-	err := store.rdb.QueryRowContext(ctx, `SELECT content_hash, mtime FROM files WHERE path IN (?, ?) ORDER BY path LIMIT 1`, file, filepath.Join(root, file)).Scan(&source.IndexedHash, &indexedMtime)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, "", fmt.Errorf("read source provenance: %w", err)
+	indexedHash, indexedMtime, err := store.FileProvenance(ctx, file, filepath.Join(root, file))
+	if err != nil {
+		return nil, "", err
 	}
+	source.IndexedHash = indexedHash
 	// Root performs symlink containment during lookup/open, rather than using
 	// a check-then-open absolute path that could be redirected outside root.
 	info, err := fs.Stat(file)

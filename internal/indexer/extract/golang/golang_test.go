@@ -132,3 +132,66 @@ func TestDefaultImportName(t *testing.T) {
 		}
 	}
 }
+
+func TestInterfaceMembersAndEmbeds(t *testing.T) {
+	src := `package demo
+
+import "io"
+
+type ReadSaver interface {
+	io.Reader
+	Saver
+	// Save persists v.
+	Save(v any) (int, error)
+	Flush()
+	~int | string
+}
+
+type Saver interface{ Save(v any) (int, error) }
+
+type Box struct {
+	*Base
+	io.Writer
+	List[int]
+	name string
+}
+`
+	f := &facts.File{Path: "demo.go"}
+	Extract(f, []byte(src))
+	if f.ParseErr != "" {
+		t.Fatal(f.ParseErr)
+	}
+	type rec struct{ name, kind, recv, sig, parent string }
+	var got []rec
+	for _, s := range f.Symbols {
+		parent := ""
+		if p, ok := s.Parent(); ok {
+			parent = f.Symbols[p].Name
+		}
+		got = append(got, rec{s.Name, s.Kind, s.Receiver, s.Signature, parent})
+	}
+	want := []rec{
+		{"ReadSaver", facts.KindInterface, "", "type ReadSaver interface", ""},
+		{"Reader", facts.KindEmbed, "", "io.Reader", "ReadSaver"},
+		{"Saver", facts.KindEmbed, "", "Saver", "ReadSaver"},
+		{"Save", facts.KindMethod, "ReadSaver", "Save(v any) (int, error)", "ReadSaver"},
+		{"Flush", facts.KindMethod, "ReadSaver", "Flush()", "ReadSaver"},
+		{"Saver", facts.KindInterface, "", "type Saver interface", ""},
+		{"Save", facts.KindMethod, "Saver", "Save(v any) (int, error)", "Saver"},
+		{"Box", facts.KindStruct, "", "type Box struct", ""},
+		{"Base", facts.KindEmbed, "", "*Base", "Box"},
+		{"Writer", facts.KindEmbed, "", "io.Writer", "Box"},
+		{"List", facts.KindEmbed, "", "List[int]", "Box"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("symbols:\n got %+v\nwant %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("symbol %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if f.Symbols[3].Doc != "Save persists v." {
+		t.Fatalf("method spec doc = %q", f.Symbols[3].Doc)
+	}
+}

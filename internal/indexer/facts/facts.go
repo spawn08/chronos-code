@@ -13,10 +13,15 @@ const (
 	KindStruct    = "struct"
 	KindVar       = "var"
 	KindConst     = "const"
+	// KindEmbed is a type embedded in an interface or struct. Its Name is the
+	// embedded type's base name and its Signature the full type expression
+	// (e.g. "io.Reader"). Embeds are structure, not declarations: symbol
+	// lookups skip them.
+	KindEmbed = "embed"
 )
 
-// Kinds lists every symbol kind in its stable on-disk order.
-var Kinds = []string{KindFunc, KindMethod, KindType, KindInterface, KindStruct, KindVar, KindConst}
+// Kinds lists every symbol kind in its stable on-disk order. Append only.
+var Kinds = []string{KindFunc, KindMethod, KindType, KindInterface, KindStruct, KindVar, KindConst, KindEmbed}
 
 // Qualifier kinds of a call site.
 const (
@@ -58,7 +63,14 @@ type Symbol struct {
 	Line      int
 	EndLine   int
 	Exported  bool
+	// Container is 1 + the File.Symbols index of the enclosing symbol (an
+	// interface for its method specs, a struct or interface for its embeds);
+	// 0 means top level. The offset keeps the zero value meaning "none".
+	Container int
 }
+
+// Parent returns the File.Symbols index of the enclosing symbol, if any.
+func (s Symbol) Parent() (int, bool) { return s.Container - 1, s.Container > 0 }
 
 // Qualified returns Recv.Name for methods (receiver without '*' or type
 // parameters) and Name otherwise.

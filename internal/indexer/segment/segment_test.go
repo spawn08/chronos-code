@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/cespare/xxhash/v2"
+
 	"github.com/spawn08/chronos-code/internal/indexer/facts"
 )
 
@@ -170,4 +172,91 @@ func TestDuplicatePathRejected(t *testing.T) {
 	if _, err := Encode([]*facts.File{{Path: "a.go"}, {Path: "a.go"}}, KindBase, 1); err == nil {
 		t.Fatal("expected duplicate path error")
 	}
+}
+
+func TestContainerRoundTrip(t *testing.T) {
+	files := []*facts.File{{
+		Path: "i.go", Lang: "go", Package: "m", PkgName: "m",
+		Symbols: []facts.Symbol{
+			{Name: "Save", Kind: facts.KindMethod, Receiver: "Repo", Line: 4, EndLine: 4, Container: 3},
+			{Name: "Closer", Kind: facts.KindEmbed, Signature: "io.Closer", Line: 3, EndLine: 3, Container: 3},
+			{Name: "Repo", Kind: facts.KindInterface, Line: 2, EndLine: 5},
+			{Name: "Free", Kind: facts.KindFunc, Line: 7, EndLine: 7},
+		},
+	}}
+	data, err := Encode(files, KindBase, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parents := map[string]string{}
+	for k := 0; k < s.NumSymbols(); k++ {
+		rec := s.Symbol(k)
+		if rec.Container != 0 {
+			t.Fatalf("SymbolRec must not carry a file-local Container: %+v", rec)
+		}
+		if rec.Parent >= 0 {
+			parents[rec.Name] = s.Symbol(rec.Parent).Name
+		}
+		if s.SymbolParent(k) != rec.Parent || s.SymbolKind(k) != rec.Kind || s.SymbolName(k) != rec.Name {
+			t.Fatalf("accessors disagree for %+v", rec)
+		}
+	}
+	if parents["Save"] != "Repo" || parents["Closer"] != "Repo" || len(parents) != 2 {
+		t.Fatalf("parents = %v", parents)
+	}
+	// Decoded files are in line order; containers must follow the reorder.
+	f := s.File(0)
+	for _, sym := range f.Symbols {
+		p, ok := sym.Parent()
+		switch sym.Name {
+		case "Save", "Closer":
+			if !ok || f.Symbols[p].Name != "Repo" {
+				t.Fatalf("decoded %s parent = %d (%v)", sym.Name, p, ok)
+			}
+		default:
+			if ok {
+				t.Fatalf("decoded %s must be top level", sym.Name)
+			}
+		}
+	}
+	// A container pointing at a symbol of another file is corrupt.
+	two := []*facts.File{
+		{Path: "a.go", Symbols: []facts.Symbol{{Name: "A", Kind: facts.KindFunc, Line: 1}}},
+		{Path: "b.go", Symbols: []facts.Symbol{{Name: "B", Kind: facts.KindFunc, Line: 1}}},
+	}
+	data, err = Encode(two, KindBase, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(data); err != nil {
+		t.Fatal(err)
+	}
+	// Point B (symbol 1, file 1) at A (symbol 0, file 0) and re-checksum.
+	b := append([]byte(nil), data...)
+	resum(b)
+	if _, err := Parse(b); err != nil {
+		t.Fatalf("resum must keep an untampered image valid: %v", err)
+	}
+	symOff := int(le.Uint64(b[le.Uint64(b[24:])+uint64(secSymbols-1)*sectionEntry+8:]))
+	le.PutUint32(b[symOff+symbolRecSize+48:], 0)
+	resum(b)
+	if _, err := Parse(b); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("cross-file container accepted: %v", err)
+	}
+}
+
+// resum recomputes section, table and header checksums after a test edit.
+func resum(b []byte) {
+	tableOff := le.Uint64(b[24:])
+	for i := 0; i < numSections; i++ {
+		e := b[tableOff+uint64(i*sectionEntry):]
+		off, n := le.Uint64(e[8:]), le.Uint64(e[16:])
+		le.PutUint64(e[24:], xxhash.Sum64(b[off:off+n]))
+	}
+	le.PutUint64(b[32:], xxhash.Sum64(b[tableOff:]))
+	le.PutUint64(b[40:], xxhash.Sum64(b[:40]))
 }

@@ -12,7 +12,7 @@ import (
 
 // RenderCodeMap renders the indexed files, imports, and symbols for pkg as
 // deterministic Markdown. Only paths contained by workspaceRoot become links.
-func RenderCodeMap(ctx context.Context, store *Store, workspaceRoot, pkg string) (string, error) {
+func RenderCodeMap(ctx context.Context, store Backend, workspaceRoot, pkg string) (string, error) {
 	files, err := store.FilesInPackage(ctx, pkg)
 	if err != nil {
 		return "", fmt.Errorf("render code map files: %w", err)
@@ -105,7 +105,7 @@ func RenderCodeMap(ctx context.Context, store *Store, workspaceRoot, pkg string)
 }
 
 // RenderCodeMapIndex renders the deterministic list of indexed packages.
-func RenderCodeMapIndex(ctx context.Context, store *Store) (string, error) {
+func RenderCodeMapIndex(ctx context.Context, store Backend) (string, error) {
 	packages, err := store.Packages(ctx)
 	if err != nil {
 		return "", fmt.Errorf("render code map index: %w", err)

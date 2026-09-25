@@ -18,20 +18,20 @@ const (
 
 // Tools returns the T0 (zero-LLM-cost) graph navigation tools. root is the
 // workspace root, used to resolve paths for source snippets and code maps.
-func Tools(store *Store, root string) []*tool.Definition {
+func Tools(store Backend, root string) []*tool.Definition {
 	return []*tool.Definition{
-		graphQueryTool(store),
+		batched(graphQueryTool(store)),
 		codebaseSearchTool(store),
 		codebaseContextTool(store, root),
 		codebaseMapTool(store, root),
-		findCallersTool(store),
-		findImplementationsTool(store),
+		batched(findCallersTool(store)),
+		batched(findImplementationsTool(store)),
 		multiResolutionViewTool(store, root),
-		resolveSymbolTool(store),
+		batched(resolveSymbolTool(store)),
 	}
 }
 
-func codebaseMapTool(store *Store, root string) *tool.Definition {
+func codebaseMapTool(store Backend, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_map",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -113,7 +113,7 @@ func limitCodebaseMapOutputBytes(output string) string {
 	return output[:end] + codebaseMapTruncationNotice
 }
 
-func codebaseSearchTool(store *Store) *tool.Definition {
+func codebaseSearchTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_search",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -156,12 +156,13 @@ func codebaseSearchTool(store *Store) *tool.Definition {
 				seen[result.ID] = struct{}{}
 				syms = append(syms, result.Symbol)
 			}
-			return map[string]any{"found": len(syms) > 0, "symbols": symbolSummaries(syms)}, nil
+			return labelResult(store, map[string]any{"found": len(syms) > 0, "symbols": symbolSummaries(syms)}, false, len(syms) == 0,
+				fmt.Sprintf("No symbol matches %q by exact name or full-text search", query)), nil
 		},
 	}
 }
 
-func graphQueryTool(store *Store) *tool.Definition {
+func graphQueryTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "graph_query",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -186,18 +187,19 @@ func graphQueryTool(store *Store) *tool.Definition {
 				return nil, err
 			}
 			if len(syms) == 0 {
+				note := fmt.Sprintf("No declaration named %q: exact-name lookup over the whole index", name)
 				fuzzy, ferr := store.FindSymbolsFuzzy(ctx, name)
 				if ferr == nil && len(fuzzy) > 0 {
-					return map[string]any{"found": false, "did_you_mean": symbolSummaries(fuzzy)}, nil
+					return labelResult(store, map[string]any{"found": false, "did_you_mean": symbolSummaries(fuzzy)}, false, true, note), nil
 				}
-				return map[string]any{"found": false}, nil
+				return labelResult(store, map[string]any{"found": false}, false, true, note), nil
 			}
-			return map[string]any{"found": true, "symbols": symbolSummaries(syms)}, nil
+			return labelResult(store, map[string]any{"found": true, "symbols": symbolSummaries(syms)}, false, false, ""), nil
 		},
 	}
 }
 
-func findCallersTool(store *Store) *tool.Definition {
+func findCallersTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_callers",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -252,12 +254,21 @@ func findCallersTool(store *Store) *tool.Definition {
 				}
 				frontier = next
 			}
-			return map[string]any{"name": name, "callers_by_depth": levels}, nil
+			empty := true
+			for _, level := range levels {
+				for _, callers := range level {
+					if len(callers) > 0 {
+						empty = false
+					}
+				}
+			}
+			return labelResult(store, map[string]any{"name": name, "callers_by_depth": levels}, true, empty,
+				fmt.Sprintf("No callers of %q: no indexed call site calls a function or method with that name; calls through function values or reflection are not visible", name)), nil
 		},
 	}
 }
 
-func findImplementationsTool(store *Store) *tool.Definition {
+func findImplementationsTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_implementations",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -279,12 +290,20 @@ func findImplementationsTool(store *Store) *tool.Definition {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"interface": name, "implementations": impls}, nil
+			note := fmt.Sprintf("No indexed type declares every method of interface %q (matched by method name)", name)
+			if len(impls) == 0 {
+				if _, reports := store.(Reporter); reports {
+					if ifaces, err := store.FindSymbols(ctx, name, string(KindInterface)); err == nil && len(ifaces) == 0 {
+						note = fmt.Sprintf("No interface named %q is indexed", name)
+					}
+				}
+			}
+			return labelResult(store, map[string]any{"interface": name, "implementations": impls}, true, len(impls) == 0, note), nil
 		},
 	}
 }
 
-func resolveSymbolTool(store *Store) *tool.Definition {
+func resolveSymbolTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "resolve_symbol",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -308,25 +327,26 @@ func resolveSymbolTool(store *Store) *tool.Definition {
 				return nil, err
 			}
 			if len(syms) == 0 {
-				return map[string]any{"found": false}, nil
+				return labelResult(store, map[string]any{"found": false}, false, true,
+					fmt.Sprintf("No declaration named %q: exact-name lookup over the whole index", name)), nil
 			}
 			if len(syms) > 1 {
 				if ctxFile, _ := args["context_file"].(string); ctxFile != "" {
 					ctxDir := filepath.Dir(ctxFile)
 					for _, s := range syms {
 						if filepath.Dir(s.File) == ctxDir {
-							return map[string]any{"found": true, "symbol": symbolSummary(s)}, nil
+							return labelResult(store, map[string]any{"found": true, "symbol": symbolSummary(s)}, false, false, ""), nil
 						}
 					}
 				}
-				return map[string]any{"found": true, "ambiguous": true, "candidates": symbolSummaries(syms)}, nil
+				return labelResult(store, map[string]any{"found": true, "ambiguous": true, "candidates": symbolSummaries(syms)}, false, false, ""), nil
 			}
-			return map[string]any{"found": true, "symbol": symbolSummary(syms[0])}, nil
+			return labelResult(store, map[string]any{"found": true, "symbol": symbolSummary(syms[0])}, false, false, ""), nil
 		},
 	}
 }
 
-func multiResolutionViewTool(store *Store, root string) *tool.Definition {
+func multiResolutionViewTool(store Backend, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "multi_resolution_view",
 		Effects:     []tool.Effect{tool.EffectRead},
@@ -413,7 +433,7 @@ func multiResolutionViewTool(store *Store, root string) *tool.Definition {
 }
 
 // l3Snippet resolves target (a symbol name or file path) to source text.
-func l3Snippet(ctx context.Context, store *Store, root, target string) (any, error) {
+func l3Snippet(ctx context.Context, store Backend, root, target string) (any, error) {
 	path := target
 	startLine, endLine := 0, 0
 	if !strings.Contains(target, string(os.PathSeparator)) && !strings.HasSuffix(target, ".go") {

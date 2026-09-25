@@ -74,7 +74,7 @@ func (s *RequestScope) ImpactTools() []*tool.Definition {
 	return s.wrap(ImpactTools(s.store, s.root), ImpactTools)
 }
 
-func (s *RequestScope) wrap(templates []*tool.Definition, build func(*Store, string) []*tool.Definition) []*tool.Definition {
+func (s *RequestScope) wrap(templates []*tool.Definition, build func(Backend, string) []*tool.Definition) []*tool.Definition {
 	wrapped := make([]*tool.Definition, 0, len(templates))
 	for _, template := range templates {
 		definition := *template
@@ -97,7 +97,7 @@ func (s *RequestScope) wrap(templates []*tool.Definition, build func(*Store, str
 
 // tool returns the entry's definition for name, building the definitions for
 // this graph once instead of on every invocation.
-func (g *requestGraph) tool(name, root string, build func(*Store, string) []*tool.Definition) *tool.Definition {
+func (g *requestGraph) tool(name, root string, build func(Backend, string) []*tool.Definition) *tool.Definition {
 	g.toolsMu.Lock()
 	defer g.toolsMu.Unlock()
 	if definition := g.tools[name]; definition != nil {

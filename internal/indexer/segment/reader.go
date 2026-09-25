@@ -155,6 +155,13 @@ func (s *Segment) validate() error {
 			return corrupt("symbol %d fields", i)
 		}
 	}
+	for i := 0; i < s.nSyms; i++ {
+		b := s.syms[i*symbolRecSize:]
+		if c := le.Uint32(b[48:]); c != noCaller && (int(c) >= s.nSyms || int(c) == i ||
+			le.Uint32(s.syms[int(c)*symbolRecSize+32:]) != le.Uint32(b[32:])) {
+			return corrupt("symbol %d container", i)
+		}
+	}
 	for i := 0; i < s.nImps; i++ {
 		b := s.imps[i*importRecSize:]
 		if !okRef(b[0:]) || !okRef(b[8:]) || int(le.Uint32(b[16:])) >= s.nFiles {
@@ -237,9 +244,12 @@ func (s *Segment) FindFile(path string) (int, bool) {
 }
 
 // SymbolRec is a symbol plus the segment file index that declares it.
+// Symbol.Container is always 0 here; Parent holds the enclosing symbol's
+// segment index, or -1.
 type SymbolRec struct {
 	facts.Symbol
-	File int
+	File   int
+	Parent int
 }
 
 func (s *Segment) symRec(i int) []byte { return s.syms[i*symbolRecSize : (i+1)*symbolRecSize] }
@@ -253,12 +263,32 @@ func (s *Segment) Symbol(i int) SymbolRec {
 			Line: int(le.Uint32(b[36:])), EndLine: int(le.Uint32(b[40:])), Kind: facts.Kinds[b[44]],
 			Exported: b[45]&flagExported != 0,
 		},
-		File: int(le.Uint32(b[32:])),
+		File:   int(le.Uint32(b[32:])),
+		Parent: s.SymbolParent(i),
 	}
 }
 
 // SymbolFile returns the file index of symbol i without decoding it.
 func (s *Segment) SymbolFile(i int) int { return int(le.Uint32(s.symRec(i)[32:])) }
+
+// SymbolKind returns the kind of symbol i without decoding it.
+func (s *Segment) SymbolKind(i int) string { return facts.Kinds[s.symRec(i)[44]] }
+
+// SymbolName returns a zero-copy view of symbol i's name. It is valid only
+// while the segment is open; clone it to retain it.
+func (s *Segment) SymbolName(i int) string { return s.view(s.symRec(i)) }
+
+// SymbolReceiver returns a zero-copy view of symbol i's receiver, valid only
+// while the segment is open.
+func (s *Segment) SymbolReceiver(i int) string { return s.view(s.symRec(i)[8:]) }
+
+// SymbolParent returns the segment index of symbol i's enclosing symbol, or -1.
+func (s *Segment) SymbolParent(i int) int {
+	if c := le.Uint32(s.symRec(i)[48:]); c != noCaller {
+		return int(c)
+	}
+	return -1
+}
 
 // SymbolsNamed returns the half-open range of symbol indexes named name.
 func (s *Segment) SymbolsNamed(name string) (lo, hi int) {
@@ -306,6 +336,14 @@ func (s *Segment) Call(i int) CallRec {
 
 // CallFile returns the file index of call i without decoding it.
 func (s *Segment) CallFile(i int) int { return int(le.Uint32(s.callRec(i)[16:])) }
+
+// CallCaller returns the enclosing symbol index of call i, or -1.
+func (s *Segment) CallCaller(i int) int {
+	if c := le.Uint32(s.callRec(i)[20:]); c != noCaller {
+		return int(c)
+	}
+	return -1
+}
 
 // CallsTo returns the half-open range of call indexes whose callee is name.
 func (s *Segment) CallsTo(name string) (lo, hi int) {
@@ -372,9 +410,19 @@ func (s *Segment) File(i int) *facts.File {
 		Hash: m.Hash, Size: m.Size, MtimeNS: m.MtimeNS, Deleted: m.Deleted,
 	}
 	local := map[int]int{}
+	parents := map[int]int{}
 	for _, si := range s.SymbolsInFile(i) {
+		rec := s.Symbol(si)
 		local[si] = len(f.Symbols)
-		f.Symbols = append(f.Symbols, s.Symbol(si).Symbol)
+		if rec.Parent >= 0 {
+			parents[len(f.Symbols)] = rec.Parent
+		}
+		f.Symbols = append(f.Symbols, rec.Symbol)
+	}
+	for li, parent := range parents {
+		if p, ok := local[parent]; ok {
+			f.Symbols[li].Container = p + 1
+		}
 	}
 	for _, ii := range s.ImportsInFile(i) {
 		f.Imports = append(f.Imports, s.Import(ii).Import)

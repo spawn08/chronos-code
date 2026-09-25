@@ -97,6 +97,11 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		if s.sym.Exported {
 			b[45] = flagExported
 		}
+		container := noCaller
+		if p, ok := s.sym.Parent(); ok && p < len(sorted[s.file].Symbols) && p != s.local {
+			container = globalSym[s.file][p]
+		}
+		le.PutUint32(b[48:], container)
 	}
 
 	// Calls: global order (callee, qualifier, file, line).

@@ -27,7 +27,7 @@ import (
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;
 // an index written by another version is discarded and rebuilt.
-const ExtractorVersion = "go-syntax-1"
+const ExtractorVersion = "go-syntax-2"
 
 // Compaction thresholds: merge overlays into a new base when either is hit.
 const (
@@ -71,6 +71,66 @@ type Engine struct {
 	compacting atomic.Bool
 	wg         sync.WaitGroup
 	closed     atomic.Bool
+
+	busy       atomic.Int32                // indexing passes in progress
+	pending    atomic.Int64                // changed paths the watcher has not applied yet
+	lastPass   atomic.Int64                // unix nanoseconds of the last completed pass
+	watcher    atomic.Pointer[Watcher]     // set by Watch, for Sync
+	readyOnce  sync.Once                   // closes ready after the first reconcile
+	ready      chan struct{}               // closed once the index reflects the workspace
+	lastErr    atomic.Pointer[errorHolder] // last pass error, nil after a success
+	reconciled atomic.Bool
+}
+
+type errorHolder struct{ err error }
+
+// Status describes how current the index is.
+type Status struct {
+	Generation uint64
+	Files      int
+	Pending    int       // changed paths seen but not yet indexed
+	Busy       bool      // an indexing pass is running
+	Reconciled bool      // a full reconcile completed in this process
+	LastPass   time.Time // zero before the first pass
+	LastError  error     // error of the last pass, if it failed
+}
+
+// Status reports the current generation and freshness.
+func (e *Engine) Status() Status {
+	sn := e.st.Snapshot()
+	defer sn.Release()
+	st := Status{
+		Generation: sn.Generation(), Files: sn.NumFiles(), Pending: int(e.pending.Load()),
+		Busy: e.busy.Load() > 0, Reconciled: e.reconciled.Load(),
+	}
+	if ns := e.lastPass.Load(); ns > 0 {
+		st.LastPass = time.Unix(0, ns)
+	}
+	if h := e.lastErr.Load(); h != nil {
+		st.LastError = h.err
+	}
+	return st
+}
+
+// Ready is closed after the first successful Reconcile in this process.
+func (e *Engine) Ready() <-chan struct{} { return e.ready }
+
+// Sync applies changes the watcher has seen but not yet indexed, and returns
+// once they are visible. Without a watcher it returns immediately.
+func (e *Engine) Sync(ctx context.Context) error {
+	if w := e.watcher.Load(); w != nil {
+		return w.Flush(ctx)
+	}
+	return nil
+}
+
+func (e *Engine) finishPass(err error) {
+	e.lastPass.Store(time.Now().UnixNano())
+	if err != nil {
+		e.lastErr.Store(&errorHolder{err})
+		return
+	}
+	e.lastErr.Store(nil)
 }
 
 // Open opens (or creates) the index for opts.Root. It does not scan; call
@@ -95,7 +155,7 @@ func Open(opts Options) (*Engine, error) {
 	if st.Recovered != "" {
 		opts.Logf("indexer: rebuilding index: %s", st.Recovered)
 	}
-	return &Engine{opts: opts, st: st, known: map[string]bool{}}, nil
+	return &Engine{opts: opts, st: st, known: map[string]bool{}, ready: make(chan struct{})}, nil
 }
 
 // Root returns the workspace root.
@@ -118,9 +178,22 @@ func (e *Engine) Close() error {
 
 // Reconcile lists the whole workspace and indexes every difference from the
 // current generation.
-func (e *Engine) Reconcile(ctx context.Context) (Stats, error) {
+func (e *Engine) Reconcile(ctx context.Context) (st Stats, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.busy.Add(1)
+	defer func() {
+		e.busy.Add(-1)
+		e.finishPass(err)
+		if err == nil {
+			e.reconciled.Store(true)
+			e.readyOnce.Do(func() { close(e.ready) })
+		}
+	}()
+	return e.reconcileLocked(ctx)
+}
+
+func (e *Engine) reconcileLocked(ctx context.Context) (Stats, error) {
 	start := time.Now()
 	var st Stats
 	listing, err := scan.List(ctx, e.opts.Root)
@@ -165,7 +238,7 @@ func (e *Engine) Reconcile(ctx context.Context) (Stats, error) {
 // Update indexes the given changed paths (absolute or root-relative). Paths
 // the indexer does not handle are ignored, except that module files and
 // directories trigger a full Reconcile.
-func (e *Engine) Update(ctx context.Context, paths []string) (Stats, error) {
+func (e *Engine) Update(ctx context.Context, paths []string) (st Stats, err error) {
 	e.mu.Lock()
 	candidates, reconcile := e.classify(paths)
 	if reconcile || e.modules == nil {
@@ -173,8 +246,12 @@ func (e *Engine) Update(ctx context.Context, paths []string) (Stats, error) {
 		return e.Reconcile(ctx)
 	}
 	defer e.mu.Unlock()
+	e.busy.Add(1)
+	defer func() {
+		e.busy.Add(-1)
+		e.finishPass(err)
+	}()
 	start := time.Now()
-	var st Stats
 	sn := e.st.Snapshot()
 	defer sn.Release()
 
