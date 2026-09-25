@@ -36,8 +36,8 @@ try {
   Write-Host "Downloading $archive ($tag)..."
   $archivePath = Join-Path $workdir $archive
   Invoke-WebRequest -Uri "$baseUrl/$archive" -OutFile $archivePath
-  $checksumsPath = Join-Path $workdir "checksums-sha256.txt"
-  Invoke-WebRequest -Uri "$baseUrl/checksums-sha256.txt" -OutFile $checksumsPath
+  $checksumsPath = Join-Path $workdir "SHA256SUMS"
+  Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS" -OutFile $checksumsPath
 
   Write-Host "Verifying checksum..."
   $expected = (Select-String -Path $checksumsPath -Pattern " $archive$").Line.Split(" ")[0]

@@ -35,7 +35,10 @@ case "$arch" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-  tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+  # Fetch fully before parsing: piping curl into `grep -m1` makes curl fail
+  # with a write error (23) when grep exits early, which pipefail turns fatal.
+  release_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
+  tag="$(printf '%s\n' "$release_json" | grep '"tag_name"' | head -n1 | cut -d'"' -f4)"
   if [ -z "$tag" ]; then
     echo "error: could not resolve latest release tag" >&2
     exit 1
@@ -52,10 +55,16 @@ trap 'rm -rf "$workdir"' EXIT
 
 echo "Downloading ${archive} (${tag})..."
 curl -fsSL "${base_url}/${archive}" -o "${workdir}/${archive}"
-curl -fsSL "${base_url}/checksums-sha256.txt" -o "${workdir}/checksums-sha256.txt"
+curl -fsSL "${base_url}/SHA256SUMS" -o "${workdir}/SHA256SUMS"
 
 echo "Verifying checksum..."
-( cd "$workdir" && grep " ${archive}\$" checksums-sha256.txt | sha256sum -c - )
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_check="sha256sum -c -"
+else
+  # macOS before 14 ships shasum but not sha256sum.
+  sha256_check="shasum -a 256 -c -"
+fi
+( cd "$workdir" && grep " ${archive}\$" SHA256SUMS | $sha256_check )
 
 echo "Installing to ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"
