@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,126 @@ import (
 	"github.com/spawn08/chronos-code/internal/workspace"
 	"github.com/spawn08/chronos-code/internal/worktree"
 )
+
+func TestPrepareDeliveryPlanGenerationIsRetryableAndRejectsChangedProposal(t *testing.T) {
+	ctx := context.Background()
+	store, err := plan.OpenSQLStore(ctx, filepath.Join(t.TempDir(), "plans.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	orch := &Orchestrator{planStore: store, routingConfig: &router.Config{PPD: router.PPDConfig{Mode: router.PPDModeEnabled}}, capabilities: RuntimeCapabilityManifest{Capabilities: []config.Capability{{Name: capabilityClosedLoopPPD}}}}
+	orch.planController = plan.NewController(store, nil, nil, nil, plan.ControllerConfig{})
+	identity := PlanRuntimeIdentity{TenantID: "tenant", RepositoryID: "repo", TaskID: "delivery", PlanID: "delivery", Generation: "1"}
+	proposal := []byte(`{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"a","kind":"implement","objective":"add api","depends_on":[],"scope":"api.go","context_refs":[],"expected_artifacts":["api.go"],"assumptions":[],"invalidation_triggers":[],"recovery_class":"replan","risks":["compatibility"],"verification":"go test ./..."}]}`)
+	if err := orch.PrepareDeliveryPlan(ctx, proposal, identity); err != nil {
+		t.Fatal(err)
+	}
+	if err := orch.PrepareDeliveryPlan(ctx, proposal, identity); err != nil {
+		t.Fatalf("retry same proposal: %v", err)
+	}
+	changed := []byte(strings.Replace(string(proposal), "add api", "delete api", 1))
+	if err := orch.PrepareDeliveryPlan(ctx, changed, identity); !errors.Is(err, ErrPlanHandoffConflict) {
+		t.Fatalf("changed generation became runnable: %v", err)
+	}
+	loaded, err := store.Load(ctx, plan.Plan{TenantID: identity.TenantID, RepositoryID: identity.RepositoryID, TaskID: identity.TaskID, ID: identity.PlanID, Generation: identity.Generation})
+	if err != nil || loaded.State != plan.PlanDraft || len(loaded.Nodes) != 1 || loaded.Nodes[0].Objective != "add api" {
+		t.Fatalf("persisted generation = %+v, error = %v", loaded, err)
+	}
+}
+
+func TestVerifiedIntegrationReceiptReconcilesExpiredPlanNodeWithoutReapplying(t *testing.T) {
+	ctx := context.Background()
+	repo := initializePlanExecutorRepo(t)
+	manager, err := worktree.New(filepath.Join(t.TempDir(), "data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := plan.OpenSQLStore(ctx, filepath.Join(t.TempDir(), "plans.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plans.Close()
+	deliveries, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deliveries.Close()
+	identity := PlanRuntimeIdentity{TenantID: "tenant", RepositoryID: "repo", TaskID: "delivery", PlanID: "delivery", Generation: "1"}
+	p := plan.Plan{TenantID: identity.TenantID, RepositoryID: identity.RepositoryID, TaskID: identity.TaskID, ID: identity.PlanID, Generation: identity.Generation, State: plan.PlanActive,
+		Nodes: []plan.Node{{ID: "a", State: plan.NodePending}, {ID: "b", State: plan.NodePending}}, Dependencies: []plan.Dependency{{NodeID: "b", DependsOn: "a"}}}
+	if err := plans.Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	scheduler := plan.NewScheduler(plans, plan.SchedulerConfig{LeaseDuration: time.Minute, Now: func() time.Time { return now }})
+	claim := plan.ClaimRequest{AttemptID: "controller-a-1", LeaseID: "controller-a-1", EventID: "controller-a-1", IdempotencyKey: "controller-a-1"}
+	if _, err := scheduler.Claim(ctx, p, claim); err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Start(ctx, p, "a", claim.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := manager.Create(ctx, repo, worktree.CreateOptions{TaskID: "delivery", AttemptID: string(claim.AttemptID), DirtyPolicy: worktree.DirtyReject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(handle.Manifest.WorktreePath, "api.go")
+	if err := os.WriteFile(path, []byte("package fixture\nfunc API() int { return 42 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checks := []worktree.Check{{Name: "plan-node-verification", Passed: true}}
+	collected, err := manager.Collect(ctx, handle, checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := manager.IntegrateVerified(ctx, handle, []string{"api.go"}, checks, collected.FinalHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	if _, err := scheduler.Ready(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	if _, err := deliveries.AdmitRunnable(ctx, execution.Admission{Scope: scope, DeliveryID: "delivery", AdmissionKey: "key", PolicyReference: execution.InternalPlanPolicyReference,
+		Goal: execution.Goal{Statement: "build api", Actor: "operator"}, Event: execution.EventIdentity{ID: "admit", IdempotencyKey: "admit"}}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := deliveries.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked, err := deliveries.Finalize(ctx, lease, execution.Outcome{Kind: execution.OutcomeWaiting, WaitState: execution.DeliveryWaitingDecision, Signal: "plan-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	orch := &Orchestrator{planStore: plans, worktreeManager: manager, workspace: &workspace.Info{Root: repo}}
+	authorized := authorization.WithRequest(ctx, authorization.Request{PrincipalID: "operator", TenantID: "tenant", RepositoryID: "repo", Action: "plan.reconcile"})
+	if err := orch.ReconcilePlanReceipt(ctx, deliveries, identity, "a", claim.AttemptID, receipt.ReceiptID, parked.Version); !errors.Is(err, authorization.ErrDenied) {
+		t.Fatalf("unauthorized recovery: %v", err)
+	}
+	if err := orch.ReconcilePlanReceipt(authorized, deliveries, identity, "a", "wrong-attempt", receipt.ReceiptID, parked.Version); err == nil {
+		t.Fatal("unrelated plan attempt accepted receipt")
+	}
+	if err := orch.ReconcilePlanReceipt(authorized, deliveries, identity, "a", claim.AttemptID, receipt.ReceiptID, parked.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := orch.ReconcilePlanReceipt(authorized, deliveries, identity, "a", claim.AttemptID, receipt.ReceiptID, parked.Version); err != nil {
+		t.Fatalf("same receipt after crash/retry: %v", err)
+	}
+	if err := orch.ReconcilePlanReceipt(authorized, deliveries, identity, "a", claim.AttemptID, receipt.ReceiptID, parked.Version+1); !errors.Is(err, execution.ErrStaleDeliveryVersion) {
+		t.Fatalf("wrong delivery version accepted a receipt: %v", err)
+	}
+	loaded, err := plans.Load(ctx, p)
+	if err != nil || loaded.State != plan.PlanActive || loaded.Nodes[0].State != plan.NodeCompleted || loaded.Nodes[1].State != plan.NodeReady || len(loaded.Artifacts) != 1 || loaded.Artifacts[0].ID != receipt.ArtifactID {
+		t.Fatalf("reconciled plan = %+v, error = %v", loaded, err)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, "api.go"))
+	if err != nil || string(content) != "package fixture\nfunc API() int { return 42 }\n" {
+		t.Fatalf("patch applied twice or changed: %q, error = %v", content, err)
+	}
+}
 
 func TestAdmittedPlanWorkerStartExecutesPersistedNodesAndParksForAcceptance(t *testing.T) {
 	ctx := context.Background()

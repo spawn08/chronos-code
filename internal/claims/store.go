@@ -3,6 +3,7 @@ package claims
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -238,4 +239,62 @@ func cloneClaim(c Claim) Claim {
 	c.Anchors = append([]Anchor(nil), c.Anchors...)
 	c.DerivedFrom = append([]string(nil), c.DerivedFrom...)
 	return c
+}
+
+// Restore rebuilds a store from claims previously returned by List, keeping
+// their IDs, anchors, derivation and stale reasons. Anchors are not re-hashed:
+// call Refresh to re-check them against the current workspace. Derived status
+// is recomputed, so a doubted claim whose parents are live is restored live.
+func Restore(root string, saved []Claim) (*Store, error) {
+	s, err := NewStore(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range saved {
+		if _, dup := s.entries[c.ID]; dup {
+			return nil, fmt.Errorf("restore claim %q: duplicate id", c.ID)
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(c.ID, "c"))
+		if !strings.HasPrefix(c.ID, "c") || err != nil || n < 1 {
+			return nil, fmt.Errorf("restore claim %q: malformed id", c.ID)
+		}
+		if strings.TrimSpace(c.Text) == "" || len(c.Anchors) == 0 {
+			return nil, fmt.Errorf("restore claim %q: text and anchors are required", c.ID)
+		}
+		switch c.Status {
+		case StatusLive, StatusStale, StatusDoubted:
+		default:
+			return nil, fmt.Errorf("restore claim %q: unknown status %q", c.ID, c.Status)
+		}
+		c = cloneClaim(c)
+		for i, a := range c.Anchors {
+			rel, err := normalizePath(s.root, a.Path)
+			if err != nil {
+				return nil, fmt.Errorf("restore claim %q: %w", c.ID, err)
+			}
+			if a.Hash == "" {
+				return nil, fmt.Errorf("restore claim %q: anchor %s has no hash", c.ID, a)
+			}
+			c.Anchors[i].Path = rel
+		}
+		for _, pid := range c.DerivedFrom {
+			if _, ok := s.entries[pid]; !ok {
+				return nil, fmt.Errorf("restore claim %q: derived_from references unknown or later claim %q", c.ID, pid)
+			}
+		}
+		e := &entry{claim: c}
+		if c.Status == StatusStale {
+			e.ownReason = c.Reason
+			if e.ownReason == "" {
+				e.ownReason = "anchor changed"
+			}
+		}
+		s.entries[c.ID] = e
+		s.order = append(s.order, c.ID)
+		if n > s.next {
+			s.next = n
+		}
+		s.applyDerived(e)
+	}
+	return s, nil
 }

@@ -19,10 +19,9 @@ import (
 )
 
 const (
-	configuredSubagentTimeout = 30 * time.Minute
-	subagentTaskLimit         = 64 << 10
-	subagentResultLimit       = 256 << 10
-	subagentPreviewLimit      = 4 << 10
+	subagentTaskLimit    = 64 << 10
+	subagentResultLimit  = 256 << 10
+	subagentPreviewLimit = 4 << 10
 )
 
 var errSubagentBusy = errors.New("subagent busy: nested delegation cannot wait for capacity or an active agent")
@@ -192,7 +191,17 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 			r.resources = newSubagentResources(r.agents)
 		}
 	})
-	runCtx, cancel := context.WithTimeout(ctx, configuredSubagentTimeout)
+	longRunning, renewing := longRunningPolicyFromContext(ctx)
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	switch {
+	case !renewing:
+		runCtx, cancel = context.WithTimeout(ctx, boundedSubagentTimeout)
+	case longRunning.subagentTimeout > 0:
+		runCtx, cancel = context.WithTimeout(ctx, longRunning.subagentTimeout)
+	default:
+		runCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 	nested, _ := ctx.Value(subagentActiveKey{}).(bool)
 	if err := acquireSubagentLease(runCtx, r.resources.gate, nested); err != nil {
@@ -223,6 +232,12 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		identity.RoleID = configured.ID
 		runCtx = agent.WithRunIdentity(runCtx, identity)
 		runCtx = agent.WithModelProvider(runCtx, provider)
+		if renewing {
+			// The child gets its own windows and progress history; the
+			// parent's governor waits at its round boundary meanwhile.
+			runtime, _ := taskRuntimeFromContext(runCtx)
+			runCtx = agent.WithToolLoopController(runCtx, configured.ID, newWindowGovernor(longRunning, runtime, time.Now))
+		}
 		result, err = configured.Execute(runCtx, task)
 	} else if r.fallback != nil {
 		if _, durable := execution.OperationLeaseFromContext(runCtx); durable {

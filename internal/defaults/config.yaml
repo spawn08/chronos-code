@@ -61,6 +61,33 @@ repair:
   # enforcement opt-in; the other cumulative repair limits remain active.
   max_cost_microdollars: 0
 
+# Long-running interactive work. In "renew" mode the window limits below are
+# renewable checkpoints, not stop conditions: when any one fills, the run
+# checks for progress (new file content, new verification results, or mostly
+# new tool calls) and continues. It pauses and asks for guidance only after
+# `no_progress_windows` consecutive windows without progress. In renew mode
+# repair.max_model_calls/max_tool_calls/wall_time_sec/max_tokens and the
+# guardrail session token budget renew instead of ending the run;
+# repair.max_attempts is replaced by "repair while the unmet checks change".
+# An explicit repair.max_cost_microdollars remains a hard limit. "bounded"
+# restores the terminal repair.* limits. In verification report mode an
+# exhausted repair allowance completes with the unverified checks listed.
+# Delivery-worker executions always keep their own bounded accounting.
+long_running:
+  mode: renew
+  window:
+    tool_rounds: 60
+    tool_calls: 100
+    seconds: 900
+    tokens: 250000
+  no_progress_windows: 2
+  # Wall-clock limit for one delegated subagent run; 0 = none (its own work
+  # windows and no-progress check still apply). Bounded mode uses 1800.
+  subagent_timeout_sec: 0
+  # Persist each tool round to the session and compact inside long turns so
+  # a paused or failed turn keeps its working context.
+  persist_tool_rounds: true
+
 # Durable evidence ledger for long-horizon tasks. When enabled, executions
 # with an explicit task ID (plan nodes, resumed tasks) keep verification
 # evidence across turns and restarts under <project>/ledgers/. Files changed

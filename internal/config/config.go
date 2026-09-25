@@ -35,6 +35,7 @@ type Config struct {
 	Learning     LearningConfig              `yaml:"learning,omitempty"`
 	Verification VerificationConfig          `yaml:"verification,omitempty"`
 	Repair       RepairConfig                `yaml:"repair,omitempty"`
+	LongRunning  LongRunningConfig           `yaml:"long_running,omitempty"`
 	Ledger       LedgerConfig                `yaml:"ledger,omitempty"`
 	Claims       ClaimsConfig                `yaml:"claims,omitempty"`
 	RuntimeCaps  CapabilityManifest          `yaml:"runtime_capabilities,omitempty"`
@@ -250,6 +251,15 @@ type ServerConfig struct {
 	FleetInstances    []string `yaml:"fleet_instances,omitempty"`
 
 	DeliverySandbox DeliverySandboxConfig `yaml:"delivery_sandbox,omitempty"`
+	DeliveryHTTP    DeliveryHTTPConfig    `yaml:"delivery_http,omitempty"`
+}
+
+// DeliveryHTTPConfig binds one mutation tool to a host-owned downstream API.
+// The observation endpoint must return the exact response saved for the
+// Idempotency-Key; unconfigured HTTP mutations have no replay observer.
+type DeliveryHTTPConfig struct {
+	RequestURL     string `yaml:"request_url"`
+	ObservationURL string `yaml:"observation_url"`
 }
 
 // DeliverySandboxConfig is the host-owned sandbox admission profile. The image
@@ -383,6 +393,66 @@ func (c *RepairConfig) UnmarshalYAML(node *yaml.Node) error {
 		return fmt.Errorf("repair limits must be non-negative")
 	}
 	*c = RepairConfig(decoded)
+	return nil
+}
+
+// Long-running execution modes.
+const (
+	LongRunningRenew   = "renew"
+	LongRunningBounded = "bounded"
+)
+
+// LongRunningConfig controls how interactive executions treat work limits.
+// In renew mode (the embedded default) the window limits are renewable: when
+// one fills, progress is checked and the run continues; it pauses only after
+// NoProgressWindows consecutive windows without progress (0 = default 2).
+// Bounded mode keeps repair.* model/tool/time/token limits terminal. Zero
+// disables a window dimension; negative values are invalid.
+type LongRunningConfig struct {
+	Mode               string           `yaml:"mode,omitempty"`
+	Window             WorkWindowConfig `yaml:"window,omitempty"`
+	NoProgressWindows  int              `yaml:"no_progress_windows,omitempty"`
+	SubagentTimeoutSec int              `yaml:"subagent_timeout_sec,omitempty"`
+	PersistToolRounds  *bool            `yaml:"persist_tool_rounds,omitempty"`
+}
+
+// WorkWindowConfig sizes one renewable work window.
+type WorkWindowConfig struct {
+	ToolRounds int   `yaml:"tool_rounds,omitempty"`
+	ToolCalls  int   `yaml:"tool_calls,omitempty"`
+	Seconds    int   `yaml:"seconds,omitempty"`
+	Tokens     int64 `yaml:"tokens,omitempty"`
+}
+
+// Renewing reports whether work limits renew instead of ending the run. The
+// embedded defaults select renew; an unset mode (a programmatic zero-value
+// config) keeps the legacy bounded behavior.
+func (c LongRunningConfig) Renewing() bool {
+	return c.Mode == LongRunningRenew
+}
+
+// ToolRoundsPersisted reports whether session chat keeps tool rounds. The
+// embedded defaults enable it; unset keeps the legacy ledger.
+func (c LongRunningConfig) ToolRoundsPersisted() bool {
+	return c.PersistToolRounds != nil && *c.PersistToolRounds
+}
+
+func (c *LongRunningConfig) UnmarshalYAML(node *yaml.Node) error {
+	type raw LongRunningConfig
+	var decoded raw
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	switch decoded.Mode {
+	case "", LongRunningRenew, LongRunningBounded:
+	default:
+		return fmt.Errorf("long_running.mode must be %q or %q, got %q", LongRunningRenew, LongRunningBounded, decoded.Mode)
+	}
+	w := decoded.Window
+	if w.ToolRounds < 0 || w.ToolCalls < 0 || w.Seconds < 0 || w.Tokens < 0 || decoded.NoProgressWindows < 0 || decoded.SubagentTimeoutSec < 0 {
+		return fmt.Errorf("long_running limits must be non-negative")
+	}
+	*c = LongRunningConfig(decoded)
 	return nil
 }
 
@@ -795,6 +865,7 @@ func mergeConfig(base, overlay *Config, source string) {
 	mergeTypedSection(&base.Learning, overlay.Learning, overlay.set, "learning")
 	mergeTypedSection(&base.Verification, overlay.Verification, overlay.set, "verification")
 	mergeTypedSection(&base.Repair, overlay.Repair, overlay.set, "repair")
+	mergeTypedSection(&base.LongRunning, overlay.LongRunning, overlay.set, "long_running")
 	mergeTypedSection(&base.Ledger, overlay.Ledger, overlay.set, "ledger")
 	mergeTypedSection(&base.Claims, overlay.Claims, overlay.set, "claims")
 	mergeTypedSection(&base.RuntimeCaps, overlay.RuntimeCaps, overlay.set, "runtime_capabilities")

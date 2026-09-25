@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/config"
+	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/router"
+	"github.com/spawn08/chronos-code/internal/worktree"
 )
 
 // PlanRuntimeIdentity is trusted runtime metadata and is never accepted from
@@ -135,6 +138,34 @@ func (o *Orchestrator) UndoPlanArtifact(ctx context.Context, identity PlanRuntim
 		return err
 	}
 	return o.planStore.RecordArtifactUndo(ctx, ref, nodeID, receiptID, version)
+}
+
+// ReconcilePlanReceipt is an operator-only recovery of one verified node whose
+// file integration was observed after its plan lease expired. It never repeats
+// the patch and never asserts success for unrelated tool/provider effects.
+func (o *Orchestrator) ReconcilePlanReceipt(ctx context.Context, deliveries *execution.DeliveryStore, identity PlanRuntimeIdentity, nodeID plan.NodeID, attemptID plan.AttemptID, receiptID string, expectedDeliveryVersion int64) error {
+	auth, ok := authorization.FromContext(ctx)
+	if !ok || auth.Action != "plan.reconcile" || auth.TenantID != string(identity.TenantID) || auth.RepositoryID != string(identity.RepositoryID) {
+		return authorization.ErrDenied
+	}
+	if deliveries == nil || o == nil || o.planStore == nil || o.worktreeManager == nil || o.workspace == nil || identity.PlanID != plan.PlanID(identity.TaskID) || identity.Generation == "" {
+		return execution.ErrInvalidDelivery
+	}
+	root, err := filepath.EvalSymlinks(o.workspace.Root)
+	if err != nil {
+		return fmt.Errorf("resolve plan receipt repository: %w", err)
+	}
+	ref := plan.Plan{TenantID: identity.TenantID, RepositoryID: identity.RepositoryID, TaskID: identity.TaskID, ID: identity.PlanID, Generation: identity.Generation}
+	scope := execution.DeliveryScope{TenantID: execution.TenantID(identity.TenantID), RepositoryID: execution.RepositoryID(identity.RepositoryID)}
+	return deliveries.WithParkedPlan(ctx, scope, execution.DeliveryID(identity.TaskID), expectedDeliveryVersion, func(guarded context.Context) error {
+		version, err := o.planStore.Version(guarded, ref)
+		if err != nil {
+			return err
+		}
+		return o.worktreeManager.WithVerifiedPlanReceipt(guarded, root, receiptID, string(identity.TaskID), string(attemptID), func(receipt worktree.IntegrationReceipt) error {
+			return o.planStore.ReconcileAppliedReceipt(guarded, ref, nodeID, attemptID, receipt.ArtifactID, receipt.ID, version)
+		})
+	})
 }
 
 func (o *Orchestrator) closedLoopPPDEnabled() bool {

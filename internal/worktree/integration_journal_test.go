@@ -109,6 +109,104 @@ func TestIntegrationJournalParksChangedParentWithoutReapplying(t *testing.T) {
 	}
 }
 
+func TestVerifiedPlanReceiptRecoversApplyBeforeReceiptAndRejectsChangedPostimage(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%v", changed), func(t *testing.T) {
+			ctx := context.Background()
+			repo := newTestRepo(t)
+			runner := &integrationFaultRunner{failCleanup: true}
+			data := filepath.Join(t.TempDir(), "data")
+			manager, err := New(data, runner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "attempt", DirtyPolicy: DirtyReject})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(handle.Manifest.WorktreePath, "tracked.txt"), []byte("accepted\n"))
+			checks := []Check{{Name: "plan-node-verification", Passed: true}}
+			collected, err := manager.Collect(ctx, handle, checks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err := manager.IntegrateVerified(ctx, handle, []string{"tracked.txt"}, checks, collected.FinalHash)
+			if err == nil || first.ReceiptID == "" || runner.applyCalls != 1 {
+				t.Fatalf("injected cleanup failure = %+v, error = %v", first, err)
+			}
+			manifest, err := readManifest(handle.Manifest.ManifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest.Integration.State = "prepared"
+			if err := manager.persist(manifest); err != nil {
+				t.Fatal(err)
+			}
+			receiptPath, err := manager.receiptPath(first.ReceiptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(receiptPath); err != nil {
+				t.Fatal(err)
+			}
+			if changed {
+				mustWrite(t, filepath.Join(repo, "tracked.txt"), []byte("user edit\n"))
+			}
+			runner.failCleanup = false
+			restarted, err := New(data, runner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			err = restarted.WithVerifiedPlanReceipt(ctx, repo, first.ReceiptID, "task", "attempt", func(receipt IntegrationReceipt) error {
+				called = true
+				if receipt.ArtifactID != first.ArtifactID || receipt.Checks[0].Name != "plan-node-verification" {
+					t.Fatalf("unverified receipt = %+v", receipt)
+				}
+				return nil
+			})
+			if changed {
+				if err == nil || called {
+					t.Fatalf("changed parent accepted: called=%v error=%v", called, err)
+				}
+			} else if err != nil || !called || runner.applyCalls != 1 {
+				t.Fatalf("applied patch not reconciled exactly once: called=%v, applies=%d, error=%v", called, runner.applyCalls, err)
+			}
+		})
+	}
+}
+
+func TestIntegrateVerifiedRejectsPatchChangedAfterVerification(t *testing.T) {
+	ctx := context.Background()
+	repo := newTestRepo(t)
+	manager, err := New(filepath.Join(t.TempDir(), "data"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := manager.Create(ctx, repo, CreateOptions{TaskID: "task", AttemptID: "attempt", DirtyPolicy: DirtyReject})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(handle.Manifest.WorktreePath, "tracked.txt")
+	mustWrite(t, path, []byte("verified\n"))
+	checks := []Check{{Name: "plan-node-verification", Passed: true}}
+	collected, err := manager.Collect(ctx, handle, checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, path, []byte("different\n"))
+	if _, err := manager.IntegrateVerified(ctx, handle, []string{"tracked.txt"}, checks, collected.FinalHash); err == nil {
+		t.Fatal("changed patch was accepted with stale verification")
+	}
+	if _, err := manager.LoadReceipt(handle.Manifest.ID); !os.IsNotExist(err) {
+		t.Fatalf("changed patch received a receipt: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, "tracked.txt"))
+	if err != nil || string(content) == "different\n" {
+		t.Fatalf("changed patch reached parent: %q, error=%v", content, err)
+	}
+}
+
 func TestIndependentManagersComposeDisjointParentChanges(t *testing.T) {
 	ctx := context.Background()
 	repo := newTestRepo(t)

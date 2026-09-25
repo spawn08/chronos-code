@@ -25,7 +25,7 @@ func TestContextReportStableMetadataOnlyContract(t *testing.T) {
 	wantKinds := []ContextSourceKind{
 		ContextSourceSessionSummaries, ContextSourceMemory, ContextSourceLearnedPattern,
 		ContextSourceProjectDocs, ContextSourceSkills, ContextSourceDiagnostics,
-		ContextSourceGraphPrediction, ContextSourceUserHook,
+		ContextSourceGraphPrediction, ContextSourceUserHook, ContextSourceWorkingMemory,
 	}
 	gotKinds := make([]ContextSourceKind, len(report.Sources))
 	for i := range report.Sources {
@@ -66,7 +66,7 @@ func TestExecuteContextReportBlockingStreamingParityAndRedaction(t *testing.T) {
 		for _, kind := range []ContextSourceKind{
 			ContextSourceSessionSummaries, ContextSourceMemory, ContextSourceLearnedPattern,
 			ContextSourceProjectDocs, ContextSourceSkills, ContextSourceDiagnostics,
-			ContextSourceGraphPrediction, ContextSourceUserHook,
+			ContextSourceGraphPrediction, ContextSourceUserHook, ContextSourceWorkingMemory,
 		} {
 			contextSourceSelected(ctx, kind, 1, len(secret), false)
 		}

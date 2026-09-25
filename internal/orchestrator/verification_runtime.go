@@ -22,10 +22,13 @@ type taskRuntimeKey struct{}
 // top-level execution. Child contexts inherit it unless they explicitly start
 // another task.
 type taskRuntime struct {
-	taskID           execution.TaskID
-	workspaceRoot    string
-	ledger           *execution.Ledger
-	claims           *claims.Store
+	taskID        execution.TaskID
+	workspaceRoot string
+	ledger        *execution.Ledger
+	claims        *claims.Store
+	// claimsPath is the durable claims snapshot; empty keeps claims in memory.
+	claimsPath       string
+	claimsSaveMu     sync.Mutex
 	budget           *execution.TaskBudget
 	usageMu          sync.Mutex
 	usage            model.Usage

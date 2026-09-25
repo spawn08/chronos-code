@@ -138,6 +138,28 @@ func TestDeliveryAdmissionRequiresAuthenticatedAuthorizedStorage(t *testing.T) {
 	}
 }
 
+func TestPlanGenerationAdmissionRequiresExplicitPlanWorker(t *testing.T) {
+	ctx := context.Background()
+	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	config := ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store}
+	worker, err := execution.NewWorker(store, parkedDeliveryExecutor{}, execution.WorkerConfig{OwnerID: "reader", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DeliveryWorker = worker
+	response := deliveryRequest(New(nil, config).Handler(), http.MethodPost, "/v1/deliveries", "plan-key", `{"goal":"add api","plan_generation":{}}`, "secret")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured plan admission = %d: %s", response.Code, response.Body.String())
+	}
+	if deliveries, err := store.List(ctx, execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}); err != nil || len(deliveries) != 0 {
+		t.Fatalf("unconfigured plan became runnable = %+v, error = %v", deliveries, err)
+	}
+}
+
 func TestReadOnlyDeliveryAdmissionQueuesAtomicallyAndOutlivesRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))

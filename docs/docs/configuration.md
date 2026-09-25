@@ -130,6 +130,27 @@ Repair prompts contain only unmet obligations, affected paths, and remaining lim
 
 Provider model-list APIs expose model or deployment identifiers, not authoritative prices. This is especially important for Azure deployment aliases and negotiated enterprise pricing. Consequently, the default USD repair limit is disabled while model-call, tool-call, wall-time, token, and repair-attempt limits remain enforced. Configuring a positive USD limit continues to fail closed if any selected model has no known price.
 
+With the default `long_running.mode: renew` (below), interactive runs treat the model-call, tool-call, wall-time and token limits above as renewable work windows instead, and repairs continue while each one changes the set of unmet checks. A positive `max_cost_microdollars` stays a hard limit. In `report` verification mode, an exhausted repair allowance completes the turn with the unverified checks listed instead of failing it.
+
+### Long-Running Work
+
+Interactive TUI, CLI and HTTP runs are not stopped by routine work limits. Work runs in windows. When any window dimension fills, the run checks whether that window made progress: new file content, a new verification result, or mostly new tool calls. If it did, the run continues in a new window. After `no_progress_windows` windows in a row with no progress, the run pauses with a message and the `no_progress` stop reason (offered for resume) and waits for your guidance. The guardrail session token budget also renews at progress windows and at each new user turn.
+
+```yaml
+long_running:
+  mode: renew                 # "bounded" restores terminal repair.* limits
+  window:
+    tool_rounds: 60           # 0 disables a dimension
+    tool_calls: 100
+    seconds: 900
+    tokens: 250000
+  no_progress_windows: 2
+  subagent_timeout_sec: 0     # 0 = no wall-clock limit for a delegated subagent
+  persist_tool_rounds: true   # keep tool rounds in the session; compact within long turns
+```
+
+Nothing caps total spend in renew mode unless you set `repair.max_cost_microdollars` (requires known model pricing). Delivery-worker executions keep their own bounded accounting.
+
 ### Retention And Cleanup
 
 Retention policies independently enforce age, count, and estimated byte limits. A value of `0` disables only that dimension; an all-zero policy is disabled. Cleanup is bounded to `batch_size` candidates per scope and periodic server cleanup is opt-in.

@@ -20,6 +20,7 @@ system_prompt: |
   NEXT ACTION: the concrete next step for the parent; use "none" when complete
   When addressed directly, answer naturally with the same substance without forcing these labels.
 instructions:
+- After your final edit, run the project's tests (for example `go test ./...`) and then `git diff --stat`, each as its own shell command with no pipes, output redirection, or chained commands after it. The runtime records only such commands as verification evidence, and any later edit or mutating command makes that evidence stale.
 - When the user's request is ambiguous, ask one clarifying question — not three.
 - When a test fails, start from the failure output and inspect enough test and implementation context to diagnose it.
 - Test each coherent change increment; dependent edits may be batched before verification.

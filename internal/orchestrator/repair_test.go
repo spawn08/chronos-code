@@ -78,3 +78,66 @@ func TestRepairBlockingAllowsRepeatedFailureInReportMode(t *testing.T) {
 		t.Fatalf("repeated repair = (%#v, %q, %v), calls=%d", decision, reason, err, len(provider.requests))
 	}
 }
+
+// changingEvidenceProvider records a failing test on its first call, so the
+// unmet verification set changes and a second repair would be needed.
+type changingEvidenceProvider struct{ calls int }
+
+func (p *changingEvidenceProvider) Chat(ctx context.Context, _ *model.ChatRequest) (*model.ChatResponse, error) {
+	p.calls++
+	if p.calls == 1 {
+		runtime, _ := taskRuntimeFromContext(ctx)
+		exitCode := 1
+		now := time.Now()
+		_, _ = runtime.recordCommand("go test ./...", execution.CommandTest, &exitCode, execution.TerminalExited, nil, execution.ProvenanceRuntime, now, now)
+	}
+	return &model.ChatResponse{Role: model.RoleAssistant, Content: "tried"}, nil
+}
+
+func (p *changingEvidenceProvider) StreamChat(context.Context, *model.ChatRequest) (<-chan *model.ChatResponse, error) {
+	return nil, nil
+}
+func (p *changingEvidenceProvider) Name() string  { return "changing" }
+func (p *changingEvidenceProvider) Model() string { return "claude-haiku-4-5" }
+
+func TestRepairAllowanceExhaustionIsAdvisoryInReportMode(t *testing.T) {
+	for _, mode := range []verification.Mode{verification.ModeReport, verification.ModeEnforce} {
+		t.Run(string(mode), func(t *testing.T) {
+			runtime, err := newTaskRuntimeWithLimits("task", t.TempDir(), execution.TaskLimits{RepairAttempts: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runtime.recordWrite("main.go", "hash", 1, execution.ProvenanceRuntime, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			a := newExecutionTestAgent("coder", &changingEvidenceProvider{})
+			response, _, reason, err := (&Orchestrator{}).repairBlocking(withTaskRuntime(context.Background(), runtime), a, "", ExecutionRequest{VerificationMode: mode}, router.Classification{Kind: router.TaskKindEdit}, runtime, &model.ChatResponse{Content: "done"})
+			if mode == verification.ModeEnforce {
+				if reason != execution.StopBudgetExhausted || err == nil {
+					t.Fatalf("enforce = (%q, %v), want budget exhaustion", reason, err)
+				}
+				return
+			}
+			if err != nil || reason != execution.StopSuccess || !strings.Contains(response.Content, "without current verification evidence") || !strings.Contains(response.Content, "test (failed)") {
+				t.Fatalf("report = (%q, %q, %v)", response.Content, reason, err)
+			}
+		})
+	}
+}
+
+func TestRepairPromptNamesConcreteCommands(t *testing.T) {
+	runtime, err := newTaskRuntime("task", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := verification.Decision{Obligations: []verification.Obligation{
+		{ID: "test", Kind: verification.KindTest, Paths: []string{"main.go"}, Status: verification.StatusPending},
+		{ID: "diff", Kind: verification.KindDiff, Paths: []string{"main.go"}, Status: verification.StatusPending},
+	}}
+	prompt := buildRepairPrompt(decision, runtime)
+	for _, want := range []string{"`go test ./...`", "`git diff --stat`", "without pipes"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}

@@ -48,6 +48,7 @@ type IntegrationJournal struct {
 	ArtifactID string            `json:"artifact_id"`
 	Selected   []string          `json:"selected"`
 	Files      []IntegrationFile `json:"files"`
+	Checks     []Check           `json:"checks,omitempty"`
 }
 
 type IntegrationFile struct {

@@ -17,9 +17,42 @@ import (
 	"github.com/spawn08/chronos/storage"
 )
 
-// PlanDeliveryExecutor is an internal, unreleased worker adapter for a
-// host-persisted plan generation. It has no HTTP/CLI admission route until
-// acceptance verification (F10) gates write-enabled autonomous delivery.
+var ErrPlanHandoffConflict = errors.New("plan generation conflicts with persisted proposal")
+
+// PrepareDeliveryPlan validates and persists a host-scoped generation before
+// admission is made runnable. The plan and delivery use separate databases:
+// if queue promotion fails, retrying the same proposal completes the handoff;
+// a different proposal for the same identity is rejected.
+func (o *Orchestrator) PrepareDeliveryPlan(ctx context.Context, strategistJSON []byte, identity PlanRuntimeIdentity) error {
+	if o == nil || !o.closedLoopPPDEnabled() || o.planStore == nil || o.planController == nil {
+		return execution.ErrInvalidDelivery
+	}
+	output, err := plan.ParseStrategistOutput(strategistJSON)
+	if err != nil {
+		return err
+	}
+	requested := plan.DecompositionRequest{
+		TenantID: identity.TenantID, RepositoryID: identity.RepositoryID, TaskID: identity.TaskID,
+		PlanID: identity.PlanID, Generation: identity.Generation,
+		SourceRequestRef: output.SourceRequestRef, ClassifierRef: output.ClassifierRef, Nodes: output.Nodes,
+	}
+	ref := plan.Plan{TenantID: identity.TenantID, RepositoryID: identity.RepositoryID, TaskID: identity.TaskID, ID: identity.PlanID, Generation: identity.Generation}
+	stored, err := o.planStore.Load(ctx, ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = o.planController.Decompose(ctx, requested)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if !samePlanProposal(stored, requested) {
+		return ErrPlanHandoffConflict
+	}
+	return o.validatePlanArtifactReceipts(stored)
+}
+
+// PlanDeliveryExecutor is an opt-in worker adapter for a host-persisted plan
+// generation. The public handoff requires an explicitly installed plan worker.
 type PlanDeliveryExecutor struct {
 	orchestrator *Orchestrator
 	authorizer   authorization.Authorizer
@@ -32,6 +65,8 @@ func NewPlanDeliveryExecutor(orch *Orchestrator, authorizer authorization.Author
 	}
 	return &PlanDeliveryExecutor{orchestrator: orch, authorizer: authorizer, sandbox: sandbox}, nil
 }
+
+func (e *PlanDeliveryExecutor) SupportsPlanDelivery() bool { return e != nil }
 
 func (e *PlanDeliveryExecutor) Execute(ctx context.Context, attempt *execution.Execution) execution.Outcome {
 	d := attempt.Lease.Delivery

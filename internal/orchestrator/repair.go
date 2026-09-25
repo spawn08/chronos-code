@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -19,6 +20,10 @@ import (
 func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessionID string, request ExecutionRequest, classification router.Classification, runtime *taskRuntime, response *model.ChatResponse) (*model.ChatResponse, verification.Decision, execution.StopReason, error) {
 	decision := assessRuntimeVerification(request, classification, runtime)
 	seen := make(map[string]struct{})
+	if response != nil && response.StopReason == model.StopReasonPaused {
+		// A no-progress pause awaits the user; repairing would resume it.
+		return response, decision, execution.StopNoProgress, nil
+	}
 	for decision.Disagreement {
 		fingerprint := verificationFailureFingerprint(decision)
 		if _, repeated := seen[fingerprint]; repeated {
@@ -29,6 +34,15 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 		}
 		seen[fingerprint] = struct{}{}
 		if err := runtime.budget.ConsumeRepairAttempt(); err != nil {
+			if request.VerificationMode != verification.ModeEnforce {
+				// Report mode is advisory: finish with the gaps listed.
+				if response != nil {
+					noted := *response
+					noted.Content += unverifiedCompletionNote(decision)
+					response = &noted
+				}
+				return response, decision, execution.StopSuccess, nil
+			}
 			return response, decision, execution.StopBudgetExhausted, err
 		}
 		repairPrompt := buildRepairPrompt(decision, runtime)
@@ -46,10 +60,6 @@ func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) str
 	lines := []string{"Verification did not support completion. Repair only the unmet obligations below; do not replay the original task or repeat completed side effects."}
 	paths := make(map[string]struct{})
 	for _, obligation := range decision.Obligations {
-		if obligation.Status == verification.StatusSatisfied {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("- %s status=%s command=%q", obligation.ID, obligation.Status, obligation.Command))
 		for _, path := range obligation.Paths {
 			paths[path] = struct{}{}
 		}
@@ -59,6 +69,13 @@ func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) str
 		changed = append(changed, path)
 	}
 	sort.Strings(changed)
+	for _, obligation := range decision.Obligations {
+		if obligation.Status == verification.StatusSatisfied {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- %s status=%s: %s", obligation.ID, obligation.Status, obligationAction(obligation, changed)))
+	}
+	lines = append(lines, "Run each check as its own shell command, without pipes, output redirection, or chained commands after it; only then is its exit status recorded. Run checks after your final edit: any later edit or mutating command makes them stale.")
 	if len(changed) > 0 {
 		lines = append(lines, "Changed paths: "+strings.Join(changed, ", "))
 	}
@@ -71,6 +88,54 @@ func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) str
 		remainingInt64(snapshot.Limits.Tokens, snapshot.Tokens),
 		remainingInt64(snapshot.Limits.CostMicrodollars, snapshot.CostMicrodollars)))
 	return strings.Join(lines, "\n")
+}
+
+// unverifiedCompletionNote lists the checks without current passing evidence
+// when report mode completes after its repair allowance.
+func unverifiedCompletionNote(decision verification.Decision) string {
+	var gaps []string
+	for _, obligation := range decision.Obligations {
+		if obligation.Status != verification.StatusSatisfied {
+			gaps = append(gaps, fmt.Sprintf("%s (%s)", obligation.ID, obligation.Status))
+		}
+	}
+	return "\n\nNote: completed without current verification evidence for: " + strings.Join(gaps, ", ") + "."
+}
+
+// obligationAction tells the model which command satisfies an obligation.
+func obligationAction(obligation verification.Obligation, changed []string) string {
+	if obligation.Command != "" {
+		return fmt.Sprintf("run `%s`", obligation.Command)
+	}
+	switch obligation.Kind {
+	case verification.KindTest:
+		return "run the project's tests, for example " + testCommandHint(changed)
+	case verification.KindDiff:
+		return "run `git diff --stat` to review the final change"
+	case verification.KindBuild:
+		return "run the project's build command"
+	case verification.KindDiagnostics:
+		return "run the project's linter or vet command"
+	}
+	return "run the matching check"
+}
+
+func testCommandHint(changed []string) string {
+	for _, path := range changed {
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".go":
+			return "`go test ./...`"
+		case ".py":
+			return "`pytest`"
+		case ".rs":
+			return "`cargo test`"
+		case ".js", ".jsx", ".ts", ".tsx":
+			return "`npm test`"
+		case ".java", ".kt":
+			return "`mvn test`"
+		}
+	}
+	return "`go test ./...`, `npm test`, `pytest`, or `cargo test`"
 }
 
 func verificationFailureFingerprint(decision verification.Decision) string {

@@ -18,6 +18,7 @@ const (
 	ContextSourceDiagnostics      ContextSourceKind = "diagnostics"
 	ContextSourceGraphPrediction  ContextSourceKind = "graph_prediction"
 	ContextSourceUserHook         ContextSourceKind = "user_hook"
+	ContextSourceWorkingMemory    ContextSourceKind = "working_memory"
 
 	ContextOmittedNotConfigured = "not_configured"
 	ContextOmittedNotSelected   = "not_selected"
@@ -65,6 +66,7 @@ var contextSourceDefinitions = []ContextSourceReport{
 	{Kind: ContextSourceDiagnostics, ID: "diagnostics", Title: "LSP diagnostics"},
 	{Kind: ContextSourceGraphPrediction, ID: "graph-prediction", Title: "Graph prediction"},
 	{Kind: ContextSourceUserHook, ID: "user-hook", Title: "User prompt hooks", BudgetBytes: userHookPromptContextTokens * 4},
+	{Kind: ContextSourceWorkingMemory, ID: "working-memory", Title: "Anchored claims working memory"},
 }
 
 func newContextReportCollector() *contextReportCollector {

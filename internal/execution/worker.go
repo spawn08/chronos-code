@@ -76,6 +76,16 @@ func (w *Worker) CanRunCheckpointedTeam() bool {
 	return ok && capable.SupportsCheckpointedTeam()
 }
 
+// CanRunPlan requires an explicitly installed plan executor. A read-only
+// delivery worker must never implicitly admit write-capable plan nodes.
+func (w *Worker) CanRunPlan() bool {
+	if w == nil {
+		return false
+	}
+	capable, ok := w.executor.(interface{ SupportsPlanDelivery() bool })
+	return ok && capable.SupportsPlanDelivery()
+}
+
 func NewWorker(store *DeliveryStore, executor Executor, config WorkerConfig) (*Worker, error) {
 	if store == nil || executor == nil || config.OwnerID == "" || config.Concurrency < 1 || config.LeaseDuration <= 0 || config.HeartbeatEvery <= 0 || config.HeartbeatEvery >= config.LeaseDuration || config.PollEvery <= 0 {
 		return nil, ErrInvalidDelivery

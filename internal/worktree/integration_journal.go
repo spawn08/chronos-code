@@ -76,8 +76,8 @@ func fingerprintFile(root, path string) (FileFingerprint, error) {
 	return FileFingerprint{Exists: true, Hash: fmt.Sprintf("%x", hash.Sum(nil)), Mode: uint32(opened.Mode().Perm())}, nil
 }
 
-func (m *Manager) prepareIntegration(manifest *Manifest, selected, paths []string, artifactID string) error {
-	journal := &IntegrationJournal{State: "prepared", ArtifactID: artifactID, Selected: append([]string(nil), selected...)}
+func (m *Manager) prepareIntegration(manifest *Manifest, selected, paths []string, artifactID string, checks []Check) error {
+	journal := &IntegrationJournal{State: "prepared", ArtifactID: artifactID, Selected: append([]string(nil), selected...), Checks: append([]Check(nil), checks...)}
 	for _, path := range paths {
 		before, err := fingerprintFile(manifest.RepoRoot, path)
 		if err != nil {

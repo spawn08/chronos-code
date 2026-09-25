@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -13,6 +14,19 @@ import (
 // Integrate applies only selected paths after all conflict checks pass. A
 // successful integration also removes the private worktree, ref, and manifest.
 func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []string) (Result, error) {
+	return m.integrate(ctx, handle, selected, nil, "")
+}
+
+// IntegrateVerified persists the plan controller's verification with the
+// integration intent before touching the parent checkout.
+func (m *Manager) IntegrateVerified(ctx context.Context, handle Handle, selected []string, checks []Check, expectedArtifactID string) (Result, error) {
+	if len(checks) != 1 || checks[0].Name != "plan-node-verification" || !checks[0].Passed || expectedArtifactID == "" {
+		return Result{}, fmt.Errorf("plan node verification is not passed")
+	}
+	return m.integrate(ctx, handle, selected, checks, expectedArtifactID)
+}
+
+func (m *Manager) integrate(ctx context.Context, handle Handle, selected []string, checks []Check, expectedArtifactID string) (Result, error) {
 	manifest := handle.Manifest
 	if err := m.validateOwned(manifest); err != nil {
 		return Result{}, err
@@ -47,6 +61,9 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 	}
 	manifest = persisted
 	if manifest.Integration != nil {
+		if !slices.Equal(manifest.Integration.Checks, checks) || expectedArtifactID != "" && manifest.Integration.ArtifactID != expectedArtifactID {
+			return Result{}, fmt.Errorf("integration verification differs from prepared journal")
+		}
 		return m.recoverIntegration(ctx, Handle{Manifest: manifest}, selected)
 	}
 
@@ -123,6 +140,9 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 		ChangedPaths: actualPaths, Patch: append([]byte(nil), patch.Stdout...),
 		Cleanup: Cleanup{State: string(manifest.CleanupState), ManifestPath: manifest.ManifestPath},
 	}
+	if expectedArtifactID != "" && expectedArtifactID != result.FinalHash {
+		return Result{}, fmt.Errorf("plan patch changed since verification")
+	}
 	_, err = m.runner.Run(ctx, Command{Dir: manifest.RepoRoot, Args: []string{"apply", "--check", "--binary", "--whitespace=nowarn", "-"}, Stdin: patch.Stdout})
 	if err != nil {
 		return Result{}, fmt.Errorf("selected patch conflicts with parent: %w", err)
@@ -132,7 +152,7 @@ func (m *Manager) Integrate(ctx context.Context, handle Handle, selected []strin
 	}
 	result.ArtifactID = result.FinalHash
 	result.ReceiptID = manifest.ID
-	if err := m.prepareIntegration(&manifest, selected, actualPaths, result.ArtifactID); err != nil {
+	if err := m.prepareIntegration(&manifest, selected, actualPaths, result.ArtifactID, checks); err != nil {
 		return Result{}, fmt.Errorf("prepare integration journal: %w", err)
 	}
 	if _, err := m.runner.Run(ctx, Command{Dir: manifest.RepoRoot, Args: []string{"apply", "--binary", "--whitespace=nowarn", "-"}, Stdin: patch.Stdout}); err != nil {

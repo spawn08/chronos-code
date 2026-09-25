@@ -353,6 +353,15 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		return nil, fmt.Errorf("configure security: %w", err)
 	}
 	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second)
+	if cfg.Server.DeliveryHTTP.RequestURL != "" || cfg.Server.DeliveryHTTP.ObservationURL != "" {
+		observedHTTP, err := newDeliveryHTTPTool(cfg.Server.DeliveryHTTP)
+		if err != nil {
+			return nil, fmt.Errorf("configure delivery HTTP destination: %w", err)
+		}
+		for _, a := range agents {
+			a.Tools.Register(observedHTTP)
+		}
+	}
 	grCfg := setupGuardrails(cfg, projectDir, agents, policy.SecretPatterns)
 
 	maxTokens, _ := grCfg.TokenBudget()
@@ -360,6 +369,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	attBudget := attention.NewBudgeter(100)
 	for _, a := range agents {
 		a.Hooks = append(a.Hooks, attBudget)
+		a.ContextCfg.PersistToolRounds = cfg.LongRunning.ToolRoundsPersisted()
 	}
 
 	actBuf := activation.NewBuffer(50)
@@ -1853,6 +1863,18 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	if err != nil {
 		return ExecutionResult{}, err
 	}
+	longRunning, renewing := o.longRunningPolicy(ctx)
+	if renewing {
+		// Model/tool/time/token limits become renewable work windows owned by
+		// the governor; only repair attempts and a cost ceiling stay terminal.
+		taskRuntime.budget = execution.NewTaskBudget(renewableTaskLimits(taskLimits(o.cfg)), time.Now())
+		ctx = withLongRunningPolicy(ctx, longRunning)
+		ctx = agent.WithToolLoopController(ctx, agentID, newWindowGovernor(longRunning, taskRuntime, time.Now))
+		// A new user turn authorizes another session budget window.
+		if o.budget != nil && o.budget.Ratio(sessionID) >= 1 {
+			o.budget.ResetSession(sessionID)
+		}
+	}
 	ctx = withTaskRuntime(ctx, taskRuntime)
 	if request.PolicyContext != nil {
 		ctx = context.WithValue(ctx, executionPolicyContextKey{}, request.PolicyContext)
@@ -1896,6 +1918,9 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			message = hint + "\n\n" + message
 		}
 	}
+	if !request.BoundedContext {
+		message = taskRuntime.withWorkingMemory(ctx, message)
+	}
 	if hasIntent && intent.Action == memory.IntentRecallPast && result.MemoryIntent.Applied {
 		ctx = context.WithValue(ctx, messageKey{}, intent.Payload)
 	}
@@ -1909,7 +1934,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		}
 	}
 	var taskCancel context.CancelFunc
-	if o.cfg != nil && o.cfg.Repair.WallTimeSec > 0 {
+	if o.cfg != nil && o.cfg.Repair.WallTimeSec > 0 && !renewing {
 		ctx, taskCancel = context.WithTimeout(ctx, time.Duration(o.cfg.Repair.WallTimeSec)*time.Second)
 	}
 	if request.Mode == ExecutionStreaming {
@@ -2174,6 +2199,7 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 			defer cancel()
 		}
 		seen := make(map[string]struct{})
+		paused := false
 		complete := func(decision verification.Decision, reason execution.StopReason, err error) {
 			result := ExecutionResult{Verification: decision, Budget: runtime.budget.Snapshot(), StopReason: reason}
 			populateRuntimeResult(&result, runtime)
@@ -2191,6 +2217,12 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 			case response, ok := <-stream:
 				if !ok {
 					decision := assessRuntimeVerification(request, classification, runtime)
+					if paused {
+						// The governor paused for lack of progress; a repair
+						// prompt would resume the loop the user must steer.
+						complete(decision, execution.StopNoProgress, nil)
+						return
+					}
 					if !decision.Disagreement {
 						complete(decision, execution.StopSuccess, nil)
 						return
@@ -2212,6 +2244,16 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 					}
 					seen[fingerprint] = struct{}{}
 					if err := runtime.budget.ConsumeRepairAttempt(); err != nil {
+						if request.VerificationMode != verification.ModeEnforce {
+							// Report mode is advisory: finish with the gaps
+							// listed instead of failing a completed turn.
+							select {
+							case assessed <- &model.ChatResponse{Role: model.RoleAssistant, Content: unverifiedCompletionNote(decision), Delta: true}:
+							case <-ctx.Done():
+							}
+							complete(decision, execution.StopSuccess, nil)
+							return
+						}
 						terminal := &execution.TerminalError{Reason: execution.StopBudgetExhausted, Err: err}
 						assessed <- &model.ChatResponse{Err: terminal}
 						complete(decision, execution.StopBudgetExhausted, terminal)
@@ -2230,6 +2272,9 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 					classified := *response
 					classified.Err = apierror.Classify(response.Err)
 					response = &classified
+				}
+				if response != nil && !response.Delta && response.StopReason == model.StopReasonPaused {
+					paused = true
 				}
 				select {
 				case assessed <- response:

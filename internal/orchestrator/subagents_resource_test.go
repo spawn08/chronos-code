@@ -517,7 +517,7 @@ func TestSetupSubagentsPreservesDynamicFallback(t *testing.T) {
 	provider := resourceProvider{chat: func(ctx context.Context, req *model.ChatRequest) (*model.ChatResponse, error) {
 		calls++
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > configuredSubagentTimeout || time.Until(deadline) < configuredSubagentTimeout-time.Minute {
+		if !ok || time.Until(deadline) > boundedSubagentTimeout || time.Until(deadline) < boundedSubagentTimeout-time.Minute {
 			return nil, fmt.Errorf("missing default delegation deadline: %v", deadline)
 		}
 		if req.Messages[0].Content != "dynamic role" || req.Messages[len(req.Messages)-1].Content != "dynamic task" {

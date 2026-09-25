@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spawn08/chronos/engine/tool"
@@ -74,6 +75,47 @@ func TestClassifyShellCommandIsConservative(t *testing.T) {
 	} {
 		if got := classifyShellCommand(command); got != want {
 			t.Errorf("classifyShellCommand(%q) = %q, want %q", command, got, want)
+		}
+	}
+}
+
+func TestPlanShellEvidenceCountsCommonAgentCommands(t *testing.T) {
+	type want struct {
+		checks    []string
+		mutations int
+	}
+	for command, expected := range map[string]want{
+		"go test ./... 2>&1":                   {checks: []string{"test:go test ./..."}},
+		"cd pkg && go test ./...":              {checks: []string{"test:go test ./..."}},
+		"go build ./... && go test ./...":      {checks: []string{"build:go build ./...", "test:go test ./..."}},
+		"GOFLAGS=-count=1 go test ./...":       {checks: []string{"test:go test ./..."}},
+		"git diff --stat":                      {checks: []string{"diff:git diff --stat"}},
+		"go test ./... 2>&1 | tail -30":        {},
+		"cat main.go | head -20":               {},
+		"grep -rn foo . > /dev/null":           {},
+		"sed -n '1,20p' main.go":               {},
+		"find . -name '*.go'":                  {},
+		"go vet ./...; go test ./...":          {checks: []string{"test:go test ./..."}},
+		"go test ./... > out.txt":              {mutations: 1, checks: []string{"test:go test ./..."}},
+		"sed -i 's/a/b/' main.go":              {mutations: 1},
+		"find . -name '*.tmp' -delete":         {mutations: 1},
+		"go test ./... && rm -rf x":            {mutations: 1, checks: []string{"test:go test ./..."}},
+		"echo $(rm -rf x)":                     {mutations: 1},
+		"go test ./... | tee log && rm x":      {mutations: 2},
+		"./build.sh":                           {mutations: 1},
+		"go test -run 'TestA|TestB' ./pkg/...": {checks: []string{"test:go test -run 'TestA|TestB' ./pkg/..."}},
+	} {
+		var checks []string
+		mutations := 0
+		for _, step := range planShellEvidence(command) {
+			if step.mutation {
+				mutations++
+				continue
+			}
+			checks = append(checks, string(step.class)+":"+step.command)
+		}
+		if mutations != expected.mutations || strings.Join(checks, ",") != strings.Join(expected.checks, ",") {
+			t.Errorf("planShellEvidence(%q) = checks %v, mutations %d; want %v, %d", command, checks, mutations, expected.checks, expected.mutations)
 		}
 	}
 }

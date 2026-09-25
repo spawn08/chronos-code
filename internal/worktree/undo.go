@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -15,11 +16,14 @@ import (
 // file patch; shell/API effects and dependent plan nodes are not reversed.
 type IntegrationReceipt struct {
 	ID             string            `json:"id"`
+	TaskID         string            `json:"task_id,omitempty"`
+	AttemptID      string            `json:"attempt_id,omitempty"`
 	RepoRoot       string            `json:"repo_root"`
 	ParentRevision string            `json:"parent_revision"`
 	ArtifactID     string            `json:"artifact_id"`
 	State          string            `json:"state"`
 	Files          []IntegrationFile `json:"files"`
+	Checks         []Check           `json:"checks,omitempty"`
 }
 
 func (m *Manager) receiptPath(id string) (string, error) {
@@ -41,10 +45,10 @@ func (m *Manager) retainReceipt(manifest Manifest) error {
 	if revision == "" {
 		revision = manifest.BaseRevision
 	}
-	receipt := IntegrationReceipt{ID: manifest.ID, RepoRoot: manifest.RepoRoot, ParentRevision: revision,
-		ArtifactID: journal.ArtifactID, State: "applied", Files: append([]IntegrationFile(nil), journal.Files...)}
+	receipt := IntegrationReceipt{ID: manifest.ID, TaskID: manifest.TaskID, AttemptID: manifest.AttemptID, RepoRoot: manifest.RepoRoot, ParentRevision: revision,
+		ArtifactID: journal.ArtifactID, State: "applied", Files: append([]IntegrationFile(nil), journal.Files...), Checks: append([]Check(nil), journal.Checks...)}
 	if existing, err := m.LoadReceipt(receipt.ID); err == nil {
-		if existing.ID != receipt.ID || existing.RepoRoot != receipt.RepoRoot || existing.ParentRevision != receipt.ParentRevision || existing.ArtifactID != receipt.ArtifactID || !sameReceiptFiles(existing.Files, receipt.Files) {
+		if existing.ID != receipt.ID || existing.TaskID != receipt.TaskID || existing.AttemptID != receipt.AttemptID || existing.RepoRoot != receipt.RepoRoot || existing.ParentRevision != receipt.ParentRevision || existing.ArtifactID != receipt.ArtifactID || !sameReceiptFiles(existing.Files, receipt.Files) || !slices.Equal(existing.Checks, receipt.Checks) {
 			return fmt.Errorf("integration receipt conflicts with existing artifact")
 		}
 		return nil

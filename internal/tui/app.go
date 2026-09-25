@@ -1485,7 +1485,7 @@ func controlEligible(kind controlKind, reason execution.StopReason) bool {
 	case controlRetry:
 		return reason == execution.StopProviderRetryable || reason == execution.StopTimeout
 	case controlResume:
-		return reason == execution.StopCancelled || reason == execution.StopBudgetExhausted || reason == execution.StopVerificationFailed || reason == execution.StopRepeatedFailure
+		return reason == execution.StopCancelled || reason == execution.StopBudgetExhausted || reason == execution.StopVerificationFailed || reason == execution.StopRepeatedFailure || reason == execution.StopNoProgress
 	default:
 		return false
 	}

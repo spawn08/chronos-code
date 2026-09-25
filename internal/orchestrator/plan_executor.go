@@ -31,6 +31,10 @@ type planWorktreeManager interface {
 	Remove(context.Context, worktree.Handle) error
 }
 
+type verifiedPlanIntegrator interface {
+	IntegrateVerified(context.Context, worktree.Handle, []string, []worktree.Check, string) (worktree.Result, error)
+}
+
 // IsolationCapabilityError reports that a mutating execution cannot be bound
 // to an isolated workspace. Callers may use errors.As to handle it explicitly.
 type IsolationCapabilityError struct{ Reason string }
@@ -134,11 +138,11 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 	if lease, ok := execution.OperationLeaseFromContext(ctx); ok {
 		err = lease.Store.WithLeaseEffect(ctx, lease.Lease, 2*time.Minute, func(effectCtx context.Context) error {
 			var applyErr error
-			integrated, applyErr = e.worktrees.Integrate(effectCtx, handle, collected.ChangedPaths)
+			integrated, applyErr = e.integrateVerified(effectCtx, handle, collected.ChangedPaths, collected.Checks, collected.FinalHash)
 			return applyErr
 		})
 	} else {
-		integrated, err = e.worktrees.Integrate(ctx, handle, collected.ChangedPaths)
+		integrated, err = e.integrateVerified(ctx, handle, collected.ChangedPaths, collected.Checks, collected.FinalHash)
 	}
 	if err != nil {
 		if integrated.ArtifactID != "" && (integrated.Cleanup.State == string(worktree.CleanupPending) || integrated.Cleanup.State == "complete") {
@@ -153,6 +157,13 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 	mapped.Workspace.ReceiptID = integrated.ReceiptID
 	mapped.Workspace.Cleanup = integrated.Cleanup
 	return mapped, nil
+}
+
+func (e *planNodeExecutor) integrateVerified(ctx context.Context, handle worktree.Handle, paths []string, checks []worktree.Check, expectedHash string) (worktree.Result, error) {
+	if integrator, ok := e.worktrees.(verifiedPlanIntegrator); ok {
+		return integrator.IntegrateVerified(ctx, handle, paths, checks, expectedHash)
+	}
+	return e.worktrees.Integrate(ctx, handle, paths)
 }
 
 func (e *planNodeExecutor) execute(ctx context.Context, request plan.NodeExecutionRequest, paths []string) (plan.NodeExecutionResult, error) {

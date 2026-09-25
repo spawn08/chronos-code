@@ -19,7 +19,10 @@ const (
 	StopTimeout            StopReason = "timeout"
 	StopCancelled          StopReason = "cancelled"
 	StopBudgetExhausted    StopReason = "budget_exhausted"
-	StopInternalError      StopReason = "internal_error"
+	// StopNoProgress: renewable work windows repeatedly produced no progress
+	// and the run paused for user guidance. Work so far is kept; not success.
+	StopNoProgress    StopReason = "no_progress"
+	StopInternalError StopReason = "internal_error"
 )
 
 type TerminalError struct {

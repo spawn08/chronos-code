@@ -1,6 +1,9 @@
 package orchestrator
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,10 +76,12 @@ func (r *taskRuntime) recordReadClaim(args map[string]any, result any) {
 			return
 		}
 	}
-	_, _ = r.claims.Add(claims.Input{
+	if _, err := r.claims.Add(claims.Input{
 		Text:    fmt.Sprintf("read %s:%d-%d", rel, start, end),
 		Anchors: []claims.Anchor{{Path: rel, StartLine: start, EndLine: end}},
-	})
+	}); err == nil {
+		_ = r.saveClaims()
+	}
 }
 
 // refreshClaims re-checks claims anchored to paths (every claim when paths is
@@ -85,6 +90,10 @@ func (r *taskRuntime) refreshClaims(completedAt time.Time, paths ...string) erro
 	if r == nil || r.claims == nil {
 		return nil
 	}
+	// Refresh can relocate moved anchors without a status change, so the
+	// snapshot is rewritten whenever claims exist. Persistence is best-effort
+	// working memory and never fails the caller.
+	defer func() { _ = r.saveClaims() }()
 	for _, change := range r.claims.Refresh(paths...) {
 		claim, ok := r.claims.Get(change.ID)
 		if !ok {
@@ -144,6 +153,101 @@ func (r *taskRuntime) claimsDigest() []string {
 		header = fmt.Sprintf("Working memory (anchored reads from this task; %d live claims omitted):", omitted)
 	}
 	return append([]string{header}, lines...)
+}
+
+// claimsSnapshotVersion identifies the on-disk claims snapshot format.
+const claimsSnapshotVersion = 1
+
+type claimsSnapshot struct {
+	Version int            `json:"version"`
+	Claims  []claims.Claim `json:"claims"`
+}
+
+// claimsSnapshotPath places the claims snapshot beside the task's ledger file.
+func claimsSnapshotPath(ledgerPath string) string {
+	return strings.TrimSuffix(ledgerPath, ".jsonl") + ".claims.json"
+}
+
+// loadClaims replaces the in-memory store with the durable snapshot at
+// claimsPath. A missing snapshot is an empty store. Callers must Refresh
+// afterwards: the workspace may have changed while no task was running.
+func (r *taskRuntime) loadClaims() error {
+	if r == nil || r.claimsPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(r.claimsPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read claims snapshot: %w", err)
+	}
+	var snapshot claimsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("decode claims snapshot: %w", err)
+	}
+	if snapshot.Version != claimsSnapshotVersion {
+		return fmt.Errorf("claims snapshot version %d is not supported", snapshot.Version)
+	}
+	store, err := claims.Restore(r.workspaceRoot, snapshot.Claims)
+	if err != nil {
+		return fmt.Errorf("restore claims snapshot: %w", err)
+	}
+	r.claims = store
+	return nil
+}
+
+// saveClaims atomically rewrites the durable snapshot (temp file, fsync,
+// rename), so a crash leaves either the previous or the new snapshot.
+func (r *taskRuntime) saveClaims() error {
+	if r == nil || r.claims == nil || r.claimsPath == "" {
+		return nil
+	}
+	r.claimsSaveMu.Lock()
+	defer r.claimsSaveMu.Unlock()
+	data, err := json.Marshal(claimsSnapshot{Version: claimsSnapshotVersion, Claims: r.claims.List()})
+	if err != nil {
+		return fmt.Errorf("encode claims snapshot: %w", err)
+	}
+	dir := filepath.Dir(r.claimsPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create claims snapshot dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(r.claimsPath)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create claims snapshot: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write claims snapshot: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync claims snapshot: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close claims snapshot: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), r.claimsPath); err != nil {
+		return fmt.Errorf("commit claims snapshot: %w", err)
+	}
+	return nil
+}
+
+// withWorkingMemory appends the claims digest to a turn's opening prompt so
+// the model sees carried-over reads, and which of them have since changed,
+// before it acts. With no claims the prompt is unchanged.
+func (r *taskRuntime) withWorkingMemory(ctx context.Context, message string) string {
+	lines := r.claimsDigest()
+	if len(lines) == 0 {
+		contextSourceOmitted(ctx, ContextSourceWorkingMemory, ContextOmittedNotSelected)
+		return message
+	}
+	block := strings.Join(lines, "\n")
+	truncated := r.claims != nil && len(r.claims.List()) > len(lines)-1
+	contextSourceSelected(ctx, ContextSourceWorkingMemory, len(lines)-1, len(block), truncated)
+	return message + "\n\n" + block
 }
 
 func fileLineCount(path string) int {

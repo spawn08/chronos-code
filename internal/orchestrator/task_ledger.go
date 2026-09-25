@@ -35,8 +35,27 @@ func (o *Orchestrator) openTaskRuntime(taskID string, explicitTaskID bool, works
 		return nil, fmt.Errorf("open evidence ledger for task %q: %w", taskID, err)
 	}
 	runtime.ledger = ledger
-	if err := runtime.reconcileExternalChanges(time.Now().UTC()); err != nil {
+	now := time.Now().UTC()
+	runtime.claimsPath = claimsSnapshotPath(store.Path(runtime.taskID))
+	if loadErr := runtime.loadClaims(); loadErr != nil {
+		// Claims are advisory working memory: an unreadable snapshot must
+		// not block the task. Start empty and leave an audit trail.
+		if _, err := runtime.ledger.Record(execution.Event{
+			Type:        execution.EventClaim,
+			Detail:      "claims snapshot discarded: " + loadErr.Error(),
+			Provenance:  execution.ProvenanceRuntime,
+			CompletedAt: now,
+		}); err != nil {
+			return nil, fmt.Errorf("record discarded claims snapshot for task %q: %w", taskID, err)
+		}
+	}
+	if err := runtime.reconcileExternalChanges(now); err != nil {
 		return nil, fmt.Errorf("reconcile evidence ledger for task %q: %w", taskID, err)
+	}
+	// Claims can anchor files the task only read; re-check all of them, not
+	// just files with recorded writes.
+	if err := runtime.refreshClaims(now); err != nil {
+		return nil, fmt.Errorf("refresh claims for task %q: %w", taskID, err)
 	}
 	return runtime, nil
 }
