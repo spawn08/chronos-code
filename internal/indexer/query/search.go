@@ -5,172 +5,35 @@ import (
 	"math"
 	"slices"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
 	"github.com/spawn08/chronos-code/internal/indexer/segment"
+	"github.com/spawn08/chronos-code/internal/indexer/terms"
 )
 
-// BM25 parameters and field weights. The name field dominates so that a
-// symbol whose name matches outranks one that merely mentions the term.
+// BM25 parameters.
 const (
-	bm25K1       = 1.2
-	bm25B        = 0.75
-	weightName   = 3
-	weightOther  = 1
-	fuzzyLimit   = 25
-	maxQueryTerm = 32
+	bm25K1     = 1.2
+	bm25B      = 0.75
+	fuzzyLimit = 25
+	// A term in more than commonDocs documents (and more than 1/20 of
+	// them) carries almost no idf and is skipped when the query has rarer
+	// terms; postings visited per term are capped at maxPostings.
+	commonDocs  = 50000
+	maxPostings = 200000
 )
 
-type posting struct {
-	sym int32
-	tf  float32
-}
+func queryTerms(q string) []string { return terms.Query(q) }
 
-// segIndex is the search index of one immutable segment: BM25 postings over
-// symbol name, signature, doc, package and file, plus a trigram index over
-// distinct lower-cased symbol names for fuzzy lookup. Postings include
-// records of files later replaced by overlays; queries filter liveness.
-type segIndex struct {
-	terms  map[string][]posting
-	docLen []float32
-	nDocs  int
-	sumLen float64
-	names  []string // distinct symbol names, sorted
-	lower  []string // lower-cased names, parallel to names
-	tri    map[string][]int32
-}
+func stem(w string) string { return terms.Stem(w) }
 
-func buildSegIndex(seg *segment.Segment) *segIndex {
-	idx := &segIndex{terms: map[string][]posting{}, docLen: make([]float32, seg.NumSymbols()), tri: map[string][]int32{}}
-	fileTerms := make(map[int]map[string]float32)
-	tf := map[string]float32{}
-	for k := 0; k < seg.NumSymbols(); k++ {
-		if seg.SymbolKind(k) == facts.KindEmbed {
-			continue
-		}
-		rec := seg.Symbol(k)
-		clear(tf)
-		addTerms(tf, rec.Name, weightName)
-		addTerms(tf, rec.Receiver, weightOther)
-		addTerms(tf, rec.Signature, weightOther)
-		addTerms(tf, rec.Doc, weightOther)
-		ft, ok := fileTerms[rec.File]
-		if !ok {
-			m := seg.FileMeta(rec.File)
-			ft = map[string]float32{}
-			addTerms(ft, m.Package, weightOther)
-			addTerms(ft, m.Path, weightOther)
-			fileTerms[rec.File] = ft
-		}
-		for t, n := range ft {
-			tf[t] += n
-		}
-		var n float32
-		for t, w := range tf {
-			idx.terms[t] = append(idx.terms[t], posting{int32(k), w})
-			n += w
-		}
-		idx.docLen[k] = n
-		idx.nDocs++
-		idx.sumLen += float64(n)
-		if len(idx.names) == 0 || idx.names[len(idx.names)-1] != rec.Name {
-			// Symbols are sorted by name, so distinct names arrive in order.
-			idx.names = append(idx.names, rec.Name)
-		}
-	}
-	idx.lower = make([]string, len(idx.names))
-	for i, n := range idx.names {
-		idx.lower[i] = strings.ToLower(n)
-		for _, g := range trigrams(idx.lower[i]) {
-			if l := idx.tri[g]; len(l) == 0 || l[len(l)-1] != int32(i) {
-				idx.tri[g] = append(l, int32(i))
-			}
-		}
-	}
-	return idx
-}
-
-// addTerms adds the code-aware terms of s to tf with weight w: every word
-// (letters, digits, underscore) lower-cased, plus its camelCase and
-// snake_case parts when they differ.
-func addTerms(tf map[string]float32, s string, w float32) {
-	for _, word := range words(s) {
-		lw := strings.ToLower(word)
-		tf[lw] += w
-		parts := subwords(word)
-		if len(parts) > 1 {
-			for _, p := range parts {
-				tf[strings.ToLower(p)] += w / 2
-			}
-		}
-	}
-}
-
-func words(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool { return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_') })
-}
-
-// subwords splits an identifier at underscores and case changes:
-// "parseHTTPRequest_v2" -> parse, HTTP, Request, v2.
-func subwords(word string) []string {
-	var out []string
-	for _, part := range strings.Split(word, "_") {
-		if part == "" {
-			continue
-		}
-		rs := []rune(part)
-		start := 0
-		for i := 1; i < len(rs); i++ {
-			prev, cur := rs[i-1], rs[i]
-			next := rune(0)
-			if i+1 < len(rs) {
-				next = rs[i+1]
-			}
-			lowerToUpper := (unicode.IsLower(prev) || unicode.IsDigit(prev)) && unicode.IsUpper(cur)
-			acronymEnd := unicode.IsUpper(prev) && unicode.IsUpper(cur) && next != 0 && unicode.IsLower(next)
-			if lowerToUpper || acronymEnd {
-				out = append(out, string(rs[start:i]))
-				start = i
-			}
-		}
-		out = append(out, string(rs[start:]))
-	}
-	return out
-}
-
-// queryTerms returns the distinct terms of a search query.
-func queryTerms(q string) []string {
-	tf := map[string]float32{}
-	addTerms(tf, q, 1)
-	out := make([]string, 0, len(tf))
-	for t := range tf {
-		out = append(out, t)
-	}
-	slices.Sort(out)
-	if len(out) > maxQueryTerm {
-		out = out[:maxQueryTerm]
-	}
-	return out
-}
-
-func trigrams(s string) []string {
-	if utf8.RuneCountInString(s) < 3 {
-		return nil
-	}
-	rs := []rune(s)
-	out := make([]string, 0, len(rs)-2)
-	for i := 0; i+3 <= len(rs); i++ {
-		out = append(out, string(rs[i:i+3]))
-	}
-	return out
-}
+func common(df, n int) bool { return df > commonDocs && df*20 > n }
 
 // Scored is a search hit.
 type Scored struct {
 	Symbol
-	Score float64 // higher is better
+	Score   float64 // higher is better
+	Matched int     // distinct query terms the symbol matched
+	Terms   int     // distinct terms in the query
 }
 
 // Search ranks live symbols for a free-text query with BM25 over name,
@@ -186,45 +49,62 @@ func (v *View) Search(query string, topK int) []Scored {
 		seg, sym int
 		score    float64
 		matched  int
+		idf      float64 // idf mass of the matched terms
 	}
 	n, sumLen := 0, 0.0
-	idxs := make([]*segIndex, v.sn.NumSegments())
-	for i := range idxs {
-		idxs[i] = v.cache.segment(v.sn, i)
-		n += idxs[i].nDocs
-		sumLen += idxs[i].sumLen
+	for i := 0; i < v.sn.NumSegments(); i++ {
+		docs, sl := v.sn.Segment(i).SearchStats()
+		n += docs
+		sumLen += sl
 	}
 	if n == 0 {
 		return nil
 	}
 	avg := sumLen / float64(n)
 	hits := map[[2]int]*hit{}
+	idfs := map[string]float64{}
+	idfTotal := 0.0
+	dfs := make(map[string]int, len(terms))
+	rare := false
 	for _, t := range terms {
-		df := 0
-		for _, idx := range idxs {
-			df += len(idx.terms[t])
+		for i := 0; i < v.sn.NumSegments(); i++ {
+			lo, hi := v.sn.Segment(i).Postings(t)
+			dfs[t] += hi - lo
 		}
-		if df == 0 {
+		if dfs[t] > 0 && !common(dfs[t], n) {
+			rare = true
+		}
+	}
+	for _, t := range terms {
+		df := dfs[t]
+		if df == 0 || (rare && common(df, n)) {
 			continue
 		}
+		visited := 0
 		idf := math.Log(1 + (float64(n)-float64(df)+0.5)/(float64(df)+0.5))
-		for i, idx := range idxs {
+		idfs[t] = idf
+		idfTotal += idf
+		for i := 0; i < v.sn.NumSegments(); i++ {
 			seg := v.sn.Segment(i)
-			for _, p := range idx.terms[t] {
-				if !v.sn.Live(i, seg.SymbolFile(int(p.sym))) {
+			lo, hi := seg.Postings(t)
+			for k := lo; k < hi && visited < maxPostings; k++ {
+				visited++
+				sym, ptf := seg.Posting(k)
+				if !v.sn.Live(i, seg.SymbolFile(sym)) {
 					continue
 				}
-				tf := float64(p.tf)
-				dl := float64(idx.docLen[p.sym])
+				tf := float64(ptf)
+				dl := float64(seg.DocLen(sym))
 				s := idf * tf * (bm25K1 + 1) / (tf + bm25K1*(1-bm25B+bm25B*dl/avg))
-				key := [2]int{i, int(p.sym)}
+				key := [2]int{i, sym}
 				h := hits[key]
 				if h == nil {
-					h = &hit{seg: i, sym: int(p.sym)}
+					h = &hit{seg: i, sym: sym}
 					hits[key] = h
 				}
 				h.score += s
 				h.matched++
+				h.idf += idf
 			}
 		}
 	}
@@ -233,10 +113,15 @@ func (v *View) Search(query string, topK int) []Scored {
 	lq := strings.ToLower(strings.TrimSpace(query))
 	ranked := make([]*hit, 0, len(hits))
 	for _, h := range hits {
-		coverage := float64(h.matched) / float64(len(terms))
+		// Coverage by idf mass: matching the rare task words matters more
+		// than matching many generic ones.
+		coverage := h.idf / idfTotal
 		h.score *= coverage * coverage
 		seg := v.sn.Segment(h.seg)
 		name := seg.SymbolName(h.sym)
+		if idf, ok := idfs[stem(strings.ToLower(name))]; ok {
+			h.score += idf // a task word is this declaration's own name
+		}
 		if strings.EqualFold(name, lq) || strings.EqualFold(qualifiedOf(seg.SymbolReceiver(h.sym), name), lq) {
 			h.score += 1000
 		}
@@ -259,7 +144,7 @@ func (v *View) Search(query string, topK int) []Scored {
 	}
 	out := make([]Scored, 0, keep)
 	for _, h := range ranked[:keep] {
-		out = append(out, Scored{Symbol: v.symbol(h.seg, h.sym), Score: h.score})
+		out = append(out, Scored{Symbol: v.symbol(h.seg, h.sym), Score: h.score, Matched: h.matched, Terms: len(terms)})
 	}
 	slices.SortFunc(out, func(a, b Scored) int {
 		if c := cmp.Compare(b.Score, a.Score); c != 0 {
@@ -289,20 +174,20 @@ func (v *View) Fuzzy(substr string) []Symbol {
 		return nil
 	}
 	names := map[string]bool{}
-	grams := trigrams(q)
+	grams := terms.Trigrams(q)
 	for i := 0; i < v.sn.NumSegments(); i++ {
-		idx := v.cache.segment(v.sn, i)
+		seg := v.sn.Segment(i)
 		if len(grams) == 0 {
-			for j, l := range idx.lower {
-				if strings.Contains(l, q) {
-					names[idx.names[j]] = true
+			for j := 0; j < seg.NumNames(); j++ {
+				if name, lower := seg.Name(j); strings.Contains(lower, q) {
+					names[strings.Clone(name)] = true
 				}
 			}
 			continue
 		}
-		for _, j := range intersectPostings(idx.tri, grams) {
-			if strings.Contains(idx.lower[j], q) {
-				names[idx.names[j]] = true
+		for _, j := range intersectNames(seg, grams) {
+			if name, lower := seg.Name(j); strings.Contains(lower, q) {
+				names[strings.Clone(name)] = true
 			}
 		}
 	}
@@ -329,16 +214,16 @@ func (v *View) Fuzzy(substr string) []Symbol {
 	return out
 }
 
-func intersectPostings(tri map[string][]int32, grams []string) []int32 {
-	var lists [][]int32
+func intersectNames(seg *segment.Segment, grams []string) []int {
+	var lists [][]int
 	for _, g := range grams {
-		l := tri[g]
+		l := seg.TrigramNames(g)
 		if len(l) == 0 {
 			return nil
 		}
 		lists = append(lists, l)
 	}
-	slices.SortFunc(lists, func(a, b []int32) int { return cmp.Compare(len(a), len(b)) })
+	slices.SortFunc(lists, func(a, b []int) int { return cmp.Compare(len(a), len(b)) })
 	out := slices.Clone(lists[0])
 	for _, l := range lists[1:] {
 		keep := out[:0]
@@ -364,16 +249,17 @@ func (v *View) closestNames(q string, grams []string) []string {
 	}
 	shared := map[string]int{}
 	for i := 0; i < v.sn.NumSegments(); i++ {
-		idx := v.cache.segment(v.sn, i)
-		counts := map[int32]int{}
+		seg := v.sn.Segment(i)
+		counts := map[int]int{}
 		for _, g := range grams {
-			for _, j := range idx.tri[g] {
+			for _, j := range seg.TrigramNames(g) {
 				counts[j]++
 			}
 		}
 		for j, c := range counts {
 			if c*3 >= len(grams) {
-				shared[idx.names[j]] = max(shared[idx.names[j]], c)
+				name, _ := seg.Name(j)
+				shared[strings.Clone(name)] = max(shared[name], c)
 			}
 		}
 	}

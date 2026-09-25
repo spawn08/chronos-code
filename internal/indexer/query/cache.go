@@ -2,88 +2,84 @@ package query
 
 import (
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
 	"github.com/spawn08/chronos-code/internal/indexer/store"
 )
 
-// Cache holds derived, read-only structures shared by views of one engine:
-// search indexes per immutable segment (built once, dropped when the segment
-// leaves the current snapshot) and the package index of the latest
-// generation. Safe for concurrent use.
+// Cache holds derived, read-only results shared by the views of one engine.
+// Search indexes live in the segments (persisted), so the only cached state
+// is the package list of the latest generation, built on first use.
 type Cache struct {
 	mu   sync.Mutex
-	segs map[*segment.Segment]*segEntry
-	pkgs *pkgIndex
+	pkgs *pkgList
 }
 
-type segEntry struct {
-	once sync.Once
-	idx  *segIndex
-}
-
-type pkgIndex struct {
-	gen     uint64
-	names   []string
-	files   map[string][]string // package -> sorted live paths
-	symbols int
-	calls   int
+type pkgList struct {
+	gen   uint64
+	names []string
 }
 
 // NewCache returns an empty cache.
-func NewCache() *Cache { return &Cache{segs: map[*segment.Segment]*segEntry{}} }
+func NewCache() *Cache { return &Cache{} }
 
-// segment returns the search index of segment i of sn, building it once.
-// Entries for segments no longer in sn are dropped.
-func (c *Cache) segment(sn *store.Snapshot, i int) *segIndex {
-	seg := sn.Segment(i)
-	c.mu.Lock()
-	e := c.segs[seg]
-	if e == nil {
-		e = &segEntry{}
-		c.segs[seg] = e
-		if len(c.segs) > sn.NumSegments() {
-			live := make(map[*segment.Segment]bool, sn.NumSegments())
-			for j := 0; j < sn.NumSegments(); j++ {
-				live[sn.Segment(j)] = true
-			}
-			for s := range c.segs {
-				if !live[s] {
-					delete(c.segs, s)
-				}
-			}
-		}
-	}
-	c.mu.Unlock()
-	e.once.Do(func() { e.idx = buildSegIndex(seg) })
-	return e.idx
-}
-
-func (c *Cache) packages(sn *store.Snapshot) *pkgIndex {
+// packageNames returns the sorted packages with at least one live file. It
+// scans each segment's package-ordered file list once per generation.
+func (c *Cache) packageNames(sn *store.Snapshot) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pkgs != nil && c.pkgs.gen == sn.Generation() {
-		return c.pkgs
+		return c.pkgs.names
 	}
-	idx := &pkgIndex{gen: sn.Generation(), files: map[string][]string{}}
-	for _, ref := range sn.Refs() {
-		seg := sn.Segment(int(ref.Seg))
-		m := seg.FileMeta(int(ref.File))
-		idx.files[m.Package] = append(idx.files[m.Package], m.Path)
-		for _, k := range seg.SymbolsInFile(int(ref.File)) {
-			if seg.SymbolKind(k) != facts.KindEmbed {
-				idx.symbols++
+	seen := map[string]bool{}
+	for i := 0; i < sn.NumSegments(); i++ {
+		seg := sn.Segment(i)
+		prev, live := "", false
+		for k := 0; k <= seg.NumPackageFiles(); k++ {
+			var pkg string
+			f := -1
+			if k < seg.NumPackageFiles() {
+				f = seg.PackageFile(k)
+				pkg = seg.FilePackage(f)
+			}
+			if k == seg.NumPackageFiles() || (k > 0 && pkg != prev) {
+				if live && !seen[prev] {
+					seen[strings.Clone(prev)] = true
+				}
+				live = false
+			}
+			if f >= 0 {
+				prev = pkg
+				live = live || sn.Live(i, f)
 			}
 		}
-		idx.calls += len(seg.CallsInFile(int(ref.File)))
 	}
-	for p, files := range idx.files {
-		slices.Sort(files)
-		idx.names = append(idx.names, p)
+	names := make([]string, 0, len(seen))
+	for p := range seen {
+		names = append(names, p)
 	}
-	slices.Sort(idx.names)
-	c.pkgs = idx
-	return idx
+	slices.Sort(names)
+	c.pkgs = &pkgList{gen: sn.Generation(), names: names}
+	return names
+}
+
+// liveCounts returns live declaration and call counts: segment totals minus
+// the records of dead files, so its cost is O(segments + overlay files).
+func liveCounts(sn *store.Snapshot) (decls, calls int) {
+	for i := 0; i < sn.NumSegments(); i++ {
+		seg := sn.Segment(i)
+		decls += seg.NumDecls()
+		calls += seg.NumCalls()
+		sn.EachDead(i, func(f int) {
+			for _, k := range seg.SymbolsInFile(f) {
+				if seg.SymbolKind(k) != facts.KindEmbed {
+					decls--
+				}
+			}
+			calls -= len(seg.CallsInFile(f))
+		})
+	}
+	return decls, calls
 }

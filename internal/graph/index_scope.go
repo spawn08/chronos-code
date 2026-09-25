@@ -14,9 +14,11 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
+	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/indexer"
 	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/internal/indexer/retrieve"
 	"github.com/spawn08/chronos-code/internal/indexer/store"
 )
 
@@ -26,6 +28,8 @@ const (
 	maxExtraRoots = 4
 	// nonGoRefreshInterval throttles the tree-sitter tier's freshness scan.
 	nonGoRefreshInterval = time.Second
+	// maxSessions bounds the per-session delivered-source records kept.
+	maxSessions = 64
 )
 
 // IndexScopeOptions configures an IndexScope.
@@ -57,6 +61,8 @@ type IndexScope struct {
 	lru    []string // extra roots, least recently used first
 	nonGo  *nonGoTier
 	live   *liveBackend
+	seen   map[string]*retrieve.Seen // session + root -> delivered source
+	canon  sync.Map                  // requested root -> canonical root
 }
 
 type indexRoot struct {
@@ -142,7 +148,8 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 		dir = filepath.Join(base, "chronos-code", "index", rootKey(root), "v1")
 	}
 	r := &indexRoot{root: root, cache: query.NewCache(), started: make(chan struct{})}
-	eng, err := indexer.Open(indexer.Options{Root: root, Dir: dir, Logf: s.opts.Logf})
+	opts := indexer.Options{Root: root, Dir: dir, Logf: s.opts.Logf, Focus: focusDir(root)}
+	eng, err := indexer.Open(opts)
 	if errors.Is(err, store.ErrLocked) {
 		base := filepath.Join(filepath.Dir(dir), "sessions")
 		if err := os.MkdirAll(base, 0o755); err != nil {
@@ -154,7 +161,8 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 		}
 		s.opts.Logf("code graph: index at %s is in use by another session; using a private index", dir)
 		r.private = private
-		eng, err = indexer.Open(indexer.Options{Root: root, Dir: private, Logf: s.opts.Logf})
+		opts.Dir = private
+		eng, err = indexer.Open(opts)
 		if err != nil {
 			_ = os.RemoveAll(private)
 			return nil, fmt.Errorf("graph index: %w", err)
@@ -164,6 +172,23 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 	}
 	r.engine = eng
 	return r, nil
+}
+
+// focusDir is the process's working directory relative to root, when inside
+// it: a progressive first build indexes that subtree first.
+func focusDir(root string) string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if c, err := filepath.EvalSymlinks(wd); err == nil {
+		wd = c
+	}
+	rel, err := filepath.Rel(root, wd)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	return rel
 }
 
 func rootKey(root string) string { return fmt.Sprintf("%016x", xxhash.Sum64String(root)) }
@@ -310,7 +335,7 @@ func (s *IndexScope) closeRoot(r *indexRoot) {
 // backend returns a Backend over the current snapshot of the workspace root
 // the request targets, and its release function.
 func (s *IndexScope) backend(ctx context.Context) (Backend, string, func(), error) {
-	root, err := canonicalGraphRoot(builtins.WorkspaceRoot(ctx, s.opts.Root))
+	root, err := s.canonical(builtins.WorkspaceRoot(ctx, s.opts.Root))
 	if err != nil {
 		return nil, s.opts.Root, nil, err
 	}
@@ -328,13 +353,30 @@ func (s *IndexScope) backend(ctx context.Context) (Backend, string, func(), erro
 	}
 	st := r.engine.Status()
 	sn := r.engine.Snapshot()
-	b := &indexBackend{view: query.NewView(sn, r.cache), root: root, report: reportFrom(st)}
+	b := &indexBackend{view: query.NewView(sn, r.cache), root: root, report: reportFrom(st), seen: s.seenFor(storage.SessionFromContext(ctx), root)}
 	var out Backend = b
 	if root == s.root && s.nonGo != nil {
 		s.nonGo.refresh(ctx, s.opts.Logf)
 		out = &mergedBackend{primary: b, extra: s.nonGo.store}
 	}
 	return out, root, func() { sn.Release(); s.release(r) }, nil
+}
+
+// canonical resolves a workspace root once per distinct spelling; a cached
+// root that no longer exists is resolved again (and then fails).
+func (s *IndexScope) canonical(root string) (string, error) {
+	if c, ok := s.canon.Load(root); ok {
+		if info, err := os.Stat(c.(string)); err == nil && info.IsDir() {
+			return c.(string), nil
+		}
+		s.canon.Delete(root)
+	}
+	c, err := canonicalGraphRoot(root)
+	if err != nil {
+		return "", err
+	}
+	s.canon.Store(root, c)
+	return c, nil
 }
 
 // ready makes sure the root has been reconciled at least once in this
@@ -364,10 +406,30 @@ func (s *IndexScope) ready(ctx context.Context, r *indexRoot) error {
 	}
 }
 
+// seenFor returns the delivered-source record of one session in one root.
+// Calls without a session share one record per root.
+func (s *IndexScope) seenFor(session, root string) *retrieve.Seen {
+	key := session + "\x00" + root
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = map[string]*retrieve.Seen{}
+	}
+	if seen := s.seen[key]; seen != nil {
+		return seen
+	}
+	if len(s.seen) >= maxSessions {
+		clear(s.seen)
+	}
+	seen := retrieve.NewSeen()
+	s.seen[key] = seen
+	return seen
+}
+
 func reportFrom(st indexer.Status) IndexReport {
 	r := IndexReport{
 		Mode: "syntactic", Generation: st.Generation, Files: st.Files, Pending: st.Pending,
-		Building: !st.Reconciled, Relations: query.NameMatched,
+		Building: !st.Reconciled || !st.Complete, Partial: !st.Complete, Relations: query.NameMatched,
 	}
 	if st.LastError != nil {
 		r.Error = st.LastError.Error()
@@ -563,6 +625,8 @@ func (l *liveBackend) FileProvenance(ctx context.Context, paths ...string) (stri
 func describeReport(r IndexReport) string {
 	var parts []string
 	switch {
+	case r.Partial:
+		parts = append(parts, "the first build has indexed only recently changed files so far; others may be missing")
 	case r.Building:
 		parts = append(parts, "the index is still being built, so recent changes may be missing")
 	case r.Pending > 0:

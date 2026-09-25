@@ -50,6 +50,7 @@ type IndexReport struct {
 	UpToDate   bool
 	Pending    int    // changed paths not yet indexed
 	Building   bool   // the first build is still running
+	Partial    bool   // only the working set is indexed so far (progressive first build)
 	Relations  string // how calls and implementations are matched, e.g. "name_matched"
 	Error      string // last indexing error, if any
 }

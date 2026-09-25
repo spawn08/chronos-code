@@ -4,8 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/indexbench"
 )
@@ -120,6 +123,18 @@ func BenchmarkScopeQueryAfterEdit(b *testing.B) {
 			b.Fatal(err)
 		}
 		if _, err := query.Handler(ctx, args); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkScopePrefetch(b *testing.B) {
+	s, _ := benchScope(b)
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// A fresh session each time: nothing is subtracted as already seen.
+		if _, err := s.Prefetch(storage.WithSession(ctx, strconv.Itoa(i)), "the watcher should flush a burst of file events into one Engine.Update", 1500); err != nil {
 			b.Fatal(err)
 		}
 	}

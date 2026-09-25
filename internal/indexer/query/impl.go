@@ -189,7 +189,7 @@ func (v *View) embeddersOf(r typeRef) []typeRef {
 // those promoted from its embedded fields that resolve in the index.
 func (v *View) methodSet(pkg, name string, depth int) map[string]bool {
 	out := map[string]bool{}
-	for _, p := range v.cache.packages(v.sn).files[pkg] {
+	for _, p := range v.packagePaths(pkg) {
 		ref, ok := v.sn.Lookup(p)
 		if !ok {
 			continue

@@ -183,13 +183,17 @@ func TestIndexScopeMatchesStoreTools(t *testing.T) {
 		}
 		return out
 	}
+	// Graph retrieval (M3) may add callees and related items, but must keep
+	// everything the store's evidence found.
 	oldR, newR := oldE.(*evidenceResult), newE.(*evidenceResult)
-	if !slices.Equal(roles(oldR), roles(newR)) {
-		t.Fatalf("codebase_context roles: store %v, index %v", roles(oldR), roles(newR))
+	for _, role := range roles(oldR) {
+		if !slices.Contains(roles(newR), role) {
+			t.Fatalf("codebase_context: index lost %s; store %v, index %v", role, roles(oldR), roles(newR))
+		}
 	}
 	for _, it := range newR.Items {
-		if it.Source == nil || it.Source.Freshness != "verified" {
-			t.Fatalf("codebase_context over the index must verify excerpts: %+v", it)
+		if it.Zoom == "excerpt" && (it.Source == nil || !deliverable(it.Source)) {
+			t.Fatalf("codebase_context excerpts must match the index: %+v", it)
 		}
 	}
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/internal/indexer/retrieve"
 )
 
 // indexBackend answers the graph tools from one chronos-indexer snapshot.
@@ -17,6 +18,7 @@ type indexBackend struct {
 	view   *query.View
 	root   string
 	report IndexReport
+	seen   *retrieve.Seen // source already delivered to this session; may be nil
 }
 
 var (

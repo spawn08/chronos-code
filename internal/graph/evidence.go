@@ -68,6 +68,8 @@ type evidenceItem struct {
 	EndLine     int             `json:"end_line"`
 	Signature   string          `json:"signature,omitempty"`
 	IndexedHash string          `json:"indexed_hash,omitempty"`
+	Why         string          `json:"why,omitempty"`  // chronos index: why it was selected
+	Zoom        string          `json:"zoom,omitempty"` // chronos index: excerpt, signature or handle
 	Source      *evidenceSource `json:"source,omitempty"`
 }
 
@@ -81,6 +83,12 @@ type evidenceResult struct {
 	Omitted   map[string]int `json:"omitted"`
 	Truncated bool           `json:"truncated"`
 	IOBytes   int            `json:"io_bytes"`
+	// Set by the chronos index: name-like task words that match nothing,
+	// files delivered earlier in the session that have changed since, and
+	// the index's freshness.
+	Misses      []string       `json:"misses,omitempty"`
+	Invalidated []string       `json:"invalidated,omitempty"`
+	Index       map[string]any `json:"index,omitempty"`
 }
 
 // evidenceCounter is shared process-wide: building the BPE codec compiles a
@@ -133,7 +141,13 @@ func codebaseContextTool(store Backend, root string) *tool.Definition {
 				return nil, err
 			}
 			counter, basis := evidenceCounter()
-			result, err := collectEvidence(ctx, store, rootAbs, req)
+			var result *evidenceResult
+			ib := indexedOf(store)
+			if ib != nil {
+				result, err = collectIndexedEvidence(ctx, ib, rootAbs, req)
+			} else {
+				result, err = collectEvidence(ctx, store, rootAbs, req)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -142,6 +156,9 @@ func codebaseContextTool(store Backend, root string) *tool.Definition {
 			defer evidenceCounterMu.Unlock()
 			if err := fitEvidence(ctx, result, counter); err != nil {
 				return nil, err
+			}
+			if ib != nil {
+				ib.recordSeen(result.Items)
 			}
 			return result, nil
 		},

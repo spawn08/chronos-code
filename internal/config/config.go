@@ -339,9 +339,29 @@ func (c *RetentionConfig) UnmarshalYAML(node *yaml.Node) error {
 
 // WorkspaceConfig controls project-root detection and the code graph indexer.
 type WorkspaceConfig struct {
-	Root         string `yaml:"root,omitempty"`
-	IndexOnStart *bool  `yaml:"index_on_start,omitempty"`
-	GraphDB      string `yaml:"graph_db,omitempty"`
+	Root         string        `yaml:"root,omitempty"`
+	IndexOnStart *bool         `yaml:"index_on_start,omitempty"`
+	GraphDB      string        `yaml:"graph_db,omitempty"`
+	Indexer      IndexerConfig `yaml:"indexer,omitempty"`
+}
+
+// DefaultPrefetchTokens is the per-turn repository context budget when
+// workspace.indexer.prefetch_tokens is unset.
+const DefaultPrefetchTokens = 1500
+
+// IndexerConfig tunes the chronos code index.
+type IndexerConfig struct {
+	// PrefetchTokens bounds the task-ranked repository context added before
+	// each turn's first model call; 0 disables it.
+	PrefetchTokens *int `yaml:"prefetch_tokens,omitempty"`
+}
+
+// PrefetchTokensOrDefault returns the configured prefetch budget.
+func (c IndexerConfig) PrefetchTokensOrDefault() int {
+	if c.PrefetchTokens == nil {
+		return DefaultPrefetchTokens
+	}
+	return max(0, *c.PrefetchTokens)
 }
 
 // ToolsConfig controls cross-cutting tool behavior.

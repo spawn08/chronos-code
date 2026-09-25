@@ -15,8 +15,9 @@ import (
 // Magic identifies a segment file; the last byte is the major format version.
 var Magic = [8]byte{'C', 'H', 'X', 'S', 'E', 'G', 0, 1}
 
-// Version is the current format version. v2 added the symbol container.
-const Version = 2
+// Version is the current format version. v2 added the symbol container;
+// v3 the search (terms, postings, names, trigrams) and package sections.
+const Version = 3
 
 // Kind classifies a segment.
 type Kind uint16
@@ -55,7 +56,21 @@ const (
 	secCalls
 	secCallsByCaller
 	secCallsByFile
-	numSections = secCallsByFile
+	secSearchStats // nDocs u64, sumLen f64
+	secDocLen      // f32 per symbol (0 for embeds)
+	secTerms       // sorted: term strRef, postings off u32, n u32
+	secPostings    // symbol u32, tf f32; per term in symbol order
+	secNames       // distinct declaration names, sorted: name strRef, lower strRef
+	secTrigrams    // sorted: trigram strRef, off u32, n u32 (into triPost)
+	secTriPost     // name indexes u32
+	secPkgFiles    // file indexes u32 sorted by (package, path)
+	numSections    = secPkgFiles
+)
+
+const (
+	termRecSize    = 16
+	postingRecSize = 8
+	nameRecSize    = 16
 )
 
 var le = binary.LittleEndian

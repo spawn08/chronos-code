@@ -297,6 +297,7 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 var droppableContextSources = []ContextSourceKind{
 	ContextSourceDiagnostics,
 	ContextSourceGraphPrediction,
+	ContextSourceRepositoryContext,
 	ContextSourceSessionSummaries,
 	ContextSourceMemory,
 	ContextSourceLearnedPattern,
@@ -312,6 +313,7 @@ func contextSourceFromMessage(message model.Message) ContextSourceKind {
 	}{
 		{"Fresh LSP diagnostics for referenced files", ContextSourceDiagnostics},
 		{"[Pre-loaded context]", ContextSourceGraphPrediction},
+		{"[Repository context]", ContextSourceRepositoryContext},
 		{"Relevant context from prior sessions:", ContextSourceSessionSummaries},
 		{layerDataHeader, ContextSourceMemory},
 		{"Known project/user/feedback notes", ContextSourceMemory},

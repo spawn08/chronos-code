@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"slices"
 
+	"math"
+	"strings"
+
 	"github.com/cespare/xxhash/v2"
 
 	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/internal/indexer/terms"
 )
 
 type encoder struct {
@@ -219,6 +223,12 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 			le.PutUint32(b[88:], flagDeleted)
 		}
 	}
+	search := encodeSearch(e, sorted, syms)
+	pkgFiles := make([]uint32, len(sorted))
+	for i := range pkgFiles {
+		pkgFiles[i] = uint32(i)
+	}
+	slices.SortStableFunc(pkgFiles, func(a, b uint32) int { return cmp.Compare(sorted[a].Package, sorted[b].Package) })
 	if len(e.strs) >= maxStringBytes {
 		return nil, fmt.Errorf("encode segment: string table exceeds %d bytes", maxStringBytes)
 	}
@@ -237,6 +247,14 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		secCalls - 1:         callSec,
 		secCallsByCaller - 1: u32s(byCaller),
 		secCallsByFile - 1:   u32s(callsByFile),
+		secSearchStats - 1:   search.stats,
+		secDocLen - 1:        search.docLen,
+		secTerms - 1:         search.terms,
+		secPostings - 1:      search.postings,
+		secNames - 1:         search.names,
+		secTrigrams - 1:      search.trigrams,
+		secTriPost - 1:       u32s(search.triPost),
+		secPkgFiles - 1:      u32s(pkgFiles),
 	}
 	return assemble(sections, kind, generation), nil
 }
@@ -277,5 +295,102 @@ func assemble(sections [numSections][]byte, kind Kind, generation uint64) []byte
 	}
 	le.PutUint64(out[32:], xxhash.Sum64(out[tableOff:]))
 	le.PutUint64(out[40:], xxhash.Sum64(out[:40]))
+	return out
+}
+
+type searchSections struct {
+	stats, docLen, terms, postings, names, trigrams []byte
+	triPost                                         []uint32
+}
+
+// encodeSearch builds BM25 postings over each declaration's name,
+// receiver, signature, doc, package and path, and a trigram index over the
+// distinct lower-cased declaration names. syms is in global symbol order.
+func encodeSearch(e *encoder, files []*facts.File, syms []symEntry) searchSections {
+	var out searchSections
+	post := map[string][]byte{}
+	out.docLen = make([]byte, len(syms)*4)
+	fileTerms := make([]map[string]float32, len(files))
+	tf := map[string]float32{}
+	var nDocs uint64
+	var sumLen float64
+	var names []string
+	for gi, se := range syms {
+		sym := se.sym
+		if sym.Kind == facts.KindEmbed {
+			continue
+		}
+		clear(tf)
+		terms.Add(tf, sym.Name, terms.WeightName)
+		terms.Add(tf, sym.Receiver, terms.WeightOther)
+		terms.Add(tf, sym.Signature, terms.WeightOther)
+		terms.Add(tf, sym.Doc, terms.WeightOther)
+		if fileTerms[se.file] == nil {
+			ft := map[string]float32{}
+			terms.Add(ft, files[se.file].Package, terms.WeightOther)
+			terms.Add(ft, files[se.file].Path, terms.WeightOther)
+			fileTerms[se.file] = ft
+		}
+		for t, n := range fileTerms[se.file] {
+			tf[t] += n
+		}
+		var n float32
+		for t, w := range tf {
+			var rec [postingRecSize]byte
+			le.PutUint32(rec[0:], uint32(gi))
+			le.PutUint32(rec[4:], math.Float32bits(w))
+			post[t] = append(post[t], rec[:]...)
+			n += w
+		}
+		le.PutUint32(out.docLen[gi*4:], math.Float32bits(n))
+		nDocs++
+		sumLen += float64(n)
+		if len(names) == 0 || names[len(names)-1] != sym.Name {
+			names = append(names, sym.Name)
+		}
+	}
+	out.stats = make([]byte, 16)
+	le.PutUint64(out.stats[0:], nDocs)
+	le.PutUint64(out.stats[8:], math.Float64bits(sumLen))
+
+	keys := make([]string, 0, len(post))
+	for t := range post {
+		keys = append(keys, t)
+	}
+	slices.Sort(keys)
+	out.terms = make([]byte, len(keys)*termRecSize)
+	for i, t := range keys {
+		b := out.terms[i*termRecSize:]
+		putRef(b[0:], e.ref(t))
+		le.PutUint32(b[8:], uint32(len(out.postings)/postingRecSize))
+		le.PutUint32(b[12:], uint32(len(post[t])/postingRecSize))
+		out.postings = append(out.postings, post[t]...)
+	}
+
+	tri := map[string][]uint32{}
+	out.names = make([]byte, len(names)*nameRecSize)
+	for i, n := range names {
+		lower := strings.ToLower(n)
+		putRef(out.names[i*nameRecSize:], e.ref(n))
+		putRef(out.names[i*nameRecSize+8:], e.ref(lower))
+		for _, g := range terms.Trigrams(lower) {
+			if l := tri[g]; len(l) == 0 || l[len(l)-1] != uint32(i) {
+				tri[g] = append(l, uint32(i))
+			}
+		}
+	}
+	grams := make([]string, 0, len(tri))
+	for g := range tri {
+		grams = append(grams, g)
+	}
+	slices.Sort(grams)
+	out.trigrams = make([]byte, len(grams)*termRecSize)
+	for i, g := range grams {
+		b := out.trigrams[i*termRecSize:]
+		putRef(b[0:], e.ref(g))
+		le.PutUint32(b[8:], uint32(len(out.triPost)))
+		le.PutUint32(b[12:], uint32(len(tri[g])))
+		out.triPost = append(out.triPost, tri[g]...)
+	}
 	return out
 }

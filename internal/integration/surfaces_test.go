@@ -280,8 +280,8 @@ func assertAdapterUsesExecute(t *testing.T, result orchestrator.ExecutionResult)
 		orchestrator.ContextSourceSessionSummaries, orchestrator.ContextSourceMemory,
 		orchestrator.ContextSourceLearnedPattern, orchestrator.ContextSourceProjectDocs,
 		orchestrator.ContextSourceSkills, orchestrator.ContextSourceDiagnostics,
-		orchestrator.ContextSourceGraphPrediction, orchestrator.ContextSourceUserHook,
-		orchestrator.ContextSourceWorkingMemory,
+		orchestrator.ContextSourceGraphPrediction, orchestrator.ContextSourceRepositoryContext,
+		orchestrator.ContextSourceUserHook, orchestrator.ContextSourceWorkingMemory,
 	}
 	if len(result.ContextReport.Sources) != len(wantKinds) {
 		t.Fatalf("context report sources = %d, want %d", len(result.ContextReport.Sources), len(wantKinds))

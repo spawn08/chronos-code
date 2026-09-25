@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/budget"
+	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/graph"
 	"github.com/spawn08/chronos-code/internal/memory"
@@ -1004,5 +1006,55 @@ func TestExecuteStopsAfterMaximumOutputSegments(t *testing.T) {
 				t.Fatalf("model calls=%d, want %d", provider.calls, maxOutputSegments)
 			}
 		})
+	}
+}
+
+func TestExecutePrefetchesRepositoryContext(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{
+		"go.mod":  "module demo\n\ngo 1.24\n",
+		"main.go": "package demo\n\n// BuildAgent assembles an agent.\nfunc BuildAgent() error { return nil }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope, err := graph.NewIndexScope(context.Background(), graph.IndexScopeOptions{Root: root, DataDir: t.TempDir(), IndexOnStart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scope.Close() })
+	<-scope.Engine().Ready()
+	provider := &executionTestProvider{name: "coder", modelID: "test"}
+	orch := &Orchestrator{
+		agents:     map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)},
+		active:     "coder",
+		cfg:        &config.Config{},
+		graphStore: scope.Live(),
+		graphScope: scope,
+		actBuf:     activation.NewBuffer(1),
+	}
+	result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "fix BuildAgent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := userContent(provider.request(0))
+	if !contains(prompt, "[Repository context]") || !contains(prompt, "func BuildAgent() error") || contains(prompt, "[Pre-loaded context]") {
+		t.Fatalf("prompt = %q", prompt)
+	}
+	if src := contextSource(result.ContextReport, ContextSourceRepositoryContext); src.SelectedCount == 0 || src.Bytes == 0 {
+		t.Fatalf("repository context report = %#v", src)
+	}
+
+	off := 0
+	orch.cfg = &config.Config{Workspace: config.WorkspaceConfig{Indexer: config.IndexerConfig{PrefetchTokens: &off}}}
+	if _, err := orch.Execute(context.Background(), ExecutionRequest{Message: "fix BuildAgent"}); err != nil {
+		t.Fatal(err)
+	}
+	if prompt := userContent(provider.request(1)); contains(prompt, "[Repository context]") {
+		t.Fatalf("prefetch_tokens: 0 must disable prefetch: %q", prompt)
 	}
 }

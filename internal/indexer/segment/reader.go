@@ -3,6 +3,7 @@ package segment
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -28,10 +29,19 @@ type Segment struct {
 	calls  []byte
 	cbc    []byte
 	cbf    []byte
+	stats  []byte
+	docLen []byte
+	terms  []byte
+	posts  []byte
+	names  []byte
+	tris   []byte
+	triPst []byte
+	pkgFs  []byte
 	nFiles int
 	nSyms  int
 	nCalls int
 	nImps  int
+	nDecls int // symbols other than embeds
 }
 
 // Open maps and validates the segment file at path.
@@ -100,6 +110,8 @@ func Parse(data []byte) (*Segment, error) {
 	}
 	s.strs, s.files, s.syms, s.sbf = secs[secStrings-1], secs[secFiles-1], secs[secSymbols-1], secs[secSymByFile-1]
 	s.imps, s.ibp, s.calls, s.cbc, s.cbf = secs[secImports-1], secs[secImportsByPath-1], secs[secCalls-1], secs[secCallsByCaller-1], secs[secCallsByFile-1]
+	s.stats, s.docLen, s.terms, s.posts = secs[secSearchStats-1], secs[secDocLen-1], secs[secTerms-1], secs[secPostings-1]
+	s.names, s.tris, s.triPst, s.pkgFs = secs[secNames-1], secs[secTrigrams-1], secs[secTriPost-1], secs[secPkgFiles-1]
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -155,8 +167,14 @@ func (s *Segment) validate() error {
 			return corrupt("symbol %d fields", i)
 		}
 	}
+	if err := s.validateSearch(okRef); err != nil {
+		return err
+	}
 	for i := 0; i < s.nSyms; i++ {
 		b := s.syms[i*symbolRecSize:]
+		if facts.Kinds[b[44]] != facts.KindEmbed {
+			s.nDecls++
+		}
 		if c := le.Uint32(b[48:]); c != noCaller && (int(c) >= s.nSyms || int(c) == i ||
 			le.Uint32(s.syms[int(c)*symbolRecSize+32:]) != le.Uint32(b[32:])) {
 			return corrupt("symbol %d container", i)
@@ -188,6 +206,53 @@ func (s *Segment) validate() error {
 	return nil
 }
 
+func (s *Segment) validateSearch(okRef func([]byte) bool) error {
+	if len(s.stats) != 16 || len(s.docLen) != s.nSyms*4 || len(s.pkgFs) != s.nFiles*4 ||
+		len(s.terms)%termRecSize != 0 || len(s.posts)%postingRecSize != 0 ||
+		len(s.names)%nameRecSize != 0 || len(s.tris)%termRecSize != 0 || len(s.triPst)%4 != 0 {
+		return corrupt("search section sizes")
+	}
+	nPosts, nNames, nTri := len(s.posts)/postingRecSize, len(s.names)/nameRecSize, len(s.triPst)/4
+	for _, dict := range []struct {
+		b     []byte
+		limit int
+	}{{s.terms, nPosts}, {s.tris, nTri}} {
+		prev := ""
+		for i := 0; i+termRecSize <= len(dict.b); i += termRecSize {
+			b := dict.b[i:]
+			if !okRef(b) || uint64(le.Uint32(b[8:]))+uint64(le.Uint32(b[12:])) > uint64(dict.limit) {
+				return corrupt("search dictionary entry")
+			}
+			if t := s.view(b); i > 0 && t <= prev {
+				return corrupt("search dictionary not sorted")
+			} else {
+				prev = t
+			}
+		}
+	}
+	for i := 0; i < nPosts; i++ {
+		if int(le.Uint32(s.posts[i*postingRecSize:])) >= s.nSyms {
+			return corrupt("posting out of range")
+		}
+	}
+	for i := 0; i < nNames; i++ {
+		if !okRef(s.names[i*nameRecSize:]) || !okRef(s.names[i*nameRecSize+8:]) {
+			return corrupt("name entry")
+		}
+	}
+	for o := 0; o < len(s.triPst); o += 4 {
+		if int(le.Uint32(s.triPst[o:])) >= nNames {
+			return corrupt("trigram posting out of range")
+		}
+	}
+	for o := 0; o < len(s.pkgFs); o += 4 {
+		if int(le.Uint32(s.pkgFs[o:])) >= s.nFiles {
+			return corrupt("package file out of range")
+		}
+	}
+	return nil
+}
+
 // view returns a zero-copy string over the mapping; never retain it.
 func (s *Segment) view(b []byte) string {
 	r := getRef(b)
@@ -213,6 +278,76 @@ func (s *Segment) Size() int { return len(s.data) }
 func (s *Segment) NumFiles() int   { return s.nFiles }
 func (s *Segment) NumSymbols() int { return s.nSyms }
 func (s *Segment) NumCalls() int   { return s.nCalls }
+
+// NumDecls returns the number of symbols that are not embeds.
+func (s *Segment) NumDecls() int { return s.nDecls }
+
+// SearchStats returns the BM25 document count and total document length.
+func (s *Segment) SearchStats() (docs int, sumLen float64) {
+	return int(le.Uint64(s.stats[0:])), math.Float64frombits(le.Uint64(s.stats[8:]))
+}
+
+// DocLen returns symbol i's BM25 document length (0 for embeds).
+func (s *Segment) DocLen(i int) float32 { return math.Float32frombits(le.Uint32(s.docLen[i*4:])) }
+
+func dictFind(s *Segment, dict []byte, key string) (off, n int) {
+	cnt := len(dict) / termRecSize
+	i := sort.Search(cnt, func(i int) bool { return s.view(dict[i*termRecSize:]) >= key })
+	if i == cnt || s.view(dict[i*termRecSize:]) != key {
+		return 0, 0
+	}
+	b := dict[i*termRecSize:]
+	return int(le.Uint32(b[8:])), int(le.Uint32(b[12:]))
+}
+
+// Postings returns the range of posting indexes for term.
+func (s *Segment) Postings(term string) (lo, hi int) {
+	off, n := dictFind(s, s.terms, term)
+	return off, off + n
+}
+
+// Posting returns posting k: a symbol index and its term frequency.
+func (s *Segment) Posting(k int) (sym int, tf float32) {
+	b := s.posts[k*postingRecSize:]
+	return int(le.Uint32(b)), math.Float32frombits(le.Uint32(b[4:]))
+}
+
+// NumNames returns the number of distinct declaration names.
+func (s *Segment) NumNames() int { return len(s.names) / nameRecSize }
+
+// Name returns distinct name i and its lower-cased form (zero-copy views).
+func (s *Segment) Name(i int) (name, lower string) {
+	return s.view(s.names[i*nameRecSize:]), s.view(s.names[i*nameRecSize+8:])
+}
+
+// TrigramNames returns the name indexes containing trigram g, ascending.
+func (s *Segment) TrigramNames(g string) []int {
+	off, n := dictFind(s, s.tris, g)
+	return s.u32Range(s.triPst, uint32(off), uint32(n))
+}
+
+// NumPackageFiles returns the length of the package-ordered file list.
+func (s *Segment) NumPackageFiles() int { return len(s.pkgFs) / 4 }
+
+// PackageFile returns entry k of the file list ordered by (package, path).
+func (s *Segment) PackageFile(k int) int { return int(le.Uint32(s.pkgFs[k*4:])) }
+
+// FilePackage returns a zero-copy view of file i's package.
+func (s *Segment) FilePackage(i int) string { return s.view(s.fileRec(i)[8:]) }
+
+// PackageFiles returns the indexes of the files of pkg, in path order.
+func (s *Segment) PackageFiles(pkg string) []int {
+	n := s.NumPackageFiles()
+	lo := sort.Search(n, func(k int) bool { return s.FilePackage(s.PackageFile(k)) >= pkg })
+	hi := lo + sort.Search(n-lo, func(k int) bool { return s.FilePackage(s.PackageFile(lo+k)) > pkg })
+	return s.u32Range(s.pkgFs, uint32(lo), uint32(hi-lo))
+}
+
+// FileDeleted reports whether file i is a tombstone.
+func (s *Segment) FileDeleted(i int) bool { return le.Uint32(s.fileRec(i)[88:])&flagDeleted != 0 }
+
+// FilePathView returns a zero-copy view of file i's path.
+func (s *Segment) FilePathView(i int) string { return s.view(s.fileRec(i)) }
 
 // FileMeta is a file record without its facts.
 type FileMeta struct {

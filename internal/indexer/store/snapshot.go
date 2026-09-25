@@ -1,6 +1,8 @@
 package store
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -45,33 +47,41 @@ type route struct {
 
 // Snapshot is an immutable, consistent view of one index generation. Callers
 // obtained from Store.Snapshot must call Release.
+//
+// Segments are the base shards (disjoint path ranges, ordered by their lower
+// bound; shard 0 starts at "") followed by overlays, oldest first. Routing is
+// layered: a path is looked up in the overlay map (small, bounded by
+// compaction), then by binary search in the one shard whose range holds it.
+// Records shadowed by a newer overlay, and tombstones, are kept in sparse
+// per-segment dead sets. Deriving a snapshot for a new overlay therefore
+// costs O(overlay files), never O(repository files).
 type Snapshot struct {
-	gen    uint64
-	segs   []*segRef // oldest first
-	routes map[string]route
-	live   [][]bool // per segment, per file: this record is the newest for its path
-	nLive  int
-	refs   atomic.Int32
-	remove func(string)
+	gen     uint64
+	segs    []*segRef
+	los     []string // lower bound of each shard
+	nShards int
+	over    map[string]route     // newest overlay record per path, tombstones included
+	dead    []map[int32]struct{} // per segment; nil when nothing in it is dead
+	nLive   int
+	work    int // route and dead-set entries touched deriving this snapshot
+	refs    atomic.Int32
+	remove  func(string)
 }
 
-func newSnapshot(gen uint64, segs []*segRef, remove func(string)) *Snapshot {
-	sn := &Snapshot{gen: gen, segs: segs, routes: map[string]route{}, live: make([][]bool, len(segs)), remove: remove}
-	for i := len(segs) - 1; i >= 0; i-- {
-		s := segs[i].seg
-		sn.live[i] = make([]bool, s.NumFiles())
-		for f := 0; f < s.NumFiles(); f++ {
-			path := s.FilePath(f)
-			if _, seen := sn.routes[path]; seen {
-				continue
-			}
-			deleted := s.FileMeta(f).Deleted
-			sn.routes[path] = route{ref: Ref{int32(i), int32(f)}, deleted: deleted}
-			if !deleted {
-				sn.live[i][f] = true
-				sn.nLive++
-			}
-		}
+// newSnapshot builds a snapshot from shards (ordered by lo) and overlays
+// (oldest first). Its cost is O(shards + overlay files).
+func newSnapshot(gen uint64, shards []*segRef, los []string, overlays []*segRef, remove func(string)) *Snapshot {
+	sn := &Snapshot{
+		gen: gen, segs: append(append([]*segRef(nil), shards...), overlays...), los: los, nShards: len(shards),
+		over: map[string]route{}, remove: remove,
+	}
+	sn.dead = make([]map[int32]struct{}, len(sn.segs))
+	for _, r := range shards {
+		sn.nLive += r.seg.NumFiles()
+	}
+	cloned := map[int]bool{}
+	for i := range overlays {
+		sn.apply(len(shards)+i, cloned)
 	}
 	sn.retain()
 	return sn
@@ -79,36 +89,74 @@ func newSnapshot(gen uint64, segs []*segRef, remove func(string)) *Snapshot {
 
 // withOverlay derives the next snapshot by stacking one new segment on top.
 func (sn *Snapshot) withOverlay(gen uint64, top *segRef) *Snapshot {
-	segs := append(append(make([]*segRef, 0, len(sn.segs)+1), sn.segs...), top)
 	next := &Snapshot{
-		gen: gen, segs: segs, routes: make(map[string]route, len(sn.routes)+top.seg.NumFiles()),
-		live: append(append(make([][]bool, 0, len(segs)), sn.live...), nil), nLive: sn.nLive, remove: sn.remove,
+		gen: gen, segs: append(append(make([]*segRef, 0, len(sn.segs)+1), sn.segs...), top),
+		los: sn.los, nShards: sn.nShards, over: make(map[string]route, len(sn.over)+top.seg.NumFiles()),
+		dead:  append(append(make([]map[int32]struct{}, 0, len(sn.segs)+1), sn.dead...), nil),
+		nLive: sn.nLive, remove: sn.remove,
 	}
-	for k, v := range sn.routes {
-		next.routes[k] = v
+	for k, v := range sn.over {
+		next.over[k] = v
 	}
-	cloned := map[int32]bool{}
-	s := top.seg
-	topIdx := int32(len(segs) - 1)
-	next.live[topIdx] = make([]bool, s.NumFiles())
-	for f := 0; f < s.NumFiles(); f++ {
-		m := s.FileMeta(f)
-		if old, ok := next.routes[m.Path]; ok && !old.deleted {
-			if !cloned[old.ref.Seg] {
-				next.live[old.ref.Seg] = append([]bool(nil), next.live[old.ref.Seg]...)
-				cloned[old.ref.Seg] = true
-			}
-			next.live[old.ref.Seg][old.ref.File] = false
-			next.nLive--
-		}
-		next.routes[m.Path] = route{ref: Ref{topIdx, int32(f)}, deleted: m.Deleted}
-		if !m.Deleted {
-			next.live[topIdx][f] = true
-			next.nLive++
-		}
-	}
+	next.work = len(sn.over)
+	next.apply(len(next.segs)-1, map[int]bool{})
 	next.retain()
 	return next
+}
+
+// apply routes the files of overlay segment ti over everything older.
+// Dead sets are copied on first write (cloned tracks which are private).
+func (sn *Snapshot) apply(ti int, cloned map[int]bool) {
+	markDead := func(seg int, file int32) {
+		if !cloned[seg] {
+			d := make(map[int32]struct{}, len(sn.dead[seg])+1)
+			for k := range sn.dead[seg] {
+				d[k] = struct{}{}
+			}
+			sn.work += len(sn.dead[seg])
+			sn.dead[seg] = d
+			cloned[seg] = true
+		}
+		sn.dead[seg][file] = struct{}{}
+	}
+	seg := sn.segs[ti].seg
+	for f := 0; f < seg.NumFiles(); f++ {
+		path := seg.FilePath(f)
+		deleted := seg.FileDeleted(f)
+		sn.work++
+		if old, ok := sn.over[path]; ok {
+			if !old.deleted {
+				markDead(int(old.ref.Seg), old.ref.File)
+				sn.nLive--
+			}
+		} else if k, fi, ok := sn.baseLookup(path); ok && sn.Live(k, fi) {
+			markDead(k, int32(fi))
+			sn.nLive--
+		}
+		sn.over[path] = route{ref: Ref{int32(ti), int32(f)}, deleted: deleted}
+		if deleted {
+			markDead(ti, int32(f))
+		} else {
+			sn.nLive++
+		}
+	}
+}
+
+// ShardFor returns the shard whose range holds path, or -1 without shards.
+func (sn *Snapshot) ShardFor(path string) int {
+	if sn.nShards == 0 {
+		return -1
+	}
+	return max(0, sort.Search(sn.nShards, func(k int) bool { return sn.los[k] > path })-1)
+}
+
+func (sn *Snapshot) baseLookup(path string) (shard, file int, ok bool) {
+	k := sn.ShardFor(path)
+	if k < 0 {
+		return 0, 0, false
+	}
+	f, found := sn.segs[k].seg.FindFile(path)
+	return k, f, found
 }
 
 func (sn *Snapshot) retain() {
@@ -132,25 +180,50 @@ func (sn *Snapshot) Release() {
 // Generation returns the snapshot's generation (0 for an empty index).
 func (sn *Snapshot) Generation() uint64 { return sn.gen }
 
-// NumSegments returns the number of segments, oldest first.
+// NumSegments returns the number of segments: shards first, then overlays.
 func (sn *Snapshot) NumSegments() int { return len(sn.segs) }
 
-// Segment returns segment i (0 = oldest).
+// NumShards returns the number of base shards (segments 0..NumShards-1).
+func (sn *Snapshot) NumShards() int { return sn.nShards }
+
+// ShardLo returns the lower bound of shard k's path range.
+func (sn *Snapshot) ShardLo(k int) string { return sn.los[k] }
+
+// NumOverlayFiles returns the number of routed overlay records.
+func (sn *Snapshot) NumOverlayFiles() int { return len(sn.over) }
+
+// BuildWork returns the route and dead-set entries touched when this
+// snapshot was derived. It measures the edit path's cost and must not grow
+// with the number of files in the base.
+func (sn *Snapshot) BuildWork() int { return sn.work }
+
+// Segment returns segment i.
 func (sn *Snapshot) Segment(i int) *segment.Segment { return sn.segs[i].seg }
 
-// Live reports whether file f of segment i is the current record for its path.
-func (sn *Snapshot) Live(i, f int) bool { return sn.live[i][f] }
+// Live reports whether file f of segment i is the current record for its
+// path (not shadowed by a newer overlay, and not a tombstone).
+func (sn *Snapshot) Live(i, f int) bool {
+	d := sn.dead[i]
+	if d == nil {
+		return true
+	}
+	_, gone := d[int32(f)]
+	return !gone
+}
 
 // NumFiles returns the number of live files.
 func (sn *Snapshot) NumFiles() int { return sn.nLive }
 
 // Lookup returns the live record for path.
 func (sn *Snapshot) Lookup(path string) (Ref, bool) {
-	r, ok := sn.routes[path]
-	if !ok || r.deleted {
+	if r, ok := sn.over[path]; ok {
+		return r.ref, !r.deleted
+	}
+	k, f, ok := sn.baseLookup(path)
+	if !ok {
 		return Ref{}, false
 	}
-	return r.ref, true
+	return Ref{int32(k), int32(f)}, true
 }
 
 // Meta returns the metadata of a live file.
@@ -162,24 +235,66 @@ func (sn *Snapshot) Meta(path string) (segment.FileMeta, bool) {
 	return sn.segs[r.Seg].seg.FileMeta(int(r.File)), true
 }
 
-// Paths returns every live path (unordered).
+// OverlayPaths returns the paths routed to overlays, tombstones included.
+func (sn *Snapshot) OverlayPaths() []string {
+	out := make([]string, 0, len(sn.over))
+	for p := range sn.over {
+		out = append(out, p)
+	}
+	return out
+}
+
+// HasPrefix reports whether any live path starts with prefix. Its cost is
+// O(overlay files + log(files)).
+func (sn *Snapshot) HasPrefix(prefix string) bool {
+	for p, r := range sn.over {
+		if !r.deleted && strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	for k := max(0, sn.ShardFor(prefix)); k < sn.nShards; k++ {
+		if k > 0 && sn.los[k] > prefix && !strings.HasPrefix(sn.los[k], prefix) {
+			break
+		}
+		seg := sn.segs[k].seg
+		for f, _ := seg.FindFile(prefix); f < seg.NumFiles(); f++ {
+			if !strings.HasPrefix(seg.FilePathView(f), prefix) {
+				break
+			}
+			if sn.Live(k, f) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Paths returns every live path. It is O(files): full reconciles only.
 func (sn *Snapshot) Paths() []string {
 	out := make([]string, 0, sn.nLive)
-	for p, r := range sn.routes {
-		if !r.deleted {
-			out = append(out, p)
+	for _, r := range sn.Refs() {
+		out = append(out, sn.segs[r.Seg].seg.FilePath(int(r.File)))
+	}
+	return out
+}
+
+// Refs returns every live file record, shards in path order then overlays.
+// It is O(files): full reconciles and compaction only.
+func (sn *Snapshot) Refs() []Ref {
+	out := make([]Ref, 0, sn.nLive)
+	for i, r := range sn.segs {
+		for f := 0; f < r.seg.NumFiles(); f++ {
+			if sn.Live(i, f) {
+				out = append(out, Ref{int32(i), int32(f)})
+			}
 		}
 	}
 	return out
 }
 
-// Refs returns every live file record (unordered).
-func (sn *Snapshot) Refs() []Ref {
-	out := make([]Ref, 0, sn.nLive)
-	for _, r := range sn.routes {
-		if !r.deleted {
-			out = append(out, r.ref)
-		}
+// EachDead calls fn for each dead file of segment i (shadowed or tombstone).
+func (sn *Snapshot) EachDead(i int, fn func(f int)) {
+	for f := range sn.dead[i] {
+		fn(int(f))
 	}
-	return out
 }

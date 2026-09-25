@@ -10,15 +10,16 @@ import (
 type ContextSourceKind string
 
 const (
-	ContextSourceSessionSummaries ContextSourceKind = "session_summaries"
-	ContextSourceMemory           ContextSourceKind = "memory"
-	ContextSourceLearnedPattern   ContextSourceKind = "learned_pattern"
-	ContextSourceProjectDocs      ContextSourceKind = "project_docs"
-	ContextSourceSkills           ContextSourceKind = "skills"
-	ContextSourceDiagnostics      ContextSourceKind = "diagnostics"
-	ContextSourceGraphPrediction  ContextSourceKind = "graph_prediction"
-	ContextSourceUserHook         ContextSourceKind = "user_hook"
-	ContextSourceWorkingMemory    ContextSourceKind = "working_memory"
+	ContextSourceSessionSummaries  ContextSourceKind = "session_summaries"
+	ContextSourceMemory            ContextSourceKind = "memory"
+	ContextSourceLearnedPattern    ContextSourceKind = "learned_pattern"
+	ContextSourceProjectDocs       ContextSourceKind = "project_docs"
+	ContextSourceSkills            ContextSourceKind = "skills"
+	ContextSourceDiagnostics       ContextSourceKind = "diagnostics"
+	ContextSourceGraphPrediction   ContextSourceKind = "graph_prediction"
+	ContextSourceRepositoryContext ContextSourceKind = "repository_context"
+	ContextSourceUserHook          ContextSourceKind = "user_hook"
+	ContextSourceWorkingMemory     ContextSourceKind = "working_memory"
 
 	ContextOmittedNotConfigured = "not_configured"
 	ContextOmittedNotSelected   = "not_selected"
@@ -65,6 +66,7 @@ var contextSourceDefinitions = []ContextSourceReport{
 	{Kind: ContextSourceSkills, ID: "skills", Title: "Selected skills", BudgetBytes: 32000},
 	{Kind: ContextSourceDiagnostics, ID: "diagnostics", Title: "LSP diagnostics"},
 	{Kind: ContextSourceGraphPrediction, ID: "graph-prediction", Title: "Graph prediction"},
+	{Kind: ContextSourceRepositoryContext, ID: "repository-context", Title: "Repository context", BudgetBytes: 6000},
 	{Kind: ContextSourceUserHook, ID: "user-hook", Title: "User prompt hooks", BudgetBytes: userHookPromptContextTokens * 4},
 	{Kind: ContextSourceWorkingMemory, ID: "working-memory", Title: "Anchored claims working memory"},
 }

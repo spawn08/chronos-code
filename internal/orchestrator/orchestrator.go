@@ -1716,6 +1716,10 @@ func readOverridableFile(projectDir, overridePath, embeddedName string) ([]byte,
 	return defaults.ReadFile(embeddedName)
 }
 
+// repositoryContextTimeout bounds per-turn prefetch, so a turn never waits
+// long for the index (for example while a first build is still running).
+const repositoryContextTimeout = 250 * time.Millisecond
+
 // setupGraph opens the chronos code index, registers the T0 graph tools on
 // every agent, and (with workspace.index_on_start) reconciles the workspace
 // and starts a watcher in the background. It never blocks on indexing and
@@ -1912,7 +1916,23 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		ctx = context.WithValue(ctx, messageKey{}, intent.Payload)
 	}
 	// Predictive context is part of preparation, not a blocking-only feature.
-	if !request.BoundedContext && o.graphStore != nil && o.actBuf != nil {
+	// With the code index, task-ranked repository context replaces the older
+	// symbol-summary prediction.
+	prefetchTokens := 0
+	if o.cfg != nil {
+		prefetchTokens = o.cfg.Workspace.Indexer.PrefetchTokensOrDefault()
+	}
+	if tokens := prefetchTokens; !request.BoundedContext && o.graphScope != nil && tokens > 0 {
+		prefetchCtx, cancel := context.WithTimeout(ctx, repositoryContextTimeout)
+		preloaded, _ := o.graphScope.Prefetch(prefetchCtx, request.Message, tokens)
+		cancel()
+		if preloaded != "" {
+			contextSourceSelected(ctx, ContextSourceRepositoryContext, strings.Count(preloaded, "\n"), len(preloaded), false)
+			message += "\n\n" + preloaded
+		} else {
+			contextSourceOmitted(ctx, ContextSourceRepositoryContext, ContextOmittedNotSelected)
+		}
+	} else if !request.BoundedContext && o.graphStore != nil && o.actBuf != nil {
 		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
 			contextSourceSelected(ctx, ContextSourceGraphPrediction, strings.Count(preloaded, "\n"), len(preloaded), false)
 			message += "\n\n" + preloaded

@@ -29,6 +29,9 @@ func labelResult(store Backend, out map[string]any, relation, empty bool, note s
 	if report.Building {
 		index["building"] = true
 	}
+	if report.Partial {
+		index["coverage"] = "partial"
+	}
 	if report.Error != "" {
 		index["error"] = report.Error
 	}

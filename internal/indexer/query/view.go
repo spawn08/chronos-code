@@ -59,9 +59,11 @@ func (s Symbol) Qualified() string {
 // View is a read-only query view over one snapshot. It must not be used after
 // the snapshot is released.
 type View struct {
-	sn    *store.Snapshot
-	cache *Cache
-	metas map[fileKey]segment.FileMeta
+	sn      *store.Snapshot
+	cache   *Cache
+	metas   map[fileKey]segment.FileMeta
+	visible map[string]map[string]bool // package -> itself and its imports
+	syms    map[fileKey]Symbol         // decoded symbols by (segment, symbol index)
 }
 
 type fileKey struct{ seg, file int }
@@ -91,8 +93,21 @@ func (v *View) meta(seg, file int) segment.FileMeta {
 	return m
 }
 
-// symbol decodes symbol k of segment i.
+// symbol decodes symbol k of segment i, once per view.
 func (v *View) symbol(i, k int) Symbol {
+	key := fileKey{i, k}
+	if s, ok := v.syms[key]; ok {
+		return s
+	}
+	s := v.decodeSymbol(i, k)
+	if v.syms == nil {
+		v.syms = map[fileKey]Symbol{}
+	}
+	v.syms[key] = s
+	return s
+}
+
+func (v *View) decodeSymbol(i, k int) Symbol {
 	seg := v.sn.Segment(i)
 	rec := seg.Symbol(k)
 	m := v.meta(i, rec.File)
@@ -237,11 +252,26 @@ type File struct {
 }
 
 // Packages returns every package with at least one live file, sorted.
-func (v *View) Packages() []string { return v.cache.packages(v.sn).names }
+func (v *View) Packages() []string { return v.cache.packageNames(v.sn) }
+
+// packagePaths returns the live paths of pkg, sorted.
+func (v *View) packagePaths(pkg string) []string {
+	var out []string
+	for i := 0; i < v.sn.NumSegments(); i++ {
+		seg := v.sn.Segment(i)
+		for _, f := range seg.PackageFiles(pkg) {
+			if v.sn.Live(i, f) {
+				out = append(out, seg.FilePath(f))
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // PackageFiles returns the live files of pkg, sorted by path.
 func (v *View) PackageFiles(pkg string) []File {
-	paths := v.cache.packages(v.sn).files[pkg]
+	paths := v.packagePaths(pkg)
 	out := make([]File, len(paths))
 	for i, p := range paths {
 		out[i] = File{Path: p, Package: pkg}
@@ -252,7 +282,7 @@ func (v *View) PackageFiles(pkg string) []File {
 // PackageSymbols returns the declarations of pkg, ordered by file and line.
 func (v *View) PackageSymbols(pkg string) []Symbol {
 	var out []Symbol
-	for _, p := range v.cache.packages(v.sn).files[pkg] {
+	for _, p := range v.packagePaths(pkg) {
 		out = append(out, v.FileSymbols(p)...)
 	}
 	return out
@@ -261,7 +291,7 @@ func (v *View) PackageSymbols(pkg string) []Symbol {
 // PackageImports returns the distinct import paths of pkg's files, sorted.
 func (v *View) PackageImports(pkg string) []string {
 	seen := map[string]bool{}
-	for _, p := range v.cache.packages(v.sn).files[pkg] {
+	for _, p := range v.packagePaths(pkg) {
 		ref, ok := v.sn.Lookup(p)
 		if !ok {
 			continue
@@ -281,10 +311,9 @@ func (v *View) PackageImports(pkg string) []string {
 
 // PackageDeps returns the indexed packages pkg imports, sorted.
 func (v *View) PackageDeps(pkg string) []string {
-	idx := v.cache.packages(v.sn)
 	var out []string
 	for _, imp := range v.PackageImports(pkg) {
-		if _, ok := idx.files[imp]; ok && imp != pkg {
+		if imp != pkg && len(v.packagePaths(imp)) > 0 {
 			out = append(out, imp)
 		}
 	}
@@ -320,6 +349,6 @@ type Stats struct {
 
 // Stats returns live record counts.
 func (v *View) Stats() Stats {
-	idx := v.cache.packages(v.sn)
-	return Stats{Files: v.sn.NumFiles(), Packages: len(idx.names), Symbols: idx.symbols, Calls: idx.calls}
+	decls, calls := liveCounts(v.sn)
+	return Stats{Files: v.sn.NumFiles(), Packages: len(v.Packages()), Symbols: decls, Calls: calls}
 }
