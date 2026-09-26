@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -244,10 +243,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		return nil, fmt.Errorf("recover interrupted cleanup: %w", err)
 	}
 	// Keep caller configuration (including embedded-path provenance) intact.
-	configuredGraphDB := cfg.Workspace.GraphDB
 	runtimeConfig := *cfg
 	runtimeConfig.Workspace.Root = paths.Root
-	runtimeConfig.Workspace.GraphDB = paths.GraphDB
 	cfg = &runtimeConfig
 	store, dsn, err := openStorage(cfg)
 	if err != nil {
@@ -309,10 +306,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	sessionMgr := session.NewManager(store, dsn)
 	sessions := setupSessions(ctx, cfg, sessionMgr, agents, resumeSessionID)
 
-	if err := migrateDefaultDatabase(ctx, paths, paths.GraphDB, "graph.db", configuredGraphDB); err != nil {
-		return nil, err
-	}
-	graphStore, graphScope := setupGraph(ctx, cfg, agents)
+	graphStore, graphScope := setupGraph(ctx, cfg, paths.Dir, agents)
 	orch.graphStore, orch.graphScope = graphStore, graphScope
 
 	root := cfg.Workspace.Root
@@ -1732,22 +1726,13 @@ const repositoryContextTimeout = 250 * time.Millisecond
 // reconcile runs, and wait only when no index exists yet. Any failure is
 // logged as a warning and treated as non-fatal — the harness still works
 // without the graph, just without the T0 navigation tools.
-func setupGraph(ctx context.Context, cfg *config.Config, agents map[string]*agent.Agent) (graph.Backend, *graph.IndexScope) {
+// setupGraph opens the code index for the workspace; the index lives under
+// the project data directory (dataDir/index).
+func setupGraph(ctx context.Context, cfg *config.Config, dataDir string, agents map[string]*agent.Agent) (graph.Backend, *graph.IndexScope) {
 	root := cfg.Workspace.Root
 	if root == "" {
 		root = config.WorkspaceRoot()
 	}
-
-	dbPath := cfg.Workspace.GraphDB
-	if dbPath == "" {
-		dbPath = ".chronos-code/graph.db"
-	}
-	dbPath, err := filepath.Abs(dbPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: resolve graph data dir: %v\n", err)
-		return nil, nil
-	}
-	dataDir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: create graph data dir %s: %v\n", dataDir, err)
 		return nil, nil
@@ -3550,11 +3535,6 @@ func (o *Orchestrator) Close() error {
 		if o.graphScope != nil {
 			if err := o.graphScope.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close code index: %w", err))
-			}
-		}
-		if closer, ok := o.graphStore.(io.Closer); ok && closer != nil {
-			if err := closer.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close graph store: %w", err))
 			}
 		}
 		for _, recorder := range o.telemetryRecorders {

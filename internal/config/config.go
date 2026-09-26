@@ -341,7 +341,6 @@ func (c *RetentionConfig) UnmarshalYAML(node *yaml.Node) error {
 type WorkspaceConfig struct {
 	Root         string        `yaml:"root,omitempty"`
 	IndexOnStart *bool         `yaml:"index_on_start,omitempty"`
-	GraphDB      string        `yaml:"graph_db,omitempty"`
 	Indexer      IndexerConfig `yaml:"indexer,omitempty"`
 }
 

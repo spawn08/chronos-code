@@ -2,22 +2,32 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/indexbench"
 )
 
-// Query-path benchmarks for the chronos index (IndexScope), with the same
-// tools and arguments as the Query benchmarks for the SQLite store, so the
-// two can be compared directly:
+// Query-path benchmarks for the graph tools over this repository's own
+// index (IndexScope). The index is built once per benchmark binary; only
+// query latency is timed:
 //
 //	go test ./internal/graph -run '^$' -bench '^BenchmarkScope' -benchmem
+//
+// BenchmarkScopeQueryAfterEdit edits a probe in internal/config, which about
+// 40 packages import, so API changes there exercise reverse-importer work.
+const (
+	benchProbeDir = "internal/config"
+	benchProbePkg = "config"
+)
+
 var ownRepoScope struct {
 	once  sync.Once
 	scope *IndexScope
@@ -57,17 +67,17 @@ func benchScope(b *testing.B) (*IndexScope, string) {
 
 func BenchmarkScopeGraphQuery(b *testing.B) {
 	s, _ := benchScope(b)
-	benchTool(b, s.Tools(), "graph_query", map[string]any{"name": "IndexAll"})
+	benchTool(b, s.Tools(), "graph_query", map[string]any{"name": "Reconcile"})
 }
 
 func BenchmarkScopeGraphQueryMiss(b *testing.B) {
 	s, _ := benchScope(b)
-	benchTool(b, s.Tools(), "graph_query", map[string]any{"name": "IndxAl"})
+	benchTool(b, s.Tools(), "graph_query", map[string]any{"name": "Reconcle"})
 }
 
 func BenchmarkScopeGraphQueryBatch(b *testing.B) {
 	s, _ := benchScope(b)
-	benchTool(b, s.Tools(), "graph_query", map[string]any{"names": []any{"IndexAll", "Reconcile", "Update", "Snapshot"}})
+	benchTool(b, s.Tools(), "graph_query", map[string]any{"names": []any{"Reconcile", "Update", "Snapshot", "Publish"}})
 }
 
 func BenchmarkScopeFindCallersDepth3(b *testing.B) {
@@ -83,13 +93,13 @@ func BenchmarkScopeFindImplementations(b *testing.B) {
 func BenchmarkScopeImpact(b *testing.B) {
 	s, root := benchScope(b)
 	benchTool(b, s.ImpactTools(), "impact_analysis", map[string]any{
-		"file": filepath.Join(root, "internal/graph/indexer.go"), "start_line": 1, "end_line": 700,
+		"file": filepath.Join(root, "internal/indexer/engine.go"), "start_line": 1, "end_line": 700,
 	})
 }
 
 func BenchmarkScopeCodebaseContext(b *testing.B) {
 	s, _ := benchScope(b)
-	benchTool(b, s.Tools(), "codebase_context", map[string]any{"query": "IndexAll", "max_tokens": 4096})
+	benchTool(b, s.Tools(), "codebase_context", map[string]any{"query": "Reconcile", "max_tokens": 4096})
 }
 
 func BenchmarkScopeCodebaseSearch(b *testing.B) {
@@ -98,8 +108,7 @@ func BenchmarkScopeCodebaseSearch(b *testing.B) {
 }
 
 // BenchmarkScopeQueryAfterEdit is an edit made visible (as the watcher does
-// on its event) followed by the first graph tool call: the M2 counterpart of
-// BenchmarkIndexQueryAfterEdit for the SQLite graph.
+// on its event) followed by the first graph tool call.
 func BenchmarkScopeQueryAfterEdit(b *testing.B) {
 	src, err := filepath.Abs("../..")
 	if err != nil {
@@ -135,6 +144,33 @@ func BenchmarkScopePrefetch(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// A fresh session each time: nothing is subtracted as already seen.
 		if _, err := s.Prefetch(storage.WithSession(ctx, strconv.Itoa(i)), "the watcher should flush a burst of file events into one Engine.Update", 1500); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchTool(b *testing.B, defs []*tool.Definition, name string, args map[string]any) {
+	b.Helper()
+	var def *tool.Definition
+	for _, d := range defs {
+		if d.Name == name {
+			def = d
+		}
+	}
+	if def == nil {
+		b.Fatalf("tool %s not found", name)
+	}
+	ctx := context.Background()
+	if _, err := def.Handler(ctx, args); err != nil {
+		b.Fatalf("%s: %v", name, err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v, err := def.Handler(ctx, args)
+		if err != nil {
+			b.Fatalf("%s: %v", name, err)
+		}
+		if _, err := json.Marshal(v); err != nil {
 			b.Fatal(err)
 		}
 	}

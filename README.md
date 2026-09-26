@@ -50,7 +50,7 @@ The full documentation site is published at **[spawn08.github.io/chronos-code](h
 
 - **YAML-first configuration** — agents, skills, guardrails, security policies, routing, and MCP servers defined in YAML, not Go
 - **Primary agent plus specialists** — Chronos Code stays the conversation partner; coder, planner, delivery strategist, reviewer, debugger, researcher, architect, explainer, and tester run via `spawn_subagent` or `@agent_id`
-- **Go code graph** — default indexer uses `go/packages` and the Go AST; tree-sitter is an optional `treesitter` build tag
+- **Code graph** — the chronos indexer parses Go with `go/parser` and 17 other languages with a pure-Go tree-sitter runtime, in every build (see [docs/chronos-indexer.md](docs/chronos-indexer.md))
 - **Tiered routing** — T0 graph tools before T1 cheap models before T2 frontier models; complexity paths bound tool-call counts
 - **Self-learning loop** — traces sessions into reviewable YAML suggestions (`learn accept` / `learn reject`); automatic distillation is off by default
 - **MCP** — stdio and HTTPS SSE servers from `.mcp.json`; tools are namespaced and require approval by default
@@ -88,7 +88,7 @@ The TUI and HTTP server are surfaces, not a second runtime. They do not talk to 
 | | `internal/defaults` | Embedded agents, skills, guardrails, routing (`go:embed`) |
 | | `internal/router` | Intent patterns, model routing, complexity paths, PPD policy |
 | Workspace | `internal/workspace` | Project root, ignore rules, file indexing |
-| | `internal/graph` | Go AST graph by default; tree-sitter behind `treesitter` |
+| | `internal/graph` | Graph tools served by the chronos indexer (`internal/indexer`) |
 | | `internal/projectdocs` | Watches project docs for context |
 | | `internal/lsp` | Optional `lsp` tag: diagnostics, hover, references, rename preview |
 | Context | `internal/session` | Session persistence and resume |
@@ -131,21 +131,20 @@ To build from source instead, see [Prerequisites](#prerequisites) and [Build](#b
 ### Prerequisites
 
 - Go 1.26+
-- CGO enabled for the full tree-sitter build; core SQLite storage is pure Go
+- No cgo: every build is pure Go
 - [Chronos](https://github.com/spawn08/chronos) as a sibling checkout, or change the `go.mod` `replace` directive
 
 ### Build
 
 ```bash
 make build        # produces bin/chronos-code
-make build-core   # produces bin/chronos-code-core (Go graph, no bundled tree-sitter)
-make size-check-core size-check-full
+make build-core   # produces bin/chronos-code-core (same build, CGO_ENABLED=0 forced)
+make size-check size-check-core
 ```
 
-`make build` / `make install` use the full parser profile. Release archives use
-the portable core profile (`CGO_ENABLED=0`); non-Go tree-sitter indexing requires
-the full build. Both profiles include sessions, SQLite FTS, memory, hooks, and
-the TUI. Core/full size gates are 40/70 MiB respectively.
+Every build, including release archives, includes the same parsers (Go and 17
+tree-sitter languages), sessions, SQLite FTS, memory, hooks, and the TUI. The
+size gate is 56 MiB.
 
 ### Initialize a project
 
@@ -297,8 +296,7 @@ Restart after changing these. `memory.enabled: false` stops persist and recall. 
 
 | Capability | Status |
 |---|---|
-| Go code graph, SQLite sessions, deterministic YAML memory | Default |
-| Tree-sitter graph | Optional `treesitter` build |
+| Code graph (Go and 17 tree-sitter languages), SQLite sessions, deterministic YAML memory | Default |
 | PostgreSQL storage | Optional `postgres` build |
 | LSP tools | Optional `lsp` build |
 | Delivery-strategy policy | Embedded `ppd` compatibility key defaults to `shadow`; it observes without invoking `delivery-strategist`; `disabled` skips it |

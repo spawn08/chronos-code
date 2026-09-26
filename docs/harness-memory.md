@@ -10,7 +10,7 @@ Default layout (`CHRONOS_CODE_DATA_HOME` overrides `~/.chronos-code`):
   projects/<basename>-<128-bit-id>/
     project.json                    # canonical root and identifier
     sessions.db
-    graph.db
+    index/                          # code index segments (internal/indexer)
     telemetry.db
     artifacts/                      # oversized TUI input and receipts
     checkpoints/                    # file-write undo artifacts
@@ -19,11 +19,11 @@ Default layout (`CHRONOS_CODE_DATA_HOME` overrides `~/.chronos-code`):
 Identity derives from the canonical checkout/worktree path, including `.git`
 files used by worktrees. Subdirectory and symlink launches resolve consistently.
 Different worktrees/clones have different IDs. Moving a checkout changes its ID;
-automatic relinking is not implemented. Explicit storage/graph paths override
-defaults; relative overrides resolve from the project root.
+automatic relinking is not implemented. An explicit storage path overrides the
+default; a relative override resolves from the project root.
 
 The first runtime opening imports missing default databases from project
-`.chronos-code/sessions.db`, `graph.db`, and telemetry `memory.db`. SQLite
+`.chronos-code/sessions.db` and telemetry `memory.db`. SQLite
 `VACUUM INTO` snapshots include committed WAL changes, undergo integrity checks,
 and publish without overwriting an existing destination. Originals are retained.
 Existing old/new databases are not merged. CLI analytics can read legacy telemetry
@@ -197,10 +197,10 @@ fast if waiting would deadlock an ancestor.
 
 ## Build and measurement
 
-`make build` and `make install` retain the full tree-sitter profile. `make
-build-core` produces a separate portable core binary. `make size-check-core`
-enforces 40 MiB, and `make size-check-full` enforces 70 MiB. Portable release
-archives use the core profile. CI reads the Go toolchain version from `go.mod`.
+Every build is pure Go and includes the same parsers; `make build-core` only
+writes a separately named binary with `CGO_ENABLED=0` forced. `make size-check`
+and `make size-check-core` enforce 56 MiB. CI reads the Go toolchain version
+from `go.mod`.
 
 The offline eval now validates actual requested source or reconstructible
 compressed evidence. It does not award correctness credit for a misleading

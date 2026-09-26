@@ -59,7 +59,7 @@ func TestProjectPathsIdentity(t *testing.T) {
 			id := fmt.Sprintf("%s-%x", filepath.Base(root), hash[:16])
 			dir := filepath.Join(dataHome, "projects", id)
 			want := ProjectPaths{Root: root, ID: id, Dir: dir,
-				SessionsDB: filepath.Join(dir, "sessions.db"), GraphDB: filepath.Join(dir, "graph.db"),
+				SessionsDB:   filepath.Join(dir, "sessions.db"),
 				PlansDB:      filepath.Join(dir, "plans.db"),
 				DeliveriesDB: filepath.Join(dir, "deliveries.db"),
 				TelemetryDB:  filepath.Join(dir, "telemetry.db"), MemoryDB: filepath.Join(dir, "memory.db"),
@@ -118,15 +118,15 @@ func TestConfigProjectPathsOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	abs := filepath.Join(t.TempDir(), "sessions.db")
-	for _, tt := range []struct{ name, overlay, sessions, graph string }{
-		{"embedded legacy defaults", "", defaults.SessionsDB, defaults.GraphDB},
-		{"relative", "defaults:\n  storage:\n    dsn: db/custom.db\nworkspace:\n  graph_db: db/index.db\n", filepath.Join(defaults.Root, "db/custom.db"), filepath.Join(defaults.Root, "db/index.db")},
-		{"explicit legacy defaults", "defaults:\n  storage:\n    dsn: .chronos-code/sessions.db\nworkspace:\n  graph_db: .chronos-code/graph.db\n", filepath.Join(defaults.LegacyDir, "sessions.db"), filepath.Join(defaults.LegacyDir, "graph.db")},
-		{"absolute", fmt.Sprintf("defaults:\n  storage:\n    dsn: %q\nworkspace:\n  graph_db: %q\n", abs, abs), abs, abs},
-		{"empty resets defaults", "defaults:\n  storage:\n    dsn: ''\nworkspace:\n  graph_db: ''\n", defaults.SessionsDB, defaults.GraphDB},
-		{"sqlite memory", "defaults:\n  storage:\n    dsn: ':memory:'\n", ":memory:", defaults.GraphDB},
-		{"sqlite URI", "defaults:\n  storage:\n    dsn: 'file:shared?mode=memory&cache=shared'\n", "file:shared?mode=memory&cache=shared", defaults.GraphDB},
-		{"postgres DSN", "defaults:\n  storage:\n    backend: postgres\n    dsn: 'host=localhost dbname=chronos'\n", "host=localhost dbname=chronos", defaults.GraphDB},
+	for _, tt := range []struct{ name, overlay, sessions string }{
+		{"embedded legacy defaults", "", defaults.SessionsDB},
+		{"relative", "defaults:\n  storage:\n    dsn: db/custom.db\n", filepath.Join(defaults.Root, "db/custom.db")},
+		{"explicit legacy defaults", "defaults:\n  storage:\n    dsn: .chronos-code/sessions.db\n", filepath.Join(defaults.LegacyDir, "sessions.db")},
+		{"absolute", fmt.Sprintf("defaults:\n  storage:\n    dsn: %q\n", abs), abs},
+		{"empty resets defaults", "defaults:\n  storage:\n    dsn: ''\n", defaults.SessionsDB},
+		{"sqlite memory", "defaults:\n  storage:\n    dsn: ':memory:'\n", ":memory:"},
+		{"sqlite URI", "defaults:\n  storage:\n    dsn: 'file:shared?mode=memory&cache=shared'\n", "file:shared?mode=memory&cache=shared"},
+		{"postgres DSN", "defaults:\n  storage:\n    backend: postgres\n    dsn: 'host=localhost dbname=chronos'\n", "host=localhost dbname=chronos"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := loadEmbeddedDefaults()
@@ -153,8 +153,8 @@ func TestConfigProjectPathsOverrides(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.SessionsDB != tt.sessions || got.GraphDB != tt.graph {
-				t.Fatalf("paths = %+v, want sessions %q graph %q", got, tt.sessions, tt.graph)
+			if got.SessionsDB != tt.sessions {
+				t.Fatalf("paths = %+v, want sessions %q", got, tt.sessions)
 			}
 			after, err := cfg.EffectiveConfig()
 			if err != nil || !reflect.DeepEqual(before, after) {
@@ -236,7 +236,7 @@ func TestLoadProjectPaths(t *testing.T) {
 	t.Setenv("CHRONOS_CODE_DATA_HOME", dataHome)
 	for path, text := range map[string]string{
 		filepath.Join(home, ConfigDirName, "config.yaml"): "defaults:\n  storage:\n    dsn: .chronos-code/sessions.db\nmemory:\n  semantic_enabled: true\n  organization_id: example\n",
-		filepath.Join(root, ConfigDirName, "config.yaml"): "defaults:\n  model:\n    model: project-model\nworkspace:\n  graph_db: custom/graph.db\n",
+		filepath.Join(root, ConfigDirName, "config.yaml"): "defaults:\n  model:\n    model: project-model\n",
 		filepath.Join(base, "cli.yaml"):                   "memory:\n  semantic_enabled: false\n",
 		filepath.Join(root, ConfigDirName, "sessions.db"): "legacy session sentinel",
 	} {
@@ -253,13 +253,13 @@ func TestLoadProjectPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.SessionsDB != filepath.Join(paths.LegacyDir, "sessions.db") || paths.GraphDB != filepath.Join(paths.Root, "custom/graph.db") {
+	if paths.SessionsDB != filepath.Join(paths.LegacyDir, "sessions.db") {
 		t.Fatalf("loaded paths = %+v", paths)
 	}
 	if cfg.Memory.SemanticMemoryEnabled() || cfg.Memory.OrganizationID != "example" || !cfg.Memory.LayeredMemoryEnabled() {
 		t.Fatalf("loaded memory = %+v", cfg.Memory)
 	}
-	if cfg.sources["defaults.storage.dsn"] != "user" || cfg.sources["workspace.graph_db"] != "project" || cfg.sources["memory.semantic_enabled"] != "cli" {
+	if cfg.sources["defaults.storage.dsn"] != "user" || cfg.sources["defaults.model.model"] != "project" || cfg.sources["memory.semantic_enabled"] != "cli" {
 		t.Fatalf("incorrect path/memory provenance: %v", cfg.sources)
 	}
 	data, err := os.ReadFile(paths.SessionsDB)

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,125 +98,6 @@ func withoutIndex(m map[string]any) map[string]any {
 	return out
 }
 
-// The same workspace answered by the type-checked SQLite graph and by the
-// syntactic chronos index gives the same relationships through the
-// unchanged tool contracts. The one intended difference: the index also
-// returns interface method specs as declarations.
-func TestIndexScopeMatchesStoreTools(t *testing.T) {
-	root := canonicalTempDir(t)
-	writeTree(t, root, payFiles)
-	ctx := context.Background()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if _, err := NewIndexer(store, root).IndexAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-	scope := newTestScope(t, root, false)
-	oldTools := append(Tools(store, root), ImpactTools(store, root)...)
-	newTools := append(scope.Tools(), scope.ImpactTools()...)
-	both := func(name string, args map[string]any) (map[string]any, map[string]any) {
-		return call(t, ctx, toolFrom(t, oldTools, name), args), call(t, ctx, toolFrom(t, newTools, name), args)
-	}
-
-	type decl struct{ Name, Kind, Package, Receiver string }
-	decls := func(v any) []decl {
-		var out []decl
-		for _, s := range v.([]map[string]any) {
-			out = append(out, decl{s["name"].(string), s["kind"].(string), s["package"].(string), s["receiver"].(string)})
-		}
-		return out
-	}
-	oldQ, newQ := both("graph_query", map[string]any{"name": "Pay"})
-	oldDecls, newDecls := decls(oldQ["symbols"]), decls(newQ["symbols"])
-	for _, d := range oldDecls {
-		if !slices.Contains(newDecls, d) {
-			t.Fatalf("graph_query(Pay): index lost %+v; got %+v", d, newDecls)
-		}
-	}
-	for _, d := range newDecls {
-		if !slices.Contains(oldDecls, d) && d.Receiver != "Payer" {
-			t.Fatalf("graph_query(Pay): unexpected extra declaration %+v", d)
-		}
-	}
-
-	for _, name := range []string{"record", "Pay", "Handle"} {
-		oldC, newC := both("find_callers", map[string]any{"name": name, "depth": 3})
-		if !reflect.DeepEqual(oldC["callers_by_depth"], newC["callers_by_depth"]) {
-			t.Fatalf("find_callers(%s): store %v, index %v", name, oldC["callers_by_depth"], newC["callers_by_depth"])
-		}
-	}
-	oldI, newI := both("find_implementations", map[string]any{"name": "Payer"})
-	if !reflect.DeepEqual(oldI["implementations"], newI["implementations"]) {
-		t.Fatalf("find_implementations: store %v, index %v", oldI["implementations"], newI["implementations"])
-	}
-	oldT, newT := both("test_map", map[string]any{"symbol": "Pay"})
-	if !reflect.DeepEqual(oldT["tests"], newT["tests"]) {
-		t.Fatalf("test_map: store %v, index %v", oldT["tests"], newT["tests"])
-	}
-	impactArgs := map[string]any{"file": filepath.Join(root, "service.go"), "start_line": 9, "end_line": 9}
-	oldA, newA := both("impact_analysis", impactArgs)
-	if !reflect.DeepEqual(oldA["affected_symbols"], newA["affected_symbols"]) || oldA["potential_breaking_change"] != newA["potential_breaking_change"] {
-		t.Fatalf("impact_analysis: store %v, index %v", oldA, newA)
-	}
-	relA := call(t, ctx, toolFrom(t, newTools, "impact_analysis"), map[string]any{"file": "service.go", "start_line": 9, "end_line": 9})
-	if !reflect.DeepEqual(relA["affected_symbols"], newA["affected_symbols"]) {
-		t.Fatalf("impact_analysis must accept relative paths: %v", relA)
-	}
-
-	contextArgs := map[string]any{"query": "record", "max_tokens": 4096}
-	oldE, err := toolFrom(t, oldTools, "codebase_context").Handler(ctx, contextArgs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newE, err := toolFrom(t, newTools, "codebase_context").Handler(ctx, contextArgs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	roles := func(r *evidenceResult) []string {
-		var out []string
-		for _, it := range r.Items {
-			out = append(out, it.Role+":"+it.Name)
-		}
-		return out
-	}
-	// Graph retrieval (M3) may add callees and related items, but must keep
-	// everything the store's evidence found.
-	oldR, newR := oldE.(*evidenceResult), newE.(*evidenceResult)
-	for _, role := range roles(oldR) {
-		if !slices.Contains(roles(newR), role) {
-			t.Fatalf("codebase_context: index lost %s; store %v, index %v", role, roles(oldR), roles(newR))
-		}
-	}
-	for _, it := range newR.Items {
-		if it.Zoom == "excerpt" && (it.Source == nil || !deliverable(it.Source)) {
-			t.Fatalf("codebase_context excerpts must match the index: %+v", it)
-		}
-	}
-
-	oldS, newS := both("codebase_search", map[string]any{"query": "record"})
-	first := func(m map[string]any) string { return m["symbols"].([]map[string]any)[0]["name"].(string) }
-	if first(oldS) != first(newS) {
-		t.Fatalf("codebase_search first hit: store %s, index %s", first(oldS), first(newS))
-	}
-	oldL1, newL1 := both("multi_resolution_view", map[string]any{"level": "L1", "target": "pay"})
-	names := func(m map[string]any) []string {
-		var out []string
-		for _, s := range m["symbols"].([]map[string]any) {
-			if s["receiver"] != "Payer" {
-				out = append(out, s["name"].(string))
-			}
-		}
-		slices.Sort(out)
-		return out
-	}
-	if !slices.Equal(names(oldL1), names(newL1)) {
-		t.Fatalf("multi_resolution_view L1: store %v, index %v", names(oldL1), names(newL1))
-	}
-}
-
 func TestIndexScopeBatchedNamesMatchSeparateCalls(t *testing.T) {
 	root := canonicalTempDir(t)
 	writeTree(t, root, payFiles)
@@ -286,13 +166,8 @@ func TestIndexScopeLabelsEmptyResults(t *testing.T) {
 	if s["found"] != false || s["note"] == nil || s["index"] == nil {
 		t.Fatalf("empty search label: %+v", s)
 	}
-	// The SQLite store does not report freshness: its output is unchanged.
-	store, err := OpenStore(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	plain := call(t, ctx, toolFrom(t, Tools(store, root), "graph_query"), map[string]any{"name": "Missing"})
+	// A backend that does not report freshness leaves the output unchanged.
+	plain := call(t, ctx, toolFrom(t, Tools(newMemBackend(), root), "graph_query"), map[string]any{"name": "Missing"})
 	if !reflect.DeepEqual(plain, map[string]any{"found": false}) {
 		t.Fatalf("store output changed: %+v", plain)
 	}

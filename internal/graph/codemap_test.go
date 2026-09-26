@@ -10,29 +10,22 @@ import (
 func TestRenderCodeMapIncludesFilesImportsAndSignatures(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := newCodeMapStore(t)
-	defer store.Close()
+	store := newMemBackend()
 
 	files := []string{
 		filepath.Join(root, "pkg", "empty.go"),
 		filepath.Join(root, "pkg", "code.go"),
 	}
 	for _, file := range files {
-		if err := store.UpsertFile(ctx, file, "example/pkg", 1); err != nil {
-			t.Fatalf("UpsertFile: %v", err)
-		}
+		store.addFile(file, "example/pkg")
 	}
-	if err := store.UpsertPackage(ctx, "example/pkg", "fmt,encoding/json,fmt"); err != nil {
-		t.Fatalf("UpsertPackage: %v", err)
-	}
+	store.addPackage("example/pkg", "fmt,encoding/json,fmt")
 	for _, symbol := range []Symbol{
 		{Name: "Beta", Kind: KindType, Package: "example/pkg", File: files[1], Line: 8, EndLine: 8, Signature: "type Beta string"},
 		{Name: "Alpha", Kind: KindFunc, Package: "example/pkg", File: files[1], Line: 3, EndLine: 5, Signature: "func Alpha() error"},
 		{Name: "Alpha", Kind: KindFunc, Package: "example/pkg", File: files[1], Line: 3, EndLine: 5, Signature: "func Alpha() error"},
 	} {
-		if err := store.InsertSymbol(ctx, symbol); err != nil {
-			t.Fatalf("InsertSymbol: %v", err)
-		}
+		store.addSymbol(symbol)
 	}
 
 	got, err := RenderCodeMap(ctx, store, root, "example/pkg")
@@ -60,19 +53,14 @@ func TestRenderCodeMapDeterministicAcrossInsertionOrder(t *testing.T) {
 	paths := []string{filepath.Join(root, "b.go"), filepath.Join(root, "a.go")}
 
 	render := func(reverse bool) string {
-		store := newCodeMapStore(t)
-		defer store.Close()
-		if err := store.UpsertPackage(ctx, "pkg", "z.example/a,a.example/z,z.example/a"); err != nil {
-			t.Fatalf("UpsertPackage: %v", err)
-		}
+		store := newMemBackend()
+		store.addPackage("pkg", "z.example/a,a.example/z,z.example/a")
 		for i := range paths {
 			index := i
 			if reverse {
 				index = len(paths) - 1 - i
 			}
-			if err := store.UpsertFile(ctx, paths[index], "pkg", 1); err != nil {
-				t.Fatalf("UpsertFile: %v", err)
-			}
+			store.addFile(paths[index], "pkg")
 		}
 		symbols := []Symbol{
 			{Name: "Zed", Kind: KindFunc, Package: "pkg", File: paths[0], Line: 9, Signature: "func Zed()"},
@@ -83,9 +71,7 @@ func TestRenderCodeMapDeterministicAcrossInsertionOrder(t *testing.T) {
 			if reverse {
 				index = len(symbols) - 1 - i
 			}
-			if err := store.InsertSymbol(ctx, symbols[index]); err != nil {
-				t.Fatalf("InsertSymbol: %v", err)
-			}
+			store.addSymbol(symbols[index])
 		}
 		got, err := RenderCodeMap(ctx, store, root, "pkg")
 		if err != nil {
@@ -103,16 +89,13 @@ func TestRenderCodeMapDeterministicAcrossInsertionOrder(t *testing.T) {
 func TestRenderCodeMapNormalizesSafePaths(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	store := newCodeMapStore(t)
-	defer store.Close()
+	store := newMemBackend()
 
 	inRoot := filepath.Join(root, "pkg", "safe name.go")
 	outOfRoot := filepath.Join(filepath.Dir(root), "secret.go")
 	unsafeRelative := filepath.Join("..", "escape.go")
 	for _, path := range []string{inRoot, "pkg/relative.go", outOfRoot, unsafeRelative} {
-		if err := store.UpsertFile(ctx, path, "pkg", 1); err != nil {
-			t.Fatalf("UpsertFile(%s): %v", path, err)
-		}
+		store.addFile(path, "pkg")
 	}
 
 	got, err := RenderCodeMap(ctx, store, root, "pkg")
@@ -135,8 +118,7 @@ func TestRenderCodeMapNormalizesSafePaths(t *testing.T) {
 
 func TestRenderCodeMapEmptyPackage(t *testing.T) {
 	ctx := context.Background()
-	store := newCodeMapStore(t)
-	defer store.Close()
+	store := newMemBackend()
 
 	got, err := RenderCodeMap(ctx, store, t.TempDir(), "empty")
 	if err != nil {
@@ -150,12 +132,9 @@ func TestRenderCodeMapEmptyPackage(t *testing.T) {
 
 func TestRenderCodeMapIndex(t *testing.T) {
 	ctx := context.Background()
-	store := newCodeMapStore(t)
-	defer store.Close()
+	store := newMemBackend()
 	for _, pkg := range []string{"z.example/pkg", "a.example/pkg"} {
-		if err := store.UpsertPackage(ctx, pkg, ""); err != nil {
-			t.Fatalf("UpsertPackage: %v", err)
-		}
+		store.addPackage(pkg, "")
 	}
 
 	got, err := RenderCodeMapIndex(ctx, store)
@@ -167,8 +146,7 @@ func TestRenderCodeMapIndex(t *testing.T) {
 		t.Fatalf("RenderCodeMapIndex output = %q, want %q", got, want)
 	}
 
-	empty := newCodeMapStore(t)
-	defer empty.Close()
+	empty := newMemBackend()
 	got, err = RenderCodeMapIndex(ctx, empty)
 	if err != nil {
 		t.Fatalf("RenderCodeMapIndex empty: %v", err)
@@ -177,13 +155,4 @@ func TestRenderCodeMapIndex(t *testing.T) {
 	if got != want {
 		t.Fatalf("RenderCodeMapIndex empty output = %q, want %q", got, want)
 	}
-}
-
-func newCodeMapStore(t *testing.T) *Store {
-	t.Helper()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "graph.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	return store
 }

@@ -25,7 +25,7 @@ If you're evaluating whether it's right for your workflow, start here:
 |---------|-------------|
 | **YAML-first configuration** | Agents, skills, guardrails, security policies, routing, and MCP servers defined in YAML |
 | **Primary agent + specialists** | `chronos-code` stays the conversation partner; coder, planner, reviewer, debugger, researcher, architect, and explainer run via `spawn_subagent` or `@agent_id` |
-| **Go code graph** | Default indexer uses `go/packages` and the Go AST; tree-sitter via `treesitter` build tag |
+| **Code graph** | The chronos indexer parses Go with `go/parser` and 17 other languages with a pure-Go tree-sitter runtime, in every build |
 | **Tiered routing** | T0 graph tools → T1 cheap models → T2 frontier models |
 | **Self-learning loop** | Traces sessions into reviewable YAML suggestions; auto-distillation off by default |
 | **MCP** | stdio and HTTPS SSE servers from `.mcp.json`; tools namespaced and approval-gated |

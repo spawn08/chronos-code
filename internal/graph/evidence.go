@@ -26,11 +26,10 @@ import (
 )
 
 const (
-	evidenceReadLimit      = 256 * 1024
-	evidenceFileReadLimit  = 64 * 1024
-	evidenceExcerptLimit   = 4096
-	evidenceSelectionLimit = 16
-	evidenceItemLimit      = 64
+	evidenceReadLimit     = 256 * 1024
+	evidenceFileReadLimit = 64 * 1024
+	evidenceExcerptLimit  = 4096
+	evidenceItemLimit     = 64
 )
 
 type evidenceRange struct {
@@ -94,7 +93,7 @@ type evidenceResult struct {
 // evidenceCounter is shared process-wide: building the BPE codec compiles a
 // large regexp, and request-scoped tool definitions are rebuilt per graph.
 // Counter access is serialized rather than assuming the SDK codec is safe for
-// concurrent calls. Source/SQLite work can still proceed concurrently.
+// concurrent calls. Source reads and index queries still run concurrently.
 var evidenceCounter = sync.OnceValues(func() (model.TokenCounter, string) {
 	if bpe, err := model.NewBPECounter(""); err == nil {
 		return bpe, "sdk:o200k_base+10%+32"
@@ -109,12 +108,12 @@ func codebaseContextTool(store Backend, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_context",
 		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Read-only, one-turn graph evidence: definitions, bounded source excerpts, direct callers and graph-reachable tests (depth 3). Exact/explicit matches precede FTS relevance; ties use source location. max_tokens bounds the complete compact JSON result using the SDK tokenizer plus overhead. Omissions and source freshness are explicit; relationships remain name-based.",
+		Description: "Read-only, one-turn graph evidence: definitions, bounded source excerpts, direct callers and graph-reachable tests (depth 3). Exact/explicit matches precede ranked matches; ties use source location. max_tokens bounds the complete compact JSON result using the SDK tokenizer plus overhead. Omissions and source freshness are explicit; relationships remain name-based.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{
-				"query":      map[string]any{"type": "string", "maxLength": 1024, "description": "Exact symbol name or FTS query; optional when symbols or ranges are supplied"},
+				"query":      map[string]any{"type": "string", "maxLength": 1024, "description": "Exact symbol name or search query; optional when symbols or ranges are supplied"},
 				"max_tokens": map[string]any{"type": "integer", "minimum": 256, "maximum": 16384, "default": 4096},
 				"include":    map[string]any{"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": map[string]any{"type": "string", "enum": []string{"definitions", "callers", "tests", "excerpts"}}, "description": "Defaults to all four sections"},
 				"symbols":    map[string]any{"type": "array", "minItems": 1, "maxItems": 16, "items": map[string]any{"type": "string", "minLength": 1, "maxLength": 256}, "description": "Batch of exact symbol names"},
@@ -141,13 +140,11 @@ func codebaseContextTool(store Backend, root string) *tool.Definition {
 				return nil, err
 			}
 			counter, basis := evidenceCounter()
-			var result *evidenceResult
 			ib := indexedOf(store)
-			if ib != nil {
-				result, err = collectIndexedEvidence(ctx, ib, rootAbs, req)
-			} else {
-				result, err = collectEvidence(ctx, store, rootAbs, req)
+			if ib == nil {
+				return nil, fmt.Errorf("codebase_context: the code index is not available")
 			}
+			result, err := collectIndexedEvidence(ctx, ib, rootAbs, req)
 			if err != nil {
 				return nil, err
 			}
@@ -157,9 +154,7 @@ func codebaseContextTool(store Backend, root string) *tool.Definition {
 			if err := fitEvidence(ctx, result, counter); err != nil {
 				return nil, err
 			}
-			if ib != nil {
-				ib.recordSeen(result.Items)
-			}
+			ib.recordSeen(result.Items)
 			return result, nil
 		},
 	}
@@ -321,54 +316,6 @@ func parseEvidenceRequest(root string, args map[string]any) (evidenceRequest, er
 	return r, nil
 }
 
-type evidenceMatch struct {
-	Symbol
-	tier  int
-	score float64
-}
-
-const evidenceColumns = `s.id, s.name, s.kind, s.package, s.file, s.line, s.end_line, s.signature, '', s.receiver`
-
-// evidenceCallersQuery resolves callers of a short callee name to their
-// declarations. edges.from_name is the caller's qualified identity, joined
-// through the symbols expression index (see symbolQualifiedExpr) rather than a
-// disjunction SQLite can only evaluate by scanning every symbol per edge.
-var evidenceCallersQuery = `SELECT DISTINCT ` + evidenceColumns + `, 0 FROM edges e JOIN symbols s ON ` +
-	symbolQualified("s.") +
-	` = e.from_name AND (e.source_file = '' OR s.file = e.source_file) WHERE e.kind = 'call' AND e.to_name = ? ORDER BY s.file, s.line, s.name, s.id LIMIT 17`
-
-// evidenceMatches orders symbols the way the evidence queries always have
-// (by package first unless byFile), keeps the first 17 (one past the
-// selection limit, so overflow is counted), and drops docs, which evidence
-// never reports.
-func evidenceMatches(syms []Symbol, byFile bool) []evidenceMatch {
-	sort.SliceStable(syms, func(i, j int) bool {
-		a, b := syms[i], syms[j]
-		if !byFile && a.Package != b.Package {
-			return a.Package < b.Package
-		}
-		if a.File != b.File {
-			return a.File < b.File
-		}
-		if a.Line != b.Line {
-			return a.Line < b.Line
-		}
-		if a.Name != b.Name {
-			return a.Name < b.Name
-		}
-		return a.ID < b.ID
-	})
-	if len(syms) > evidenceSelectionLimit+1 {
-		syms = syms[:evidenceSelectionLimit+1]
-	}
-	out := make([]evidenceMatch, len(syms))
-	for i, sym := range syms {
-		sym.Doc = ""
-		out[i] = evidenceMatch{Symbol: sym}
-	}
-	return out
-}
-
 func evidenceRevision(ctx context.Context, root string) string {
 	if revision, ok := readGitHead(root); ok {
 		return revision
@@ -459,247 +406,6 @@ func validGitRevision(revision string) bool {
 	}
 	_, err := hex.DecodeString(revision)
 	return err == nil
-}
-
-func collectEvidence(ctx context.Context, store Backend, root string, req evidenceRequest) (*evidenceResult, error) {
-	result := &evidenceResult{Revision: evidenceRevision(ctx, root), MaxTokens: req.maxTokens, Items: []evidenceItem{}, Omitted: make(map[string]int)}
-	if result.Revision == "unavailable" {
-		result.Omitted["revision_unavailable"]++
-	}
-	var matches []evidenceMatch
-	addMatches := func(found []evidenceMatch, tier int) {
-		if len(found) > evidenceSelectionLimit {
-			result.Omitted["selection_limit"] += len(found) - evidenceSelectionLimit
-			found = found[:evidenceSelectionLimit]
-		}
-		for _, m := range found {
-			m.tier = tier
-			matches = append(matches, m)
-		}
-	}
-	exact := func(name string, tier int) error {
-		syms, err := store.FindSymbols(ctx, name, "")
-		if err != nil {
-			return fmt.Errorf("query graph evidence: %w", err)
-		}
-		found := evidenceMatches(syms, false)
-		if len(found) == 0 && tier == 0 {
-			result.Omitted["not_found"]++
-		}
-		addMatches(found, tier)
-		return nil
-	}
-	for i, name := range req.symbols {
-		if i > 0 && name == req.symbols[i-1] {
-			continue
-		}
-		if err := exact(name, 0); err != nil {
-			return nil, err
-		}
-	}
-	if req.query != "" {
-		beforeQuery := len(matches)
-		if err := exact(req.query, 1); err != nil {
-			return nil, err
-		}
-		if query := fts5MatchQuery(req.query); query != "" {
-			results, err := store.Search(ctx, req.query, evidenceSelectionLimit+1)
-			if err != nil {
-				return nil, fmt.Errorf("query graph evidence: %w", err)
-			}
-			found := make([]evidenceMatch, len(results))
-			for i, r := range results {
-				r.Doc = ""
-				found[i] = evidenceMatch{Symbol: r.Symbol, score: r.Rank}
-			}
-			addMatches(found, 2)
-		}
-		if len(matches) == beforeQuery {
-			result.Omitted["not_found"]++
-		}
-	}
-	for _, span := range req.ranges {
-		var inRange []Symbol
-		for _, file := range []string{span.File, filepath.Join(root, span.File)} {
-			syms, err := store.SymbolsInFile(ctx, file)
-			if err != nil {
-				return nil, fmt.Errorf("query graph evidence: %w", err)
-			}
-			for _, sym := range syms {
-				if sym.Line <= span.EndLine && max(sym.Line, sym.EndLine) >= span.StartLine {
-					inRange = append(inRange, sym)
-				}
-			}
-		}
-		addMatches(evidenceMatches(inRange, true), 0)
-		result.Items = append(result.Items, evidenceItem{Role: "range", File: filepath.ToSlash(span.File), StartLine: span.StartLine, EndLine: span.EndLine})
-	}
-	sort.Slice(matches, func(i, j int) bool {
-		a, b := matches[i], matches[j]
-		if a.tier != b.tier {
-			return a.tier < b.tier
-		}
-		if a.score != b.score {
-			return a.score < b.score
-		}
-		if a.Package != b.Package {
-			return a.Package < b.Package
-		}
-		if a.File != b.File {
-			return a.File < b.File
-		}
-		if a.Line != b.Line {
-			return a.Line < b.Line
-		}
-		if a.Name != b.Name {
-			return a.Name < b.Name
-		}
-		return a.ID < b.ID
-	})
-	seen := make(map[int64]bool)
-	seenItems := make(map[string]bool)
-	addItem := func(sym Symbol, role, target string) error {
-		file, ok := evidenceRelative(root, sym.File)
-		if !ok || len(sym.Name) > 256 || len(sym.Package) > 1024 {
-			result.Omitted["invalid_location_or_metadata"]++
-			return nil
-		}
-		key := fmt.Sprintf("%s:%d:%s", role, sym.ID, target)
-		if seenItems[key] {
-			return nil
-		}
-		seenItems[key] = true
-		if len(result.Items) >= evidenceItemLimit {
-			result.Omitted["item_limit"]++
-			return nil
-		}
-		signature := sym.Signature
-		if len(signature) > 512 {
-			signature = evidenceClip(signature, 512)
-			result.Omitted["metadata_limit"]++
-		}
-		indexedHash, err := store.FileHash(ctx, sym.File)
-		if err != nil {
-			return err
-		}
-		if indexedHash == "" {
-			result.Omitted["unindexed_graph"]++
-		}
-		result.Items = append(result.Items, evidenceItem{Role: role, Name: sym.Name, Target: target, Kind: sym.Kind, Package: sym.Package, File: filepath.ToSlash(file), StartLine: sym.Line, EndLine: max(sym.Line, sym.EndLine), Signature: signature, IndexedHash: indexedHash})
-		return nil
-	}
-	lookups := 0
-	for _, match := range matches {
-		if seen[match.ID] {
-			continue
-		}
-		seen[match.ID] = true
-		if len(seen) > evidenceSelectionLimit {
-			result.Omitted["selection_limit"]++
-			continue
-		}
-		if req.include["definitions"] || req.include["excerpts"] {
-			if err := addItem(match.Symbol, "definition", ""); err != nil {
-				return nil, err
-			}
-		}
-		if !req.include["callers"] && !req.include["tests"] {
-			continue
-		}
-		frontier := []string{match.Name}
-		visited := map[string]bool{match.Name: true}
-		for depth := 0; depth < 3 && len(frontier) > 0; depth++ {
-			var next []string
-			for _, target := range frontier {
-				if lookups >= 64 {
-					result.Omitted["relationship_limit"]++
-					break
-				}
-				lookups++
-				callerSyms, err := store.CallerSymbols(ctx, target, evidenceSelectionLimit+1)
-				if err != nil {
-					return nil, err
-				}
-				callers := make([]evidenceMatch, len(callerSyms))
-				for i, sym := range callerSyms {
-					sym.Doc = ""
-					callers[i] = evidenceMatch{Symbol: sym}
-				}
-				if len(callers) > 16 {
-					result.Omitted["relationship_limit"]++
-					callers = callers[:16]
-				}
-				for _, caller := range callers {
-					if depth == 0 && req.include["callers"] {
-						if err := addItem(caller.Symbol, "caller", match.Name); err != nil {
-							return nil, err
-						}
-					}
-					if req.include["tests"] && evidenceIsTest(caller.Symbol) {
-						if err := addItem(caller.Symbol, "test", match.Name); err != nil {
-							return nil, err
-						}
-					}
-					if !visited[caller.Name] {
-						visited[caller.Name] = true
-						next = append(next, caller.Name)
-					}
-				}
-			}
-			if !req.include["tests"] {
-				break
-			}
-			sort.Strings(next)
-			frontier = next
-		}
-		if req.include["tests"] && len(frontier) > 0 {
-			result.Omitted["test_depth_limit"]++
-		}
-	}
-	if req.include["excerpts"] && len(result.Items) > 0 {
-		fs, err := os.OpenRoot(root)
-		if err != nil {
-			return nil, fmt.Errorf("open evidence root: %w", err)
-		}
-		defer fs.Close()
-		remaining := evidenceReadLimit
-		for i := range result.Items {
-			item := &result.Items[i]
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			end := item.EndLine
-			if item.Role != "range" && end-item.StartLine >= 64 {
-				end = item.StartLine + 63
-				result.Omitted["excerpt_limit"]++
-			}
-			source, reason, err := readEvidenceSource(ctx, store, fs, root, item.File, max(1, item.StartLine), max(1, end), &remaining)
-			if err != nil {
-				return nil, err
-			}
-			if end != item.EndLine {
-				source.Truncated = true
-			}
-			item.Source = source
-			if reason != "" {
-				result.Omitted[reason]++
-			}
-		}
-		result.IOBytes = evidenceReadLimit - remaining
-	}
-	result.Truncated = len(result.Omitted) > 0
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-func evidenceIsTest(sym Symbol) bool {
-	file := filepath.ToSlash(sym.File)
-	if strings.HasSuffix(file, "_test.go") {
-		return strings.HasPrefix(sym.Name, "Test") || strings.HasPrefix(sym.Name, "Example") || strings.HasPrefix(sym.Name, "Fuzz") || strings.HasPrefix(sym.Name, "Benchmark")
-	}
-	return strings.HasPrefix(sym.Name, "test_") && (strings.HasPrefix(filepath.Base(file), "test_") || strings.HasSuffix(file, "_test.py"))
 }
 
 var errEvidenceReadLimit = errors.New("evidence read limit")

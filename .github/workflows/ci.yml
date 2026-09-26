@@ -117,7 +117,7 @@ jobs:
 
       - name: Check binary size
         working-directory: chronos-code
-        run: make size-check size-check-core size-check-full
+        run: make size-check size-check-core
 
   eval:
     runs-on: ubuntu-latest

@@ -770,9 +770,7 @@ Every pack language is discovered and extracted in all builds
 - **The old cgo tree-sitter tier no longer answers.** `IndexScope` stopped
   merging it (`mergedBackend`, `RefreshNonGo` and the `GraphDB` option are
   gone), because the indexer now holds the same files and cgo builds would
-  list them twice. Nothing constructs the old SQLite store or indexer
-  outside `internal/graph` tests any more; deleting it stays M11. Until
-  then `make build` still links its cgo grammars (about 24 MB).
+  list them twice. The old graph was then deleted (see "M11 results").
 
 As built, this differs from the design above in these ways:
 
@@ -800,7 +798,8 @@ As built, this differs from the design above in these ways:
 Binary size (linux/amd64, stripped, release flags): 40.9 MB before, 52.9 MB
 after. The tree-sitter parser core with the grammars' scanners is about
 7.5 MB, the 17 grammar blobs with the runtime wrapper about 4.8 MB and the query engine 0.5 MB. The
-size gates are now 56 MiB (release and core) and 80 MiB (cgo full build).
+size gates are now 56 MiB (release and core); the cgo full-build gate went
+with M11.
 Two cuts in chronos are planned so the gates can come down again: loading
 only tiktoken's o200k vocabulary (about -5.0 MB; the other three are linked
 through `tokenizer.ForModel`) and keeping `storage/adapters/postgres` out
@@ -813,6 +812,36 @@ non-Go sources are two shell scripts and two small JavaScript files
 was loaded (load average about 45 on 10 cores), so these numbers resolve to
 about ±10%. Grammars load once per process (3–13 ms each); query compilation
 takes 0.1–4 ms per pack.
+
+### M11 results (old graph removed, 2026-09-26)
+
+M11 moved ahead of M7–M10: after M6.3 nothing used the old graph at
+runtime, yet `make build` still linked its cgo grammars.
+
+- **Deleted from `internal/graph`:** the SQLite `Store`, the type-checking
+  `Indexer` (`go/packages`), `RequestScope`, the fsnotify `Watcher`, Merkle
+  hashing, the cgo tree-sitter tier (`treesitter.go`, `smacker/go-tree-sitter`)
+  and their tests (about 7,700 lines). The shared types (`Symbol`,
+  `SearchResult`, `Stats`, …) moved to `types.go`. `codebase_context` now
+  requires the index; its SQLite/FTS fallback is gone.
+- **Tests ported, not dropped.** The `codebase_context` tests (validation,
+  budgets, bounded reads, symlink escape, staleness) run against a real
+  `IndexScope`. The code map, tool plumbing and activation tests run against
+  in-memory fakes of `Backend`, because they need exact control of the data
+  (duplicate symbols, unsafe paths, insertion order, edges added mid-test).
+  The parity tests against the old store are gone with it. The M6 exit
+  criterion "parity with the old tree-sitter tier on its tests" is covered
+  by the per-pack goldens instead.
+- **Config and data:** `workspace.graph_db` is removed. The index lives in
+  the project data directory (`<data>/index`), as before for the default
+  configuration; an explicit `graph_db` in existing YAML is ignored. A
+  leftover `graph.db` is no longer copied from `.chronos-code/`.
+- **Build:** no package uses cgo, so `CGO_ENABLED` defaults to 0 and there
+  is one build profile; `size-check-full` and its 80 MiB gate are gone.
+  `make bench-index` now runs the indexer benchmarks and `BenchmarkScope*`
+  (which query `Reconcile` instead of the deleted `IndexAll`).
+- **Size:** release (linux/amd64) 52.9 → 51.7 MB; local `make build`
+  (darwin/arm64) 77.4 → 52.2 MB.
 
 ## Plan after M2
 
@@ -1113,7 +1142,7 @@ acceptance criteria met.
 | M8 | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
 | M9 | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |
 | M10 | Precise tier for other languages through SCIP import, when the toolchain is present | A precise edge is used only when its file hash matches; indexing and edits never block on an external indexer |
-| M11 | Delete old `internal/graph` store and indexer, including its tree-sitter tier | No dead code; docs updated |
+| M11 (done) | Delete old `internal/graph` store and indexer, including its tree-sitter tier | No dead code; docs updated |
 
 Order: M2 → M3 → M5 → M6 → M7 → M8 → M9. M4 and M10 are independent and can
 move. M5 comes before languages because M6 multiplies the file count that the
@@ -1122,7 +1151,7 @@ store and watcher must handle.
 M2 must keep the old tree-sitter tier (local cgo builds only) answering for
 non-Go files until M6 lands, so that local builds don't lose non-Go results
 in between. Release builds are unaffected, because they never had that
-tier.
+tier. (Resolved: M6.3 stopped merging the tier and M11 deleted it.)
 
 ## Open questions and risks
 
@@ -1144,8 +1173,8 @@ tier.
 6. **Pure-Go parser runtime maturity.** The candidate is pre-1.0, changes
    quickly and has a large API. Mitigation: it sits behind
    `extract/treesitter`'s interface and its version is pinned; every parse
-   has a deadline and a memory budget. Output is checked against the old
-   cgo tier and against SCIP gold. Known gaps at v0.55.0: C#/Swift parse
+   has a deadline and a memory budget. Output is checked against the
+   per-pack goldens and against SCIP gold. Known gaps at v0.55.0: C#/Swift parse
    cliffs and `no_stacks_alive` stops on invalid input (see "M6 parser
    runtime spike"); `TestFailedRecoveryKeepsPartialTree` pins the latter.
 7. **Fresh-build time at a million files.** At 3–5× the C runtime's parse

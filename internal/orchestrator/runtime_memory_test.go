@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/pprof"
 	"strings"
 	"sync"
@@ -134,7 +135,7 @@ func TestRuntimeSnapshotFailureRetainsOriginal(t *testing.T) {
 	}
 }
 
-func TestRuntimeNewMigratesGraphTelemetryAndPreservesYAML(t *testing.T) {
+func TestRuntimeNewMigratesTelemetryAndPreservesYAML(t *testing.T) {
 	root, _ := runtimeTestEnvironment(t)
 	cfg := runtimeTestConfig(root)
 	cfg.Memory.Enabled, cfg.Learning.Enabled = true, true
@@ -142,7 +143,7 @@ func TestRuntimeNewMigratesGraphTelemetryAndPreservesYAML(t *testing.T) {
 	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"graph.db", "memory.db"} {
+	for _, name := range []string{"memory.db"} {
 		db, err := sql.Open("sqlite", filepath.Join(legacyDir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -163,7 +164,7 @@ func TestRuntimeNewMigratesGraphTelemetryAndPreservesYAML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{paths.GraphDB, paths.TelemetryDB} {
+	for _, path := range []string{paths.TelemetryDB} {
 		db, err := sql.Open("sqlite", path)
 		if err != nil {
 			t.Fatal(err)
@@ -182,15 +183,15 @@ func TestRuntimeNewMigratesGraphTelemetryAndPreservesYAML(t *testing.T) {
 }
 
 func TestRuntimeNilConfigAndExplicitSQLiteURI(t *testing.T) {
-	root, home := runtimeTestEnvironment(t)
+	root, _ := runtimeTestEnvironment(t)
 	t.Chdir(root)
 	orch, err := New(context.Background(), nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer orch.Close()
-	if orch.runtimeMemory != nil || !strings.HasPrefix(orch.cfg.Workspace.GraphDB, home) {
-		t.Fatal("nil config lost safe disabled memory/default path behavior")
+	if orch.runtimeMemory != nil || !strings.HasPrefix(orch.cfg.Workspace.Root, root) {
+		t.Fatal("nil config lost safe disabled memory/default root behavior")
 	}
 	for _, dsn := range []string{":memory:", "file:plan08-in-memory?mode=memory&cache=shared"} {
 		cfg := runtimeTestConfig(root)
@@ -216,6 +217,7 @@ func TestRuntimeExplicitDefaultLocationDoesNotImportLegacy(t *testing.T) {
 	if err := os.MkdirAll(paths.LegacyDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// graph.db is the removed SQLite code graph: a leftover copy is ignored.
 	for _, name := range []string{"sessions.db", "graph.db"} {
 		if err := os.WriteFile(filepath.Join(paths.LegacyDir, name), []byte("unreadable old database"), 0o600); err != nil {
 			t.Fatal(err)
@@ -223,7 +225,6 @@ func TestRuntimeExplicitDefaultLocationDoesNotImportLegacy(t *testing.T) {
 	}
 	// Even an explicit path spelled exactly like the new default is an override.
 	cfg.Defaults = &agent.AgentConfig{Storage: agent.StorageConfig{DSN: paths.SessionsDB}}
-	cfg.Workspace.GraphDB = paths.GraphDB
 	orch, err := New(context.Background(), cfg, "")
 	if err != nil {
 		t.Fatalf("explicit location incorrectly attempted legacy import: %v", err)
@@ -273,6 +274,7 @@ func TestRuntimeStorageCLIAndNewResolveSameDefault(t *testing.T) {
 		t.Fatalf("CLI lost legacy session: %v", err)
 	}
 	cfg := runtimeTestConfig(root)
+	before := cfg.Workspace
 	orch, err := New(ctx, cfg, "legacy-session")
 	if err != nil {
 		t.Fatal(err)
@@ -281,10 +283,10 @@ func TestRuntimeStorageCLIAndNewResolveSameDefault(t *testing.T) {
 	if _, err := orch.store.GetSession(ctx, "legacy-session"); err != nil {
 		t.Fatalf("New and CLI disagree: %v", err)
 	}
-	if cfg.Workspace.GraphDB != "" {
+	if !reflect.DeepEqual(cfg.Workspace, before) {
 		t.Fatal("New rewrote caller configuration")
 	}
-	if orch.cfg.Workspace.Root != root || !strings.HasPrefix(orch.cfg.Workspace.GraphDB, home) {
+	if orch.cfg.Workspace.Root != root {
 		t.Fatalf("unresolved runtime workspace: %+v", orch.cfg.Workspace)
 	}
 	// An explicitly supplied legacy path is used in place rather than migrated.

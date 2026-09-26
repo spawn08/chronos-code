@@ -1,6 +1,5 @@
 workspace:
   index_on_start: true
-  graph_db: ".chronos-code/graph.db"
 
 tools:
   compression_threshold_tokens: 500

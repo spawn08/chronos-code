@@ -15,7 +15,7 @@ const maxBatchNames = 16
 // how relationships were matched when relation is true. When empty is true a
 // note says what was searched and how current the index is, so an agent can
 // trust the absence instead of re-checking with grep. Backends that do not
-// report (the SQLite store) leave results unchanged.
+// report (test fakes) leave results unchanged.
 func labelResult(store Backend, out map[string]any, relation, empty bool, note string) map[string]any {
 	r, ok := store.(Reporter)
 	if !ok {

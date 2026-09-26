@@ -30,7 +30,7 @@ func TestIndexedEvidenceBudgetNeverExceeded(t *testing.T) {
 	s := newTestScope(t, root, false)
 	counter, _ := evidenceCounter()
 	ctx := context.Background()
-	for _, q := range []string{"IndexAll", "how does the watcher debounce edits", "Engine.Update Snapshot Release", "internal/indexer/engine.go"} {
+	for _, q := range []string{"Reconcile", "how does the watcher debounce edits", "Engine.Update Snapshot Release", "internal/indexer/engine.go"} {
 		for _, budget := range []int{256, 512, 1024, 4096, 16384} {
 			r := contextCall(t, ctx, s, map[string]any{"query": q, "max_tokens": budget})
 			data, err := json.Marshal(r)

@@ -12,7 +12,7 @@ import (
 
 // debounceWindow batches bursts of file events (an editor's save-then-touch
 // sequence, a branch switch touching several files at once) into one
-// recompute, mirroring internal/graph/watch.go's debounce window.
+// recompute.
 const debounceWindow = 300 * time.Millisecond
 
 // Watcher watches every directory level between a Bundle's root and cwd for

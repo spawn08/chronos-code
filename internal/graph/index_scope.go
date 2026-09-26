@@ -39,9 +39,8 @@ type IndexScopeOptions struct {
 	Logf         func(format string, args ...any)
 }
 
-// IndexScope serves the graph tools from the chronos indexer. Unlike
-// RequestScope it never type-checks and never rebuilds on the request path:
-// each call applies changes the watcher has already seen, then answers from
+// IndexScope serves the graph tools from the chronos indexer. It never
+// type-checks and never rebuilds on the request path: each call applies changes the watcher has already seen, then answers from
 // one immutable snapshot and reports how fresh that snapshot is.
 type IndexScope struct {
 	opts   IndexScopeOptions
@@ -590,4 +589,34 @@ func describeReport(r IndexReport) string {
 	}
 	parts = append(parts, fmt.Sprintf("generation %d, %d files", r.Generation, r.Files))
 	return strings.Join(parts, "; ")
+}
+
+func canonicalGraphRoot(root string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("workspace root is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", fmt.Errorf("inspect workspace root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace root is not a directory")
+	}
+	return filepath.Clean(canonical), nil
+}
+
+func graphUnavailable(root string, err error) map[string]any {
+	return map[string]any{
+		"available":      false,
+		"workspace_root": root,
+		"reason":         err.Error(),
+	}
 }

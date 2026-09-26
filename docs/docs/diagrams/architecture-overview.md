@@ -31,7 +31,7 @@ graph LR
     end
 
     subgraph Workspace["Workspace & Intelligence"]
-        Graph["Code Graph\n(Go AST / tree-sitter)"]:::core
+        Graph["Code Graph\n(chronos indexer)"]:::core
         LSP["LSP\n(optional)"]:::core
         ProjectDocs["ProjectDocs\n(doc watcher)"]:::core
     end

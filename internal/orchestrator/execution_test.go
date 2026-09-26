@@ -296,23 +296,30 @@ func TestExecuteUsesConcurrentRequestScopedProviders(t *testing.T) {
 }
 
 func TestExecutePreparesPredictiveContextForBothModes(t *testing.T) {
-	store, err := graph.OpenStore(t.TempDir() + "/graph.db")
+	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
-		t.Fatalf("OpenStore() error = %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	for name, text := range map[string]string{
+		"go.mod":  "module demo\n\ngo 1.24\n",
+		"main.go": "package demo\n\nfunc BuildAgent() error { return nil }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope, err := graph.NewIndexScope(context.Background(), graph.IndexScopeOptions{Root: root, DataDir: t.TempDir(), IndexOnStart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = scope.Close() })
+	<-scope.Engine().Ready()
 	ctx := context.Background()
-	if err := store.UpsertFileHash(ctx, "main.go", "revision"); err != nil {
-		t.Fatalf("UpsertFileHash() error = %v", err)
-	}
-	if err := store.InsertSymbol(ctx, graph.Symbol{Name: "BuildAgent", Kind: graph.KindFunc, Package: "main", File: "main.go", Line: 1}); err != nil {
-		t.Fatalf("InsertSymbol() error = %v", err)
-	}
 	provider := &executionTestProvider{name: "coder", modelID: "test"}
 	orch := &Orchestrator{
 		agents:     map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", provider)},
 		active:     "coder",
-		graphStore: store,
+		graphStore: scope.Live(),
 		actBuf:     activation.NewBuffer(1),
 	}
 

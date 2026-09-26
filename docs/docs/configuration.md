@@ -344,8 +344,7 @@ Use `chronos-code login` for OAuth and enterprise credential flows. `chronos-cod
 
 | Capability | Status |
 |-----------|--------|
-| Go code graph, SQLite sessions, deterministic YAML memory | **Default** |
-| Tree-sitter graph | Optional `treesitter` build tag |
+| Code graph (Go and 17 tree-sitter languages), SQLite sessions, deterministic YAML memory | **Default** |
 | PostgreSQL storage | Optional `postgres` build tag |
 | LSP tools | Optional `lsp` build tag |
 | PPD policy | `shadow` by default; `enabled` is rejected until closed-loop durable execution is available |

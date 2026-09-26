@@ -140,10 +140,9 @@ func TestPrefetch(t *testing.T) {
 	}
 }
 
-// A blocked graph query models a busy SQLite connection without timing-dependent
-// database locks. All production calls still use graph.Store's public methods.
+// A blocked graph query models a busy index without timing-dependent locks.
 type blockingStore struct {
-	*graph.Store
+	*fakeGraph
 	started chan string
 	once    sync.Once
 	exited  chan struct{}
@@ -236,7 +235,7 @@ func TestBufferRequestCancellation(t *testing.T) {
 	}
 }
 
-func graphQuery(t *testing.T, store *graph.Store) *tool.Definition {
+func graphQuery(t *testing.T, store *fakeGraph) *tool.Definition {
 	t.Helper()
 	for _, def := range graph.Tools(store, "") {
 		if def.Name == "graph_query" {
@@ -329,7 +328,7 @@ func TestPredictiveContextHardBoundsAndDeterminism(t *testing.T) {
 }
 
 type hashBlockingStore struct {
-	*graph.Store
+	*fakeGraph
 	started chan struct{}
 	release chan struct{}
 }
@@ -338,7 +337,7 @@ func (s *hashBlockingStore) FileHash(ctx context.Context, file string) (string, 
 	close(s.started)
 	select {
 	case <-s.release:
-		return s.Store.FileHash(ctx, file)
+		return s.fakeGraph.FileHash(ctx, file)
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -347,7 +346,7 @@ func (s *hashBlockingStore) FileHash(ctx context.Context, file string) (string, 
 func TestCacheValidationDoesNotHoldMutexDuringSQL(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	store := &hashBlockingStore{Store: setupTestStore(t), started: make(chan struct{}), release: make(chan struct{})}
+	store := &hashBlockingStore{fakeGraph: setupTestStore(t), started: make(chan struct{}), release: make(chan struct{})}
 	buf := NewBuffer(50)
 	t.Cleanup(func() { buf.Close() })
 	syms, err := store.FindSymbols(ctx, "Caller", "")
@@ -433,10 +432,10 @@ func TestFindCallersUsesLiveEdgesAndDepth(t *testing.T) {
 	buf := NewBuffer(50)
 	t.Cleanup(func() { buf.Close() })
 	buf.Prefetch(ctx, store, "Caller")
-	if err := store.InsertEdge(ctx, graph.Edge{Kind: graph.EdgeCall, FromName: "NewCaller", ToName: "Caller"}); err != nil {
+	if err := store.InsertCall(ctx, "NewCaller", "Caller"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.InsertEdge(ctx, graph.Edge{Kind: graph.EdgeCall, FromName: "Outer", ToName: "NewCaller"}); err != nil {
+	if err := store.InsertCall(ctx, "Outer", "NewCaller"); err != nil {
 		t.Fatal(err)
 	}
 	var wrapped, original *tool.Definition
@@ -492,9 +491,6 @@ func TestBufferConcurrentCloseAndEnqueue(t *testing.T) {
 	if buf.Enqueue(context.Background(), store, "Caller") {
 		t.Fatal("accepted work after shutdown")
 	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestMergeUnique(t *testing.T) {
@@ -510,19 +506,14 @@ func TestMergeUnique(t *testing.T) {
 	}
 }
 
-func setupTestStore(t *testing.T) *graph.Store {
+func setupTestStore(t *testing.T) *fakeGraph {
 	t.Helper()
-	store, err := graph.OpenStore(":memory:")
-	if err != nil {
-		t.Fatalf("open test store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-
 	ctx := context.Background()
-	store.InsertSymbol(ctx, graph.Symbol{Name: "Caller", Kind: graph.KindFunc, Package: "main", File: "main.go", Line: 10, EndLine: 20})
-	store.InsertSymbol(ctx, graph.Symbol{Name: "Callee", Kind: graph.KindFunc, Package: "main", File: "main.go", Line: 30, EndLine: 40})
-	store.InsertSymbol(ctx, graph.Symbol{Name: "TestCaller", Kind: graph.KindFunc, Package: "main", File: "main_test.go", Line: 1, EndLine: 10})
-	store.InsertEdge(ctx, graph.Edge{Kind: graph.EdgeCall, FromName: "Caller", ToName: "Callee"})
-	store.InsertEdge(ctx, graph.Edge{Kind: graph.EdgeCall, FromName: "TestCaller", ToName: "Caller"})
+	store := newFakeGraph()
+	_ = store.InsertSymbol(ctx, graph.Symbol{Name: "Caller", Kind: graph.KindFunc, Package: "main", File: "main.go", Line: 10, EndLine: 20})
+	_ = store.InsertSymbol(ctx, graph.Symbol{Name: "Callee", Kind: graph.KindFunc, Package: "main", File: "main.go", Line: 30, EndLine: 40})
+	_ = store.InsertSymbol(ctx, graph.Symbol{Name: "TestCaller", Kind: graph.KindFunc, Package: "main", File: "main_test.go", Line: 1, EndLine: 10})
+	_ = store.InsertCall(ctx, "Caller", "Callee")
+	_ = store.InsertCall(ctx, "TestCaller", "Caller")
 	return store
 }

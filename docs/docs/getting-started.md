@@ -39,7 +39,6 @@ make install      # $GOPATH/bin
 
 | Tag | What it adds |
 |-----|-------------|
-| `treesitter` | Tree-sitter code graph (in addition to Go AST graph) |
 | `postgres` | PostgreSQL storage adapter |
 | `lsp` | LSP tools: diagnostics, hover, references, rename preview |
 

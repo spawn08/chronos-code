@@ -19,7 +19,7 @@ tools_required: [file_read, file_write, file_grep, shell]
 2. **Wrap errors with context**: `fmt.Errorf("context: %w", err)` — never bare `return err`
 3. **`context.Context` is always the first parameter** when present
 4. **YAML-first**: all user-facing config in YAML, not Go code. Use `gopkg.in/yaml.v3`
-5. **CGO_ENABLED=1** required for SQLite (`modernc.org/sqlite`)
+5. **No cgo**: builds are pure Go (`modernc.org/sqlite` is pure Go)
 
 ## Error Handling Pattern
 ```go

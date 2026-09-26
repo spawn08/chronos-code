@@ -15,7 +15,6 @@ type ProjectPaths struct {
 	ID           string
 	Dir          string
 	SessionsDB   string
-	GraphDB      string
 	PlansDB      string
 	DeliveriesDB string
 	TelemetryDB  string
@@ -52,7 +51,6 @@ func ResolveProjectPaths(root string) (ProjectPaths, error) {
 	return ProjectPaths{
 		Root: root, ID: id, Dir: dir,
 		SessionsDB:   filepath.Join(dir, "sessions.db"),
-		GraphDB:      filepath.Join(dir, "graph.db"),
 		PlansDB:      filepath.Join(dir, "plans.db"),
 		DeliveriesDB: filepath.Join(dir, "deliveries.db"),
 		TelemetryDB:  filepath.Join(dir, "telemetry.db"),
@@ -61,8 +59,8 @@ func ResolveProjectPaths(root string) (ProjectPaths, error) {
 	}, nil
 }
 
-// ResolveProjectPaths applies workspace.root, defaults.storage.dsn and
-// workspace.graph_db without changing c. Relative overrides use the canonical
+// ResolveProjectPaths applies workspace.root and defaults.storage.dsn
+// without changing c. Relative overrides use the canonical
 // project root; a relative workspace.root uses the supplied root (or CWD).
 // Embedded legacy DB paths select the new defaults, while explicit YAML values
 // (even the same legacy spelling) win. Non-SQLite DSNs, SQLite URIs and :memory:
@@ -93,12 +91,6 @@ func (c *Config) ResolveProjectPaths(root string) (ProjectPaths, error) {
 					return ProjectPaths{}, fmt.Errorf("resolve sessions DB: %w", err)
 				}
 			}
-		}
-	}
-	if c.explicitDBPath("workspace.graph_db", c.Workspace.GraphDB, "graph.db") {
-		paths.GraphDB, err = resolveRootPath(paths.Root, c.Workspace.GraphDB)
-		if err != nil {
-			return ProjectPaths{}, fmt.Errorf("resolve graph DB: %w", err)
 		}
 	}
 	return paths, nil

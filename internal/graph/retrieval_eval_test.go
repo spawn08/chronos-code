@@ -31,51 +31,42 @@ var retrievalTasks = []struct {
 }
 
 func BenchmarkRetrievalEval(b *testing.B) {
-	store, root := ownRepoStore(b)
 	scope, _ := benchScope(b)
 	counter, _ := evidenceCounter()
-	for _, backend := range []struct {
-		name string
-		tool func() any
-	}{{"store", nil}, {"index", nil}} {
-		var def = toolFrom(&testing.T{}, Tools(store, root), "codebase_context")
-		if backend.name == "index" {
-			def = toolFrom(&testing.T{}, scope.Tools(), "codebase_context")
+	def := toolFrom(&testing.T{}, scope.Tools(), "codebase_context")
+	found, excerpts, total, tokens := 0, 0, 0, 0
+	for _, task := range retrievalTasks {
+		out, err := def.Handler(context.Background(), map[string]any{"query": task.task, "max_tokens": 4096})
+		if err != nil {
+			b.Fatal(err)
 		}
-		found, excerpts, total, tokens := 0, 0, 0, 0
-		for _, task := range retrievalTasks {
-			out, err := def.Handler(context.Background(), map[string]any{"query": task.task, "max_tokens": 4096})
-			if err != nil {
-				b.Fatal(err)
-			}
-			r := out.(*evidenceResult)
-			data, _ := json.Marshal(r)
-			tokens += counter.CountString(string(data))
-			names, shown := map[string]bool{}, map[string]bool{}
-			for _, it := range r.Items {
-				names[it.Name] = true
-				if it.Source != nil && it.Source.Text != "" {
-					shown[it.Name] = true
-				}
-			}
-			var missed []string
-			for _, g := range task.gold {
-				total++
-				if names[g] {
-					found++
-				} else {
-					missed = append(missed, g)
-				}
-				if shown[g] {
-					excerpts++
-				}
-			}
-			if testing.Verbose() {
-				fmt.Printf("%s %-70q missed %v\n", backend.name, task.task, missed)
+		r := out.(*evidenceResult)
+		data, _ := json.Marshal(r)
+		tokens += counter.CountString(string(data))
+		names, shown := map[string]bool{}, map[string]bool{}
+		for _, it := range r.Items {
+			names[it.Name] = true
+			if it.Source != nil && it.Source.Text != "" {
+				shown[it.Name] = true
 			}
 		}
-		b.ReportMetric(float64(found)/float64(total), backend.name+"_recall")
-		b.ReportMetric(float64(excerpts)/float64(total), backend.name+"_excerpt_recall")
-		b.ReportMetric(float64(tokens)/float64(len(retrievalTasks)), backend.name+"_tokens/task")
+		var missed []string
+		for _, g := range task.gold {
+			total++
+			if names[g] {
+				found++
+			} else {
+				missed = append(missed, g)
+			}
+			if shown[g] {
+				excerpts++
+			}
+		}
+		if testing.Verbose() {
+			fmt.Printf("%-70q missed %v\n", task.task, missed)
+		}
 	}
+	b.ReportMetric(float64(found)/float64(total), "recall")
+	b.ReportMetric(float64(excerpts)/float64(total), "excerpt_recall")
+	b.ReportMetric(float64(tokens)/float64(len(retrievalTasks)), "tokens/task")
 }

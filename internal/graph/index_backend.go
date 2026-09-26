@@ -67,8 +67,8 @@ func (b *indexBackend) FindSymbolsFuzzy(ctx context.Context, substr string) ([]S
 	return toSymbols(b.view.Fuzzy(substr)), nil
 }
 
-// Search clamps topK like the SQLite store (default 10, at most 100). Rank
-// is the negated score, so lower ranks are better in both backends.
+// Search clamps topK (default 10, at most 100). Rank is the negated score,
+// so lower ranks are better.
 func (b *indexBackend) Search(ctx context.Context, q string, topK int) ([]SearchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -199,8 +199,8 @@ func (b *indexBackend) Stats(ctx context.Context) (Stats, error) {
 	return Stats{Files: st.Files, Packages: st.Packages, Symbols: st.Symbols, Edges: st.Refs}, nil
 }
 
-// FileHash returns the indexed content hash in the SQLite store's format
-// (%016x of xxh64), or "" for an unindexed or unreadable file.
+// FileHash returns the indexed content hash (%016x of xxh64), or "" for an
+// unindexed or unreadable file.
 func (b *indexBackend) FileHash(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err

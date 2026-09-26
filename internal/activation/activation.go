@@ -30,8 +30,8 @@ const (
 	maxSummaryBytes      = 768
 )
 
-// GraphReader is the part of a graph backend activation queries: the SQLite
-// *graph.Store and the chronos index (graph.IndexScope.Live) both satisfy it.
+// GraphReader is the part of a graph backend activation queries; the
+// chronos index (graph.IndexScope.Live) satisfies it.
 type GraphReader interface {
 	FindSymbols(context.Context, string, string) ([]graph.Symbol, error)
 	FileHash(context.Context, string) (string, error)
