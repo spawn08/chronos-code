@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +140,49 @@ func TestRepairPromptNamesConcreteCommands(t *testing.T) {
 	for _, want := range []string{"`go test ./...`", "`git diff --stat`", "without pipes"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// Renew mode disables task limits (0 = unlimited). Printing them as 0 made the
+// model believe no tool calls remained and hand the task back to the user.
+func TestRepairPromptRendersUnlimitedLimits(t *testing.T) {
+	runtime, err := newTaskRuntimeWithLimits("task", t.TempDir(), execution.TaskLimits{ModelCalls: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := buildRepairPrompt(verification.Decision{}, runtime)
+	want := "Remaining limits: repairs=unlimited model_calls=5 tool_calls=unlimited tokens=unlimited cost_microdollars=unlimited"
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("repair prompt missing %q:\n%s", want, prompt)
+	}
+	if !strings.Contains(prompt, "deliverable is still missing") {
+		t.Fatalf("repair prompt should allow finishing missing deliverables:\n%s", prompt)
+	}
+}
+
+func TestRuntimeVerificationSkipsDiffOutsideGit(t *testing.T) {
+	for _, git := range []bool{false, true} {
+		root := t.TempDir()
+		if git {
+			if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runtime, err := newTaskRuntime("task", root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtime.recordWrite("main.go", "hash", 1, execution.ProvenanceRuntime, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		decision := assessRuntimeVerification(ExecutionRequest{}, router.Classification{Kind: router.TaskKindEdit}, runtime)
+		hasDiff := false
+		for _, obligation := range decision.Obligations {
+			hasDiff = hasDiff || obligation.Kind == verification.KindDiff
+		}
+		if hasDiff != git {
+			t.Fatalf("git=%v: diff obligation present=%v, obligations=%#v", git, hasDiff, decision.Obligations)
 		}
 	}
 }

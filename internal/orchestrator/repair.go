@@ -57,7 +57,8 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 }
 
 func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) string {
-	lines := []string{"Verification did not support completion. Repair only the unmet obligations below; do not replay the original task or repeat completed side effects."}
+	lines := []string{"Verification did not support completion. Repair only the unmet obligations below; do not replay the original task or repeat completed side effects.",
+		"If a requested deliverable is still missing or incomplete, finish it first, then run the checks."}
 	paths := make(map[string]struct{})
 	for _, obligation := range decision.Obligations {
 		for _, path := range obligation.Paths {
@@ -81,13 +82,22 @@ func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) str
 	}
 	lines = append(lines, runtime.claimsDigest()...)
 	snapshot := runtime.budget.Snapshot()
-	lines = append(lines, fmt.Sprintf("Remaining limits: repairs=%d model_calls=%d tool_calls=%d tokens=%d cost_microdollars=%d",
-		remainingInt(snapshot.Limits.RepairAttempts, snapshot.RepairAttempts),
-		remainingInt(snapshot.Limits.ModelCalls, snapshot.ModelCalls),
-		remainingInt(snapshot.Limits.ToolCalls, snapshot.ToolCalls),
-		remainingInt64(snapshot.Limits.Tokens, snapshot.Tokens),
-		remainingInt64(snapshot.Limits.CostMicrodollars, snapshot.CostMicrodollars)))
+	lines = append(lines, fmt.Sprintf("Remaining limits: repairs=%s model_calls=%s tool_calls=%s tokens=%s cost_microdollars=%s",
+		remainingLabel(int64(snapshot.Limits.RepairAttempts), int64(snapshot.RepairAttempts)),
+		remainingLabel(int64(snapshot.Limits.ModelCalls), int64(snapshot.ModelCalls)),
+		remainingLabel(int64(snapshot.Limits.ToolCalls), int64(snapshot.ToolCalls)),
+		remainingLabel(snapshot.Limits.Tokens, snapshot.Tokens),
+		remainingLabel(snapshot.Limits.CostMicrodollars, snapshot.CostMicrodollars)))
 	return strings.Join(lines, "\n")
+}
+
+// remainingLabel renders a limit for the model. A non-positive limit is
+// unlimited; printing it as 0 made the model stop, believing no calls remained.
+func remainingLabel(limit, used int64) string {
+	if limit <= 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d", remainingInt64(limit, used))
 }
 
 // unverifiedCompletionNote lists the checks without current passing evidence
@@ -148,16 +158,6 @@ func verificationFailureFingerprint(decision verification.Decision) string {
 	sort.Strings(parts)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])
-}
-
-func remainingInt(limit, used int) int {
-	if limit <= 0 {
-		return 0
-	}
-	if used >= limit {
-		return 0
-	}
-	return limit - used
 }
 
 func remainingInt64(limit, used int64) int64 {

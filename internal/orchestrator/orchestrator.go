@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -505,6 +506,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// the model's context window, preventing 413/400 token-limit errors that
 		// the SDK's tool-calling loop doesn't guard against.
 		a.Hooks = append(a.Hooks, sessionUXHook{orchestrator: orch})
+		// Set the output allowance before the guard reserves room for it.
+		a.Hooks = append(a.Hooks, outputTokensHook{})
 		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List()), contextGuardOptions{
 			ContextLimit: a.ContextCfg.MaxContextTokens,
 		}))
@@ -2049,7 +2052,10 @@ func (o *Orchestrator) contextReport(collector *contextReportCollector) ContextR
 
 const (
 	maxOutputSegments  = 3
-	continuationPrompt = "Your previous response was cut off because it reached the output token limit. Continue exactly where it stopped. Do not repeat any text already provided."
+	continuationPrompt = "Your previous response was cut off because it reached the output token limit. " +
+		"If it was cut off inside a tool call, that call was discarded and never ran, so nothing from it was written: " +
+		"issue it again with a smaller payload, for example by splitting large content across several smaller files that the main file imports. " +
+		"Otherwise continue exactly where the text stopped without repeating it. Then continue the task until it is complete."
 )
 
 // Output-token exhaustion is a successful provider response, not a retryable
@@ -2352,10 +2358,32 @@ func assessRuntimeVerification(request ExecutionRequest, classification router.C
 		}
 	}
 	obligations := append([]verification.Obligation(nil), request.VerificationObligations...)
-	obligations = append(obligations, verification.Derive(verification.Input{
+	derived := verification.Derive(verification.Input{
 		TaskKind: string(classification.Kind), ChangedPaths: changedPaths,
-	})...)
+	})
+	if runtime != nil && !insideGitWorktree(runtime.workspaceRoot) {
+		// `git diff --stat` cannot succeed outside a repository; requiring it
+		// only pushes the model to run `git init` in the user's project.
+		derived = slices.DeleteFunc(derived, func(o verification.Obligation) bool { return o.Kind == verification.KindDiff })
+	}
+	obligations = append(obligations, derived...)
 	return verification.Assess(request.VerificationMode, true, obligations, events)
+}
+
+func insideGitWorktree(root string) bool {
+	if root == "" {
+		return true
+	}
+	for dir := root; ; {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 // Chat preserves the blocking public API while delegating to Execute.
