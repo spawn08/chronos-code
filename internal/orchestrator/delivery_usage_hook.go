@@ -108,7 +108,7 @@ func (deliveryUsageHook) Before(ctx context.Context, event *hooks.Event) error {
 	}
 	callID := identity.InvocationID + ":" + callSeq
 	record, err := lease.Store.ReserveUsageLease(ctx, lease.Lease, execution.UsageReservation{
-		CallID: callID, Provider: provider.Name(), Model: modelID,
+		CallID: callID, NodeID: identity.NodeID, Provider: provider.Name(), Model: modelID,
 		EstimateTokens: int64(estimate), ReservedMicrodollars: reserved, KnownPrice: known,
 	})
 	if err != nil {

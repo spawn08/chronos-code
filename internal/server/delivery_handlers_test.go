@@ -242,7 +242,9 @@ func TestAuthenticatedTeamAdmissionBindsConfiguredCheckpointedWorker(t *testing.
 	configured := &config.Config{FileConfig: agent.FileConfig{
 		Defaults: &agent.AgentConfig{Storage: agent.StorageConfig{Backend: "sqlite", DSN: filepath.Join(root, "sessions.db")}},
 		Agents:   []agent.AgentConfig{agentConfig("reader"), agentConfig("reviewer")},
-		Teams:    []agent.TeamConfig{{ID: "pair", Name: "Pair", Strategy: "sequential", Agents: []string{"reader", "reviewer"}}},
+		Teams: []agent.TeamConfig{{ID: "pair", Name: "Pair", Strategy: "sequential", Agents: []string{"reader", "reviewer"}},
+			{ID: "fan", Name: "Fan", Strategy: "parallel", Agents: []string{"reader", "reviewer"}},
+			{ID: "route", Name: "Route", Strategy: "router", Agents: []string{"reader", "reviewer"}}},
 	}, Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart}}
 	orch, err := orchestrator.New(context.Background(), configured, "")
 	if err != nil {
@@ -279,6 +281,12 @@ func TestAuthenticatedTeamAdmissionBindsConfiguredCheckpointedWorker(t *testing.
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("unknown team admission = %d", invalid.Code)
 	}
+	if parallel := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "parallel-team", `{"goal":"inspect","run_read_only":true,"team_id":"fan"}`, "secret"); parallel.Code != http.StatusAccepted {
+		t.Fatalf("parallel team admission = %d: %s", parallel.Code, parallel.Body.String())
+	}
+	if router := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "router-team", `{"goal":"inspect","run_read_only":true,"team_id":"route"}`, "secret"); router.Code != http.StatusBadRequest {
+		t.Fatalf("router team without member checkpoints admitted = %d", router.Code)
+	}
 }
 
 func TestDeliveryCostAuthorityIsScopedAndImmutableAtAdmission(t *testing.T) {
@@ -300,5 +308,74 @@ func TestDeliveryCostAuthorityIsScopedAndImmutableAtAdmission(t *testing.T) {
 	}
 	if invalid := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "invalid", `{"goal":"build feature","max_cost_microdollars":-1}`, "secret"); invalid.Code != http.StatusBadRequest {
 		t.Fatalf("negative authority accepted: %d", invalid.Code)
+	}
+}
+
+// TestCandidatePlanAdmissionFromProductionStartup exercises orchestrator.New,
+// the candidate plan executor and the routed worker without the interactive
+// closed-loop PPD capability. The worker is not run: it would call a provider.
+func TestCandidatePlanAdmissionFromProductionStartup(t *testing.T) {
+	t.Setenv("CHRONOS_CODE_DATA_HOME", t.TempDir())
+	root := t.TempDir()
+	indexOnStart := false
+	configured := &config.Config{FileConfig: agent.FileConfig{
+		Defaults: &agent.AgentConfig{Storage: agent.StorageConfig{Backend: "sqlite", DSN: filepath.Join(root, "sessions.db")}},
+		Agents:   []agent.AgentConfig{{ID: "reader", Name: "reader", Model: agent.ModelConfig{Provider: "openai", Model: "gpt-4o-mini", APIKey: "test-key"}}},
+	}, Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart}}
+	orch, err := orchestrator.New(context.Background(), configured, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer orch.Close()
+	store, err := execution.OpenDeliveryStore(context.Background(), filepath.Join(t.TempDir(), "deliveries.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	authorizer := authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}
+	readOnly, err := orchestrator.NewReadOnlyDeliveryExecutor(orch, authorizer, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orchestrator.NewPlanDeliveryExecutor(orch, authorizer, security.SandboxPolicy{}); err == nil {
+		t.Fatal("write plan executor started without the closed-loop PPD capability")
+	}
+	candidate, err := orchestrator.NewCandidatePlanDeliveryExecutor(orch, authorizer, security.SandboxPolicy{})
+	if err != nil {
+		t.Fatalf("candidate plan executor from production startup: %v", err)
+	}
+	routed, err := orchestrator.NewRoutedDeliveryExecutor(readOnly, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := execution.NewWorker(store, routed, execution.WorkerConfig{OwnerID: "worker", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(orch, ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store, DeliveryWorker: worker}).Handler()
+	proposal := `{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"a","kind":"implement","objective":"add api","depends_on":[],"scope":"api.go","context_refs":[],"expected_artifacts":["api.go"],"assumptions":[],"invalidation_triggers":[],"recovery_class":"replan","risks":["compatibility"],"verification":"go test ./..."}]}`
+	body := `{"goal":"add api","plan_generation":` + proposal + `}`
+	if capped := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "capped-plan", `{"goal":"add api","max_cost_microdollars":10,"plan_generation":`+proposal+`}`, "secret"); capped.Code != http.StatusServiceUnavailable {
+		t.Fatalf("capped candidate plan admission = %d: %s", capped.Code, capped.Body.String())
+	}
+	response := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "plan-key", body, "secret")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("candidate plan admission = %d: %s", response.Code, response.Body.String())
+	}
+	var admitted deliveryResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil {
+		t.Fatal(err)
+	}
+	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
+	loaded, err := store.Load(context.Background(), scope, admitted.ID)
+	if err != nil || loaded.PolicyReference != execution.CandidatePlanPolicyReference || loaded.State != execution.DeliveryQueued {
+		t.Fatalf("candidate plan route = %+v, error = %v", loaded, err)
+	}
+	if retry := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "plan-key", body, "secret"); retry.Code != http.StatusAccepted {
+		t.Fatalf("retried candidate plan admission = %d: %s", retry.Code, retry.Body.String())
+	}
+	changed := strings.Replace(body, "add api", "remove api", 2)
+	if conflict := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "plan-key", changed, "secret"); conflict.Code != http.StatusConflict {
+		t.Fatalf("changed proposal under same key = %d: %s", conflict.Code, conflict.Body.String())
 	}
 }

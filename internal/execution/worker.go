@@ -86,6 +86,44 @@ func (w *Worker) CanRunPlan() bool {
 	return ok && capable.SupportsPlanDelivery()
 }
 
+// CanRunCandidatePlan reports an executor that runs plan nodes in private
+// worktrees and retains verified patches without integrating them.
+func (w *Worker) CanRunCandidatePlan() bool {
+	if w == nil {
+		return false
+	}
+	capable, ok := w.executor.(interface{ SupportsCandidatePlanDelivery() bool })
+	return ok && capable.SupportsCandidatePlanDelivery()
+}
+
+// PlanPolicyReference returns the admission policy the installed plan
+// executor accepts, so public admission cannot stamp a route no worker runs.
+func (w *Worker) PlanPolicyReference() string {
+	if w == nil {
+		return ""
+	}
+	if routed, ok := w.executor.(interface{ PlanPolicyReference() string }); ok {
+		return routed.PlanPolicyReference()
+	}
+	if direct, ok := w.executor.(interface{ PolicyReference() string }); ok && (w.CanRunPlan() || w.CanRunCandidatePlan()) {
+		return direct.PolicyReference()
+	}
+	if w.CanRunPlan() {
+		return InternalPlanPolicyReference
+	}
+	return ""
+}
+
+// CanRunCappedPlan is separate from CanRunCapped so a routed worker whose
+// read-only path has durable call admission cannot imply the same for plans.
+func (w *Worker) CanRunCappedPlan() bool {
+	if w == nil {
+		return false
+	}
+	capable, ok := w.executor.(interface{ SupportsCappedPlanDelivery() bool })
+	return ok && capable.SupportsCappedPlanDelivery()
+}
+
 func NewWorker(store *DeliveryStore, executor Executor, config WorkerConfig) (*Worker, error) {
 	if store == nil || executor == nil || config.OwnerID == "" || config.Concurrency < 1 || config.LeaseDuration <= 0 || config.HeartbeatEvery <= 0 || config.HeartbeatEvery >= config.LeaseDuration || config.PollEvery <= 0 {
 		return nil, ErrInvalidDelivery

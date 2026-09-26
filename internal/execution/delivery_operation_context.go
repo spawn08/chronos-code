@@ -40,6 +40,10 @@ func (e *Execution) CumulativeUsage(ctx context.Context) (CumulativeUsage, error
 	return e.store.Usage(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
 }
 
+func (e *Execution) UsageByNode(ctx context.Context) (map[string]NodeCallCounts, error) {
+	return e.store.UsageByNode(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
+}
+
 // WithOperationLease is for host-owned workers and bounded integration tests;
 // model tool arguments cannot manufacture a worker lease.
 func WithOperationLease(ctx context.Context, store *DeliveryStore, lease Lease) context.Context {

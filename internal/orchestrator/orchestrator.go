@@ -123,6 +123,10 @@ type Orchestrator struct {
 	capabilities       RuntimeCapabilityManifest
 	closeOnce          sync.Once
 	closeErr           error
+
+	// planImplementationAgent is the role the plan controller's node executor
+	// runs; empty when startup found no implementation role.
+	planImplementationAgent string
 }
 
 type SkillInfo struct {
@@ -499,6 +503,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	orch.planController = plan.NewController(planStore, &planNodeExecutor{
 		runner: orch, worktrees: worktreeManager, repositoryRoot: root, implementationAgent: implementationAgent, permissionChecker: orch.permissionChecker,
 	}, nil, nil, plan.ControllerConfig{})
+	orch.planImplementationAgent = implementationAgent
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
 		// Context guard runs before budget: it trims messages that would exceed

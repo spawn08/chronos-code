@@ -35,6 +35,27 @@ type verifiedPlanIntegrator interface {
 	IntegrateVerified(context.Context, worktree.Handle, []string, []worktree.Check, string) (worktree.Result, error)
 }
 
+// candidateArtifactStore retains a verified node patch without applying it to
+// the parent checkout.
+type candidateArtifactStore interface {
+	StoreArtifact(context.Context, worktree.Result) error
+}
+
+type planCandidateArtifactsKey struct{}
+
+// withPlanCandidateArtifacts makes mutating plan nodes stop at a retained,
+// content-addressed candidate patch. Dependents still compose accepted
+// predecessor patches in private worktrees, but the user's checkout is never
+// written until an authorized integration step accepts the result.
+func withPlanCandidateArtifacts(ctx context.Context) context.Context {
+	return context.WithValue(ctx, planCandidateArtifactsKey{}, true)
+}
+
+func planCandidateArtifacts(ctx context.Context) bool {
+	candidate, _ := ctx.Value(planCandidateArtifactsKey{}).(bool)
+	return candidate
+}
+
 // IsolationCapabilityError reports that a mutating execution cannot be bound
 // to an isolated workspace. Callers may use errors.As to handle it explicitly.
 type IsolationCapabilityError struct{ Reason string }
@@ -134,6 +155,9 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 		mapped.Workspace.Cleanup.State = "complete"
 		return mapped, nil
 	}
+	if planCandidateArtifacts(ctx) {
+		return e.retainCandidate(ctx, handle, collected, mapped)
+	}
 	var integrated worktree.Result
 	if lease, ok := execution.OperationLeaseFromContext(ctx); ok {
 		err = lease.Store.WithLeaseEffect(ctx, lease.Lease, 2*time.Minute, func(effectCtx context.Context) error {
@@ -156,6 +180,30 @@ func (e *planNodeExecutor) Execute(ctx context.Context, request plan.NodeExecuti
 	mapped.Workspace.ArtifactID = integrated.ArtifactID
 	mapped.Workspace.ReceiptID = integrated.ReceiptID
 	mapped.Workspace.Cleanup = integrated.Cleanup
+	return mapped, nil
+}
+
+// retainCandidate stores the verified patch under its content identity and
+// discards the private worktree. The artifact is durable before the node can
+// complete, so a crash leaves at most an unreferenced content-addressed file.
+// A failed worktree removal leaves a manifest for pruning, not a lost result.
+func (e *planNodeExecutor) retainCandidate(ctx context.Context, handle worktree.Handle, collected worktree.Result, mapped plan.NodeExecutionResult) (plan.NodeExecutionResult, error) {
+	store, ok := e.worktrees.(candidateArtifactStore)
+	if !ok {
+		return mapped, errors.Join(&plan.StopError{Reason: plan.StopCapabilityMissing, Err: &IsolationCapabilityError{Reason: "candidate plan artifacts require durable patch retention"}}, e.cancel(handle))
+	}
+	storeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	err := store.StoreArtifact(storeCtx, collected)
+	cancel()
+	if err != nil {
+		return mapped, errors.Join(fmt.Errorf("retain candidate plan artifact: %w", err), e.cancel(handle))
+	}
+	mapped.Workspace.ArtifactID = collected.FinalHash
+	mapped.Workspace.ReceiptID = ""
+	mapped.Workspace.Cleanup.State = "complete"
+	if err := e.remove(handle); err != nil {
+		mapped.Workspace.Cleanup.State = string(worktree.CleanupPending)
+	}
 	return mapped, nil
 }
 

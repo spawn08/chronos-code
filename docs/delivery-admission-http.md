@@ -47,6 +47,19 @@ commit together; retrying the same key/proposal repairs a crash between the two
 databases. A changed proposal is rejected with HTTP 409. Plan results park for
 acceptance verification; the packaged server does not enable write-capable plan
 workers while the F10 acceptance gate is pending.
+`serve --delivery-plan-worker` installs a candidate plan worker alongside the
+read-only one. Plan admissions are then stamped `plan-candidate-worker-v1`:
+nodes run in private worktrees with read, scratch-write and sandboxed process
+grants only; each verified node patch is retained by content hash, and
+dependent nodes compose accepted predecessor patches privately. The checkout,
+network and external systems are never mutated. Capped plan admission still
+returns HTTP 503.
+
+`run_read_only` with `team_id` accepts a configured sequential or parallel
+team. Each member's response is checkpointed under the worker lease; after a
+restart only members without a receipt run. A member whose billed model calls
+have no receipt parks the delivery rather than being resubmitted. Other team
+strategies return HTTP 400.
 
 The delivery aggregate, ordered events, worker attempts, and queue share the
 same SQLite database. `QueueAdmitted` commits a promotion event, state, and

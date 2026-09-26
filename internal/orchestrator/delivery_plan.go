@@ -24,7 +24,7 @@ var ErrPlanHandoffConflict = errors.New("plan generation conflicts with persiste
 // if queue promotion fails, retrying the same proposal completes the handoff;
 // a different proposal for the same identity is rejected.
 func (o *Orchestrator) PrepareDeliveryPlan(ctx context.Context, strategistJSON []byte, identity PlanRuntimeIdentity) error {
-	if o == nil || !o.closedLoopPPDEnabled() || o.planStore == nil || o.planController == nil {
+	if o == nil || o.planStore == nil || o.planController == nil || !o.closedLoopPPDEnabled() && !o.candidatePlanRuntimeReady() {
 		return execution.ErrInvalidDelivery
 	}
 	output, err := plan.ParseStrategistOutput(strategistJSON)
@@ -57,6 +57,7 @@ type PlanDeliveryExecutor struct {
 	orchestrator *Orchestrator
 	authorizer   authorization.Authorizer
 	sandbox      security.SandboxPolicy
+	candidate    bool
 }
 
 func NewPlanDeliveryExecutor(orch *Orchestrator, authorizer authorization.Authorizer, sandbox security.SandboxPolicy) (*PlanDeliveryExecutor, error) {
@@ -66,11 +67,43 @@ func NewPlanDeliveryExecutor(orch *Orchestrator, authorizer authorization.Author
 	return &PlanDeliveryExecutor{orchestrator: orch, authorizer: authorizer, sandbox: sandbox}, nil
 }
 
-func (e *PlanDeliveryExecutor) SupportsPlanDelivery() bool { return e != nil }
+// NewCandidatePlanDeliveryExecutor runs admitted plan generations with read,
+// scratch-write and sandboxed process grants only. Verified node patches are
+// retained as candidate artifacts and dependents compose them privately; the
+// parent checkout, network and external systems are never mutated.
+//
+// It is gated on its own proven prerequisites rather than the interactive
+// planning:closed-loop-ppd capability, which stays with F13.
+func NewCandidatePlanDeliveryExecutor(orch *Orchestrator, authorizer authorization.Authorizer, sandbox security.SandboxPolicy) (*PlanDeliveryExecutor, error) {
+	if orch == nil || authorizer == nil || !orch.candidatePlanRuntimeReady() {
+		return nil, execution.ErrInvalidDelivery
+	}
+	return &PlanDeliveryExecutor{orchestrator: orch, authorizer: authorizer, sandbox: sandbox, candidate: true}, nil
+}
+
+// candidatePlanRuntimeReady reports the wiring a candidate plan worker needs:
+// durable plan storage, a node controller bound to an implementation role, a
+// worktree manager that retains patches, and a repository root.
+func (o *Orchestrator) candidatePlanRuntimeReady() bool {
+	return o != nil && o.planStore != nil && o.planController != nil && o.planImplementationAgent != "" &&
+		o.worktreeManager != nil && o.workspace != nil && o.workspace.Root != ""
+}
+
+func (e *PlanDeliveryExecutor) SupportsPlanDelivery() bool { return e != nil && !e.candidate }
+
+func (e *PlanDeliveryExecutor) SupportsCandidatePlanDelivery() bool { return e != nil && e.candidate }
+
+// PolicyReference is the only delivery policy this executor accepts.
+func (e *PlanDeliveryExecutor) PolicyReference() string {
+	if e != nil && e.candidate {
+		return execution.CandidatePlanPolicyReference
+	}
+	return execution.InternalPlanPolicyReference
+}
 
 func (e *PlanDeliveryExecutor) Execute(ctx context.Context, attempt *execution.Execution) execution.Outcome {
 	d := attempt.Lease.Delivery
-	if d.PolicyReference != execution.InternalPlanPolicyReference || d.ID == "" || d.State != execution.DeliveryRunning {
+	if d.PolicyReference != e.PolicyReference() || d.ID == "" || d.State != execution.DeliveryRunning {
 		return deliveryWait("invalid-delivery-plan", execution.ErrInvalidDelivery)
 	}
 	authority := authorization.Request{PrincipalID: "delivery-plan-worker", TenantID: string(d.TenantID), RepositoryID: string(d.RepositoryID), Action: "delivery.execute"}
@@ -118,8 +151,13 @@ func (e *PlanDeliveryExecutor) Execute(ctx context.Context, attempt *execution.E
 		return attempt.WithLeaseEffect(ctx, 2*time.Minute, claim)
 	})
 	ctx = agent.WithModelRetriesDisabled(ctx)
-	ctx = security.WithEffectGrant(ctx, security.EffectRead, security.EffectScratchWrite, security.EffectDeliveryWrite,
-		security.EffectProcessExecution, security.EffectNetwork, security.EffectExternalMutation)
+	if e.candidate {
+		ctx = security.WithEffectGrant(ctx, security.EffectRead, security.EffectScratchWrite, security.EffectProcessExecution)
+		ctx = withPlanCandidateArtifacts(ctx)
+	} else {
+		ctx = security.WithEffectGrant(ctx, security.EffectRead, security.EffectScratchWrite, security.EffectDeliveryWrite,
+			security.EffectProcessExecution, security.EffectNetwork, security.EffectExternalMutation)
+	}
 	ctx = security.WithMandatorySandbox(ctx, e.sandbox)
 	finished, err := e.orchestrator.planController.Run(ctx, persisted)
 	if err != nil {

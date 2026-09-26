@@ -80,11 +80,11 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(request.PlanGeneration) != 0 {
-		if request.RunReadOnly || request.TeamID != "" || s.orch == nil || s.cfg.DeliveryWorker == nil || !s.cfg.DeliveryWorker.CanRunPlan() {
+		if request.RunReadOnly || request.TeamID != "" || s.orch == nil || s.cfg.DeliveryWorker == nil || s.cfg.DeliveryWorker.PlanPolicyReference() == "" {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "plan generation requires an explicitly configured plan worker"})
 			return
 		}
-		if request.MaxCostMicrodollars > 0 && !s.cfg.DeliveryWorker.CanRunCapped() {
+		if request.MaxCostMicrodollars > 0 && !s.cfg.DeliveryWorker.CanRunCappedPlan() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "capped plan delivery requires durable model-call admission"})
 			return
 		}
@@ -95,8 +95,8 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		configured, ok := s.orch.GetTeam(request.TeamID)
-		if !ok || configured == nil || configured.Strategy != team.StrategySequential || len(configured.Order) == 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "team_id must identify a configured sequential team"})
+		if !ok || configured == nil || configured.Strategy != team.StrategySequential && configured.Strategy != team.StrategyParallel || len(configured.Order) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "team_id must identify a configured sequential or parallel team"})
 			return
 		}
 		if s.cfg.DeliveryWorker == nil || !s.cfg.DeliveryWorker.CanRunCheckpointedTeam() {
@@ -142,7 +142,7 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(request.PlanGeneration) != 0 {
-		policyReference = execution.InternalPlanPolicyReference
+		policyReference = s.cfg.DeliveryWorker.PlanPolicyReference()
 		identity := orchestrator.PlanRuntimeIdentity{
 			TenantID: plan.TenantID(scope.TenantID), RepositoryID: plan.RepositoryID(scope.RepositoryID),
 			TaskID: plan.TaskID(id), PlanID: plan.PlanID(id), Generation: "1",

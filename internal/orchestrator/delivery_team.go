@@ -39,10 +39,11 @@ func (o *Orchestrator) durableTeam(id string) (*team.Team, error) {
 	if !ok || source == nil {
 		return nil, fmt.Errorf("durable team %q is not configured", id)
 	}
-	if source.Strategy != team.StrategySequential {
-		return nil, fmt.Errorf("durable team %q requires a checkpointed sequential strategy", id)
+	if source.Strategy != team.StrategySequential && source.Strategy != team.StrategyParallel {
+		return nil, fmt.Errorf("durable team %q requires a checkpointed sequential or parallel strategy", id)
 	}
 	fresh := team.New(source.ID, source.Name, source.Strategy)
+	fresh.MaxConcurrency, fresh.ErrorMode, fresh.Merge = source.MaxConcurrency, source.ErrorMode, source.Merge
 	for _, member := range source.Order {
 		configured := o.agents[member]
 		if configured == nil {
@@ -61,8 +62,11 @@ func (o *Orchestrator) runDurableTeam(ctx context.Context, id, message string, a
 	if err != nil {
 		return "", err
 	}
+	if t.Strategy == team.StrategyParallel && len(t.Order) > 0 {
+		return o.runDurableParallelTeam(ctx, t, message, attempt)
+	}
 	if t.Strategy != team.StrategySequential || len(t.Order) == 0 {
-		return "", fmt.Errorf("durable team %q requires nonempty sequential members", id)
+		return "", fmt.Errorf("durable team %q requires nonempty sequential or parallel members", id)
 	}
 	for _, member := range t.Order {
 		if role := o.agents[member]; role == nil || !hasDurableBudgetHook(role) {
@@ -120,6 +124,139 @@ func (o *Orchestrator) runDurableTeam(ctx context.Context, id, message string, a
 			return fmt.Errorf("team step receipt exceeds %d bytes", maxTeamCheckpointBytes)
 		}
 		return attempt.Checkpoint(ctx, payload)
+	})
+	if err != nil {
+		return "", err
+	}
+	content, _ := result["response"].(string)
+	return content, nil
+}
+
+// parallelTeamCheckpoint records one receipt per member position. Members
+// finish in any order, so each receipt carries the number of that member's
+// reconciled model calls (attributed by node "team:<id>:<step>") instead of
+// the delivery-wide total used by the sequential prefix checkpoint.
+type parallelTeamCheckpoint struct {
+	Version      int                    `json:"version"`
+	Strategy     string                 `json:"strategy"`
+	TeamID       string                 `json:"team_id"`
+	GoalRevision execution.GoalRevision `json:"goal_revision"`
+	Agents       []string               `json:"agents"`
+	Members      map[int]memberReceipt  `json:"members"`
+}
+
+type memberReceipt struct {
+	Response        string `json:"response"`
+	ReconciledCalls int64  `json:"reconciled_calls"`
+}
+
+func teamMemberNode(teamID string, step int) string {
+	return fmt.Sprintf("team:%s:%d", teamID, step)
+}
+
+// runDurableParallelTeam resumes only members without a durable receipt. A
+// member that has billed calls but no receipt, any outstanding or unknown
+// call, or a call outside the team's member nodes parks the work for
+// evidence-led reconciliation instead of resubmitting it.
+func (o *Orchestrator) runDurableParallelTeam(ctx context.Context, t *team.Team, message string, attempt *execution.Execution) (string, error) {
+	for _, member := range t.Order {
+		if role := o.agents[member]; role == nil || !hasDurableBudgetHook(role) {
+			return "", fmt.Errorf("durable team member %q has no model-call accounting", member)
+		}
+	}
+	usage, err := attempt.CumulativeUsage(ctx)
+	if err != nil {
+		return "", err
+	}
+	if usage.OutstandingCalls > 0 {
+		return "", execution.ErrUsageOutcomeUnknown
+	}
+	attempts, err := attempt.PriorAttempts(ctx)
+	if err != nil {
+		return "", err
+	}
+	checkpoint := parallelTeamCheckpoint{Version: 2, Strategy: string(team.StrategyParallel), TeamID: t.ID, GoalRevision: attempt.Lease.Delivery.CurrentGoalRevision, Agents: append([]string(nil), t.Order...), Members: map[int]memberReceipt{}}
+	for _, prior := range attempts {
+		if prior.Attempt >= attempt.Lease.Attempt || len(prior.Checkpoint) == 0 {
+			continue
+		}
+		var loaded parallelTeamCheckpoint
+		if err := json.Unmarshal(prior.Checkpoint, &loaded); err != nil {
+			return "", fmt.Errorf("read prior team checkpoint: %w", err)
+		}
+		checkpoint = loaded
+	}
+	if checkpoint.Version != 2 || checkpoint.Strategy != string(team.StrategyParallel) || checkpoint.TeamID != t.ID ||
+		checkpoint.GoalRevision != attempt.Lease.Delivery.CurrentGoalRevision || !slices.Equal(checkpoint.Agents, t.Order) || checkpoint.Members == nil {
+		return "", execution.ErrEffectNeedsReconciliation
+	}
+	byNode, err := attempt.UsageByNode(ctx)
+	if err != nil {
+		return "", err
+	}
+	members := make(map[string]int, len(t.Order))
+	for step := range t.Order {
+		members[teamMemberNode(t.ID, step)] = step
+	}
+	var covered int64
+	for node, counts := range byNode {
+		step, isMember := members[node]
+		if counts.Outstanding > 0 || counts.Unknown > 0 {
+			return "", execution.ErrUsageOutcomeUnknown
+		}
+		if counts.Reconciled == 0 {
+			continue
+		}
+		receipt, done := checkpoint.Members[step]
+		if !isMember || !done || receipt.ReconciledCalls != counts.Reconciled {
+			return "", execution.ErrEffectNeedsReconciliation
+		}
+		covered += counts.Reconciled
+	}
+	completed := make(map[int]string, len(checkpoint.Members))
+	for step, receipt := range checkpoint.Members {
+		if step < 0 || step >= len(t.Order) || !utf8.ValidString(receipt.Response) || receipt.ReconciledCalls != byNode[teamMemberNode(t.ID, step)].Reconciled {
+			return "", execution.ErrEffectNeedsReconciliation
+		}
+		completed[step] = receipt.Response
+	}
+	if covered != usage.ReconciledCalls {
+		return "", execution.ErrEffectNeedsReconciliation
+	}
+	ctx, err = o.executionTaskContext(ctx, "team:"+t.ID)
+	if err != nil {
+		return "", err
+	}
+	result, err := t.RunParallelWithCheckpoints(ctx, graph.State{"messages": message}, completed, func(ctx context.Context, step int, member, response string) error {
+		if step < 0 || step >= len(t.Order) || member != t.Order[step] || !utf8.ValidString(response) {
+			return execution.ErrInvalidDelivery
+		}
+		if _, done := checkpoint.Members[step]; done {
+			return execution.ErrInvalidDelivery
+		}
+		current, err := attempt.UsageByNode(ctx)
+		if err != nil {
+			return err
+		}
+		counts := current[teamMemberNode(t.ID, step)]
+		if counts.Outstanding > 0 || counts.Unknown > 0 {
+			return execution.ErrUsageOutcomeUnknown
+		}
+		checkpoint.Members[step] = memberReceipt{Response: response, ReconciledCalls: counts.Reconciled}
+		payload, err := json.Marshal(checkpoint)
+		if err != nil {
+			delete(checkpoint.Members, step)
+			return fmt.Errorf("encode team member receipt: %w", err)
+		}
+		if len(payload) > maxTeamCheckpointBytes {
+			delete(checkpoint.Members, step)
+			return fmt.Errorf("team member receipt exceeds %d bytes", maxTeamCheckpointBytes)
+		}
+		if err := attempt.Checkpoint(ctx, payload); err != nil {
+			delete(checkpoint.Members, step)
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return "", err

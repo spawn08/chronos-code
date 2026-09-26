@@ -358,6 +358,7 @@ Usage:
   chronos-code cleanup prune <scope> [--dry-run]             Prune one scope (plan_db also requires tenant/repository)
   chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>] [--request-timeout 5m] [--instance-id <id>]  Start HTTP server for team deployment
   chronos-code serve --delivery-read-only-worker            Process explicitly queued deliveries as read-only, then park for verification
+  chronos-code serve --delivery-plan-worker                 Also run admitted plan generations in private worktrees; retain candidate patches, never write the checkout
   chronos-code version            Print version information
   chronos-code help               Show this help
 
@@ -1728,15 +1729,19 @@ func runServe() error {
 		defer cfg.DeliveryStore.Close()
 		deliveryPaths = paths
 	}
-	readOnlyWorker := false
+	readOnlyWorker, planWorker := false, false
 	for _, arg := range args {
 		if arg == "--delivery-read-only-worker" {
 			readOnlyWorker = true
 		} else if strings.HasPrefix(arg, "--delivery-read-only-worker=") {
 			return fmt.Errorf("serve: --delivery-read-only-worker takes no value")
+		} else if arg == "--delivery-plan-worker" {
+			planWorker = true
+		} else if strings.HasPrefix(arg, "--delivery-plan-worker=") {
+			return fmt.Errorf("serve: --delivery-plan-worker takes no value")
 		}
 	}
-	if readOnlyWorker {
+	if readOnlyWorker || planWorker {
 		if cfg.DeliveryStore == nil {
 			return fmt.Errorf("serve: delivery read-only worker requires authenticated delivery storage")
 		}
@@ -1752,9 +1757,20 @@ func runServe() error {
 			}
 			_ = sandbox.Close()
 		}
-		executor, err := orchestrator.NewReadOnlyDeliveryExecutor(orch, authorizer, sandboxPolicy)
+		readOnlyExecutor, err := orchestrator.NewReadOnlyDeliveryExecutor(orch, authorizer, sandboxPolicy)
 		if err != nil {
 			return fmt.Errorf("serve: create delivery read-only executor: %w", err)
+		}
+		var planExecutor *orchestrator.PlanDeliveryExecutor
+		if planWorker {
+			planExecutor, err = orchestrator.NewCandidatePlanDeliveryExecutor(orch, authorizer, sandboxPolicy)
+			if err != nil {
+				return fmt.Errorf("serve: delivery plan worker requires plan storage, a worktree manager and an implementation agent: %w", err)
+			}
+		}
+		executor, err := orchestrator.NewRoutedDeliveryExecutor(readOnlyExecutor, planExecutor)
+		if err != nil {
+			return fmt.Errorf("serve: create delivery executor: %w", err)
 		}
 		cfg.DeliveryWorker, err = execution.NewWorker(cfg.DeliveryStore, executor, execution.WorkerConfig{
 			OwnerID: "serve:" + session.NewSessionID(), Concurrency: 1,

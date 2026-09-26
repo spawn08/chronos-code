@@ -18,6 +18,7 @@ var (
 
 type UsageReservation struct {
 	CallID               string
+	NodeID               string
 	Provider             string
 	Model                string
 	EstimateTokens       int64
@@ -117,7 +118,7 @@ func (s *DeliveryStore) reserveUsage(ctx context.Context, scope DeliveryScope, i
 	}
 	request.Status = "reserved"
 	now := timestamp(s.clock.Now())
-	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_usage_calls (tenant_id, repository_id, delivery_id, call_id, status, provider, model, estimate_tokens, reserved_microdollars, known_price, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, scope.TenantID, scope.RepositoryID, id, request.CallID, request.Status, request.Provider, request.Model, request.EstimateTokens, request.ReservedMicrodollars, request.KnownPrice, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_usage_calls (tenant_id, repository_id, delivery_id, call_id, node_id, status, provider, model, estimate_tokens, reserved_microdollars, known_price, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, scope.TenantID, scope.RepositoryID, id, request.CallID, request.NodeID, request.Status, request.Provider, request.Model, request.EstimateTokens, request.ReservedMicrodollars, request.KnownPrice, now); err != nil {
 		return UsageReservation{}, fmt.Errorf("persist usage reservation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -258,6 +259,51 @@ func (s *DeliveryStore) Usage(ctx context.Context, scope DeliveryScope, id Deliv
 		return CumulativeUsage{}, err
 	}
 	return loadCumulativeUsage(ctx, s.db, scope, id)
+}
+
+// NodeCallCounts summarizes billed model calls attributed to one node.
+type NodeCallCounts struct {
+	Reconciled  int64
+	Outstanding int64
+	Unknown     int64
+}
+
+// UsageByNode groups model calls by their host-issued node identity. Calls
+// made before node attribution existed, or outside any node, use "".
+func (s *DeliveryStore) UsageByNode(ctx context.Context, scope DeliveryScope, id DeliveryID) (map[string]NodeCallCounts, error) {
+	if err := validateDeliveryRef(scope, id); err != nil {
+		return nil, err
+	}
+	if _, err := s.Load(ctx, scope, id); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id, status, COUNT(*) FROM delivery_usage_calls WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? GROUP BY node_id, status`, scope.TenantID, scope.RepositoryID, id)
+	if err != nil {
+		return nil, fmt.Errorf("read delivery usage by node: %w", err)
+	}
+	defer rows.Close()
+	counts := make(map[string]NodeCallCounts)
+	for rows.Next() {
+		var node, status string
+		var n int64
+		if err := rows.Scan(&node, &status, &n); err != nil {
+			return nil, fmt.Errorf("scan delivery usage by node: %w", err)
+		}
+		c := counts[node]
+		switch status {
+		case "reconciled":
+			c.Reconciled += n
+		case "reserved":
+			c.Outstanding += n
+		case "unknown":
+			c.Unknown += n
+		}
+		counts[node] = c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read delivery usage by node: %w", err)
+	}
+	return counts, nil
 }
 
 func loadUsageReservation(ctx context.Context, db queryer, scope DeliveryScope, id DeliveryID, callID string) (UsageReservation, error) {

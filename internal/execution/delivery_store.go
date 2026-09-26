@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const deliverySchemaVersion = 10
+const deliverySchemaVersion = 11
 
 var deliveryMigrations = []struct {
 	version  int
@@ -30,6 +30,7 @@ var deliveryMigrations = []struct {
 	{version: 8, checksum: deliverySchemaChecksum(deliverySchemaV8), sql: deliverySchemaV8},
 	{version: 9, checksum: deliverySchemaChecksum(deliverySchemaV9), sql: deliverySchemaV9},
 	{version: 10, checksum: deliverySchemaChecksum(deliverySchemaV10), sql: deliverySchemaV10},
+	{version: 11, checksum: deliverySchemaChecksum(deliverySchemaV11), sql: deliverySchemaV11},
 }
 
 // DeliveryStore is the SQLite-backed durable delivery repository.
@@ -1369,3 +1370,8 @@ ALTER TABLE delivery_operations ADD COLUMN role_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE delivery_operations ADD COLUMN observation_descriptor TEXT NOT NULL DEFAULT '';`
 
 const deliverySchemaV10 = `ALTER TABLE delivery_operations ADD COLUMN node_id TEXT NOT NULL DEFAULT '';`
+
+// deliverySchemaV11 attributes each billed model call to the host-issued node
+// (for example one member of a checkpointed team) so resume can prove which
+// member's work is already covered by a durable receipt.
+const deliverySchemaV11 = `ALTER TABLE delivery_usage_calls ADD COLUMN node_id TEXT NOT NULL DEFAULT '';`
