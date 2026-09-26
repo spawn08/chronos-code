@@ -30,9 +30,12 @@ func (v *View) Outgoing(s Symbol) []OutCall {
 			continue
 		}
 		var out []OutCall
-		for _, ci := range seg.CallsFrom(k) {
-			c := seg.Call(ci)
-			out = append(out, OutCall{Callee: c.Callee, Qualifier: c.Qualifier, QualKind: c.QualKind, Line: c.Line})
+		for _, ci := range seg.RefsFrom(k) {
+			c := seg.Ref(ci)
+			if c.Kind != facts.RefCall {
+				continue
+			}
+			out = append(out, OutCall{Callee: c.Name, Qualifier: c.Qualifier, QualKind: c.QualKind, Line: c.Line})
 		}
 		return out
 	}

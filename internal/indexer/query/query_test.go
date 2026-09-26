@@ -234,7 +234,7 @@ func TestPackagesImportsAndStats(t *testing.T) {
 		t.Fatalf("PackageFiles = %+v", files)
 	}
 	st := v.Stats()
-	if st.Files != 3 || st.Packages != 2 || st.Symbols == 0 || st.Calls == 0 {
+	if st.Files != 3 || st.Packages != 2 || st.Symbols == 0 || st.Refs == 0 {
 		t.Fatalf("Stats = %+v", st)
 	}
 	if got := v.SymbolsInRange("store/store.go", 6, 6); len(got) != 1 || got[0].Name != "Repo" {

@@ -37,10 +37,10 @@ type symEntry struct {
 	sym         *facts.Symbol
 }
 
-type callEntry struct {
-	file   int
-	caller uint32
-	call   *facts.Call
+type refEntry struct {
+	file      int
+	enclosing uint32
+	ref       *facts.Ref
 }
 
 // Encode serializes files (in any order; duplicates by path are an error)
@@ -101,64 +101,87 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		if s.sym.Exported {
 			b[45] = flagExported
 		}
+		if s.sym.Visibility >= facts.NumVisibility {
+			return nil, fmt.Errorf("encode segment: unknown visibility %d", s.sym.Visibility)
+		}
+		b[46] = s.sym.Visibility
 		container := noCaller
 		if p, ok := s.sym.Parent(); ok && p < len(sorted[s.file].Symbols) && p != s.local {
 			container = globalSym[s.file][p]
 		}
 		le.PutUint32(b[48:], container)
+		le.PutUint32(b[52:], s.sym.Modifiers)
+	}
+	localSym := func(fi, i int) uint32 {
+		if i >= 0 && i < len(sorted[fi].Symbols) {
+			return globalSym[fi][i]
+		}
+		return noCaller
 	}
 
-	// Calls: global order (callee, qualifier, file, line).
-	var calls []callEntry
+	// References: global order (name, qualifier, file, line, col, kind).
+	var refs []refEntry
 	for fi, f := range sorted {
-		for ci := range f.Calls {
-			c := &f.Calls[ci]
-			caller := noCaller
-			if c.Caller >= 0 && c.Caller < len(f.Symbols) {
-				caller = globalSym[fi][c.Caller]
+		for ri := range f.Refs {
+			r := &f.Refs[ri]
+			if r.Kind >= facts.NumRefKinds {
+				return nil, fmt.Errorf("encode segment: unknown reference kind %d", r.Kind)
 			}
-			calls = append(calls, callEntry{fi, caller, c})
+			refs = append(refs, refEntry{fi, localSym(fi, r.Enclosing), r})
 		}
 	}
-	slices.SortFunc(calls, func(a, b callEntry) int {
-		if c := cmp.Compare(a.call.Callee, b.call.Callee); c != 0 {
+	slices.SortFunc(refs, func(a, b refEntry) int {
+		if c := cmp.Compare(a.ref.Name, b.ref.Name); c != 0 {
 			return c
 		}
-		if c := cmp.Compare(a.call.Qualifier, b.call.Qualifier); c != 0 {
+		if c := cmp.Compare(a.ref.Qualifier, b.ref.Qualifier); c != 0 {
 			return c
 		}
 		if c := cmp.Compare(a.file, b.file); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.call.Line, b.call.Line)
-	})
-	callSec := make([]byte, len(calls)*callRecSize)
-	byCaller := make([]uint32, 0, len(calls))
-	byFileCalls := make([][]uint32, len(sorted))
-	for gi, c := range calls {
-		b := callSec[gi*callRecSize:]
-		putRef(b[0:], e.ref(c.call.Callee))
-		putRef(b[8:], e.ref(c.call.Qualifier))
-		le.PutUint32(b[16:], uint32(c.file))
-		le.PutUint32(b[20:], c.caller)
-		le.PutUint32(b[24:], uint32(c.call.Line))
-		le.PutUint16(b[28:], uint16(min(c.call.Col, 0xFFFF)))
-		b[30] = c.call.QualKind
-		if c.caller != noCaller {
-			byCaller = append(byCaller, uint32(gi))
-		}
-		byFileCalls[c.file] = append(byFileCalls[c.file], uint32(gi))
-	}
-	slices.SortFunc(byCaller, func(a, b uint32) int {
-		ca, cb := calls[a], calls[b]
-		if c := cmp.Compare(ca.caller, cb.caller); c != 0 {
+		if c := cmp.Compare(a.ref.Line, b.ref.Line); c != 0 {
 			return c
 		}
-		return cmp.Compare(ca.call.Line, cb.call.Line)
+		if c := cmp.Compare(a.ref.Col, b.ref.Col); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ref.Kind, b.ref.Kind)
+	})
+	refSec := make([]byte, len(refs)*refRecSize)
+	byEnclosing := make([]uint32, 0, len(refs))
+	byFileRefs := make([][]uint32, len(sorted))
+	for gi, r := range refs {
+		b := refSec[gi*refRecSize:]
+		putRef(b[0:], e.ref(r.ref.Name))
+		putRef(b[8:], e.ref(r.ref.Qualifier))
+		le.PutUint32(b[16:], uint32(r.file))
+		le.PutUint32(b[20:], r.enclosing)
+		le.PutUint32(b[24:], uint32(r.ref.Line))
+		le.PutUint16(b[28:], uint16(min(r.ref.Col, 0xFFFF)))
+		b[30] = r.ref.QualKind
+		b[31] = r.ref.Kind
+		if r.enclosing != noCaller {
+			byEnclosing = append(byEnclosing, uint32(gi))
+		}
+		byFileRefs[r.file] = append(byFileRefs[r.file], uint32(gi))
+	}
+	// Ties break on the record index: a total order keeps the bytes
+	// deterministic without a (slower) stable sort.
+	slices.SortFunc(byEnclosing, func(a, b uint32) int {
+		ra, rb := refs[a], refs[b]
+		if c := cmp.Compare(ra.enclosing, rb.enclosing); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(ra.ref.Line, rb.ref.Line); c != 0 {
+			return c
+		}
+		return cmp.Compare(a, b)
 	})
 
-	// Imports: per-file contiguous, sorted by path within a file.
-	var impSec []byte
+	// Imports: per-file contiguous, sorted by path within a file; their
+	// listed names follow in importNames.
+	var impSec, impNameSec []byte
 	type impKey struct {
 		path string
 		idx  uint32
@@ -167,23 +190,71 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 	impOff := make([]uint32, len(sorted))
 	for fi, f := range sorted {
 		imps := slices.Clone(f.Imports)
-		slices.SortFunc(imps, func(a, b facts.Import) int { return cmp.Compare(a.Path, b.Path) })
+		slices.SortStableFunc(imps, func(a, b facts.Import) int {
+			if c := cmp.Compare(a.Path, b.Path); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.Line, b.Line)
+		})
 		impOff[fi] = uint32(len(impSec) / importRecSize)
 		for _, im := range imps {
+			if im.Kind >= facts.NumImportKinds {
+				return nil, fmt.Errorf("encode segment: unknown import kind %d", im.Kind)
+			}
 			var rec [importRecSize]byte
 			putRef(rec[0:], e.ref(im.Path))
 			putRef(rec[8:], e.ref(im.Name))
 			le.PutUint32(rec[16:], uint32(fi))
 			le.PutUint32(rec[20:], uint32(im.Line))
+			rec[24] = im.Kind
+			le.PutUint32(rec[28:], uint32(len(impNameSec)/impNameRecSize))
+			le.PutUint32(rec[32:], uint32(len(im.Names)))
+			for _, n := range im.Names {
+				var nr [impNameRecSize]byte
+				putRef(nr[0:], e.ref(n.Name))
+				putRef(nr[8:], e.ref(n.Alias))
+				impNameSec = append(impNameSec, nr[:]...)
+			}
 			impByPath = append(impByPath, impKey{im.Path, uint32(len(impSec) / importRecSize)})
 			impSec = append(impSec, rec[:]...)
 		}
 	}
 	slices.SortStableFunc(impByPath, func(a, b impKey) int { return cmp.Compare(a.path, b.path) })
 
+	// Exports and binding hints: per-file contiguous, in line order.
+	var expSec, hintSec []byte
+	expOff := make([]uint32, len(sorted))
+	hintOff := make([]uint32, len(sorted))
+	for fi, f := range sorted {
+		exps := slices.Clone(f.Exports)
+		slices.SortStableFunc(exps, func(a, b facts.Export) int { return cmp.Compare(a.Line, b.Line) })
+		expOff[fi] = uint32(len(expSec) / exportRecSize)
+		for _, x := range exps {
+			var rec [exportRecSize]byte
+			putRef(rec[0:], e.ref(x.Name))
+			putRef(rec[8:], e.ref(x.Source))
+			putRef(rec[16:], e.ref(x.SourceName))
+			le.PutUint32(rec[24:], uint32(fi))
+			le.PutUint32(rec[28:], uint32(x.Line))
+			expSec = append(expSec, rec[:]...)
+		}
+		hints := slices.Clone(f.Hints)
+		slices.SortStableFunc(hints, func(a, b facts.BindingHint) int { return cmp.Compare(a.Line, b.Line) })
+		hintOff[fi] = uint32(len(hintSec) / hintRecSize)
+		for _, h := range hints {
+			var rec [hintRecSize]byte
+			putRef(rec[0:], e.ref(h.Name))
+			putRef(rec[8:], e.ref(h.Type))
+			le.PutUint32(rec[16:], uint32(fi))
+			le.PutUint32(rec[20:], localSym(fi, h.Scope))
+			le.PutUint32(rec[24:], uint32(h.Line))
+			hintSec = append(hintSec, rec[:]...)
+		}
+	}
+
 	// Files, with their per-file index ranges.
 	fileSec := make([]byte, len(sorted)*fileRecSize)
-	var symByFile, callsByFile []uint32
+	var symByFile, refsByFile []uint32
 	for fi, f := range sorted {
 		b := fileSec[fi*fileRecSize:]
 		putRef(b[0:], e.ref(f.Path))
@@ -209,19 +280,33 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		le.PutUint32(b[72:], impOff[fi])
 		le.PutUint32(b[76:], uint32(len(f.Imports)))
 
-		fc := byFileCalls[fi]
-		slices.SortFunc(fc, func(a, b uint32) int {
-			if c := cmp.Compare(calls[a].call.Line, calls[b].call.Line); c != 0 {
+		fr := byFileRefs[fi]
+		slices.SortFunc(fr, func(a, b uint32) int {
+			if c := cmp.Compare(refs[a].ref.Line, refs[b].ref.Line); c != 0 {
 				return c
 			}
-			return cmp.Compare(calls[a].call.Col, calls[b].call.Col)
+			if c := cmp.Compare(refs[a].ref.Col, refs[b].ref.Col); c != 0 {
+				return c
+			}
+			return cmp.Compare(a, b)
 		})
-		le.PutUint32(b[80:], uint32(len(callsByFile)))
-		le.PutUint32(b[84:], uint32(len(fc)))
-		callsByFile = append(callsByFile, fc...)
-		if f.Deleted {
-			le.PutUint32(b[88:], flagDeleted)
+		le.PutUint32(b[80:], uint32(len(refsByFile)))
+		le.PutUint32(b[84:], uint32(len(fr)))
+		refsByFile = append(refsByFile, fr...)
+		var flags uint32
+		for _, fl := range []struct {
+			on  bool
+			bit uint32
+		}{{f.Deleted, flagDeleted}, {f.Generated, flagGenerated}, {f.Vendored, flagVendored}, {f.Test, flagTest}} {
+			if fl.on {
+				flags |= fl.bit
+			}
 		}
+		le.PutUint32(b[88:], flags)
+		le.PutUint32(b[96:], expOff[fi])
+		le.PutUint32(b[100:], uint32(len(f.Exports)))
+		le.PutUint32(b[104:], hintOff[fi])
+		le.PutUint32(b[108:], uint32(len(f.Hints)))
 	}
 	search := encodeSearch(e, sorted, syms)
 	pkgFiles := make([]uint32, len(sorted))
@@ -238,23 +323,26 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		impIdx[i] = k.idx
 	}
 	sections := [numSections][]byte{
-		secStrings - 1:       e.strs,
-		secFiles - 1:         fileSec,
-		secSymbols - 1:       symSec,
-		secSymByFile - 1:     u32s(symByFile),
-		secImports - 1:       impSec,
-		secImportsByPath - 1: u32s(impIdx),
-		secCalls - 1:         callSec,
-		secCallsByCaller - 1: u32s(byCaller),
-		secCallsByFile - 1:   u32s(callsByFile),
-		secSearchStats - 1:   search.stats,
-		secDocLen - 1:        search.docLen,
-		secTerms - 1:         search.terms,
-		secPostings - 1:      search.postings,
-		secNames - 1:         search.names,
-		secTrigrams - 1:      search.trigrams,
-		secTriPost - 1:       u32s(search.triPost),
-		secPkgFiles - 1:      u32s(pkgFiles),
+		secStrings - 1:         e.strs,
+		secFiles - 1:           fileSec,
+		secSymbols - 1:         symSec,
+		secSymByFile - 1:       u32s(symByFile),
+		secImports - 1:         impSec,
+		secImportsByPath - 1:   u32s(impIdx),
+		secRefs - 1:            refSec,
+		secRefsByEnclosing - 1: u32s(byEnclosing),
+		secRefsByFile - 1:      u32s(refsByFile),
+		secSearchStats - 1:     search.stats,
+		secDocLen - 1:          search.docLen,
+		secTerms - 1:           search.terms,
+		secPostings - 1:        search.postings,
+		secNames - 1:           search.names,
+		secTrigrams - 1:        search.trigrams,
+		secTriPost - 1:         u32s(search.triPost),
+		secPkgFiles - 1:        u32s(pkgFiles),
+		secImportNames - 1:     impNameSec,
+		secExports - 1:         expSec,
+		secHints - 1:           hintSec,
 	}
 	return assemble(sections, kind, generation), nil
 }

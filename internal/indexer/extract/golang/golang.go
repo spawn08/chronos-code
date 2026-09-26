@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -19,9 +20,14 @@ const Lang = "go"
 
 const maxDocBytes = 1024
 
-// Extract parses src and fills f.PkgName, f.Symbols, f.Imports and f.Calls.
-// A syntax error is recorded in f.ParseErr; whatever parsed is still kept.
+// generatedRE is the Go convention for generated files (go help generate).
+var generatedRE = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
+
+// Extract parses src and fills f.PkgName, f.Symbols, f.Imports, f.Refs and
+// the Test and Generated flags. A syntax error is recorded in f.ParseErr;
+// whatever parsed is still kept.
 func Extract(f *facts.File, src []byte) {
+	f.Test = strings.HasSuffix(f.Path, "_test.go")
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, f.Path, src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
@@ -47,6 +53,7 @@ func (x *extractor) run(file *ast.File) {
 	if file.Name != nil {
 		x.f.PkgName = file.Name.Name
 	}
+	x.f.Generated = isGenerated(file)
 	for _, spec := range file.Imports {
 		path, err := strconv.Unquote(spec.Path.Value)
 		if err != nil {
@@ -57,6 +64,9 @@ func (x *extractor) run(file *ast.File) {
 		if spec.Name != nil {
 			imp.Name = spec.Name.Name
 			local = spec.Name.Name
+			if local == "." {
+				imp.Kind = facts.ImportWildcard
+			}
 		}
 		x.f.Imports = append(x.f.Imports, imp)
 		if local != "_" && local != "." {
@@ -74,6 +84,51 @@ func (x *extractor) run(file *ast.File) {
 			x.genDecl(d)
 		}
 	}
+	for i := range x.f.Symbols {
+		setVisibility(&x.f.Symbols[i])
+	}
+}
+
+// isGenerated reports a "Code generated … DO NOT EDIT." line comment before
+// the package clause.
+func isGenerated(file *ast.File) bool {
+	for _, g := range file.Comments {
+		if g.Pos() >= file.Package {
+			return false
+		}
+		for _, c := range g.List {
+			if generatedRE.MatchString(c.Text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// setVisibility derives Visibility from Exported and marks deprecated
+// declarations (a "Deprecated: " paragraph in the doc comment). Embeds are
+// structure, not declarations, and keep VisUnknown.
+func setVisibility(s *facts.Symbol) {
+	if s.Kind == facts.KindEmbed {
+		return
+	}
+	s.Visibility = facts.VisPackage
+	if s.Exported {
+		s.Visibility = facts.VisPublic
+	}
+	if strings.HasPrefix(s.Doc, "Deprecated: ") || strings.Contains(s.Doc, "\n\nDeprecated: ") {
+		s.Modifiers |= facts.ModDeprecated
+	}
+}
+
+// isTestFunc reports Go test, benchmark, example and fuzz functions.
+func isTestFunc(name string) bool {
+	for _, p := range []string{"Test", "Benchmark", "Example", "Fuzz"} {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultImportName guesses the package name from an import path: the last
@@ -114,6 +169,11 @@ func (x *extractor) funcDecl(d *ast.FuncDecl) int {
 	if d.Recv != nil && len(d.Recv.List) > 0 {
 		sym.Kind = facts.KindMethod
 		sym.Receiver = x.render(d.Recv.List[0].Type)
+	} else if x.f.Test && isTestFunc(d.Name.Name) {
+		sym.Modifiers |= facts.ModTest
+	}
+	if d.Body == nil {
+		sym.Modifiers |= facts.ModDecl // implemented in assembly or linked
 	}
 	header := *d
 	header.Doc, header.Body = nil, nil
@@ -209,7 +269,7 @@ func (x *extractor) interfaceMembers(iface string, t *ast.InterfaceType, parent 
 				Name: name.Name, Kind: facts.KindMethod, Receiver: iface,
 				Signature: name.Name + strings.TrimPrefix(x.render(ft), "func"),
 				Doc:       docText(field.Doc), Line: x.line(name.Pos()), EndLine: x.line(field.End()),
-				Exported: name.IsExported(), Container: parent + 1,
+				Exported: name.IsExported(), Container: parent + 1, Modifiers: facts.ModDecl,
 			})
 		}
 	}
@@ -262,13 +322,13 @@ func (x *extractor) calls(root ast.Node, caller int) {
 			return true
 		}
 		fun := unwrapIndex(call.Fun)
-		c := facts.Call{Caller: caller, Line: x.line(call.Lparen)}
+		c := facts.Ref{Kind: facts.RefCall, Enclosing: caller, Line: x.line(call.Lparen)}
 		c.Col = x.fset.Position(call.Lparen).Column
 		switch fn := fun.(type) {
 		case *ast.Ident:
-			c.Callee = fn.Name
+			c.Name = fn.Name
 		case *ast.SelectorExpr:
-			c.Callee = fn.Sel.Name
+			c.Name = fn.Sel.Name
 			if id, ok := fn.X.(*ast.Ident); ok {
 				if path, ok := x.aliases[id.Name]; ok {
 					c.QualKind, c.Qualifier = facts.QualPackage, path
@@ -279,7 +339,7 @@ func (x *extractor) calls(root ast.Node, caller int) {
 		default:
 			return true // calls of func values, conversions of complex types, etc.
 		}
-		x.f.Calls = append(x.f.Calls, c)
+		x.f.Refs = append(x.f.Refs, c)
 		return true
 	})
 }

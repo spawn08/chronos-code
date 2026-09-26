@@ -73,11 +73,11 @@ func callers(sn *store.Snapshot, callee string) []string {
 	var out []string
 	for i := 0; i < sn.NumSegments(); i++ {
 		seg := sn.Segment(i)
-		lo, hi := seg.CallsTo(callee)
+		lo, hi := seg.RefsTo(callee)
 		for k := lo; k < hi; k++ {
-			c := seg.Call(k)
-			if sn.Live(i, c.File) && c.Caller >= 0 {
-				out = append(out, seg.Symbol(c.Caller).Qualified()+"->"+c.Qualifier)
+			c := seg.Ref(k)
+			if sn.Live(i, c.File) && c.Enclosing >= 0 {
+				out = append(out, seg.Symbol(c.Enclosing).Qualified()+"->"+c.Qualifier)
 			}
 		}
 	}

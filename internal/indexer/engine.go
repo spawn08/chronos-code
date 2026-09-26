@@ -28,7 +28,7 @@ import (
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;
 // an index written by another version is discarded and rebuilt.
-const ExtractorVersion = "go-syntax-3"
+const ExtractorVersion = "go-syntax-4"
 
 // Tunables.
 const (

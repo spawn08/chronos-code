@@ -422,11 +422,14 @@ func (w *BaseWriter) Add(f *facts.File) error {
 
 // EstimateBytes approximates a file's encoded size, to size shards.
 func EstimateBytes(f *facts.File) int {
-	n := 96 + len(f.Path) + len(f.Package)
+	n := 112 + len(f.Path) + len(f.Package)
 	for _, s := range f.Symbols {
 		n += 56 + len(s.Name) + len(s.Signature) + len(s.Doc) + len(s.Receiver) + 64
 	}
-	return n + 32*len(f.Calls) + 24*len(f.Imports)
+	for _, im := range f.Imports {
+		n += 40 + 16*len(im.Names)
+	}
+	return n + 32*len(f.Refs) + 32*len(f.Exports) + 32*len(f.Hints)
 }
 
 func (w *BaseWriter) flush() error {

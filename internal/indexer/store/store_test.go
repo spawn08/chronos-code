@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -105,6 +106,58 @@ func TestCompactMergesAndRemovesOldSegments(t *testing.T) {
 	segs, _ := filepath.Glob(filepath.Join(dir, segPrefix+"*"))
 	if len(segs) != 1 {
 		t.Fatalf("segment files after compaction = %v", segs)
+	}
+}
+
+// TestCompactionPreservesV2Facts checks that compaction, which decodes files
+// and re-encodes them, keeps every facts v2 field.
+func TestCompactionPreservesV2Facts(t *testing.T) {
+	rich := func() *facts.File {
+		return &facts.File{
+			Path: "web/svc.ts", Lang: "typescript", Package: "web", Hash: 9, Generated: true, Test: true, Vendored: true,
+			Symbols: []facts.Symbol{
+				{Name: "Svc", Kind: facts.KindClass, Line: 1, EndLine: 9, Exported: true, Visibility: facts.VisPublic, Modifiers: facts.ModAbstract},
+				{Name: "save", Kind: facts.KindMethod, Receiver: "Svc", Line: 3, EndLine: 5, Container: 1,
+					Visibility: facts.VisPrivate, Modifiers: facts.ModAsync | facts.ModStatic},
+			},
+			Imports: []facts.Import{{Path: "./repo", Line: 1, Kind: facts.ImportModule, Names: []facts.ImportedName{{Name: "Repo", Alias: "R"}}}},
+			Refs: []facts.Ref{
+				{Kind: facts.RefExtends, Enclosing: 0, Name: "Base", Line: 1, Col: 20},
+				{Kind: facts.RefCall, Enclosing: 1, Name: "put", Qualifier: "r", QualKind: facts.QualExpr, Line: 4, Col: 3},
+			},
+			Exports: []facts.Export{{Name: "Store", Source: "./repo", SourceName: "Repo", Line: 10}},
+			Hints:   []facts.BindingHint{{Scope: 1, Name: "r", Type: "Repo", Line: 3}},
+		}
+	}
+	dir := t.TempDir()
+	s := openStore(t, dir)
+	defer s.Close()
+	if err := s.Publish([]*facts.File{rich(), file("a.go", 1, "A")}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Publish([]*facts.File{file("a.go", 2, "A2")}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	sn := s.Snapshot()
+	defer sn.Release()
+	if sn.NumSegments() != 1 {
+		t.Fatalf("segments after compaction = %d", sn.NumSegments())
+	}
+	// The only segment holds the overlay's a.go, so the shard with
+	// web/svc.ts was decoded and re-encoded, not kept.
+	if m, _ := sn.Meta("a.go"); m.Hash != 2 {
+		t.Fatalf("a.go hash = %d, want the overlay's 2", m.Hash)
+	}
+	ref, ok := sn.Lookup("web/svc.ts")
+	if !ok {
+		t.Fatal("web/svc.ts lost")
+	}
+	got, want := sn.Segment(int(ref.Seg)).File(int(ref.File)), rich()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("v2 facts changed by compaction:\n got %+v\nwant %+v", got, want)
 	}
 }
 

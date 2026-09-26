@@ -5,8 +5,8 @@ chronos indexer, `codebase_context` and per-turn prefetch use graph
 retrieval, and the store, reconcile and watcher are built for million-file
 repositories. M4 (precise tier) is still open. M6 in progress (2026-09-26):
 parser runtime decided and wrapped (`extract/treesitter`, `extract/packs`);
-facts v2, query packs, the generic resolver and the graph switch-over are
-next. Replaces the synchronous parts of `internal/graph` with an
+facts v2 and segment format v4 done; query packs, the generic resolver and
+the graph switch-over are next. Replaces the synchronous parts of `internal/graph` with an
 in-process indexer.
 
 ## Goals
@@ -690,6 +690,52 @@ Decision:
 Reproduce with `BenchmarkParse` in `internal/indexer/extract/treesitter`
 (`CHRONOS_TS_CORPUS=<dir>`, one subdirectory per grammar name). With the
 1 s deadline it reports dropped and partial files per language.
+
+### M6.2 results (facts v2, segment format v4)
+
+`facts` is language-neutral and segments are format v4
+(`ExtractorVersion` `go-syntax-4`, so older indexes are rebuilt):
+
+- Symbols carry `Visibility` (public, protected, internal, private,
+  package) and a `Modifiers` bitset (static, abstract, async, override,
+  deprecated, test, decl). Twelve kinds were appended to the on-disk kind
+  list (class, constructor, trait, protocol, enum, enum member, field,
+  property, type alias, module, namespace, macro).
+- Calls became references: `facts.Ref` with a kind (call, type use,
+  extends, implements, instantiate, decorator). The kind uses the spare
+  byte of the old call record, so the record stays 32 bytes.
+- Files carry `Generated`, `Vendored` and `Test` flags; imports carry a
+  kind (module, wildcard, re-export, include) and their listed names with
+  aliases.
+- New per-file sections: exports and binding hints. `Parse` validates every
+  new field, including that a reference's enclosing symbol and a hint's
+  scope belong to the same file.
+
+As built, this differs from the design above in these ways:
+
+- **No separate `unit` field.** `File.Package` is the unit: the Go import
+  path, and the directory for other languages until M7 assigns modules,
+  crates or build targets.
+- **`Receiver` is the owning type** of any member (a Go receiver or the
+  enclosing class), so `Qualified()` stays `Owner.name` for every language.
+- **Exports and hints are stored per file only**; no by-name index yet.
+  The M7 resolvers add one if they need it.
+- **The query layer keeps its call API** (`CallSites`, `Callers`,
+  `Callees`, `Outgoing`) and filters to call references; `Stats.Calls`
+  became `Stats.Refs` (every kind), which the graph tools report as edges.
+- **The Go extractor fills** visibility, the test and generated flags, and
+  the test, decl and deprecated modifiers, and records dot imports as
+  wildcard imports. It emits no type-use references and no binding hints
+  yet; those come with the generic resolver (M6.4). Nothing sets `Vendored`
+  yet, because scan skips `vendor/`.
+
+Edit path and fresh build are unchanged, measured against M6.1
+(benchstat, n=10, this repository): `IndexFresh` 241 → 242 ms,
+`IndexEditBody` 7.0 → 6.8 ms, `ScopeQueryAfterEdit` 9.2 → 9.3 ms (none
+significant). A first cut used stable sorts in `Encode` for deterministic
+bytes, which cost 8% on query-after-edit; unstable sorts with a total order
+(ties broken by record index) are deterministic too
+(`TestEncodeDeterministic`).
 
 ## Plan after M2
 

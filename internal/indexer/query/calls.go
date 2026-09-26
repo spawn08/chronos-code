@@ -18,20 +18,21 @@ type CallSite struct {
 }
 
 // CallSites returns every live call whose callee name is name, in file and
-// line order.
+// line order. References of other kinds (type uses, extends, ...) are not
+// calls and are skipped.
 func (v *View) CallSites(name string) []CallSite {
 	var out []CallSite
 	for i := 0; i < v.sn.NumSegments(); i++ {
 		seg := v.sn.Segment(i)
-		lo, hi := seg.CallsTo(name)
+		lo, hi := seg.RefsTo(name)
 		for k := lo; k < hi; k++ {
-			if !v.sn.Live(i, seg.CallFile(k)) {
+			if seg.RefKind(k) != facts.RefCall || !v.sn.Live(i, seg.RefFile(k)) {
 				continue
 			}
-			c := seg.Call(k)
+			c := seg.Ref(k)
 			site := CallSite{File: v.meta(i, c.File).Path, Line: c.Line, Col: c.Col, Qualifier: c.Qualifier, QualKind: c.QualKind}
-			if c.Caller >= 0 {
-				s := v.symbol(i, c.Caller)
+			if c.Enclosing >= 0 {
+				s := v.symbol(i, c.Enclosing)
 				site.Caller = &s
 			}
 			out = append(out, site)
@@ -58,12 +59,12 @@ func (v *View) Callers(names []string) map[string][]string {
 		seen := map[string]bool{}
 		for i := 0; i < v.sn.NumSegments(); i++ {
 			seg := v.sn.Segment(i)
-			lo, hi := seg.CallsTo(name)
+			lo, hi := seg.RefsTo(name)
 			for k := lo; k < hi; k++ {
-				if !v.sn.Live(i, seg.CallFile(k)) {
+				if seg.RefKind(k) != facts.RefCall || !v.sn.Live(i, seg.RefFile(k)) {
 					continue
 				}
-				caller := seg.CallCaller(k)
+				caller := seg.RefEnclosing(k)
 				if caller < 0 {
 					continue
 				}
@@ -140,13 +141,16 @@ func (v *View) Callees(q string) []string {
 			return
 		}
 		seg := v.sn.Segment(i)
-		for _, ci := range seg.CallsFrom(k) {
-			c := seg.Call(ci)
-			if c.QualKind == facts.QualNone && goBuiltins[c.Callee] && !v.declaredIn(c.Callee, s.Package) {
+		for _, ci := range seg.RefsFrom(k) {
+			c := seg.Ref(ci)
+			if c.Kind != facts.RefCall {
 				continue
 			}
-			if c.Callee != short || c.QualKind != facts.QualNone {
-				seen[c.Callee] = true
+			if c.QualKind == facts.QualNone && goBuiltins[c.Name] && !v.declaredIn(c.Name, s.Package) {
+				continue
+			}
+			if c.Name != short || c.QualKind != facts.QualNone {
+				seen[c.Name] = true
 			}
 		}
 	})

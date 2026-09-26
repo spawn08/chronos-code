@@ -26,9 +26,9 @@ type Segment struct {
 	sbf    []byte
 	imps   []byte
 	ibp    []byte
-	calls  []byte
-	cbc    []byte
-	cbf    []byte
+	refs   []byte
+	rbe    []byte
+	rbf    []byte
 	stats  []byte
 	docLen []byte
 	terms  []byte
@@ -37,9 +37,12 @@ type Segment struct {
 	tris   []byte
 	triPst []byte
 	pkgFs  []byte
+	inames []byte
+	exps   []byte
+	hints  []byte
 	nFiles int
 	nSyms  int
-	nCalls int
+	nRefs  int
 	nImps  int
 	nDecls int // symbols other than embeds
 }
@@ -109,9 +112,10 @@ func Parse(data []byte) (*Segment, error) {
 		}
 	}
 	s.strs, s.files, s.syms, s.sbf = secs[secStrings-1], secs[secFiles-1], secs[secSymbols-1], secs[secSymByFile-1]
-	s.imps, s.ibp, s.calls, s.cbc, s.cbf = secs[secImports-1], secs[secImportsByPath-1], secs[secCalls-1], secs[secCallsByCaller-1], secs[secCallsByFile-1]
+	s.imps, s.ibp, s.refs, s.rbe, s.rbf = secs[secImports-1], secs[secImportsByPath-1], secs[secRefs-1], secs[secRefsByEnclosing-1], secs[secRefsByFile-1]
 	s.stats, s.docLen, s.terms, s.posts = secs[secSearchStats-1], secs[secDocLen-1], secs[secTerms-1], secs[secPostings-1]
 	s.names, s.tris, s.triPst, s.pkgFs = secs[secNames-1], secs[secTrigrams-1], secs[secTriPost-1], secs[secPkgFiles-1]
+	s.inames, s.exps, s.hints = secs[secImportNames-1], secs[secExports-1], secs[secHints-1]
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
@@ -121,16 +125,19 @@ func Parse(data []byte) (*Segment, error) {
 func (s *Segment) validate() error {
 	for name, pair := range map[string][2]int{
 		"files": {len(s.files), fileRecSize}, "symbols": {len(s.syms), symbolRecSize},
-		"imports": {len(s.imps), importRecSize}, "calls": {len(s.calls), callRecSize},
+		"imports": {len(s.imps), importRecSize}, "refs": {len(s.refs), refRecSize},
 		"symByFile": {len(s.sbf), 4}, "importsByPath": {len(s.ibp), 4},
-		"callsByCaller": {len(s.cbc), 4}, "callsByFile": {len(s.cbf), 4},
+		"refsByEnclosing": {len(s.rbe), 4}, "refsByFile": {len(s.rbf), 4},
+		"importNames": {len(s.inames), impNameRecSize}, "exports": {len(s.exps), exportRecSize},
+		"hints": {len(s.hints), hintRecSize},
 	} {
 		if pair[0]%pair[1] != 0 {
 			return corrupt("%s size", name)
 		}
 	}
 	s.nFiles, s.nSyms = len(s.files)/fileRecSize, len(s.syms)/symbolRecSize
-	s.nImps, s.nCalls = len(s.imps)/importRecSize, len(s.calls)/callRecSize
+	s.nImps, s.nRefs = len(s.imps)/importRecSize, len(s.refs)/refRecSize
+	nImpNames, nExps, nHints := len(s.inames)/impNameRecSize, len(s.exps)/exportRecSize, len(s.hints)/hintRecSize
 	nStr := uint64(len(s.strs))
 	okRef := func(b []byte) bool {
 		r := getRef(b)
@@ -147,7 +154,9 @@ func (s *Segment) validate() error {
 		}
 		if !okRange(le.Uint32(b[64:]), le.Uint32(b[68:]), len(s.sbf)/4) ||
 			!okRange(le.Uint32(b[72:]), le.Uint32(b[76:]), s.nImps) ||
-			!okRange(le.Uint32(b[80:]), le.Uint32(b[84:]), len(s.cbf)/4) {
+			!okRange(le.Uint32(b[80:]), le.Uint32(b[84:]), len(s.rbf)/4) ||
+			!okRange(le.Uint32(b[96:]), le.Uint32(b[100:]), nExps) ||
+			!okRange(le.Uint32(b[104:]), le.Uint32(b[108:]), nHints) {
 			return corrupt("file %d ranges", i)
 		}
 		p := s.view(b[0:])
@@ -163,7 +172,7 @@ func (s *Segment) validate() error {
 				return corrupt("symbol %d string ref", i)
 			}
 		}
-		if int(le.Uint32(b[32:])) >= s.nFiles || int(b[44]) >= len(facts.Kinds) {
+		if int(le.Uint32(b[32:])) >= s.nFiles || int(b[44]) >= len(facts.Kinds) || b[46] >= facts.NumVisibility {
 			return corrupt("symbol %d fields", i)
 		}
 	}
@@ -182,21 +191,43 @@ func (s *Segment) validate() error {
 	}
 	for i := 0; i < s.nImps; i++ {
 		b := s.imps[i*importRecSize:]
-		if !okRef(b[0:]) || !okRef(b[8:]) || int(le.Uint32(b[16:])) >= s.nFiles {
+		if !okRef(b[0:]) || !okRef(b[8:]) || int(le.Uint32(b[16:])) >= s.nFiles || b[24] >= facts.NumImportKinds ||
+			!okRange(le.Uint32(b[28:]), le.Uint32(b[32:]), nImpNames) {
 			return corrupt("import %d", i)
 		}
 	}
-	for i := 0; i < s.nCalls; i++ {
-		b := s.calls[i*callRecSize:]
+	for i := 0; i < nImpNames; i++ {
+		if b := s.inames[i*impNameRecSize:]; !okRef(b[0:]) || !okRef(b[8:]) {
+			return corrupt("import name %d", i)
+		}
+	}
+	for i := 0; i < s.nRefs; i++ {
+		b := s.refs[i*refRecSize:]
 		c := le.Uint32(b[20:])
-		if !okRef(b[0:]) || !okRef(b[8:]) || int(le.Uint32(b[16:])) >= s.nFiles || (c != noCaller && int(c) >= s.nSyms) {
-			return corrupt("call %d", i)
+		f := le.Uint32(b[16:])
+		if !okRef(b[0:]) || !okRef(b[8:]) || int(f) >= s.nFiles || b[31] >= facts.NumRefKinds ||
+			(c != noCaller && (int(c) >= s.nSyms || le.Uint32(s.syms[int(c)*symbolRecSize+32:]) != f)) {
+			return corrupt("ref %d", i)
+		}
+	}
+	for i := 0; i < nExps; i++ {
+		b := s.exps[i*exportRecSize:]
+		if !okRef(b[0:]) || !okRef(b[8:]) || !okRef(b[16:]) || int(le.Uint32(b[24:])) >= s.nFiles {
+			return corrupt("export %d", i)
+		}
+	}
+	for i := 0; i < nHints; i++ {
+		b := s.hints[i*hintRecSize:]
+		f, scope := le.Uint32(b[16:]), le.Uint32(b[20:])
+		if !okRef(b[0:]) || !okRef(b[8:]) || int(f) >= s.nFiles ||
+			(scope != noCaller && (int(scope) >= s.nSyms || le.Uint32(s.syms[int(scope)*symbolRecSize+32:]) != f)) {
+			return corrupt("hint %d", i)
 		}
 	}
 	for _, idx := range []struct {
 		b     []byte
 		limit int
-	}{{s.sbf, s.nSyms}, {s.ibp, s.nImps}, {s.cbc, s.nCalls}, {s.cbf, s.nCalls}} {
+	}{{s.sbf, s.nSyms}, {s.ibp, s.nImps}, {s.rbe, s.nRefs}, {s.rbf, s.nRefs}} {
 		for o := 0; o < len(idx.b); o += 4 {
 			if int(le.Uint32(idx.b[o:])) >= idx.limit {
 				return corrupt("index entry out of range")
@@ -274,10 +305,10 @@ func (s *Segment) Generation() uint64 { return s.gen }
 // Size returns the image size in bytes.
 func (s *Segment) Size() int { return len(s.data) }
 
-// NumFiles, NumSymbols and NumCalls return record counts.
+// NumFiles, NumSymbols and NumRefs return record counts.
 func (s *Segment) NumFiles() int   { return s.nFiles }
 func (s *Segment) NumSymbols() int { return s.nSyms }
-func (s *Segment) NumCalls() int   { return s.nCalls }
+func (s *Segment) NumRefs() int    { return s.nRefs }
 
 // NumDecls returns the number of symbols that are not embeds.
 func (s *Segment) NumDecls() int { return s.nDecls }
@@ -354,7 +385,7 @@ type FileMeta struct {
 	Path, Package, PkgName, Lang, ParseErr string
 	Hash                                   uint64
 	Size, MtimeNS                          int64
-	Deleted                                bool
+	Deleted, Generated, Vendored, Test     bool
 }
 
 func (s *Segment) fileRec(i int) []byte { return s.files[i*fileRecSize : (i+1)*fileRecSize] }
@@ -365,10 +396,12 @@ func (s *Segment) FilePath(i int) string { return s.str(s.fileRec(i)) }
 // FileMeta returns file i's metadata.
 func (s *Segment) FileMeta(i int) FileMeta {
 	b := s.fileRec(i)
+	flags := le.Uint32(b[88:])
 	return FileMeta{
 		Path: s.str(b[0:]), Package: s.str(b[8:]), PkgName: s.str(b[16:]), Lang: s.str(b[24:]),
 		ParseErr: s.str(b[32:]), Hash: le.Uint64(b[40:]), Size: int64(le.Uint64(b[48:])),
-		MtimeNS: int64(le.Uint64(b[56:])), Deleted: le.Uint32(b[88:])&flagDeleted != 0,
+		MtimeNS: int64(le.Uint64(b[56:])), Deleted: flags&flagDeleted != 0,
+		Generated: flags&flagGenerated != 0, Vendored: flags&flagVendored != 0, Test: flags&flagTest != 0,
 	}
 }
 
@@ -396,7 +429,7 @@ func (s *Segment) Symbol(i int) SymbolRec {
 		Symbol: facts.Symbol{
 			Name: s.str(b[0:]), Receiver: s.str(b[8:]), Signature: s.str(b[16:]), Doc: s.str(b[24:]),
 			Line: int(le.Uint32(b[36:])), EndLine: int(le.Uint32(b[40:])), Kind: facts.Kinds[b[44]],
-			Exported: b[45]&flagExported != 0,
+			Exported: b[45]&flagExported != 0, Visibility: b[46], Modifiers: le.Uint32(b[52:]),
 		},
 		File:   int(le.Uint32(b[32:])),
 		Parent: s.SymbolParent(i),
@@ -446,60 +479,65 @@ func (s *Segment) u32Range(sec []byte, off, n uint32) []int {
 	return out
 }
 
-// CallRec is a call site. Caller is a segment symbol index or -1.
-type CallRec struct {
-	Callee, Qualifier string
-	QualKind          uint8
-	File, Caller      int
-	Line, Col         int
+// RefRec is a reference. Enclosing is a segment symbol index or -1.
+type RefRec struct {
+	Kind            uint8
+	Name, Qualifier string
+	QualKind        uint8
+	File, Enclosing int
+	Line, Col       int
 }
 
-func (s *Segment) callRec(i int) []byte { return s.calls[i*callRecSize : (i+1)*callRecSize] }
+func (s *Segment) refRec(i int) []byte { return s.refs[i*refRecSize : (i+1)*refRecSize] }
 
-// Call returns call i.
-func (s *Segment) Call(i int) CallRec {
-	b := s.callRec(i)
-	caller := -1
+// Ref returns reference i.
+func (s *Segment) Ref(i int) RefRec {
+	b := s.refRec(i)
+	enclosing := -1
 	if c := le.Uint32(b[20:]); c != noCaller {
-		caller = int(c)
+		enclosing = int(c)
 	}
-	return CallRec{
-		Callee: s.str(b[0:]), Qualifier: s.str(b[8:]), QualKind: b[30],
-		File: int(le.Uint32(b[16:])), Caller: caller, Line: int(le.Uint32(b[24:])), Col: int(le.Uint16(b[28:])),
+	return RefRec{
+		Kind: b[31], Name: s.str(b[0:]), Qualifier: s.str(b[8:]), QualKind: b[30],
+		File: int(le.Uint32(b[16:])), Enclosing: enclosing, Line: int(le.Uint32(b[24:])), Col: int(le.Uint16(b[28:])),
 	}
 }
 
-// CallFile returns the file index of call i without decoding it.
-func (s *Segment) CallFile(i int) int { return int(le.Uint32(s.callRec(i)[16:])) }
+// RefKind returns the kind of reference i without decoding it.
+func (s *Segment) RefKind(i int) uint8 { return s.refRec(i)[31] }
 
-// CallCaller returns the enclosing symbol index of call i, or -1.
-func (s *Segment) CallCaller(i int) int {
-	if c := le.Uint32(s.callRec(i)[20:]); c != noCaller {
+// RefFile returns the file index of reference i without decoding it.
+func (s *Segment) RefFile(i int) int { return int(le.Uint32(s.refRec(i)[16:])) }
+
+// RefEnclosing returns the enclosing symbol index of reference i, or -1.
+func (s *Segment) RefEnclosing(i int) int {
+	if c := le.Uint32(s.refRec(i)[20:]); c != noCaller {
 		return int(c)
 	}
 	return -1
 }
 
-// CallsTo returns the half-open range of call indexes whose callee is name.
-func (s *Segment) CallsTo(name string) (lo, hi int) {
-	lo = sort.Search(s.nCalls, func(i int) bool { return s.view(s.callRec(i)) >= name })
-	hi = lo + sort.Search(s.nCalls-lo, func(i int) bool { return s.view(s.callRec(lo+i)) > name })
+// RefsTo returns the half-open range of reference indexes named name, of
+// every kind.
+func (s *Segment) RefsTo(name string) (lo, hi int) {
+	lo = sort.Search(s.nRefs, func(i int) bool { return s.view(s.refRec(i)) >= name })
+	hi = lo + sort.Search(s.nRefs-lo, func(i int) bool { return s.view(s.refRec(lo+i)) > name })
 	return lo, hi
 }
 
-// CallsFrom returns the call indexes made by symbol sym, in line order.
-func (s *Segment) CallsFrom(sym int) []int {
-	n := len(s.cbc) / 4
-	at := func(k int) uint32 { return le.Uint32(s.callRec(int(le.Uint32(s.cbc[k*4:])))[20:]) }
+// RefsFrom returns the reference indexes inside symbol sym, in line order.
+func (s *Segment) RefsFrom(sym int) []int {
+	n := len(s.rbe) / 4
+	at := func(k int) uint32 { return le.Uint32(s.refRec(int(le.Uint32(s.rbe[k*4:])))[20:]) }
 	lo := sort.Search(n, func(k int) bool { return at(k) >= uint32(sym) })
 	hi := lo + sort.Search(n-lo, func(k int) bool { return at(lo+k) > uint32(sym) })
-	return s.u32Range(s.cbc, uint32(lo), uint32(hi-lo))
+	return s.u32Range(s.rbe, uint32(lo), uint32(hi-lo))
 }
 
-// CallsInFile returns file i's call indexes in source order.
-func (s *Segment) CallsInFile(i int) []int {
+// RefsInFile returns file i's reference indexes in source order.
+func (s *Segment) RefsInFile(i int) []int {
 	b := s.fileRec(i)
-	return s.u32Range(s.cbf, le.Uint32(b[80:]), le.Uint32(b[84:]))
+	return s.u32Range(s.rbf, le.Uint32(b[80:]), le.Uint32(b[84:]))
 }
 
 // ImportRec is one import of a file.
@@ -508,13 +546,19 @@ type ImportRec struct {
 	File int
 }
 
-// Import returns import i.
+// Import returns import i with its listed names.
 func (s *Segment) Import(i int) ImportRec {
 	b := s.imps[i*importRecSize:]
-	return ImportRec{
-		Import: facts.Import{Path: s.str(b[0:]), Name: s.str(b[8:]), Line: int(le.Uint32(b[20:]))},
+	rec := ImportRec{
+		Import: facts.Import{Path: s.str(b[0:]), Name: s.str(b[8:]), Line: int(le.Uint32(b[20:])), Kind: b[24]},
 		File:   int(le.Uint32(b[16:])),
 	}
+	off, n := int(le.Uint32(b[28:])), int(le.Uint32(b[32:]))
+	for k := off; k < off+n; k++ {
+		nb := s.inames[k*impNameRecSize:]
+		rec.Names = append(rec.Names, facts.ImportedName{Name: s.str(nb[0:]), Alias: s.str(nb[8:])})
+	}
+	return rec
 }
 
 // ImportsInFile returns file i's import indexes.
@@ -537,12 +581,50 @@ func (s *Segment) Importers(importPath string) []int {
 	return s.u32Range(s.ibp, uint32(lo), uint32(hi-lo))
 }
 
-// File decodes file i with all of its facts. Call.Caller indexes File.Symbols.
+// Exports returns file i's exports in line order.
+func (s *Segment) Exports(i int) []facts.Export {
+	b := s.fileRec(i)
+	off, n := int(le.Uint32(b[96:])), int(le.Uint32(b[100:]))
+	out := make([]facts.Export, 0, n)
+	for k := off; k < off+n; k++ {
+		r := s.exps[k*exportRecSize:]
+		out = append(out, facts.Export{Name: s.str(r[0:]), Source: s.str(r[8:]), SourceName: s.str(r[16:]), Line: int(le.Uint32(r[28:]))})
+	}
+	return out
+}
+
+// HintRec is a binding hint. Scope is a segment symbol index or -1.
+type HintRec struct {
+	Name, Type string
+	File       int
+	Scope      int
+	Line       int
+}
+
+// Hints returns file i's binding hints in line order.
+func (s *Segment) Hints(i int) []HintRec {
+	b := s.fileRec(i)
+	off, n := int(le.Uint32(b[104:])), int(le.Uint32(b[108:]))
+	out := make([]HintRec, 0, n)
+	for k := off; k < off+n; k++ {
+		r := s.hints[k*hintRecSize:]
+		scope := -1
+		if c := le.Uint32(r[20:]); c != noCaller {
+			scope = int(c)
+		}
+		out = append(out, HintRec{Name: s.str(r[0:]), Type: s.str(r[8:]), File: int(le.Uint32(r[16:])), Scope: scope, Line: int(le.Uint32(r[24:]))})
+	}
+	return out
+}
+
+// File decodes file i with all of its facts. Ref.Enclosing and
+// BindingHint.Scope index File.Symbols.
 func (s *Segment) File(i int) *facts.File {
 	m := s.FileMeta(i)
 	f := &facts.File{
 		Path: m.Path, Package: m.Package, PkgName: m.PkgName, Lang: m.Lang, ParseErr: m.ParseErr,
 		Hash: m.Hash, Size: m.Size, MtimeNS: m.MtimeNS, Deleted: m.Deleted,
+		Generated: m.Generated, Vendored: m.Vendored, Test: m.Test,
 	}
 	local := map[int]int{}
 	parents := map[int]int{}
@@ -562,15 +644,25 @@ func (s *Segment) File(i int) *facts.File {
 	for _, ii := range s.ImportsInFile(i) {
 		f.Imports = append(f.Imports, s.Import(ii).Import)
 	}
-	for _, ci := range s.CallsInFile(i) {
-		c := s.Call(ci)
-		caller := facts.NoCaller
-		if c.Caller >= 0 {
-			caller = local[c.Caller]
+	localOf := func(seg int) int {
+		if l, ok := local[seg]; ok {
+			return l
 		}
-		f.Calls = append(f.Calls, facts.Call{
-			Caller: caller, Callee: c.Callee, Qualifier: c.Qualifier, QualKind: c.QualKind, Line: c.Line, Col: c.Col,
+		return facts.NoCaller
+	}
+	for _, ri := range s.RefsInFile(i) {
+		r := s.Ref(ri)
+		f.Refs = append(f.Refs, facts.Ref{
+			Kind: r.Kind, Enclosing: localOf(r.Enclosing), Name: r.Name, Qualifier: r.Qualifier,
+			QualKind: r.QualKind, Line: r.Line, Col: r.Col,
 		})
+	}
+	f.Exports = s.Exports(i)
+	for _, h := range s.Hints(i) {
+		f.Hints = append(f.Hints, facts.BindingHint{Scope: localOf(h.Scope), Name: h.Name, Type: h.Type, Line: h.Line})
+	}
+	if len(f.Exports) == 0 {
+		f.Exports = nil
 	}
 	return f
 }

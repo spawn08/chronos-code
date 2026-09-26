@@ -344,11 +344,12 @@ func (v *View) PackageDependents(pkg string) []string {
 
 // Stats counts live records.
 type Stats struct {
-	Files, Packages, Symbols, Calls int
+	Files, Packages, Symbols int
+	Refs                     int // references of every kind (calls, type uses, ...)
 }
 
 // Stats returns live record counts.
 func (v *View) Stats() Stats {
-	decls, calls := liveCounts(v.sn)
-	return Stats{Files: v.sn.NumFiles(), Packages: len(v.Packages()), Symbols: decls, Calls: calls}
+	decls, refs := liveCounts(v.sn)
+	return Stats{Files: v.sn.NumFiles(), Packages: len(v.Packages()), Symbols: decls, Refs: refs}
 }

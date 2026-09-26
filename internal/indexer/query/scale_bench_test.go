@@ -38,7 +38,7 @@ func BenchmarkScale(b *testing.B) {
 			f.Symbols = append(f.Symbols, facts.Symbol{Name: name, Kind: facts.KindFunc, Signature: "func " + name + "(ctx context.Context) error", Line: 10 + 10*k, EndLine: 18 + 10*k, Exported: true})
 		}
 		for c := 0; c < 6; c++ {
-			f.Calls = append(f.Calls, facts.Call{Caller: c % 4, Callee: fmt.Sprintf("Handle%dStep%d", rng.IntN(n), rng.IntN(4)), Line: 12 + c})
+			f.Refs = append(f.Refs, facts.Ref{Enclosing: c % 4, Name: fmt.Sprintf("Handle%dStep%d", rng.IntN(n), rng.IntN(4)), Line: 12 + c})
 		}
 		return f
 	}

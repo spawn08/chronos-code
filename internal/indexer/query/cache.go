@@ -65,21 +65,21 @@ func (c *Cache) packageNames(sn *store.Snapshot) []string {
 	return names
 }
 
-// liveCounts returns live declaration and call counts: segment totals minus
-// the records of dead files, so its cost is O(segments + overlay files).
-func liveCounts(sn *store.Snapshot) (decls, calls int) {
+// liveCounts returns live declaration and reference counts: segment totals
+// minus the records of dead files, so its cost is O(segments + overlay files).
+func liveCounts(sn *store.Snapshot) (decls, refs int) {
 	for i := 0; i < sn.NumSegments(); i++ {
 		seg := sn.Segment(i)
 		decls += seg.NumDecls()
-		calls += seg.NumCalls()
+		refs += seg.NumRefs()
 		sn.EachDead(i, func(f int) {
 			for _, k := range seg.SymbolsInFile(f) {
 				if seg.SymbolKind(k) != facts.KindEmbed {
 					decls--
 				}
 			}
-			calls -= len(seg.CallsInFile(f))
+			refs -= len(seg.RefsInFile(f))
 		})
 	}
-	return decls, calls
+	return decls, refs
 }

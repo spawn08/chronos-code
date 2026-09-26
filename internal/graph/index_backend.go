@@ -196,7 +196,7 @@ func (b *indexBackend) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, err
 	}
 	st := b.view.Stats()
-	return Stats{Files: st.Files, Packages: st.Packages, Symbols: st.Symbols, Edges: st.Calls}, nil
+	return Stats{Files: st.Files, Packages: st.Packages, Symbols: st.Symbols, Edges: st.Refs}, nil
 }
 
 // FileHash returns the indexed content hash in the SQLite store's format
