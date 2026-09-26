@@ -1,0 +1,6 @@
+# Pinned repositories for the SCIP edge baseline (Tier 1).
+# name	lang	url	tag	indexer
+cobra	go	https://github.com/spf13/cobra	v1.8.1	scip-go
+ky	typescript	https://github.com/sindresorhus/ky	v1.7.2	scip-typescript
+click	python	https://github.com/pallets/click	8.1.7	scip-python
+walkdir	rust	https://github.com/BurntSushi/walkdir	2.5.0	rust-analyzer

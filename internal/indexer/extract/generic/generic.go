@@ -908,6 +908,21 @@ var primitiveTypes = map[string]bool{
 // syntax. It returns "" for types that name nothing useful.
 func normalizeType(s string) string {
 	s = strings.TrimSpace(s)
+	// Optional[X], t.Optional[X], X | None and quoted forward references.
+	for _, p := range []string{"typing.Optional[", "t.Optional[", "Optional["} {
+		if strings.HasPrefix(s, p) && strings.HasSuffix(s, "]") {
+			s = s[len(p) : len(s)-1]
+		}
+	}
+	if a, b, ok := strings.Cut(s, "|"); ok {
+		switch a, b = strings.TrimSpace(a), strings.TrimSpace(b); {
+		case b == "None" || b == "null" || b == "undefined":
+			s = a
+		case a == "None" || a == "null" || a == "undefined":
+			s = b
+		}
+	}
+	s = strings.Trim(strings.TrimSpace(s), "\"'")
 	for _, p := range []string{"new ", "const ", "mut ", "struct ", "class ", "enum ", "union ", "&", "*", "?", "\\", "@"} {
 		for strings.HasPrefix(s, p) {
 			s = strings.TrimSpace(s[len(p):])

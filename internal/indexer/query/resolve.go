@@ -266,7 +266,7 @@ func (v *View) resolveUnqualified(fc *fileCtx, caller int, rec segment.RefRec, k
 		return nil, ""
 	}
 	if same := filter(all, func(s Symbol) bool { return s.File == fc.meta.Path }); len(same) > 0 {
-		return capped(same), ImportResolved
+		return capped(nearestFirst(same, rec.Line)), ImportResolved
 	}
 	if caller >= 0 && implicitThis[lang] && rec.Kind == facts.RefCall {
 		if ms := v.methodsOf(v.receiverOf(fc.seg, caller), name, 0); len(ms) > 0 {
@@ -287,6 +287,29 @@ func (v *View) resolveUnqualified(fc *fileCtx, caller int, rec segment.RefRec, k
 		return nil, ""
 	}
 	return v.labelByName(all, fc.meta.Package)
+}
+
+// nearestFirst orders same-file definitions of one name for a reference
+// on line: the closest definition before it first (a nested helper or a
+// class redefined per test), then those after it.
+func nearestFirst(cands []Symbol, line int) []Symbol {
+	if len(cands) < 2 {
+		return cands
+	}
+	out := slices.Clone(cands)
+	slices.SortStableFunc(out, func(a, b Symbol) int {
+		ab, bb := a.Line <= line, b.Line <= line
+		switch {
+		case ab && !bb:
+			return -1
+		case bb && !ab:
+			return 1
+		case ab: // both before: later is nearer
+			return b.Line - a.Line
+		}
+		return a.Line - b.Line
+	})
+	return out
 }
 
 // importedUnitsFor returns the units from which the file's imports bring
@@ -346,6 +369,19 @@ func (v *View) resolveImported(fc *fileCtx, rec segment.RefRec, kinds map[string
 }
 
 func (v *View) resolveMember(fc *fileCtx, caller int, rec segment.RefRec, kinds map[string]bool) ([]Symbol, string) {
+	if q := strings.TrimSuffix(rec.Qualifier, "()"); (q == "super" || q == "base") && caller >= 0 {
+		var ms []Symbol
+		for _, parent := range v.supertypes(v.receiverOf(fc.seg, caller)) {
+			ms = append(ms, v.methodsOf(parent, rec.Name, 1)...)
+		}
+		switch len(ms) {
+		case 0:
+		case 1:
+			return ms, TypeHinted
+		default:
+			return capped(ms), Ambiguous
+		}
+	}
 	typ, known := v.qualifierType(fc, caller, rec.Qualifier, 0)
 	if typ != "" {
 		if ms := v.methodsOf(typ, rec.Name, 0); len(ms) > 0 {
@@ -746,7 +782,7 @@ func resultType(sig, name string) string {
 // plainType strips pointer, reference, nullable, array and generic syntax
 // from a type as written; "" when nothing named remains.
 func plainType(t string) string {
-	t = strings.TrimSpace(t)
+	t = unwrapOptional(strings.Trim(strings.TrimSpace(t), "\"'"))
 	for len(t) > 0 && strings.ContainsRune("*&?^", rune(t[0])) {
 		t = t[1:]
 	}
@@ -759,6 +795,26 @@ func plainType(t string) string {
 		return ""
 	}
 	return t
+}
+
+// unwrapOptional returns X for Optional[X], t.Optional[X], X | None and
+// None | X, with quotes removed from forward references ("X").
+func unwrapOptional(t string) string {
+	for _, p := range []string{"typing.Optional[", "t.Optional[", "Optional["} {
+		if strings.HasPrefix(t, p) && strings.HasSuffix(t, "]") {
+			t = t[len(p) : len(t)-1]
+		}
+	}
+	if a, b, ok := strings.Cut(t, "|"); ok {
+		a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+		switch {
+		case b == "None" || b == "null" || b == "undefined":
+			t = a
+		case a == "None" || a == "null" || a == "undefined":
+			t = b
+		}
+	}
+	return strings.Trim(strings.TrimSpace(t), "\"'")
 }
 
 // splitQualifier splits a receiver expression into segments: a.b, a->b,
@@ -1019,4 +1075,35 @@ func IsTest(s Symbol) bool {
 		}
 	}
 	return false
+}
+
+// ResolvedRef is a reference with its resolution, for evaluation tools.
+type ResolvedRef struct {
+	File       string
+	Line, Col  int // 1-based; Col is a byte column
+	Name       string
+	Kind       uint8 // facts.Ref* constant
+	Targets    []Symbol
+	Resolution string
+}
+
+// EachReference resolves every live reference of the given kinds and calls
+// fn with each, in segment order. It is meant for offline evaluation (the
+// SCIP edge baseline), not for the query path.
+func (v *View) EachReference(kinds []uint8, fn func(ResolvedRef)) {
+	for i := 0; i < v.sn.NumSegments(); i++ {
+		seg := v.sn.Segment(i)
+		for r := 0; r < seg.NumRefs(); r++ {
+			kind := seg.RefKind(r)
+			if !slices.Contains(kinds, kind) || !v.sn.Live(i, seg.RefFile(r)) {
+				continue
+			}
+			rec := seg.Ref(r)
+			targets, label := v.resolveRef(i, r)
+			fn(ResolvedRef{
+				File: v.meta(i, rec.File).Path, Line: rec.Line, Col: rec.Col, Name: rec.Name,
+				Kind: kind, Targets: targets, Resolution: label,
+			})
+		}
+	}
 }

@@ -7,7 +7,8 @@ repositories. M4 (precise tier) is still open. M6 in progress (2026-09-26):
 parser runtime decided and wrapped (`extract/treesitter`, `extract/packs`);
 facts v2 and segment format v4 done; query packs for all 17 languages are
 indexed (M6.3); the generic resolver, type uses and binding hints are in
-(M6.4); the SCIP baseline and the graph switch-over are next. Replaces the synchronous parts of `internal/graph` with an
+(M6.4); the SCIP baseline covers Go, Python and TypeScript; the graph
+switch-over is next. Replaces the synchronous parts of `internal/graph` with an
 in-process indexer.
 
 ## Goals
@@ -875,6 +876,60 @@ resolved references, lazily decoded file context) brought it down from
 +25%. Retrieval eval recall is unchanged on this Go repository (0.41,
 excerpt recall 0.32); the resolver's effect on other languages is what the
 SCIP baseline measures.
+
+### SCIP edge baseline (Tier 1, 2026-09-26)
+
+`make eval-edges` (`benchmark/edges/run.sh`) clones pinned repositories
+(`benchmark/edges/repos.tsv`), indexes each with a SCIP indexer fetched into
+the npm or Go module cache, and scores the indexer's resolved references
+against SCIP's definitions (`benchmark/edges`, decoding SCIP with
+`protowire`; nothing is added to the binary). Results are merged into
+`benchmark/edges/baseline.json`. It needs network access and is not part of
+CI.
+
+A reference is scored where SCIP has a reference (not an import) to an
+in-repository declaration at the same line and name. Top1 means the first
+target is SCIP's definition. Calls are calls and instantiations; types are
+type uses, extends and implements.
+
+| Repository | Calls: coverage | Calls: recall | Types: coverage | Types: recall |
+|---|---:|---:|---:|---:|
+| cobra v1.8.1 (Go, scip-go 0.2.7) | 0.755 | 0.999 | 0.347 | 1.000 |
+| click 8.1.7 (Python, scip-python 0.6.6) | 0.507 | 0.964 | 0.265 | 1.000 |
+| ky v1.7.2 (TypeScript, scip-typescript 0.4.0) | 0.900 | 0.889 | 0.661 | 1.000 |
+| walkdir 2.5.0 (Rust, rust-analyzer) | not run: rust-analyzer is not installed here | | | |
+
+Precision by label, calls (top1 / references):
+
+| Label | cobra | click | ky |
+|---|---:|---:|---:|
+| `import_resolved` | 1419 / 1419 | 421 / 431 | 9 / 9 |
+| `type_hinted` | 888 / 888 | 233 / 233 | 7 / 7 |
+| `name_matched` | 186 / 186 | 14 / 15 | – |
+| `ambiguous` | – | 31 / 35 (any: 35) | – |
+| unresolved | 2 | 11 | 2 |
+
+Observations:
+
+- **Labels are honest.** `import_resolved` and `type_hinted` are 97–100%
+  precise in all three languages; `ambiguous` is where the misses are.
+- **Coverage is the gap, not precision.** Calls coverage is limited by
+  SCIP references that are not calls (functions passed as values,
+  decorators applied by name) and, in Python, by attribute calls on values
+  the hints do not type. Types coverage is lower because instantiations
+  (`T{}`, `Foo()`) are scored as calls, and SCIP also counts type
+  positions no pack captures yet (Go composite-literal keys, Python string
+  annotations).
+- The first click run found three resolver gaps, all fixed before this
+  baseline: several same-name definitions in one file (now nearest
+  preceding first), `super()` calls (now looked up on the supertypes), and
+  `Optional[...]` / quoted annotations (now unwrapped). Click's calls
+  recall went from 0.905 to 0.964.
+- ky is small and type-heavy (20 call references). It still exercises
+  relative TypeScript imports, namespace imports and `this.x` fields.
+- Tier 2 (Java, Kotlin, C/C++, C#) needs projects that build and is not
+  set up yet; Swift, Objective-C, Dart, Bash, Ruby and PHP have no reliable
+  SCIP indexer.
 
 ### M11 results (old graph removed, 2026-09-26)
 

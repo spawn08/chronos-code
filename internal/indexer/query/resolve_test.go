@@ -165,3 +165,53 @@ public class App {
 		"helper@12": "import_resolved App.helper",
 	})
 }
+
+// TestResolvePythonSuperOptionalAndNearest covers super() calls, Optional
+// and forward-reference annotations, and a name defined twice in one file.
+func TestResolvePythonSuperOptionalAndNearest(t *testing.T) {
+	v := newFixture(t, map[string]string{
+		"pkg/core.py": `import typing as t
+
+
+class Base:
+    def __init__(self):
+        pass
+
+
+class Context:
+    def close(self):
+        pass
+
+
+class Child(Base):
+    def __init__(self, ctx: t.Optional["Context"]):
+        super().__init__()
+        ctx.close()
+
+
+def first():
+    class Foo:
+        pass
+    return Foo()
+
+
+def second():
+    class Foo:
+        pass
+    return Foo()
+`,
+	}).view(t)
+	expect(t, resolved(t, v, "Child.__init__"), map[string]string{
+		"__init__@16": "type_hinted Base.__init__",
+		"close@17":    "type_hinted Context.close",
+	})
+	got := resolved(t, v, "second")
+	if !strings.HasPrefix(got["Foo@29"], "import_resolved Foo") {
+		t.Fatalf("Foo in second = %q", got["Foo@29"])
+	}
+	foo := v.Outgoing(v.ByQualified([]string{"second"})["second"][0])
+	targets, _ := v.Resolve(foo[0])
+	if len(targets) != 2 || targets[0].Line != 27 {
+		t.Fatalf("nearest Foo first: %+v", targets)
+	}
+}

@@ -1,0 +1,165 @@
+{
+  "results": [
+    {
+      "name": "click",
+      "lang": "python",
+      "repo": "https://github.com/pallets/click",
+      "commit": "874ca2bc1c30d93a4ac6e36a15ed685eafe89097",
+      "indexer": "scip-python 0.6.6",
+      "calls": {
+        "refs": 3589,
+        "gold": 1275,
+        "matched": 725,
+        "coverage": 0.507,
+        "recall": 0.964,
+        "labels": {
+          "ambiguous": {
+            "n": 35,
+            "top1": 31,
+            "any": 35
+          },
+          "import_resolved": {
+            "n": 431,
+            "top1": 421,
+            "any": 428
+          },
+          "name_matched": {
+            "n": 15,
+            "top1": 14,
+            "any": 14
+          },
+          "type_hinted": {
+            "n": 233,
+            "top1": 233,
+            "any": 233
+          },
+          "unresolved": {
+            "n": 11,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 374,
+        "gold": 582,
+        "matched": 154,
+        "coverage": 0.265,
+        "recall": 1,
+        "labels": {
+          "import_resolved": {
+            "n": 154,
+            "top1": 154,
+            "any": 154
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.302995875
+    },
+    {
+      "name": "cobra",
+      "lang": "go",
+      "repo": "https://github.com/spf13/cobra",
+      "commit": "e94f6d0dd9a5e5738dca6bce03c4b1207ffbc0ec",
+      "indexer": "scip-go v0.2.7",
+      "calls": {
+        "refs": 4591,
+        "gold": 2729,
+        "matched": 2495,
+        "coverage": 0.755,
+        "recall": 0.999,
+        "labels": {
+          "import_resolved": {
+            "n": 1419,
+            "top1": 1419,
+            "any": 1419
+          },
+          "name_matched": {
+            "n": 186,
+            "top1": 186,
+            "any": 186
+          },
+          "type_hinted": {
+            "n": 888,
+            "top1": 888,
+            "any": 888
+          },
+          "unresolved": {
+            "n": 2,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 759,
+        "gold": 904,
+        "matched": 314,
+        "coverage": 0.347,
+        "recall": 1,
+        "labels": {
+          "import_resolved": {
+            "n": 314,
+            "top1": 314,
+            "any": 314
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.333526959
+    },
+    {
+      "name": "ky",
+      "lang": "typescript",
+      "repo": "https://github.com/sindresorhus/ky",
+      "commit": "3ba40cc6333cf1847c02c51744e22ab7c04407f5",
+      "indexer": "scip-typescript 0.4.0",
+      "calls": {
+        "refs": 1706,
+        "gold": 20,
+        "matched": 18,
+        "coverage": 0.9,
+        "recall": 0.889,
+        "labels": {
+          "import_resolved": {
+            "n": 9,
+            "top1": 9,
+            "any": 9
+          },
+          "type_hinted": {
+            "n": 7,
+            "top1": 7,
+            "any": 7
+          },
+          "unresolved": {
+            "n": 2,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 419,
+        "gold": 192,
+        "matched": 127,
+        "coverage": 0.661,
+        "recall": 1,
+        "labels": {
+          "import_resolved": {
+            "n": 120,
+            "top1": 120,
+            "any": 120
+          },
+          "name_matched": {
+            "n": 7,
+            "top1": 7,
+            "any": 7
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.199176084
+    }
+  ]
+}

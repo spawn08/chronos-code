@@ -22,7 +22,7 @@ GRAMMAR_TAGS := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
 
 SIZE_LIMIT  := 58720256
 
-.PHONY: build build-core build-full build-release grammar-tags test lint size-check size-check-core fmt vet tidy clean install install-core eval bench-index
+.PHONY: build build-core build-full build-release grammar-tags test lint size-check size-check-core fmt vet tidy clean install install-core eval eval-edges bench-index
 
 build: build-full
 
@@ -70,6 +70,13 @@ test:
 # offline/deterministic — no API key or network access required.
 eval: build
 	$(BIN_DIR)/$(BINARY) eval run --md benchmark/eval/report.md
+
+# eval-edges measures reference resolution against SCIP indexes of pinned
+# repositories (benchmark/edges/repos.tsv) and updates
+# benchmark/edges/baseline.json. It needs network access and the SCIP
+# indexers (see benchmark/edges/run.sh); it is not part of CI.
+eval-edges:
+	benchmark/edges/run.sh
 
 # bench-index measures indexing latency of the chronos indexer on a private
 # copy of this repo, and the graph tools' query latency over its index
