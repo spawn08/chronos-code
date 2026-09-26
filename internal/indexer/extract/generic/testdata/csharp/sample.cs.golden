@@ -45,14 +45,24 @@ symbols:
       sig: public record Pair(string A, int B)
   18. L46-46 public type_alias Handler in=0
       sig: public delegate void Handler(int code)
+hints:
+  L12 _users: List in=1
+  L26 u: User in=7
 refs:
   L9:6 decorator Serializable in=1
   L10:29 extends BaseRepo in=1
+  L10:38 type User in=1
   L10:45 implements IRepo in=1
   L10:52 implements IDisposable in=1
+  L12:26 type List in=2
+  L12:31 type User in=2
   L12:50 instantiate List in=2
+  L12:55 type User in=2
   L22:10 decorator Obsolete in=7
+  L23:24 type User in=7
   L25:20 call Check on="Helper" in=7
   L26:25 instantiate User in=7
   L27:27 call Find on="_users" in=7
+  L30:34 type Task in=8
   L30:59 call Flush in=8
+  L37:9 type User in=11

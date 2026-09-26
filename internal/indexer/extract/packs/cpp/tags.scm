@@ -78,3 +78,27 @@
 (base_class_clause (type_identifier) @name) @ref.extends
 (base_class_clause (qualified_identifier scope: (_) @ref.qualifier name: (type_identifier) @name)) @ref.extends
 (base_class_clause (template_type name: (type_identifier) @name)) @ref.extends
+
+; Type uses.
+(qualified_identifier scope: (_) @ref.qualifier name: (type_identifier) @name) @ref.type
+((type_identifier) @name @ref.type)
+
+; Binding hints: typed parameters, variables and fields; auto x = new T().
+(parameter_declaration
+  type: (_) @hint.type
+  declarator: [
+    (identifier) @hint.name
+    (pointer_declarator declarator: (identifier) @hint.name)
+    (reference_declarator (identifier) @hint.name)]) @hint
+(declaration
+  type: (_) @hint.type
+  declarator: [
+    (identifier) @hint.name
+    (init_declarator declarator: (identifier) @hint.name)
+    (pointer_declarator declarator: (identifier) @hint.name)
+    (init_declarator declarator: (pointer_declarator declarator: (identifier) @hint.name))]) @hint
+(declaration
+  declarator: (init_declarator declarator: (identifier) @hint.name value: (new_expression type: (_) @hint.type))) @hint
+(field_declaration
+  type: (_) @hint.type
+  declarator: [(field_identifier) @hint.name (pointer_declarator declarator: (field_identifier) @hint.name)]) @hint

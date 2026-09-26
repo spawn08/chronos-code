@@ -11,7 +11,8 @@ import (
 
 // TestCallQueriesIgnoreOtherRefKinds checks that type uses, instantiations
 // and other non-call references never appear as call sites, callers or
-// callees, while Stats counts every reference.
+// callees (Outgoing, for graph expansion, also follows instantiations),
+// while Stats counts every reference.
 func TestCallQueriesIgnoreOtherRefKinds(t *testing.T) {
 	st, err := store.Open(t.TempDir(), "/root", "test")
 	if err != nil {
@@ -51,7 +52,8 @@ func TestCallQueriesIgnoreOtherRefKinds(t *testing.T) {
 	if len(use) != 1 {
 		t.Fatalf("Symbols(use) = %+v", use)
 	}
-	if got := v.Outgoing(use[0]); len(got) != 1 || got[0].Callee != "save" {
+	// Outgoing follows calls and instantiations, not type uses or decorators.
+	if got := v.Outgoing(use[0]); len(got) != 2 || got[0].Callee != "Repo" || got[1].Callee != "save" {
 		t.Errorf("Outgoing(use) = %+v", got)
 	}
 	if got := v.CallSites("save"); len(got) != 1 || got[0].Caller == nil || got[0].Caller.Name != "use" {

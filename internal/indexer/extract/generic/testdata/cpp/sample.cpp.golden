@@ -44,13 +44,25 @@ symbols:
       sig: using IdList = std::vector<int>
   19. L48-51 public func main
       sig: int main()
+hints:
+  L28 a: T in=12
+  L28 b: T in=12
+  L37 p: Point in=14
+  L49 r: store::Repo in=19
 refs:
   L7:21 extends Base in=1
   L7:35 extends Mixin in=1
+  L12:12 type Repo in=5
+  L27:20 type T in=12
+  L28:1 type T in=12
+  L28:10 type T in=12
+  L28:15 type T in=12
   L33:5 call reset in=13
   L37:18 instantiate Point in=14
   L38:10 call sort on="std" in=14
   L38:21 call begin on="items" in=14
   L38:36 call end on="items" in=14
   L39:20 call lookup on="helper" in=14
+  L44:21 type vector in=18
+  L49:12 type Repo on="store" in=19
   L50:14 call find on="r" in=19

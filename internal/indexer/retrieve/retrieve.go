@@ -52,7 +52,7 @@ const (
 
 // Edge weights by resolution; ambiguous weight is split across candidates.
 var resolutionWeight = map[string]float64{
-	query.TypeChecked: 1, query.ImportResolved: 1, query.NameMatched: 0.4, query.Ambiguous: 0.15,
+	query.TypeChecked: 1, query.ImportResolved: 1, query.TypeHinted: 0.8, query.NameMatched: 0.4, query.Ambiguous: 0.15,
 }
 
 // Range is a requested line range of a file.
@@ -287,7 +287,7 @@ func push(v *query.View, req Request, nodes map[uint64]*node, residual map[uint6
 		if u.Kind == "func" || u.Kind == "method" {
 			seen := map[uint64]bool{}
 			for _, c := range v.Outgoing(u) {
-				targets, label := v.Resolve(u.Package, c)
+				targets, label := v.Resolve(c)
 				for _, t := range targets {
 					if seen[t.ID] || t.ID == u.ID || len(out) >= maxNeighbors {
 						continue

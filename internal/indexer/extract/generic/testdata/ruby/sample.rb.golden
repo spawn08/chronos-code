@@ -25,6 +25,8 @@ symbols:
       sig: class Widget
   10. L40-42 private method Widget.secret in=9
       sig: private def secret
+hints:
+  L19 u: User in=5
 refs:
   L1:1 call require
   L2:1 call require_relative

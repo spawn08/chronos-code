@@ -26,3 +26,15 @@
       suffix: (navigation_suffix suffix: (simple_identifier) @name))) @ref.call
 (inheritance_specifier (user_type (type_identifier) @name)) @ref.extends
 (attribute (user_type (type_identifier) @name)) @ref.decorator
+
+; Type uses (capitalised: the grammar also parses some receivers as types).
+(user_type (type_identifier) @name (#match? @name "^[A-Z]")) @ref.type
+
+; Binding hints: typed parameters and properties; let x = Foo().
+(parameter (simple_identifier) @hint.name (user_type) @hint.type) @hint
+(property_declaration
+  name: (pattern bound_identifier: (simple_identifier) @hint.name)
+  (type_annotation (user_type) @hint.type)) @hint
+(property_declaration
+  name: (pattern bound_identifier: (simple_identifier) @hint.name)
+  value: (call_expression . (simple_identifier) @hint.call)) @hint

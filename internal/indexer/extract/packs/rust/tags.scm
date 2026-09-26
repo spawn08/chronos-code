@@ -51,3 +51,16 @@
 (impl_item trait: (generic_type type: (type_identifier) @name)) @ref.implements
 (impl_item trait: (scoped_type_identifier path: (_) @ref.qualifier name: (type_identifier) @name)) @ref.implements
 (trait_item bounds: (trait_bounds (type_identifier) @name)) @ref.extends
+
+; Type uses.
+(scoped_type_identifier path: (_) @ref.qualifier name: (type_identifier) @name) @ref.type
+((type_identifier) @name @ref.type (#not-has-parent? @name scoped_type_identifier))
+
+; Binding hints: typed parameters, lets and fields; T { .. }, T::new().
+(parameter pattern: (identifier) @hint.name type: (_) @hint.type) @hint
+(let_declaration pattern: (identifier) @hint.name type: (_) @hint.type) @hint
+(let_declaration pattern: (identifier) @hint.name value: (struct_expression name: (_) @hint.type)) @hint
+(let_declaration
+  pattern: (identifier) @hint.name
+  value: (call_expression function: [(identifier) (scoped_identifier)] @hint.call)) @hint
+(field_declaration name: (field_identifier) @hint.name type: (_) @hint.type) @hint

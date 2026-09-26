@@ -82,3 +82,14 @@
 ; JSX: a capitalised element is a component.
 (jsx_opening_element name: (identifier) @name (#match? @name "^[A-Z]")) @ref.instantiate
 (jsx_self_closing_element name: (identifier) @name (#match? @name "^[A-Z]")) @ref.instantiate
+
+; Binding hints: x = new Foo().
+(variable_declarator
+  name: (identifier) @hint.name
+  value: (new_expression constructor: [(identifier) (member_expression)] @hint.type)) @hint
+(field_definition
+  property: (_) @hint.name
+  value: (new_expression constructor: [(identifier) (member_expression)] @hint.type)) @hint
+(assignment_expression
+  left: (member_expression) @hint.name
+  right: (new_expression constructor: [(identifier) (member_expression)] @hint.type)) @hint

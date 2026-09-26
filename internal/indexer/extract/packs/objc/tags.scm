@@ -40,3 +40,16 @@
 (class_interface superclass: (identifier) @name) @ref.extends
 (class_interface (parameterized_arguments (type_name (identifier) @name))) @ref.implements
 (protocol_declaration (protocol_reference_list (identifier) @name)) @ref.extends
+
+; Type uses.
+((type_identifier) @name @ref.type)
+(type_name (identifier) @name) @ref.type
+
+; Binding hints: C declarations (UserRepo *r = ...).
+(declaration
+  type: (_) @hint.type
+  declarator: [
+    (identifier) @hint.name
+    (init_declarator declarator: (identifier) @hint.name)
+    (pointer_declarator declarator: (identifier) @hint.name)
+    (init_declarator declarator: (pointer_declarator declarator: (identifier) @hint.name))]) @hint

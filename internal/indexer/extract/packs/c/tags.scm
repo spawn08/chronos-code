@@ -35,3 +35,21 @@
 ; References.
 (call_expression function: (identifier) @name) @ref.call
 (call_expression function: (field_expression argument: (_) @ref.qualifier field: (field_identifier) @name)) @ref.call
+
+; Type uses.
+((type_identifier) @name @ref.type)
+
+; Binding hints: typed parameters, variables and fields.
+(parameter_declaration
+  type: (_) @hint.type
+  declarator: [(identifier) @hint.name (pointer_declarator declarator: (identifier) @hint.name)]) @hint
+(declaration
+  type: (_) @hint.type
+  declarator: [
+    (identifier) @hint.name
+    (init_declarator declarator: (identifier) @hint.name)
+    (pointer_declarator declarator: (identifier) @hint.name)
+    (init_declarator declarator: (pointer_declarator declarator: (identifier) @hint.name))]) @hint
+(field_declaration
+  type: (_) @hint.type
+  declarator: [(field_identifier) @hint.name (pointer_declarator declarator: (field_identifier) @hint.name)]) @hint

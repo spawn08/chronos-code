@@ -50,13 +50,25 @@ symbols:
       sig: let counter = 0
   20. L54-56 private func helper
       sig: function helper(x: number): number
+hints:
+  L20 cache: Map in=6
+  L23 repo: Repo in=9
+  L51 DEFAULT_ID: Id
 refs:
+  L7:24 type T in=0
   L7:35 extends Reader in=0
+  L8:20 type T in=1
   L18:2 decorator Injectable in=6
   L19:34 extends BaseService in=6
   L19:57 implements Store in=6
+  L19:63 type User in=6
   L19:70 implements Disposable in=6
   L20:32 instantiate Map in=7
+  L20:44 type User in=7
+  L23:29 type Repo in=9
+  L27:27 type User in=10
   L28:22 call find on="this.repo" in=10
+  L31:20 type Promise in=11
   L32:10 call join pkg="path" in=11
   L33:11 call flush in=11
+  L51:26 type Id in=18

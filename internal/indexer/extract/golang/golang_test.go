@@ -257,3 +257,76 @@ func (s *S) run() {}
 		t.Errorf("non-test, non-generated file flagged: %+v", plain)
 	}
 }
+
+func TestTypeRefsAndBindingHints(t *testing.T) {
+	const src = `package shop
+
+import "example.com/shop/store"
+
+type Service struct {
+	repo  store.Repo
+	cache *Cache
+	items []Item
+}
+
+func (s *Service) Handle(o Order, n int) (*Receipt, error) {
+	c := &Cache{}
+	r := store.NewRepo()
+	var w Writer
+	b, err := build()
+	x := v.(Reader)
+	p := new(Point)
+	_ = Item{}
+	return nil, nil
+}
+
+func Map[K comparable, V any](m map[K]V) []V { return nil }
+`
+	f := &facts.File{Path: "shop.go"}
+	Extract(f, []byte(src))
+	if f.ParseErr != "" {
+		t.Fatal(f.ParseErr)
+	}
+	hints := map[string]string{}
+	for _, h := range f.Hints {
+		scope := "-"
+		if h.Scope >= 0 {
+			scope = f.Symbols[h.Scope].Name
+		}
+		hints[scope+":"+h.Name] = h.Type
+	}
+	for key, want := range map[string]string{
+		"Service:repo": "store.Repo", "Service:cache": "Cache",
+		"Handle:s": "Service", "Handle:o": "Order",
+		"Handle:c": "Cache", "Handle:r": "store.NewRepo()", "Handle:w": "Writer",
+		"Handle:b": "build()", "Handle:x": "Reader", "Handle:p": "Point",
+	} {
+		if hints[key] != want {
+			t.Errorf("hint %s = %q, want %q (all: %v)", key, hints[key], want, hints)
+		}
+	}
+	for _, key := range []string{"Service:items", "Handle:n", "Handle:err"} {
+		if _, ok := hints[key]; ok {
+			t.Errorf("unexpected hint %s", key)
+		}
+	}
+	types := map[string]uint8{}
+	for _, r := range f.Refs {
+		if r.Kind != facts.RefCall {
+			types[r.Name+"/"+r.Qualifier] = r.Kind
+		}
+	}
+	for key, kind := range map[string]uint8{
+		"Repo/example.com/shop/store": facts.RefTypeUse, "Cache/": facts.RefInstantiate, "Item/": facts.RefInstantiate,
+		"Order/": facts.RefTypeUse, "Receipt/": facts.RefTypeUse, "Writer/": facts.RefTypeUse, "Reader/": facts.RefTypeUse,
+	} {
+		if got, ok := types[key]; !ok || got != kind {
+			t.Errorf("ref %s = %d (present %v), want kind %d; all %v", key, got, ok, kind, types)
+		}
+	}
+	for _, key := range []string{"int/", "error/", "K/", "V/", "comparable/", "o/", "s/"} {
+		if _, ok := types[key]; ok {
+			t.Errorf("unexpected type ref %s", key)
+		}
+	}
+}

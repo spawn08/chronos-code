@@ -88,6 +88,7 @@ func TestQueryCaptures(t *testing.T) {
 		"import.default": true, "import.wildcard": true, "export": true, "export.name": true,
 		"export.alias": true, "export.default": true, "export.all": true, "export.source": true,
 		"ref.qualifier": true, "package": true,
+		"hint": true, "hint.name": true, "hint.type": true, "hint.call": true,
 	}
 	for k := range refKinds {
 		known[k] = true
@@ -199,6 +200,16 @@ func render(f *facts.File) string {
 		if s.Doc != "" {
 			fmt.Fprintf(&b, "      doc: %q\n", s.Doc)
 		}
+	}
+	if len(f.Hints) > 0 {
+		b.WriteString("hints:\n")
+	}
+	for _, h := range f.Hints {
+		fmt.Fprintf(&b, "  L%d %s: %s", h.Line, h.Name, h.Type)
+		if h.Scope >= 0 {
+			fmt.Fprintf(&b, " in=%d", h.Scope)
+		}
+		b.WriteString("\n")
 	}
 	if len(f.Refs) > 0 {
 		b.WriteString("refs:\n")

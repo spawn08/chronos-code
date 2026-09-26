@@ -171,8 +171,16 @@ type walker struct {
 
 	defs     []*def
 	refs     []ref
+	hints    []hint
 	imports  []*importGroup
 	byImport map[[2]uint32]*importGroup
+}
+
+// hint is a binding-hint match: a name and the type it is declared or
+// constructed with (@hint.type), or the callee that produces it (@hint.call).
+type hint struct {
+	name, typ *gts.Node
+	call      bool
 }
 
 func key(n *gts.Node) [2]uint32 { return [2]uint32{n.StartByte(), n.EndByte()} }
@@ -211,6 +219,8 @@ func (w *walker) run(matches []gts.QueryMatch) {
 			exports = append(exports, m)
 		case strings.HasPrefix(main, "ref."):
 			w.addRef(m, main)
+		case main == "hint":
+			w.addHint(m)
 		case main == "package":
 			if w.f.PkgName == "" {
 				w.f.PkgName = strings.TrimSuffix(collapse(w.text(node)), ";")
@@ -233,6 +243,7 @@ func (w *walker) run(matches []gts.QueryMatch) {
 		}
 	}
 	w.references()
+	w.bindingHints()
 }
 
 // mainCapture returns the capture that says what a match is.
@@ -241,7 +252,7 @@ func mainCapture(m gts.QueryMatch) (string, *gts.Node) {
 		switch n := c.Name; {
 		case n == "ref.qualifier":
 		case strings.HasPrefix(n, "def."), strings.HasPrefix(n, "ref."),
-			n == "scope", n == "import", n == "include", n == "export", n == "package":
+			n == "scope", n == "import", n == "include", n == "export", n == "package", n == "hint":
 			return n, c.Node
 		}
 	}
@@ -731,12 +742,18 @@ func (w *walker) references() {
 	// decorators and other wrappers) contains it.
 	defs := slices.Clone(w.defs)
 	slices.SortStableFunc(defs, byRange(func(d *def) uint32 { return d.start }, func(d *def) uint32 { return d.end }))
-	seen := map[uint32]bool{}
+	seen, defName := map[uint32]bool{}, map[uint32]bool{}
+	// A type pattern also matches the name of the type's own declaration.
+	for _, d := range w.defs {
+		if !d.scope {
+			defName[d.name.StartByte()] = true
+		}
+	}
 	var stack []*def
 	next := 0
 	for _, r := range w.refs {
 		pos := r.name.StartByte()
-		if seen[pos] {
+		if seen[pos] || (r.kind == facts.RefTypeUse && (defName[pos] || primitiveTypes[w.text(r.name)])) {
 			continue
 		}
 		seen[pos] = true
@@ -824,6 +841,96 @@ func (w *walker) bindings() map[string]string {
 		out[imp.Path] = imp.Path
 	}
 	return out
+}
+
+func (w *walker) addHint(m gts.QueryMatch) {
+	h := hint{name: capture(m, "hint.name"), typ: capture(m, "hint.type")}
+	if h.typ == nil {
+		h.typ, h.call = capture(m, "hint.call"), true
+	}
+	if h.name != nil && h.typ != nil {
+		w.hints = append(w.hints, h)
+	}
+}
+
+// bindingHints records hints in line order, each scoped to the function or
+// type it appears in (never to the field or variable symbol it names).
+func (w *walker) bindingHints() {
+	seen := map[facts.BindingHint]bool{}
+	for _, h := range w.hints {
+		name := collapse(w.text(h.name))
+		typ := normalizeType(w.text(h.typ))
+		if name == "" || name == "_" || typ == "" || strings.ContainsAny(name, " (") {
+			continue
+		}
+		if h.call {
+			typ += "()"
+		}
+		bh := facts.BindingHint{Scope: w.hintScope(h.name.StartByte()), Name: name, Type: typ, Line: int(h.name.StartPoint().Row) + 1}
+		if !seen[bh] {
+			seen[bh] = true
+			w.f.Hints = append(w.f.Hints, bh)
+		}
+	}
+	slices.SortStableFunc(w.f.Hints, func(a, b facts.BindingHint) int { return a.Line - b.Line })
+}
+
+// hintScope is the innermost function or type whose extent contains pos.
+func (w *walker) hintScope(pos uint32) int {
+	best, size := facts.NoCaller, ^uint32(0)
+	for _, d := range w.defs {
+		if d.scope || d.sym < 0 || pos < d.start || pos >= d.end || d.end-d.start >= size {
+			continue
+		}
+		switch w.f.Symbols[d.sym].Kind {
+		case facts.KindField, facts.KindProperty, facts.KindVar, facts.KindConst, facts.KindEnumMember:
+			continue
+		}
+		best, size = d.sym, d.end-d.start
+	}
+	return best
+}
+
+// primitiveTypes are builtin types of the pack languages: a hint or type
+// use naming one never leads to a workspace declaration.
+var primitiveTypes = map[string]bool{
+	"int": true, "long": true, "short": true, "byte": true, "char": true, "bool": true, "boolean": true,
+	"float": true, "double": true, "void": true, "string": true, "number": true, "str": true, "bigint": true,
+	"object": true, "any": true, "unknown": true, "never": true, "undefined": true, "null": true,
+	"symbol": true, "mixed": true, "array": true, "iterable": true, "callable": true, "self": true,
+	"instancetype": true, "id": true, "unsigned": true, "signed": true, "size_t": true,
+	"i8": true, "i16": true, "i32": true, "i64": true, "i128": true, "isize": true,
+	"u8": true, "u16": true, "u32": true, "u64": true, "u128": true, "usize": true, "f32": true, "f64": true,
+}
+
+// normalizeType reduces a type or callee as written to a plain, possibly
+// qualified name: no pointer, reference, nullability, array or generic
+// syntax. It returns "" for types that name nothing useful.
+func normalizeType(s string) string {
+	s = strings.TrimSpace(s)
+	for _, p := range []string{"new ", "const ", "mut ", "struct ", "class ", "enum ", "union ", "&", "*", "?", "\\", "@"} {
+		for strings.HasPrefix(s, p) {
+			s = strings.TrimSpace(s[len(p):])
+		}
+	}
+	if s == "" || s[0] == '[' || s[0] == '(' || s[0] == '{' {
+		return ""
+	}
+	if i := strings.IndexAny(s, "<[(!"); i > 0 {
+		s = s[:i]
+	}
+	s = strings.TrimRight(s, "?*&. ")
+	if s == "" || strings.ContainsAny(s, " {}|=,;\"'") {
+		return ""
+	}
+	switch s {
+	case "var", "auto", "let", "val", "dynamic", "const":
+		return ""
+	}
+	if primitiveTypes[s] {
+		return ""
+	}
+	return s
 }
 
 // splitQualified splits "a.b.c" or "a::b::c" into ("c", "a.b").

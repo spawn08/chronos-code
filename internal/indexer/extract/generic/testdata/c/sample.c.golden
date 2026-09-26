@@ -33,7 +33,13 @@ symbols:
       doc: "Adds an item."
   13. L29-31 private func helper_internal [static]
       sig: static void helper_internal(void)
+hints:
+  L20 it: item in=11
+  L23 it: item in=12
 refs:
+  L13:16 type item in=5
+  L20:22 type item in=11
+  L23:22 type item in=12
   L24:5 call printf in=12
   L26:12 call helper in=12
   L30:5 call store_add in=13

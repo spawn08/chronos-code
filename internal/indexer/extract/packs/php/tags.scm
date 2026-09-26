@@ -35,3 +35,14 @@
 (class_interface_clause [(name) (qualified_name)] @name) @ref.implements
 (declaration_list (use_declaration [(name) (qualified_name)] @name) @ref.implements)
 (attribute [(name) (qualified_name)] @name) @ref.decorator
+
+; Type uses.
+(named_type (name) @name) @ref.type
+(named_type (qualified_name prefix: (_) @ref.qualifier (name) @name)) @ref.type
+
+; Binding hints: typed parameters and properties; $x = new Foo().
+(simple_parameter type: (_) @hint.type name: (variable_name) @hint.name) @hint
+(property_declaration type: (_) @hint.type (property_element name: (variable_name) @hint.name)) @hint
+(assignment_expression
+  left: [(variable_name) (member_access_expression)] @hint.name
+  right: (object_creation_expression [(name) (qualified_name)] @hint.type)) @hint

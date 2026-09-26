@@ -24,3 +24,9 @@
 (call !receiver method: (identifier) @name) @ref.call
 (call receiver: (_) @ref.qualifier method: (identifier) @name) @ref.call
 (superclass [(constant) (scope_resolution)] @name) @ref.extends
+
+; Binding hints: x = Foo.new.
+(assignment
+  left: [(identifier) (instance_variable)] @hint.name
+  right: (call receiver: [(constant) (scope_resolution)] @hint.type method: (identifier) @_new)
+  (#eq? @_new "new")) @hint

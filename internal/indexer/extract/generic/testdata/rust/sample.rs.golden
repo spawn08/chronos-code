@@ -51,13 +51,37 @@ symbols:
       sig: mod tests
   19. L62-64 private func it_works in=18 [test]
       sig: fn it_works()
+hints:
+  L13 name: String in=1
+  L14 items: HashMap in=1
+  L30 items: HashMap::new() in=10
 refs:
+  L12:18 type K in=1
+  L13:15 type String in=2
+  L14:12 type HashMap in=3
+  L14:20 type K in=3
+  L14:23 type String in=3
   L22:20 extends Send in=7
+  L23:33 type Option in=8
+  L23:40 type String in=8
+  L27:6 type K
+  L27:9 type Store
+  L27:15 type K
+  L29:31 type Self in=10
   L30:30 call new pkg="std::collections::HashMap" in=10
   L31:9 call helper in=10
   L32:9 instantiate Store in=10
   L32:28 call to_string on="name" in=10
   L36:20 call clear on="self.items" in=11
+  L40:6 type K
   L40:9 implements Backend
+  L40:21 type Store
+  L40:27 type K
+  L41:33 type Option in=12
+  L41:40 type String in=12
   L42:15 call lookup on="util" in=12
+  L48:13 type T in=15
+  L48:31 type Result on="std::result" in=15
+  L48:38 type T in=15
+  L48:41 type StoreError in=15
   L63:16 call helper on="super" in=19

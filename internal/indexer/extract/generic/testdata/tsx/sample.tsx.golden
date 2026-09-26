@@ -16,10 +16,16 @@ symbols:
       sig: export default class App extends React.Component<Props>
   5. L19-21 public method App.render in=4
       sig: render()
+hints:
+  L14 Panel: React.FC in=3
 refs:
+  L9:36 type Props in=2
   L10:21 call useState in=2
   L11:11 instantiate Button in=2
   L11:33 call setN in=2
+  L14:27 type FC pkg="react" in=3
+  L14:30 type Props in=3
   L15:16 call format in=3
   L18:40 extends Component pkg="react" in=4
+  L18:50 type Props in=4
   L20:13 instantiate Counter in=5

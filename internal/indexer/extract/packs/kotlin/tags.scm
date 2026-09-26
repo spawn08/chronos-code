@@ -37,3 +37,14 @@
 (delegation_specifier (user_type (type_identifier) @name)) @ref.implements
 (annotation (user_type (type_identifier) @name)) @ref.decorator
 (annotation (constructor_invocation (user_type (type_identifier) @name))) @ref.decorator
+
+; Type uses.
+(user_type (type_identifier) @name) @ref.type
+
+; Binding hints: typed parameters and properties; val x = Foo().
+(parameter (simple_identifier) @hint.name (user_type) @hint.type) @hint
+(class_parameter (simple_identifier) @hint.name (user_type) @hint.type) @hint
+(property_declaration (variable_declaration (simple_identifier) @hint.name (user_type) @hint.type)) @hint
+(property_declaration
+  (variable_declaration (simple_identifier) @hint.name)
+  (call_expression . (simple_identifier) @hint.call)) @hint

@@ -46,3 +46,20 @@
 (base_list (qualified_name qualifier: (_) @ref.qualifier name: (identifier) @name)) @ref.extends
 (attribute name: (identifier) @name) @ref.decorator
 (attribute name: (qualified_name qualifier: (_) @ref.qualifier name: (identifier) @name)) @ref.decorator
+
+; Type uses: types are plain identifiers in type positions.
+(variable_declaration type: (identifier) @name @ref.type)
+(parameter type: (identifier) @name @ref.type)
+(property_declaration type: (identifier) @name @ref.type)
+(method_declaration returns: (identifier) @name @ref.type)
+(type_argument_list (identifier) @name @ref.type)
+(variable_declaration type: (generic_name (identifier) @name) @ref.type)
+(parameter type: (generic_name (identifier) @name) @ref.type)
+(parameter type: (qualified_name qualifier: (_) @ref.qualifier name: (identifier) @name) @ref.type)
+
+; Binding hints: typed parameters, locals, fields and properties; new Foo().
+(parameter type: (_) @hint.type name: (identifier) @hint.name) @hint
+(variable_declaration type: (_) @hint.type (variable_declarator name: (identifier) @hint.name)) @hint
+(variable_declaration
+  (variable_declarator name: (identifier) @hint.name (object_creation_expression type: (_) @hint.type))) @hint
+(property_declaration type: (_) @hint.type name: (identifier) @hint.name) @hint

@@ -95,3 +95,22 @@
 (decorator (call_expression function: (identifier) @name)) @ref.decorator
 (decorator
   (call_expression function: (member_expression object: (_) @ref.qualifier property: (property_identifier) @name))) @ref.decorator
+
+; Type uses.
+(nested_type_identifier module: (_) @ref.qualifier name: (type_identifier) @name) @ref.type
+((type_identifier) @name @ref.type (#not-has-parent? @name nested_type_identifier))
+
+; Binding hints: typed parameters, variables and fields; x = new Foo().
+(required_parameter pattern: (identifier) @hint.name type: (type_annotation (_) @hint.type)) @hint
+(optional_parameter pattern: (identifier) @hint.name type: (type_annotation (_) @hint.type)) @hint
+(variable_declarator name: (identifier) @hint.name type: (type_annotation (_) @hint.type)) @hint
+(variable_declarator
+  name: (identifier) @hint.name
+  value: (new_expression constructor: [(identifier) (member_expression)] @hint.type)) @hint
+(public_field_definition name: (_) @hint.name type: (type_annotation (_) @hint.type)) @hint
+(public_field_definition
+  name: (_) @hint.name
+  value: (new_expression constructor: [(identifier) (member_expression)] @hint.type)) @hint
+(assignment_expression
+  left: (member_expression) @hint.name
+  right: (new_expression constructor: [(identifier) (member_expression)] @hint.type)) @hint

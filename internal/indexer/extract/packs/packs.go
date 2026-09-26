@@ -25,10 +25,13 @@
 //	                   @import.default and @import.wildcard
 //	@export            an export statement, with @export.name (+ @export.alias),
 //	                   @export.default, @export.all and @export.source
-//	@ref.<kind>        a reference: call, type, extends, implements,
+//	@ref.<kind>        a reference: call, type (a type use), extends, implements,
 //	                   instantiate or decorator, with @name and an optional
 //	                   @ref.qualifier (the receiver or scope expression)
 //	@package           the declared package or namespace
+//	@hint              a binding hint: @hint.name is declared (or constructed)
+//	                   with type @hint.type, or assigned the result of the
+//	                   call to @hint.call (recorded as "callee()")
 //
 // Captures starting with "_" are free for predicates.
 package packs

@@ -40,14 +40,33 @@ symbols:
       sig: typealias Id = String
   17. L50-52 internal func topLevel
       sig: func topLevel()
+hints:
+  L7 name: String in=0
+  L10 name: String in=4
+  L15 id: String in=5
+  L17 u: User() in=5
+  L30 id: String in=9
+  L34 id: String in=10
 refs:
   L5:24 extends BaseRepo in=0
   L5:34 extends Repo in=0
+  L6:25 type String in=1
+  L6:33 type User in=1
+  L7:15 type String in=2
+  L10:23 type String in=4
   L12:15 call init on="super" in=4
+  L15:28 type String in=5
+  L15:39 type User in=5
+  L16:9 type Helper in=5
   L16:16 call check on="Helper" in=5
   L17:17 call User in=5
   L18:16 call cache in=5
   L21:6 decorator available in=6
   L25:19 call flush in=7
+  L30:21 type String in=9
+  L30:32 type User in=9
+  L34:13 type String in=11
+  L42:11 type UserRepo
   L44:15 call removeAll on="cache" in=15
+  L48:16 type String in=16
   L51:5 call print in=17

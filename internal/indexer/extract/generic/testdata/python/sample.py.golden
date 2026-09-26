@@ -28,9 +28,12 @@ symbols:
       sig: class _Hidden
   8. L31-32 public method _Hidden.__repr__ in=7
       sig: def __repr__(self)
+hints:
+  L14 repo: Repo in=3
 refs:
   L9:2 decorator dataclass in=1
   L10:11 extends Base in=1
+  L14:30 type Repo in=3
   L16:9 call super in=3
   L16:17 call __init__ on="super()" in=3
   L19:17 call join on="os.path" in=4

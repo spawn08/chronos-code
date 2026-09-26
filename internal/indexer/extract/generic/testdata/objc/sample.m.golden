@@ -28,9 +28,15 @@ refs:
   L5:23 extends BaseRepo in=0
   L5:33 implements Repo in=0
   L5:39 implements NSCopying in=0
+  L6:31 type NSString in=1
+  L7:31 type NSString in=2
+  L8:4 type UserRepo in=3
+  L13:31 type NSString in=4
   L14:19 call init on="super" in=4
   L16:13 call check on="Helper" in=4
+  L20:4 type UserRepo in=5
   L21:23 call alloc on="UserRepo" in=5
   L21:30 call initWithName on="[UserRepo alloc]" in=5
   L26:17 extends NSObject in=6
+  L27:13 type NSString in=7
   L33:5 call NSLog in=9

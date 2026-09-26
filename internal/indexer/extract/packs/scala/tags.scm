@@ -34,3 +34,14 @@
 (extends_clause type: (type_identifier) @name) @ref.implements
 (extends_clause type: (generic_type type: (type_identifier) @name)) @ref.implements
 (annotation name: (type_identifier) @name) @ref.decorator
+
+; Type uses.
+((type_identifier) @name @ref.type)
+
+; Binding hints: typed parameters and values; new Foo(), Foo().
+(parameter name: (identifier) @hint.name type: (_) @hint.type) @hint
+(class_parameter name: (identifier) @hint.name type: (_) @hint.type) @hint
+(val_definition pattern: (identifier) @hint.name type: (_) @hint.type) @hint
+(var_definition pattern: (identifier) @hint.name type: (_) @hint.type) @hint
+(val_definition pattern: (identifier) @hint.name value: (instance_expression (type_identifier) @hint.type)) @hint
+(val_definition pattern: (identifier) @hint.name value: (call_expression function: (identifier) @hint.call)) @hint

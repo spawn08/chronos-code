@@ -6,7 +6,8 @@ retrieval, and the store, reconcile and watcher are built for million-file
 repositories. M4 (precise tier) is still open. M6 in progress (2026-09-26):
 parser runtime decided and wrapped (`extract/treesitter`, `extract/packs`);
 facts v2 and segment format v4 done; query packs for all 17 languages are
-indexed (M6.3); the generic resolver and the graph switch-over are next. Replaces the synchronous parts of `internal/graph` with an
+indexed (M6.3); the generic resolver, type uses and binding hints are in
+(M6.4); the SCIP baseline and the graph switch-over are next. Replaces the synchronous parts of `internal/graph` with an
 in-process indexer.
 
 ## Goals
@@ -812,6 +813,68 @@ non-Go sources are two shell scripts and two small JavaScript files
 was loaded (load average about 45 on 10 cores), so these numbers resolve to
 about ±10%. Grammars load once per process (3–13 ms each); query compilation
 takes 0.1–4 ms per pack.
+
+### M6.4 results (generic resolver, type uses, binding hints)
+
+`ExtractorVersion` is `syntax-6`. Every language now records type uses and
+binding hints, and retrieval's graph expansion resolves references with
+the ladder from "Resolution":
+
+- **Type uses.** Go records every named type in signatures, fields,
+  `var` declarations, assertions and type arguments (not predeclared types
+  or type parameters); `T{}` is an instantiation and embeds are extends.
+  Packs capture `@ref.type`; a type pattern matching a declaration's own
+  name is skipped, and primitive types are dropped.
+- **Binding hints.** Go: receivers, typed parameters, struct fields
+  (scoped to the struct), `var x T`, `x := T{}` / `&T{}` / `new(T)` /
+  `v.(T)`, and `x := f()` recorded as `f()`. Packs capture `@hint` with a
+  type or a call (`x = Foo()` is `Foo()`); a hint is scoped to its function
+  or class, never to the field it names. `T::new()` and `T.new` construct
+  `T`.
+- **Resolver** (`query/resolve.go`), one label per step:
+  `f()` resolves in the same file, the caller's class (implicit `this`
+  languages), the file's imported names and wildcard or whole-module
+  imports, then the same unit (languages whose units share scope):
+  `import_resolved`; then any declaration of the name (`name_matched`, or
+  `ambiguous`; not Go). `pkg.f()` resolves in the import's workspace units
+  (static members of an imported class first). `x.m()` infers `x`'s type
+  from `self`/`this`, hints in the caller, its class and sibling members
+  (a constructor parameter stored as a field), field chains (`s.repo`),
+  static calls on a type (`Helper.check()`) and call results (the result
+  type is read from the callee's signature), then looks up `m` on that type
+  and its supertypes: `type_hinted`. An import or type that maps to no
+  workspace unit is external and resolves to nothing, so `os.path.join()`
+  never name-matches a workspace `join`.
+- **Import specs to units:** Go import paths exactly; relative specs
+  (JS/TS, Python dots, C includes, Ruby, Dart, shell) against the file's
+  directory; dotted and path specs by directory or file-stem suffix, with
+  the spec's parent tried for imports naming a class or module; C#/PHP
+  namespaces fall back to dropping leading segments. File stems come from
+  a per-segment index built once per immutable segment; results are
+  memoized per generation.
+
+As built, this differs from the design above in these ways:
+
+- **Build-target scoping is not implemented** (no build graphs before M7).
+- **`Outgoing` now includes instantiations**, so graph expansion follows
+  `new T()` to the class. Call-site queries (`CallSites`, `Callers`,
+  `Callees`) still count calls only, and the graph tools still match
+  callers by name until the switch-over.
+- **Type inference is shallow on purpose:** three levels of field chains
+  and call results, no flow analysis, and the first matching hint in scope
+  wins.
+
+Measured on this repository against M11 (benchstat, n=6, runs
+interleaved): `IndexEditBody` 1.45 → 1.28 ms (not significant),
+`ScopeQueryAfterEdit` 8.9 → 9.5 ms (not significant), `IndexFresh` 233 →
+257 ms (+10%, the extra references and hints), `ScopePrefetch` (1,500
+tokens) 8.3 → 9.7 ms (+17%), `ScopeCodebaseContext` (4,096 tokens) 14.2 →
+16.7 ms (+17%). The retrieval cost is resolving every candidate caller
+instead of matching by name; per-view memos (declarations by name,
+resolved references, lazily decoded file context) brought it down from
++25%. Retrieval eval recall is unchanged on this Go repository (0.41,
+excerpt recall 0.32); the resolver's effect on other languages is what the
+SCIP baseline measures.
 
 ### M11 results (old graph removed, 2026-09-26)
 

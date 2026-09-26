@@ -25,6 +25,7 @@ import (
 const (
 	TypeChecked    = "type_checked"
 	ImportResolved = "import_resolved"
+	TypeHinted     = "type_hinted" // the receiver's type comes from a binding hint
 	NameMatched    = "name_matched"
 	Ambiguous      = "ambiguous"
 )
@@ -59,11 +60,14 @@ func (s Symbol) Qualified() string {
 // View is a read-only query view over one snapshot. It must not be used after
 // the snapshot is released.
 type View struct {
-	sn      *store.Snapshot
-	cache   *Cache
-	metas   map[fileKey]segment.FileMeta
-	visible map[string]map[string]bool // package -> itself and its imports
-	syms    map[fileKey]Symbol         // decoded symbols by (segment, symbol index)
+	sn       *store.Snapshot
+	cache    *Cache
+	metas    map[fileKey]segment.FileMeta
+	visible  map[string]map[string]bool // package -> itself and its imports
+	syms     map[fileKey]Symbol         // decoded symbols by (segment, symbol index)
+	files    map[fileKey]*fileCtx       // resolution context by (segment, file)
+	resolved map[fileKey]resolution     // resolved references by (segment, ref)
+	byName   map[string][]Symbol        // live declarations by name
 }
 
 type fileKey struct{ seg, file int }

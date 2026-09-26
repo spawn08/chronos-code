@@ -41,10 +41,11 @@ func Extract(f *facts.File, src []byte) {
 }
 
 type extractor struct {
-	fset    *token.FileSet
-	f       *facts.File
-	aliases map[string]string // local package name -> import path
-	buf     bytes.Buffer
+	fset       *token.FileSet
+	f          *facts.File
+	aliases    map[string]string // local package name -> import path
+	typeParams map[string]bool   // type parameters of the declaration being walked
+	buf        bytes.Buffer
 }
 
 func (x *extractor) line(p token.Pos) int { return x.fset.Position(p).Line }
@@ -77,9 +78,12 @@ func (x *extractor) run(file *ast.File) {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			idx := x.funcDecl(d)
+			x.typeParams = fieldNames(d.Type.TypeParams)
+			x.signature(d, idx)
 			if d.Body != nil {
 				x.calls(d.Body, idx)
 			}
+			x.typeParams = nil
 		case *ast.GenDecl:
 			x.genDecl(d)
 		}
@@ -207,13 +211,18 @@ func (x *extractor) genDecl(d *ast.GenDecl) {
 				Line: x.line(s.Pos()), EndLine: x.line(s.End()), Exported: s.Name.IsExported(),
 			})
 			idx := len(x.f.Symbols) - 1
+			x.typeParams = fieldNames(s.TypeParams)
 			switch t := s.Type.(type) {
 			case *ast.InterfaceType:
 				x.interfaceMembers(s.Name.Name, t, idx)
 			case *ast.StructType:
 				x.structEmbeds(t, idx)
+				x.structFields(t, idx)
+			default:
+				x.typeRefs(s.Type, idx)
 			}
 			x.bodyCalls(s.Type, idx)
+			x.typeParams = nil
 		case *ast.ValueSpec:
 			kind := facts.KindVar
 			if d.Tok == token.CONST {
@@ -241,6 +250,10 @@ func (x *extractor) genDecl(d *ast.GenDecl) {
 			if len(x.f.Symbols) > first {
 				caller = first
 			}
+			if s.Type != nil {
+				x.typeRefs(s.Type, caller)
+			}
+			x.valueHints(s, facts.NoCaller)
 			for _, v := range s.Values {
 				x.calls(v, caller)
 			}
@@ -271,6 +284,7 @@ func (x *extractor) interfaceMembers(iface string, t *ast.InterfaceType, parent 
 				Doc:       docText(field.Doc), Line: x.line(name.Pos()), EndLine: x.line(field.End()),
 				Exported: name.IsExported(), Container: parent + 1, Modifiers: facts.ModDecl,
 			})
+			x.typeRefs(ft, len(x.f.Symbols)-1)
 		}
 	}
 }
@@ -305,6 +319,7 @@ func (x *extractor) embed(e ast.Expr, parent int) {
 		Name: name, Kind: facts.KindEmbed, Signature: x.render(e),
 		Line: x.line(e.Pos()), EndLine: x.line(e.End()), Container: parent + 1,
 	})
+	x.typeRef(base, parent, facts.RefExtends)
 }
 
 // bodyCalls records calls inside type expressions (e.g. func literals in
@@ -317,6 +332,38 @@ func (x *extractor) bodyCalls(n ast.Node, caller int) {
 
 func (x *extractor) calls(root ast.Node, caller int) {
 	ast.Inspect(root, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.CompositeLit:
+			if v.Type != nil {
+				x.typeRef(v.Type, caller, facts.RefInstantiate)
+			}
+			return true
+		case *ast.TypeAssertExpr:
+			if v.Type != nil {
+				x.typeRefs(v.Type, caller)
+			}
+			return true
+		case *ast.FuncLit:
+			x.typeRefs(v.Type, caller)
+			return true
+		case *ast.AssignStmt:
+			if v.Tok == token.DEFINE {
+				x.assignHints(v, caller)
+			}
+			return true
+		case *ast.DeclStmt:
+			if g, ok := v.Decl.(*ast.GenDecl); ok && g.Tok == token.VAR {
+				for _, spec := range g.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						if vs.Type != nil {
+							x.typeRefs(vs.Type, caller)
+						}
+						x.valueHints(vs, caller)
+					}
+				}
+			}
+			return true
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
@@ -342,6 +389,252 @@ func (x *extractor) calls(root ast.Node, caller int) {
 		x.f.Refs = append(x.f.Refs, c)
 		return true
 	})
+}
+
+// predeclaredTypes are Go's builtin types; naming one is not a reference
+// into the workspace.
+var predeclaredTypes = map[string]bool{
+	"any": true, "bool": true, "byte": true, "comparable": true, "complex64": true, "complex128": true,
+	"error": true, "float32": true, "float64": true, "int": true, "int8": true, "int16": true,
+	"int32": true, "int64": true, "rune": true, "string": true, "uint": true, "uint8": true,
+	"uint16": true, "uint32": true, "uint64": true, "uintptr": true,
+}
+
+func fieldNames(fl *ast.FieldList) map[string]bool {
+	if fl == nil {
+		return nil
+	}
+	m := map[string]bool{}
+	for _, f := range fl.List {
+		for _, n := range f.Names {
+			m[n.Name] = true
+		}
+	}
+	return m
+}
+
+// signature records the types a function's parameters and results name,
+// and binding hints for its receiver and parameters (func (r *Repo) and
+// func f(s store.Store) let r.M() and s.M() resolve by type).
+func (x *extractor) signature(d *ast.FuncDecl, idx int) {
+	if d.Recv != nil {
+		for _, field := range d.Recv.List {
+			for _, n := range field.Names {
+				if t := facts.BaseType(x.render(field.Type)); t != "" && n.Name != "_" {
+					x.hint(idx, n.Name, t, n.Pos())
+				}
+			}
+		}
+	}
+	x.typeRefs(d.Type, idx)
+	if d.Type.Params != nil {
+		for _, field := range d.Type.Params.List {
+			t := hintType(field.Type)
+			for _, n := range field.Names {
+				if t != "" && n.Name != "_" {
+					x.hint(idx, n.Name, t, n.Pos())
+				}
+			}
+		}
+	}
+}
+
+// structFields records field types and a hint per named field, scoped to
+// the struct: s.repo.Save() resolves through the type of repo.
+func (x *extractor) structFields(t *ast.StructType, idx int) {
+	if t.Fields == nil {
+		return
+	}
+	for _, field := range t.Fields.List {
+		if len(field.Names) == 0 {
+			continue // embeds are recorded by structEmbeds
+		}
+		x.typeRefs(field.Type, idx)
+		if ht := hintType(field.Type); ht != "" {
+			for _, n := range field.Names {
+				x.hint(idx, n.Name, ht, n.Pos())
+			}
+		}
+	}
+}
+
+// valueHints records var x T and var x = T{} / f() as hints.
+func (x *extractor) valueHints(s *ast.ValueSpec, scope int) {
+	for i, n := range s.Names {
+		if n.Name == "_" {
+			continue
+		}
+		t := ""
+		if s.Type != nil {
+			t = hintType(s.Type)
+		} else if i < len(s.Values) && len(s.Values) == len(s.Names) {
+			t = x.valueType(s.Values[i])
+		}
+		if t != "" {
+			x.hint(scope, n.Name, t, n.Pos())
+		}
+	}
+}
+
+// assignHints records x := T{}, x := &T{}, x := new(T), x := v.(T) and
+// x := f() (as "f()", the result type of f) as hints.
+func (x *extractor) assignHints(a *ast.AssignStmt, scope int) {
+	for i, lhs := range a.Lhs {
+		id, ok := lhs.(*ast.Ident)
+		if !ok || id.Name == "_" {
+			continue
+		}
+		var t string
+		switch {
+		case len(a.Rhs) == len(a.Lhs):
+			t = x.valueType(a.Rhs[i])
+		case i == 0 && len(a.Rhs) == 1:
+			if call, ok := a.Rhs[0].(*ast.CallExpr); ok {
+				t = x.valueType(call) // a, err := f()
+			}
+		}
+		if t != "" {
+			x.hint(scope, id.Name, t, id.Pos())
+		}
+	}
+}
+
+// valueType returns the type an expression evidently has, or "f()" for a
+// call whose result type the resolver can look up.
+func (x *extractor) valueType(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.CompositeLit:
+		return hintType(v.Type)
+	case *ast.UnaryExpr:
+		if v.Op == token.AND {
+			if lit, ok := v.X.(*ast.CompositeLit); ok {
+				return hintType(lit.Type)
+			}
+		}
+	case *ast.TypeAssertExpr:
+		return hintType(v.Type)
+	case *ast.CallExpr:
+		if id, ok := v.Fun.(*ast.Ident); ok && id.Name == "new" && len(v.Args) == 1 {
+			return hintType(v.Args[0])
+		}
+		switch fn := unwrapIndex(v.Fun).(type) {
+		case *ast.Ident:
+			return fn.Name + "()"
+		case *ast.SelectorExpr:
+			if id, ok := fn.X.(*ast.Ident); ok {
+				return id.Name + "." + fn.Sel.Name + "()"
+			}
+		}
+	}
+	return ""
+}
+
+// hintType renders a named type (T, *T, pkg.T, T[int]) without pointer or
+// type arguments; other types (slices, maps, funcs) give "".
+func hintType(e ast.Expr) string {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	switch v := unwrapIndex(e).(type) {
+	case *ast.Ident:
+		if !predeclaredTypes[v.Name] {
+			return v.Name
+		}
+	case *ast.SelectorExpr:
+		if id, ok := v.X.(*ast.Ident); ok {
+			return id.Name + "." + v.Sel.Name
+		}
+	}
+	return ""
+}
+
+func (x *extractor) hint(scope int, name, typ string, pos token.Pos) {
+	x.f.Hints = append(x.f.Hints, facts.BindingHint{Scope: scope, Name: name, Type: typ, Line: x.line(pos)})
+}
+
+// typeRefs records a type use for every named type in a type expression,
+// walking type positions only (parameter names and array lengths are not
+// types).
+func (x *extractor) typeRefs(e ast.Node, enclosing int) {
+	switch v := e.(type) {
+	case nil:
+	case *ast.Ident, *ast.SelectorExpr, *ast.IndexExpr, *ast.IndexListExpr:
+		x.typeRef(v.(ast.Expr), enclosing, facts.RefTypeUse)
+	case *ast.StarExpr:
+		x.typeRefs(v.X, enclosing)
+	case *ast.ParenExpr:
+		x.typeRefs(v.X, enclosing)
+	case *ast.ArrayType:
+		x.typeRefs(v.Elt, enclosing)
+	case *ast.Ellipsis:
+		x.typeRefs(v.Elt, enclosing)
+	case *ast.MapType:
+		x.typeRefs(v.Key, enclosing)
+		x.typeRefs(v.Value, enclosing)
+	case *ast.ChanType:
+		x.typeRefs(v.Value, enclosing)
+	case *ast.UnaryExpr: // ~T in a constraint
+		x.typeRefs(v.X, enclosing)
+	case *ast.BinaryExpr: // A | B in a constraint
+		x.typeRefs(v.X, enclosing)
+		x.typeRefs(v.Y, enclosing)
+	case *ast.FuncType:
+		x.fieldTypes(v.TypeParams, enclosing)
+		x.fieldTypes(v.Params, enclosing)
+		x.fieldTypes(v.Results, enclosing)
+	case *ast.StructType:
+		x.fieldTypes(v.Fields, enclosing)
+	case *ast.InterfaceType:
+		x.fieldTypes(v.Methods, enclosing)
+	}
+}
+
+func (x *extractor) fieldTypes(fl *ast.FieldList, enclosing int) {
+	if fl == nil {
+		return
+	}
+	for _, f := range fl.List {
+		x.typeRefs(f.Type, enclosing)
+	}
+}
+
+// typeRef records one reference of kind to the named type e (T, *T,
+// pkg.T, T[int]); other expressions are ignored.
+func (x *extractor) typeRef(e ast.Expr, enclosing int, kind uint8) {
+	if star, ok := e.(*ast.StarExpr); ok {
+		e = star.X
+	}
+	if idx, ok := e.(*ast.IndexExpr); ok {
+		x.typeRefs(idx.Index, enclosing)
+	} else if idx, ok := e.(*ast.IndexListExpr); ok {
+		for _, ix := range idx.Indices {
+			x.typeRefs(ix, enclosing)
+		}
+	}
+	r := facts.Ref{Kind: kind, Enclosing: enclosing}
+	switch v := unwrapIndex(e).(type) {
+	case *ast.Ident:
+		if predeclaredTypes[v.Name] || x.typeParams[v.Name] || v.Name == "_" {
+			return
+		}
+		r.Name = v.Name
+		r.Line, r.Col = x.line(v.Pos()), x.fset.Position(v.Pos()).Column
+	case *ast.SelectorExpr:
+		id, ok := v.X.(*ast.Ident)
+		if !ok {
+			return
+		}
+		r.Name = v.Sel.Name
+		r.Line, r.Col = x.line(v.Sel.Pos()), x.fset.Position(v.Sel.Pos()).Column
+		if path, ok := x.aliases[id.Name]; ok {
+			r.QualKind, r.Qualifier = facts.QualPackage, path
+		} else {
+			r.QualKind, r.Qualifier = facts.QualExpr, id.Name
+		}
+	default:
+		return
+	}
+	x.f.Refs = append(x.f.Refs, r)
 }
 
 func unwrapIndex(e ast.Expr) ast.Expr {

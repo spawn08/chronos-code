@@ -45,15 +45,37 @@ symbols:
       sig: int topLevel(int x)
   17. L44-44 private var _private
       sig: _private = 0
+hints:
+  L10 _cache: Map in=0
+  L12 name: String in=0
+  L16 n: String in=5
+  L19 id: String in=6
+  L21 u: User() in=6
+  L31 id: String in=9
+  L37 m: String in=14
 refs:
   L9:24 extends BaseRepo in=0
+  L9:33 type User in=0
   L9:44 implements Logging in=0
   L9:63 implements Repo in=0
+  L10:9 type Map in=1
+  L10:13 type String in=1
+  L10:21 type User in=1
+  L12:3 type String in=3
+  L16:18 type String in=5
   L18:4 decorator override in=6
+  L19:3 type Future in=6
+  L19:10 type User in=6
+  L19:22 type String in=6
   L20:12 call check on="Helper" in=6
   L21:15 call User in=6
   L22:16 call get pkg="package:http/http.dart" in=6
   L22:24 call parse on="Uri" in=6
   L26:4 decorator deprecated in=7
+  L31:3 type Future in=9
+  L31:10 type User in=9
+  L31:22 type String in=9
+  L37:12 type String in=14
   L37:25 call print in=14
+  L40:14 type String in=15
   L42:24 call helper in=16

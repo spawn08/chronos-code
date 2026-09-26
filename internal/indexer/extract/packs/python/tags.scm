@@ -56,3 +56,15 @@
 (decorator (call function: (identifier) @name)) @ref.decorator
 (decorator
   (call function: (attribute object: (_) @ref.qualifier attribute: (identifier) @name))) @ref.decorator
+
+; Types named in annotations.
+(type (identifier) @name) @ref.type
+(type (attribute object: (_) @ref.qualifier attribute: (identifier) @name)) @ref.type
+
+; Binding hints: typed parameters and variables, x = Foo().
+(typed_parameter (identifier) @hint.name type: (type) @hint.type) @hint
+(typed_default_parameter name: (identifier) @hint.name type: (type) @hint.type) @hint
+(assignment left: (_) @hint.name type: (type) @hint.type) @hint
+(assignment
+  left: [(identifier) (attribute)] @hint.name
+  right: (call function: [(identifier) (attribute)] @hint.call)) @hint

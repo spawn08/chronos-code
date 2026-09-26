@@ -44,3 +44,17 @@
 (mixins (type_identifier) @name) @ref.implements
 (interfaces (type_identifier) @name) @ref.implements
 (annotation name: (identifier) @name) @ref.decorator
+
+; Type uses.
+((type_identifier) @name @ref.type)
+
+; Binding hints: typed parameters, variables and fields; final x = Foo().
+(formal_parameter (type_identifier) @hint.type name: (identifier) @hint.name) @hint
+(initialized_variable_definition (type_identifier) @hint.type name: (identifier) @hint.name) @hint
+(initialized_variable_definition
+  name: (identifier) @hint.name
+  value: (identifier) @hint.call
+  . (selector (argument_part))) @hint
+(declaration
+  (type_identifier) @hint.type
+  (initialized_identifier_list (initialized_identifier . (identifier) @hint.name))) @hint

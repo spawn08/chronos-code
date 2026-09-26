@@ -46,16 +46,43 @@ symbols:
       sig: fun topLevel(x: Int): Int
   19. L44-44 private func helper
       sig: private fun helper(x: Int)
+hints:
+  L9 db: Database in=0
+  L10 cache: mutableMapOf() in=0
+  L11 count: Int in=0
+  L13 id: String in=4
+  L15 u: User() in=4
+  L29 id: String in=9
+  L32 id: String in=10
+  L37 r: Repo in=16
+  L42 x: Int in=18
+  L44 x: Int in=19
 refs:
   L8:2 decorator Service in=0
+  L9:32 type Database in=1
   L9:44 extends BaseRepo in=0
+  L9:53 type User in=0
   L9:62 implements Repo in=0
   L9:68 implements AutoCloseable in=0
   L10:25 call mutableMapOf in=2
+  L10:38 type String in=2
+  L10:46 type User in=2
+  L11:25 type Int in=3
+  L13:27 type String in=4
+  L13:36 type User in=4
   L14:11 call check pkg="com.example.util.Helper" in=4
   L15:17 call User in=4
   L16:32 call load on="db" in=4
   L19:6 decorator Deprecated in=5
+  L24:23 type UserRepo in=7
   L24:34 call UserRepo in=7
   L24:43 call Database in=7
+  L29:18 type String in=9
+  L29:27 type User in=9
+  L32:25 type String in=11
+  L37:21 type Repo in=16
+  L40:16 type String in=17
+  L42:17 type Int in=18
+  L42:23 type Int in=18
   L42:29 call helper in=18
+  L44:23 type Int in=19

@@ -33,3 +33,16 @@
 (extends_interfaces (type_list (generic_type (type_identifier) @name))) @ref.extends
 (marker_annotation name: (identifier) @name) @ref.decorator
 (annotation name: (identifier) @name) @ref.decorator
+
+; Type uses (the segments of a scoped type are its qualifier).
+(scoped_type_identifier (_) @ref.qualifier (type_identifier) @name . (#not-has-parent? @ref.type scoped_type_identifier)) @ref.type
+((type_identifier) @name @ref.type (#not-has-parent? @name scoped_type_identifier))
+
+; Binding hints: typed parameters, locals and fields; x = new Foo().
+(formal_parameter type: (_) @hint.type name: (identifier) @hint.name) @hint
+(local_variable_declaration type: (_) @hint.type declarator: (variable_declarator name: (identifier) @hint.name)) @hint
+(local_variable_declaration
+  declarator: (variable_declarator
+    name: (identifier) @hint.name
+    value: (object_creation_expression type: (_) @hint.type))) @hint
+(field_declaration type: (_) @hint.type declarator: (variable_declarator name: (identifier) @hint.name)) @hint
