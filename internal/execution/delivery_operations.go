@@ -207,9 +207,10 @@ func (s *DeliveryStore) advanceOperation(ctx context.Context, lease Lease, id st
 		return Operation{}, fmt.Errorf("persist operation transition: %w", err)
 	}
 	eventType := DeliveryEventOperationRunning
-	if to == OperationObserved {
+	switch to {
+	case OperationObserved:
 		eventType = DeliveryEventOperationObserved
-	} else if to == OperationReconciled {
+	case OperationReconciled:
 		eventType = DeliveryEventOperationReconciled
 	}
 	if err := appendOperationEvent(ctx, tx, lease, op, eventType); err != nil {

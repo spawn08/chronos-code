@@ -147,7 +147,7 @@ func TestObservedHTTPDestinationRequiresTrustedSameOrigin(t *testing.T) {
 		{RequestURL: "http://api.example.com/mutate", ObservationURL: "http://api.example.com/effects"},
 	} {
 		if _, err := newDeliveryHTTPTool(urls); err == nil {
-			t.Fatal(fmt.Sprintf("untrusted HTTP destination accepted: %+v", urls))
+			t.Fatalf("untrusted HTTP destination accepted: %+v", urls)
 		}
 	}
 }

@@ -223,7 +223,7 @@ func Retrieve(v *query.View, req Request) Result {
 		top, topAll := 0.0, 0.0
 		for _, h := range hits {
 			topAll = math.Max(topAll, h.Score)
-			if h.Symbol.Kind != facts.KindSection {
+			if h.Kind != facts.KindSection {
 				top = math.Max(top, h.Score)
 			}
 		}

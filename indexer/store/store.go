@@ -390,7 +390,6 @@ type BaseWriter struct {
 	gen     uint64
 	pending []*facts.File
 	bytes   int
-	lastErr error
 	prev    string
 	shards  []*segRef
 	entries []SegmentEntry

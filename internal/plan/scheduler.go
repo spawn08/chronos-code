@@ -286,12 +286,13 @@ func (s *Scheduler) Stop(ctx context.Context, p Plan, nodeID NodeID, leaseID Lea
 		return err
 	}
 	state := PlanPaused
-	if status == NodeFailed {
+	switch status {
+	case NodeFailed:
 		state = PlanFailed
 		if err := blockDependents(ctx, tx, p, nodeID); err != nil {
 			return err
 		}
-	} else if status == NodeCanceled {
+	case NodeCanceled:
 		state = PlanCanceled
 		if err := cancelRemaining(ctx, tx, p); err != nil {
 			return err

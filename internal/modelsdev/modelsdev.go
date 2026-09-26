@@ -303,11 +303,11 @@ func (c Catalog) prices() map[string]budget.ModelPrice {
 }
 
 func (cost Cost) modelPrice(catalogProvider string) (budget.ModelPrice, error) {
-	base := cost.Rates.usd(catalogProvider)
+	base := cost.usd(catalogProvider)
 	var tiers []budget.USDTier
 	for _, tier := range cost.Tiers {
 		if tier.Tier.Type == "context" && tier.Tier.Size > 0 {
-			tiers = append(tiers, budget.USDTier{AbovePromptTokens: int(tier.Tier.Size), USDRates: tier.Rates.usd(catalogProvider)})
+			tiers = append(tiers, budget.USDTier{AbovePromptTokens: int(tier.Tier.Size), USDRates: tier.usd(catalogProvider)})
 		}
 	}
 	if len(tiers) == 0 && cost.ContextOver200K != nil {

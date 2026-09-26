@@ -190,24 +190,6 @@ func (r *taskRuntime) recordCommand(command string, class execution.CommandClass
 	})
 }
 
-func (r *taskRuntime) recordUncertainty(detail string, scopes []execution.Scope, completedAt time.Time) (execution.Event, error) {
-	normalized := make([]execution.Scope, 0, len(scopes))
-	for _, scope := range scopes {
-		normalizedScope, err := execution.NormalizeScope(r.workspaceRoot, scope)
-		if err != nil {
-			return execution.Event{}, err
-		}
-		normalized = append(normalized, normalizedScope)
-	}
-	return r.ledger.Record(execution.Event{
-		Type:        execution.EventUncertainty,
-		Scopes:      normalized,
-		Detail:      detail,
-		Provenance:  execution.ProvenanceRuntime,
-		CompletedAt: completedAt,
-	})
-}
-
 func (r *taskRuntime) snapshot() (execution.State, error) {
 	return r.ledger.State()
 }

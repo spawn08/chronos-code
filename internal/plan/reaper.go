@@ -45,7 +45,7 @@ func (s *SQLStore) ReapExpiredLeases(ctx context.Context, now time.Time, limit i
 		}
 		changed, err := reapExpiredPlanLeases(ctx, tx, p, now.UTC())
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return reaped, err
 		}
 		if err := tx.Commit(); err != nil {

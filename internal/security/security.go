@@ -68,19 +68,15 @@ func (g *Guard) Before(ctx context.Context, evt *hooks.Event) error {
 // tool executes.
 func (g *Guard) After(ctx context.Context, evt *hooks.Event) error { return nil }
 
-// checkFileArgs enforces the denied-path and (for file_write) writable-path
-// rules against a "path" string argument, when present, and — for tools like
-// file_glob whose schema has no "path" at all, only a "pattern" — against
-// the glob pattern itself. Checking a glob pattern against DeniedPaths is
-// necessarily a heuristic (matchesAnyGlob is a pragmatic matcher, not a full
-// glob-overlap solver: an overly broad pattern like "**/*" that would
-// incidentally sweep up a denied file isn't caught), but it closes the
-// direct case of an agent explicitly globbing for a denied file, e.g.
-// file_glob with pattern="**/.env".
-func (g *Guard) checkFileArgs(toolName string, args map[string]any) error {
-	return g.checkFileArgsAtRoot(toolName, args, g.root)
-}
-
+// checkFileArgsAtRoot enforces the denied-path and (for file_write)
+// writable-path rules against a "path" string argument, when present, and —
+// for tools like file_glob whose schema has no "path" at all, only a
+// "pattern" — against the glob pattern itself. Checking a glob pattern
+// against DeniedPaths is necessarily a heuristic (matchesAnyGlob is a
+// pragmatic matcher, not a full glob-overlap solver: an overly broad pattern
+// like "**/*" that would incidentally sweep up a denied file isn't caught),
+// but it closes the direct case of an agent explicitly globbing for a denied
+// file, e.g. file_glob with pattern="**/.env".
 func (g *Guard) checkFileArgsAtRoot(toolName string, args map[string]any, root string) error {
 	path, hasPath := args["path"].(string)
 	pattern, hasPattern := args["pattern"].(string)

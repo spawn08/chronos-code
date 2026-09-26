@@ -220,7 +220,7 @@ func TestIndexScopeNeverRunsGo(t *testing.T) {
 	}
 	run()
 	// Edits (including a signature change) must not reach the toolchain either.
-	writeTree(t, root, map[string]string{"service.go": strings.Replace(payFiles["service.go"], "amount int", "amount int64", -1)})
+	writeTree(t, root, map[string]string{"service.go": strings.ReplaceAll(payFiles["service.go"], "amount int", "amount int64")})
 	if err := scope.Engine().Sync(ctx); err != nil {
 		t.Fatal(err)
 	}

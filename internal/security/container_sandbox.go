@@ -60,7 +60,7 @@ func NewContainerShellSandbox(ctx context.Context, workspace string, policy Sand
 	}
 	info, err := os.Stat(socket)
 	if err != nil || info.Mode()&os.ModeSocket == 0 {
-		return nil, fmt.Errorf("Docker socket unavailable: %w", ErrMandatorySandboxUnavailable)
+		return nil, fmt.Errorf("no Docker socket available: %w", ErrMandatorySandboxUnavailable)
 	}
 	canonicalSocket, err := filepath.EvalSymlinks(socket)
 	if err != nil {
@@ -71,7 +71,7 @@ func NewContainerShellSandbox(ctx context.Context, workspace string, policy Sand
 		return nil, fmt.Errorf("scope Docker socket: %w", err)
 	}
 	if relativeSocket == "." || (!filepath.IsAbs(relativeSocket) && relativeSocket != ".." && !strings.HasPrefix(relativeSocket, ".."+string(filepath.Separator))) {
-		return nil, fmt.Errorf("Docker socket is inside the mounted workspace: %w", ErrMandatorySandboxUnavailable)
+		return nil, fmt.Errorf("the Docker socket is inside the mounted workspace: %w", ErrMandatorySandboxUnavailable)
 	}
 	if os.Getuid() == 0 {
 		return nil, fmt.Errorf("root-owned unattended workspace is unsupported: %w", ErrMandatorySandboxUnavailable)

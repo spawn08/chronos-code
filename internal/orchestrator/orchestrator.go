@@ -298,11 +298,11 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	setupTracing(store, agents)
 
-	projectDir, userDir, discoverErr := config.Discover()
+	_, userDir, discoverErr := config.Discover()
 	if discoverErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: discover project config dir: %v (falling back to embedded defaults)\n", discoverErr)
 	}
-	projectDir = paths.LegacyDir
+	projectDir := paths.LegacyDir
 
 	sessionMgr := session.NewManager(store, dsn)
 	sessions := setupSessions(ctx, cfg, sessionMgr, agents, resumeSessionID)

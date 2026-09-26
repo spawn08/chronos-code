@@ -119,7 +119,7 @@ func (m *Manager) writeReceipt(receipt IntegrationReceipt) error {
 		return fmt.Errorf("create integration receipt: %w", err)
 	}
 	defer os.Remove(tmp.Name())
-	if err := tmp.Chmod(0o600); err == nil {
+	if err = tmp.Chmod(0o600); err == nil {
 		_, err = tmp.Write(data)
 		if err == nil {
 			err = tmp.Sync()

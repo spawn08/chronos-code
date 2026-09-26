@@ -59,7 +59,7 @@ func lex(src []byte, hashComments bool) []token {
 			}
 		case c == '/' && i+1 < len(src) && src[i+1] == '*':
 			i += 2
-			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+			for i+1 < len(src) && (src[i] != '*' || src[i+1] != '/') {
 				if src[i] == '\n' {
 					line++
 				}
@@ -70,9 +70,10 @@ func lex(src []byte, hashComments bool) []token {
 			start, l := i+1, line
 			i++
 			for i < len(src) && src[i] != c {
-				if src[i] == '\\' {
+				switch src[i] {
+				case '\\':
 					i++
-				} else if src[i] == '\n' {
+				case '\n':
 					line++
 				}
 				i++
@@ -212,9 +213,10 @@ func extractIDL(f *facts.File, src []byte, syn idlSyntax) {
 			depth := 0
 			for ; end < len(toks); end++ {
 				tx := toks[end].text
-				if tx == "(" {
+				switch tx {
+				case "(":
 					depth++
-				} else if tx == ")" {
+				case ")":
 					depth--
 				}
 				if depth == 0 && (tx == ";" || tx == "{" || tx == "}" || tx == "," && syn.rpcWord == "") {

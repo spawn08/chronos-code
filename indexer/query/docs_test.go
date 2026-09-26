@@ -115,14 +115,14 @@ func TestDocumentSectionsAndMentions(t *testing.T) {
 	// Sections are found by search, by their heading and their text.
 	found := false
 	for _, h := range v.Search("store saves orders", 5) {
-		found = found || h.Symbol.Name == "Store" && h.Symbol.Kind == facts.KindSection
+		found = found || h.Name == "Store" && h.Kind == facts.KindSection
 	}
 	if !found {
 		t.Errorf("search misses the Store section")
 	}
 	found = false
 	for _, h := range v.Search("SHOP-123 follow up", 5) {
-		found = found || h.Symbol.File == "notes/todo.txt"
+		found = found || h.File == "notes/todo.txt"
 	}
 	if !found {
 		t.Errorf("search misses the text file")

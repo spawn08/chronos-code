@@ -191,9 +191,6 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 	if limit <= 0 || counter == nil || protectedPrefix < 0 {
 		return messages, nil
 	}
-	if protectedPrefix > len(messages) {
-		protectedPrefix = len(messages)
-	}
 	// Work on a copy so we don't mutate the original slice.
 	msgs := make([]model.Message, len(messages))
 	copy(msgs, messages)

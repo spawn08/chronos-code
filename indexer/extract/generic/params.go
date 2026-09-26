@@ -299,17 +299,12 @@ func closeQuote(text []byte, j int) int {
 	return -1
 }
 
-// callArgs returns facts.Ref.Args and facts.Ref.ArgTypes for the call or
-// instantiation node n by the pack's call rule: 1 + the argument count
-// (0 when the pack has no rule, no argument list is found or it contains
-// a syntax error), and a type hint per argument (see argHint).
-func (w *walker) callArgs(n *gts.Node) (uint8, string) {
-	args, types, _ := w.callArgsLambdas(n)
-	return args, types
-}
-
-// callArgsLambdas is callArgs that also returns the call's lambda
-// arguments (trailing or in the list), for facts.Ref.Lambda.
+// callArgsLambdas returns facts.Ref.Args and facts.Ref.ArgTypes for the
+// call or instantiation node n by the pack's call rule: 1 + the argument
+// count (0 when the pack has no rule, no argument list is found or it
+// contains a syntax error), and a type hint per argument (see argHint).
+// It also returns the call's lambda arguments (trailing or in the list),
+// for facts.Ref.Lambda.
 func (w *walker) callArgsLambdas(n *gts.Node) (uint8, string, []*gts.Node) {
 	rule := w.pk.Calls
 	if n == nil || len(rule.Arguments) == 0 {

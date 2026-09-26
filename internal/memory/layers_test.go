@@ -468,9 +468,10 @@ func TestLayerToolsValidationAndBoundOptions(t *testing.T) {
 	for _, override := range []string{"project_id", "tenant_id", "user_id", "organization_id", "session_id", "semantic_enabled", "budget"} {
 		for _, name := range []string{"memory_remember", "memory_recall", "memory_forget"} {
 			args := rememberLayerArgs()
-			if name == "memory_recall" {
+			switch name {
+			case "memory_recall":
 				args = map[string]any{"scope": "project"}
-			} else if name == "memory_forget" {
+			case "memory_forget":
 				args = map[string]any{"scope": "project", "id": r.ID}
 			}
 			args[override] = "foreign"

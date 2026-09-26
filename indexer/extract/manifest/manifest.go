@@ -627,10 +627,10 @@ func (x *extractor) bazel(src []byte) {
 				if pkg == "" {
 					pkg = "."
 				}
-			case strings.HasPrefix(label, ":"):
-				continue // the file's own package
 			default:
-				continue // another repository or cell (@x//a, cell//a)
+				// :c is the file's own package; @x//a and cell//a are
+				// another repository or cell.
+				continue
 			}
 			x.add(facts.ImportDepend, "", pkg)
 		}

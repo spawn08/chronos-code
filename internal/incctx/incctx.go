@@ -364,7 +364,6 @@ func WrapGrep(a *agent.Agent, root string) {
 		}
 
 		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0)}
-		err = nil
 		if info.IsDir() {
 			err = search.walk(ctx, resolvedPath, 0)
 		} else if info.Mode().IsRegular() {

@@ -58,7 +58,7 @@ func Query(q string) []string {
 
 // Words splits s into runs of letters, digits and '_'.
 func Words(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool { return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_') })
+	return strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' })
 }
 
 // Subwords splits an identifier at underscores and case changes:

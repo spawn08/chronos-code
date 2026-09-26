@@ -513,7 +513,7 @@ func TestDeliveryRunnableAndWaitingEnumeration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		delivery = moveDeliveryToState(t, store, admission.Scope, delivery, target, admission.Event.OccurredAt)
+		moveDeliveryToState(t, store, admission.Scope, delivery, target, admission.Event.OccurredAt)
 	}
 	runnable, err := store.ListRunnable(ctx, DeliveryScope{TenantID: "tenant", RepositoryID: "repo"})
 	if err != nil {

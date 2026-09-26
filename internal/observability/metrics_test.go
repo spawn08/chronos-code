@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -42,10 +43,10 @@ func TestHookRecordsRetryMetadataWithoutPayload(t *testing.T) {
 	r := NewRegistry()
 	h := NewHook(r)
 	event := &hooks.Event{Type: hooks.EventModelCallBefore, Name: "provider-a", Input: "secret", Metadata: map[string]any{"correlation_id": "call-1"}}
-	_ = h.Before(nil, event)
+	_ = h.Before(context.TODO(), event)
 	event.Type = hooks.EventModelCallAfter
 	event.Metadata["retry_count"] = 1
-	_ = h.After(nil, event)
+	_ = h.After(context.TODO(), event)
 	var output bytes.Buffer
 	_ = r.WritePrometheus(&output)
 	if !strings.Contains(output.String(), `chronos_code_provider_retries_total{provider="provider-a"} 1`) {

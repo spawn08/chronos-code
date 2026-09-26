@@ -256,29 +256,21 @@ func storeInputArtifact(ctx context.Context, root, kind, content string) (string
 	defer f.Close()
 	for len(content) > 0 {
 		if err := ctx.Err(); err != nil {
-			os.Remove(path)
+			_ = os.Remove(path)
 			return "", err
 		}
 		n := min(len(content), 32<<10)
 		if _, err := io.WriteString(f, content[:n]); err != nil {
-			os.Remove(path)
+			_ = os.Remove(path)
 			return "", fmt.Errorf("write input artifact: %w", err)
 		}
 		content = content[n:]
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return "", fmt.Errorf("close input artifact: %w", err)
 	}
 	return path, nil
-}
-
-func readWorkspaceFile(root, token string) (string, []byte, error) {
-	rel, data, size, err := readWorkspaceExcerpt(context.Background(), root, token, maxAttachBytes)
-	if err == nil && int64(len(data)) < size {
-		data = append(data, []byte("\n... [truncated]")...)
-	}
-	return rel, data, err
 }
 
 func readWorkspaceExcerpt(ctx context.Context, root, token string, limit int) (string, []byte, int64, error) {

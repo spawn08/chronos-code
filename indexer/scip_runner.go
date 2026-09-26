@@ -421,6 +421,9 @@ func (r *scipRunner) runCommand(ctx context.Context, s scipSource) error {
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "sh", "-c", s.Command)
 	cmd.Dir = filepath.Join(r.e.opts.Root, filepath.FromSlash(s.dir))
+	// Killing sh on cancel can leave its children holding the output pipes;
+	// bound how long Wait blocks on them so Close stays prompt.
+	cmd.WaitDelay = 2 * time.Second
 	var out tailBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	r.e.opts.Logf("indexer: scip: running %q", s.Command)

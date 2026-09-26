@@ -130,7 +130,7 @@ func TestPreciseWithoutToolchain(t *testing.T) {
 // command runs, and Close stops it.
 func TestPreciseNeverBlocksEdits(t *testing.T) {
 	fake := t.TempDir()
-	script := "#!/bin/sh\nsleep 30\n"
+	script := "#!/bin/sh\nexec sleep 30\n"
 	if err := os.WriteFile(filepath.Join(fake, "go"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -309,9 +309,10 @@ func TestRuntimeNewOwnsSharedCustomAndAsyncResources(t *testing.T) {
 	for _, id := range []string{"peer", "custom", "stateless"} {
 		ac := cfg.Agents[0]
 		ac.ID = id
-		if id == "custom" {
+		switch id {
+		case "custom":
 			ac.Storage = agent.StorageConfig{Backend: "sqlite", DSN: filepath.Join(root, "custom.db")}
-		} else if id == "stateless" {
+		case "stateless":
 			ac.Storage = agent.StorageConfig{Backend: "none"}
 		}
 		cfg.Agents = append(cfg.Agents, ac)
