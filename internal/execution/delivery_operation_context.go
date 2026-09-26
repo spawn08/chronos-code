@@ -22,6 +22,18 @@ func (e *Execution) PriorOperations(ctx context.Context) ([]Operation, error) {
 	return e.store.Operations(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
 }
 
+func (e *Execution) CoversOperation(ctx context.Context, op Operation) (bool, error) {
+	return e.store.CoversOperation(ctx, e.Lease, op)
+}
+
+func (e *Execution) CheckpointedCallCount(ctx context.Context) (int64, error) {
+	return e.store.CheckpointedCallCount(ctx, e.Lease)
+}
+
+func (e *Execution) CheckpointedCallsByNode(ctx context.Context) (map[string]int64, error) {
+	return e.store.CheckpointedCallsByNode(ctx, e.Lease)
+}
+
 func (e *Execution) PriorAttempts(ctx context.Context) ([]AttemptRecord, error) {
 	return e.store.Attempts(ctx, e.Lease.Delivery.DeliveryScope, e.Lease.Delivery.ID)
 }

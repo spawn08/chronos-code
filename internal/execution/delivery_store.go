@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const deliverySchemaVersion = 11
+const deliverySchemaVersion = 12
 
 var deliveryMigrations = []struct {
 	version  int
@@ -31,6 +31,7 @@ var deliveryMigrations = []struct {
 	{version: 9, checksum: deliverySchemaChecksum(deliverySchemaV9), sql: deliverySchemaV9},
 	{version: 10, checksum: deliverySchemaChecksum(deliverySchemaV10), sql: deliverySchemaV10},
 	{version: 11, checksum: deliverySchemaChecksum(deliverySchemaV11), sql: deliverySchemaV11},
+	{version: 12, checksum: deliverySchemaChecksum(deliverySchemaV12), sql: deliverySchemaV12},
 }
 
 // DeliveryStore is the SQLite-backed durable delivery repository.
@@ -1375,3 +1376,14 @@ const deliverySchemaV10 = `ALTER TABLE delivery_operations ADD COLUMN node_id TE
 // (for example one member of a checkpointed team) so resume can prove which
 // member's work is already covered by a durable receipt.
 const deliverySchemaV11 = `ALTER TABLE delivery_usage_calls ADD COLUMN node_id TEXT NOT NULL DEFAULT '';`
+
+const deliverySchemaV12 = `
+CREATE TABLE delivery_tool_rounds (
+  tenant_id TEXT NOT NULL, repository_id TEXT NOT NULL, delivery_id TEXT NOT NULL,
+  invocation_id TEXT NOT NULL, round_number INTEGER NOT NULL, attempt INTEGER NOT NULL,
+  role_id TEXT NOT NULL, node_id TEXT NOT NULL, goal_revision INTEGER NOT NULL,
+  input_fingerprint TEXT NOT NULL, model_id TEXT NOT NULL, messages_json TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, repository_id, delivery_id, invocation_id, round_number),
+  FOREIGN KEY (tenant_id, repository_id, delivery_id) REFERENCES delivery_deliveries ON DELETE CASCADE
+);
+CREATE INDEX idx_delivery_tool_rounds_resume ON delivery_tool_rounds (tenant_id, repository_id, delivery_id, role_id, node_id, attempt, round_number);`

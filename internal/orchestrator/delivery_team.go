@@ -96,8 +96,25 @@ func (o *Orchestrator) runDurableTeam(ctx context.Context, id, message string, a
 		checkpoint = loaded
 	}
 	if checkpoint.Version != 1 || checkpoint.TeamID != id || checkpoint.GoalRevision != attempt.Lease.Delivery.CurrentGoalRevision ||
-		!slices.Equal(checkpoint.Agents, t.Order) || len(checkpoint.Responses) > len(t.Order) || checkpoint.ReconciledCalls != usage.ReconciledCalls {
+		!slices.Equal(checkpoint.Agents, t.Order) || len(checkpoint.Responses) > len(t.Order) || checkpoint.ReconciledCalls > usage.ReconciledCalls {
 		return "", execution.ErrEffectNeedsReconciliation
+	}
+	if extra := usage.ReconciledCalls - checkpoint.ReconciledCalls; extra > 0 {
+		if len(checkpoint.Responses) == len(t.Order) {
+			return "", execution.ErrEffectNeedsReconciliation
+		}
+		byNode, err := attempt.UsageByNode(ctx)
+		if err != nil {
+			return "", err
+		}
+		checkpointed, err := attempt.CheckpointedCallsByNode(ctx)
+		if err != nil {
+			return "", err
+		}
+		node := teamMemberNode(id, len(checkpoint.Responses))
+		if byNode[node].Reconciled != extra || checkpointed[node] != extra {
+			return "", execution.ErrEffectNeedsReconciliation
+		}
 	}
 	ctx, err = o.executionTaskContext(ctx, "team:"+id)
 	if err != nil {
@@ -194,6 +211,10 @@ func (o *Orchestrator) runDurableParallelTeam(ctx context.Context, t *team.Team,
 	if err != nil {
 		return "", err
 	}
+	checkpointed, err := attempt.CheckpointedCallsByNode(ctx)
+	if err != nil {
+		return "", err
+	}
 	members := make(map[string]int, len(t.Order))
 	for step := range t.Order {
 		members[teamMemberNode(t.ID, step)] = step
@@ -208,7 +229,7 @@ func (o *Orchestrator) runDurableParallelTeam(ctx context.Context, t *team.Team,
 			continue
 		}
 		receipt, done := checkpoint.Members[step]
-		if !isMember || !done || receipt.ReconciledCalls != counts.Reconciled {
+		if !isMember || (done && receipt.ReconciledCalls != counts.Reconciled) || (!done && checkpointed[node] != counts.Reconciled) {
 			return "", execution.ErrEffectNeedsReconciliation
 		}
 		covered += counts.Reconciled

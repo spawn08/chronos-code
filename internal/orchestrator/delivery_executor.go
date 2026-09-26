@@ -82,6 +82,38 @@ func (e *ReadOnlyDeliveryExecutor) Execute(ctx context.Context, executionAttempt
 	}
 	for _, op := range operations {
 		if op.Attempt != executionAttempt.Lease.Attempt {
+			covered, err := executionAttempt.CoversOperation(ctx, op)
+			if err != nil {
+				return deliveryWait("effect-reconciliation", err)
+			}
+			if covered {
+				if op.ReplayClass == execution.ReplayFingerprintedWrite {
+					if e.orchestrator.workspace == nil {
+						return deliveryWait("effect-reconciliation", execution.ErrEffectNeedsReconciliation)
+					}
+					state, err := observeFileState(e.orchestrator.workspace.Root, op.ObservationPath)
+					if err != nil || !state.exists || state.hash != op.OutputFingerprint {
+						return deliveryWait("effect-reconciliation", errors.Join(err, execution.ErrEffectNeedsReconciliation))
+					}
+				}
+				if op.ReplayClass == execution.ReplayIdempotentExternal {
+					role := e.orchestrator.agents[op.RoleID]
+					if role == nil || role.Tools == nil {
+						return deliveryWait("effect-reconciliation", execution.ErrEffectNeedsReconciliation)
+					}
+					definition, ok := role.Tools.Get(op.Kind)
+					if !ok || definition.Recovery == nil {
+						return deliveryWait("effect-reconciliation", execution.ErrEffectNeedsReconciliation)
+					}
+					result, observed, err := definition.Recovery.Observe(ctx, op.ObservationDescriptor, op.EffectKey)
+					data, encodeErr := json.Marshal(result)
+					hash := sha256.Sum256(data)
+					if err != nil || encodeErr != nil || !observed || hex.EncodeToString(hash[:]) != op.OutputFingerprint {
+						return deliveryWait("effect-reconciliation", errors.Join(err, encodeErr, execution.ErrEffectNeedsReconciliation))
+					}
+				}
+				continue
+			}
 			if op.Status == execution.OperationRunning && op.ReplayClass == execution.ReplayFingerprintedWrite && e.orchestrator.workspace != nil {
 				root, err := filepath.EvalSymlinks(e.orchestrator.workspace.Root)
 				if err == nil {
@@ -132,7 +164,10 @@ func (e *ReadOnlyDeliveryExecutor) Execute(ctx context.Context, executionAttempt
 		return deliveryWait("usage-reconciliation", execution.ErrUsageOutcomeUnknown)
 	}
 	if executionAttempt.Lease.Attempt > 1 && usage.ReconciledCalls > 0 && !strings.HasPrefix(delivery.PolicyReference, execution.ReadOnlyTeamPolicyPrefix) {
-		return deliveryWait("provider-reconciliation", execution.ErrEffectNeedsReconciliation)
+		count, err := executionAttempt.CheckpointedCallCount(ctx)
+		if err != nil || count != usage.ReconciledCalls {
+			return deliveryWait("provider-reconciliation", errors.Join(err, execution.ErrEffectNeedsReconciliation))
+		}
 	}
 	if _, hasIntent, err := memory.ParseIntent(delivery.Goals[len(delivery.Goals)-1].Statement); err != nil || hasIntent {
 		return deliveryWait("read-only-mode", fmt.Errorf("memory mutations are unavailable in read-only delivery: %w", execution.ErrInvalidDelivery))
@@ -147,6 +182,7 @@ func (e *ReadOnlyDeliveryExecutor) Execute(ctx context.Context, executionAttempt
 		SessionID: "delivery:" + string(delivery.ID), PolicyRevision: delivery.PolicyReference,
 	})
 	ctx = executionAttempt.OperationContext(ctx)
+	ctx = agent.WithToolRoundJournal(ctx, deliveryToolRoundJournal{attempt: executionAttempt, roles: e.orchestrator.agents})
 	ctx = agent.WithModelRetriesDisabled(ctx)
 	ctx = security.WithEffectGrant(ctx, security.EffectRead)
 	ctx = security.WithMandatorySandbox(ctx, e.sandbox)

@@ -345,7 +345,7 @@ The index is the authoritative checklist. Each task may have several verified su
 | [x] | F02 | Workspace-consistent reads, analysis, and effects | F01 |
 | [x] | F03 | Effect authority, sandbox, MCP and tenant boundaries | F01, F02 |
 | [x] | F04 | Durable delivery domain and schema | F00 |
-| [ ] | F05 | Durable worker lifecycle and common executor | F01, F03, F04 |
+| [x] | F05 | Durable worker lifecycle and common executor | F01, F03, F04 |
 | [ ] | F06 | Operation journal and effect reconciliation | F04, F05 |
 | [ ] | F07 | Accepted artifact lineage and integration | F02, F04, F06 |
 | [x] | F08 | Accurate cumulative accounting and admission | F01, F04 |
@@ -748,13 +748,13 @@ This section is implementation progress, not runtime application data. Update it
 
 ### Current checkpoint
 
-- Active task: F05 (the only ready task). Remaining gaps: member checkpointing for non-sequential (parallel/coordinator/hierarchy) teams, a production-enabled public plan-worker admission path in `serve`, one worker contract covering plan/team/child work, and an uncontended full race gate.
+- Active task: F06 (the only ready task). Complete assistant/tool rounds now have a lease-fenced checkpoint and a replacement-worker resume path, verified by read/observed-effect restart and the affected race suites. Incomplete rounds and ambiguous effects still park. Generic API effects still lack destination idempotency/observation adapters, and no production external-API adapter is configured beyond `server.delivery_http`.
 - F05 acceptance scope (decided 2026-09-26): F05's gate is read-only and scratch-write plan/team execution through production construction and worker start. Write-enabled plan admission stays disabled until F10, because F10 depends on F05 through F06/F07 and a write gate inside F05 would be circular. F05's durable team scope is sequential and parallel; coordinator, router, swarm and hierarchy teams move to F11 under the replay-based step-log design recorded there.
-- Completed tasks: F00–F04, F08, F09a (F03's tested unattended isolation backend is macOS Docker Desktop only; unsupported platforms fail admission).
+- Completed tasks: F00–F05, F08, F09a (F03's tested unattended isolation backend is macOS Docker Desktop only; unsupported platforms fail admission).
 - Runtime budget continuation implemented: in-process for attached interactive runs (F09a, `long_running.mode: renew`); durable detached continuation (F09): no. F09a follow-ups still open: nonterminal "window renewed" event, explicit total-token ceiling, team members still use the fixed SDK cap.
 - Immediate hardening: verified truthful bundled routing, role-aware model floors, tester role, structured specialist handoffs, and prompt/runtime contract tests.
 - Baseline since the last entries: `1047906` fixed the previously recorded TUI model-picker pair and the integration 8-vs-9 context-source failure (and widened the CI graph-index budget); those are no longer known failures. `fcd5f81` pinned `release/chronos.version` to Chronos `a5ae191` (current sibling HEAD, clean tree), but `go.mod` still uses `replace => ../chronos`, so reproducible CI pinning (F00/Q02) is partial. `d19639b` added platform-specific worktree integration locks (`integration_lock_{unix,windows}.go`). Later commits (`5a93db2`..`c40573d`) are graph/indexer work outside this guide.
-- Next action: commit the Chronos `sdk/team` parallel-checkpoint change and advance `release/chronos.version` (Chronos Code no longer compiles against the pinned `a5ae191`); resolve whether coordinator/hierarchy checkpointing stays in F05 or moves to F11; run an uncontended `make test` to close F05; then F06 provider/adapter continuation and F07 read-set receipts/artifact retention before F10.
+- Next action: F06 operation journal and effect reconciliation (provider-response/tool-result rehydration across a crash, fault-injection gates). Before publishing anything: commit the Chronos `sdk/team` parallel-checkpoint change and advance `release/chronos.version`, because Chronos Code no longer compiles against the pinned `a5ae191` (user deferred commits on 2026-09-26).
 - Decided 2026-09-26 (user, option a): the candidate plan worker is gated on its own proven prerequisites (plan store, controller, implementation agent, worktree manager, repository root). The interactive `planning:closed-loop-ppd` capability stays with F13 and still gates the write-mode plan executor.
 - Known local integration work: the documented plan HTTP handler source is absent from this checkout; `docs/plan-http-api.md` is documentation for a separate unfinished surface.
 - Blocking decisions: none for baseline investigation; paid evaluation, publication, or consequential changes require existing host/user authority.
@@ -1087,6 +1087,38 @@ Evidence / artifact references: `TestParallelCheckpointResumesOnlyUncheckpointed
 Failure or remaining uncertainty: coordinator, router, swarm and hierarchy teams still have no member checkpoints and remain refused for durable admission. Calls recorded before schema v11 have `node_id = ''`, so a pre-upgrade in-flight parallel team parks rather than resumes (none existed, because parallel admission was refused before this change). `executeAgent`'s non-streaming fallback to `Agent.Run` after a failed call is inherited from sequential teams and still bills a second attributed call. Full `make test` not rerun.
 Capabilities: implemented: yes / enabled: opt-in read-only worker for sequential and parallel teams / evaluated: deterministic race and crash/restart tests / released: no
 Next exact action: commit the Chronos change and advance `release/chronos.version` (needs user authorization); decide whether coordinator/hierarchy member checkpointing belongs to F05 or to F11, whose scope already names all four patterns; then run an uncontended `make test` to close F05
+
+### 2026-09-26 — F05 gate and completion
+
+Date / implementing agent: 2026-09-26 / OpenCode
+Task / substep: F05 / full gate and completion against its acceptance criteria (scope as decided in the checkpoint)
+State: verified; F05 complete
+Chronos Code revision + relevant working-tree changes: `c40573d` plus the 2026-09-26 F05 increments (uncommitted); concurrent `internal/indexer/` work present in the tree and included in the gate
+Chronos revision + relevant working-tree changes: `a5ae191` plus uncommitted `sdk/team/parallel.go` and `sdk/team/parallel_checkpoint_test.go`. Commits deferred by the user; the CI pin does not include these changes yet.
+User work preserved / integration constraints: no commits, pushes or provider calls
+Decision / hypothesis being resolved: whether F05's acceptance holds without coordinator/hierarchy team checkpointing. User decision 2026-09-26: those patterns move to F11 under the replay-based step-log design recorded in F11.
+Files changed: this guide only (F11 design section, F05 scope note, index, checkpoint)
+Production path wired: unchanged from the preceding F05 entries
+Checks executed (exact commands, cwd, actual result): Chronos Code `make test` (full `-race -count=1` suite, no other test load) passed every package, including orchestrator, integration, server, execution, plan, cli, tui, graph and indexer. Chronos `go test ./sdk/agent ./sdk/harness ./sdk/team ./sdk/memory ./engine/graph ./engine/queue ./engine/tool/... ./storage/adapters/sqlite -race -count=1` passed, and `go build ./...` passed.
+Evidence / artifact references: acceptance mapping, with each criterion's test:
+- production construction plus worker start executes an admitted fixture: `TestServerStartsAndStopsOptionalDeliveryWorker`, `TestCandidatePlanAdmissionFromProductionStartup`, `TestAdmittedPlanWorkerStartExecutesPersistedNodesAndParksForAcceptance`
+- kill/restart reclaim, and a stale worker cannot finalize or integrate: `TestReplacementPlanWorkerExecutesOnlyIncompleteAcceptedDependency`, `TestPlanNodeExecutorCannotIntegrateAfterDeliveryLeaseExpires`, `TestDeliveryClaimCannotStealLeaseDuringFencedIntegration`
+- waiting states survive restart and restarts resume only incomplete work: `TestReadOnlyTeamWorkerRestartSkipsCheckpointedMember`, `TestReadOnlyParallelTeamRestartRunsOnlyMemberWithoutReceipt`, `TestReadOnlyParallelTeamParksBilledMemberWithoutReceipt`
+- detached work outlives the request: `TestReadOnlyDeliveryAdmissionQueuesAtomicallyAndOutlivesRequest`
+- explicit cancel stops admission: `TestExplicitDeliveryCancelStopsPlanNodeAdmission`
+- no plan stuck on a vanished owner: `TestPlanReaperRecoversExpiredOwnersAcrossRestartWithoutTouchingLiveTenants`
+- one routed worker for chat, team and plan kinds: `TestRoutedDeliveryExecutorParksKindsWithoutAnInstalledExecutor`
+- write capability stays unavailable: `TestPlanExecutorsRejectTheOtherAdmissionPolicy`
+Failure or remaining uncertainty: the implementation depends on uncommitted Chronos changes, so publishing requires committing them and advancing `release/chronos.version`. Coordinator, router, swarm and hierarchy durability belongs to F11. Write-enabled delivery remains gated on F06/F07/F10. `executeAgent`'s non-streaming fallback still makes a second billed (attributed) call after a failed call.
+Capabilities: implemented: yes / enabled: opt-in `serve --delivery-read-only-worker` and `--delivery-plan-worker` (read-only, sequential/parallel teams, candidate plans) / evaluated: full race suites in both repositories / released: no
+Next exact action: F06, starting with automatic rehydration of an observed provider response and tool-result pair across a worker crash, plus the fault-injection matrix in F06's acceptance
+
+### 2026-09-26 — F06 complete-round checkpoint and crash gates
+
+State: implementation in progress; F06 not yet complete.
+Chronos change: `sdk/agent` checkpoints full assistant/tool rounds and restores provider-owned continuation types when resuming blocking chat or session chat. Chronos Code change: schema v12 stores those rounds under a live delivery lease, checks operation coverage and billed-call counts before a replacement resumes, and keeps uncheckpointed/ambiguous effects parked. Sequential and parallel team member checks accept only fully checkpointed extra calls.
+Checks executed: `go test -race ./sdk/agent ./sdk/team -count=1` and `go build ./...` in Chronos passed. `go test -race ./internal/execution ./internal/orchestrator -count=1` and `go build ./...` in Chronos Code passed after the concurrent graph/config migration settled. The four crash gates (`TestOperationJournalCrashBoundaries`), SDK chat/session recovery (`TestToolRoundJournalResumesWithoutRepeatingReplyOrTool`), and worker restart (read and observed effect, including billed provider calls, `TestWorkerRestartResumesCheckpointedAssistantAndToolResult`) passed. `git diff --check` passed in both repositories. No graph/config files were modified by this increment.
+Next exact action: address F06's remaining destination adapters and incomplete-round/provider-only recovery decisions without treating an ambiguous effect as success; plan-node continuation still parks incomplete nodes pending its own receipt protocol.
 
 ### Per-increment record template
 
