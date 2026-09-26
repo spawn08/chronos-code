@@ -10,3 +10,5 @@ imports:
 tests:
   files: ["*_test.sh", "test_*.sh", "*.bats"]
   dirs: [tests, test]
+params:
+  none: true

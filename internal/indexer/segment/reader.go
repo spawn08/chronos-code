@@ -175,6 +175,9 @@ func (s *Segment) validate() error {
 		if int(le.Uint32(b[32:])) >= s.nFiles || int(b[44]) >= len(facts.Kinds) || b[46] >= facts.NumVisibility {
 			return corrupt("symbol %d fields", i)
 		}
+		if !okRef(b[64:]) || b[45]&flagArity != 0 && (b[56] > facts.MaxArity || b[57] != varArgs && b[57] < b[56]) {
+			return corrupt("symbol %d arity", i)
+		}
 	}
 	if err := s.validateSearch(okRef); err != nil {
 		return err
@@ -205,9 +208,12 @@ func (s *Segment) validate() error {
 		b := s.refs[i*refRecSize:]
 		c := le.Uint32(b[20:])
 		f := le.Uint32(b[16:])
-		if !okRef(b[0:]) || !okRef(b[8:]) || int(f) >= s.nFiles || b[31] >= facts.NumRefKinds ||
+		if !okRef(b[0:]) || !okRef(b[8:]) || !okRef(b[36:]) || int(f) >= s.nFiles || b[31] >= facts.NumRefKinds ||
 			(c != noCaller && (int(c) >= s.nSyms || le.Uint32(s.syms[int(c)*symbolRecSize+32:]) != f)) {
 			return corrupt("ref %d", i)
+		}
+		if l := le.Uint32(b[44:]); l != noCaller && (int(l) >= s.nRefs || int(l) == i || le.Uint32(s.refs[int(l)*refRecSize+16:]) != f) {
+			return corrupt("ref %d lambda", i)
 		}
 	}
 	for i := 0; i < nExps; i++ {
@@ -377,6 +383,12 @@ func (s *Segment) PackageFiles(pkg string) []int {
 // FileDeleted reports whether file i is a tombstone.
 func (s *Segment) FileDeleted(i int) bool { return le.Uint32(s.fileRec(i)[88:])&flagDeleted != 0 }
 
+// FileLangView returns a zero-copy view of file i's language.
+func (s *Segment) FileLangView(i int) string { return s.view(s.fileRec(i)[24:]) }
+
+// FilePkgNameView returns a zero-copy view of file i's declared package.
+func (s *Segment) FilePkgNameView(i int) string { return s.view(s.fileRec(i)[16:]) }
+
 // FilePathView returns a zero-copy view of file i's path.
 func (s *Segment) FilePathView(i int) string { return s.view(s.fileRec(i)) }
 
@@ -430,10 +442,22 @@ func (s *Segment) Symbol(i int) SymbolRec {
 			Name: s.str(b[0:]), Receiver: s.str(b[8:]), Signature: s.str(b[16:]), Doc: s.str(b[24:]),
 			Line: int(le.Uint32(b[36:])), EndLine: int(le.Uint32(b[40:])), Kind: facts.Kinds[b[44]],
 			Exported: b[45]&flagExported != 0, Visibility: b[46], Modifiers: le.Uint32(b[52:]),
+			Params: arity(b), ParamList: s.str(b[64:]),
 		},
 		File:   int(le.Uint32(b[32:])),
 		Parent: s.SymbolParent(i),
 	}
+}
+
+func arity(b []byte) facts.Arity {
+	if b[45]&flagArity == 0 {
+		return facts.Arity{}
+	}
+	a := facts.Arity{Min: int(b[56]), Max: int(b[57]), Known: true}
+	if b[57] == varArgs {
+		a.Max = facts.VarArgs
+	}
+	return a
 }
 
 // SymbolFile returns the file index of symbol i without decoding it.
@@ -486,7 +510,13 @@ type RefRec struct {
 	QualKind        uint8
 	File, Enclosing int
 	Line, Col       int
+	Args            uint8  // facts.Ref.Args: 1 + the argument count, 0 unknown
+	ArgTypes        string // facts.Ref.ArgTypes
+	Lambda          int    // segment ref index of the call whose lambda contains it, or -1
 }
+
+// NArgs returns the reference's argument count, if it was counted.
+func (r RefRec) NArgs() (int, bool) { return int(r.Args) - 1, r.Args > 0 }
 
 func (s *Segment) refRec(i int) []byte { return s.refs[i*refRecSize : (i+1)*refRecSize] }
 
@@ -497,10 +527,15 @@ func (s *Segment) Ref(i int) RefRec {
 	if c := le.Uint32(b[20:]); c != noCaller {
 		enclosing = int(c)
 	}
-	return RefRec{
+	rec := RefRec{
 		Kind: b[31], Name: s.str(b[0:]), Qualifier: s.str(b[8:]), QualKind: b[30],
 		File: int(le.Uint32(b[16:])), Enclosing: enclosing, Line: int(le.Uint32(b[24:])), Col: int(le.Uint16(b[28:])),
+		Args: b[32], ArgTypes: s.str(b[36:]), Lambda: -1,
 	}
+	if l := le.Uint32(b[44:]); l != noCaller {
+		rec.Lambda = int(l)
+	}
+	return rec
 }
 
 // RefKind returns the kind of reference i without decoding it.
@@ -650,12 +685,21 @@ func (s *Segment) File(i int) *facts.File {
 		}
 		return facts.NoCaller
 	}
-	for _, ri := range s.RefsInFile(i) {
+	refIdx := s.RefsInFile(i)
+	localRef := make(map[int]int, len(refIdx))
+	for k, ri := range refIdx {
+		localRef[ri] = k
+	}
+	for _, ri := range refIdx {
 		r := s.Ref(ri)
-		f.Refs = append(f.Refs, facts.Ref{
+		ref := facts.Ref{
 			Kind: r.Kind, Enclosing: localOf(r.Enclosing), Name: r.Name, Qualifier: r.Qualifier,
-			QualKind: r.QualKind, Line: r.Line, Col: r.Col,
-		})
+			QualKind: r.QualKind, Line: r.Line, Col: r.Col, Args: r.Args, ArgTypes: r.ArgTypes,
+		}
+		if k, ok := localRef[r.Lambda]; ok && r.Lambda >= 0 {
+			ref.Lambda = k + 1
+		}
+		f.Refs = append(f.Refs, ref)
 	}
 	f.Exports = s.Exports(i)
 	for _, h := range s.Hints(i) {

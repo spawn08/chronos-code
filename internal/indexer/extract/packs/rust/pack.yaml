@@ -16,3 +16,5 @@ imports:
 tests:
   dirs: [tests, benches]
   markers: [test, bench]
+params:
+  receiver: [self]

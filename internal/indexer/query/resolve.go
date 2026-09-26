@@ -84,6 +84,10 @@ func (v *View) IncomingCalls(s Symbol) []Incoming {
 		name = facts.BaseType(s.Receiver)
 	}
 	var out []Incoming
+	var ctors *ctorSet
+	if s.Kind == facts.KindConstructor {
+		ctors = v.constructorsOf(s)
+	}
 	for i := 0; i < v.sn.NumSegments(); i++ {
 		seg := v.sn.Segment(i)
 		lo, hi := seg.RefsTo(name)
@@ -97,7 +101,7 @@ func (v *View) IncomingCalls(s Symbol) []Incoming {
 				continue
 			}
 			targets, label := v.resolveRef(i, r)
-			if !targetsInclude(targets, s) {
+			if !targetsInclude(targets, s) || !ctors.selects(s, seg.Ref(r)) {
 				continue
 			}
 			cs := v.symbol(i, caller)
@@ -121,6 +125,50 @@ func targetsInclude(targets []Symbol, s Symbol) bool {
 		}
 	}
 	return false
+}
+
+// ctorSet holds the constructors of one class, to tell which of them a
+// call with a given argument count runs (new T(a, b)).
+type ctorSet struct{ all []Symbol }
+
+// constructorsOf returns the constructors of c's class (same unit and
+// receiver), c included.
+func (v *View) constructorsOf(c Symbol) *ctorSet {
+	set := &ctorSet{}
+	v.eachNamed(c.Name, func(i, k int) {
+		s := v.symbol(i, k)
+		if s.Kind == facts.KindConstructor && s.Package == c.Package && facts.BaseType(s.Receiver) == facts.BaseType(c.Receiver) {
+			set.all = append(set.all, s)
+		}
+	})
+	return set
+}
+
+// selects reports whether constructor c can be the one call site rec runs:
+// in languages with overloading, when the argument count is known and some
+// constructor of the class accepts it, c must accept it too. A definition
+// also accepts what a bodiless declaration with as many parameters accepts
+// (C++ defaults on the declaration). A nil set selects every constructor.
+func (cs *ctorSet) selects(c Symbol, rec segment.RefRec) bool {
+	n, ok := rec.NArgs()
+	if cs == nil || !ok || !overloading[c.Lang] {
+		return true
+	}
+	accepts := func(s Symbol) bool {
+		if s.Params.Accepts(n) {
+			return true
+		}
+		for _, d := range cs.all {
+			if d.Decl && d.Params.Known && d.Params.Max == s.Params.Max && d.Params.Accepts(n) {
+				return true
+			}
+		}
+		return false
+	}
+	if accepts(c) {
+		return true
+	}
+	return !slices.ContainsFunc(cs.all, accepts)
 }
 
 // Kinds a reference can target.
@@ -224,7 +272,10 @@ func (v *View) resolveRef(i, r int) ([]Symbol, string) {
 		return res.targets, res.label
 	}
 	targets, label := v.resolveRefUncached(i, r)
-	targets = definitionsFirst(targets)
+	targets = activeFirst(definitionsFirst(targets))
+	if len(targets) > 1 {
+		targets = callerLast(targets, v.sn.Segment(i).RefEnclosing(r), func(k int) Symbol { return v.symbol(i, k) })
+	}
 	if v.resolved == nil {
 		v.resolved = map[fileKey]resolution{}
 	}
@@ -262,62 +313,197 @@ func (v *View) resolveUnqualified(fc *fileCtx, caller int, rec segment.RefRec, k
 	if lang == "go" && goBuiltins[name] && !v.declaredIn(name, fc.meta.Package) {
 		return nil, ""
 	}
+	fit := func(c []Symbol) []Symbol { return v.fitCall(fc, caller, rec, c, 0) }
+	if lang != "go" {
+		if as := v.importedAs(fc, name, kinds); len(as) > 0 {
+			return capped(fit(as)), ImportResolved
+		}
+	}
+	if rec.Kind == facts.RefCall && rec.Lambda >= 0 {
+		// Inside a lambda with a receiver (Kotlin inOrder(a) { verify(a) }):
+		// the receiver's members come before top-level functions.
+		if ms := v.lambdaReceiverMembers(fc.seg, rec.Lambda, name); len(ms) > 0 {
+			return capped(fit(ms)), TypeHinted
+		}
+	}
 	all := v.named(name, kinds)
 	if len(all) == 0 {
 		// Implicit this and static imports can reach a method even when no
 		// free function exists.
 		if caller >= 0 && implicitThis[lang] && rec.Kind == facts.RefCall {
-			if ms := v.methodsOf(v.receiverOf(fc.seg, caller), name, 0); len(ms) > 0 {
-				return capped(ms), ImportResolved
+			if ms := v.implicitThis(fc, caller, name); len(ms) > 0 {
+				return capped(fit(ms)), ImportResolved
 			}
 		}
 		if rec.Kind == facts.RefCall {
 			if ms := v.importedMembers(fc, name); len(ms) > 0 {
-				return capped(ms), ImportResolved
+				return capped(fit(ms)), ImportResolved
 			}
 			// A lambda with a receiver (Kotlin apply { f() }, Ruby
 			// instance_eval) calls methods of a receiver we cannot see.
 			if implicitReceiver[lang] {
 				if ms := v.named(name, map[string]bool{facts.KindMethod: true}); len(ms) > 0 {
-					return v.labelByName(v.preferVisible(fc, ms), fc.meta.Package)
+					return v.labelByName(v.inBuildDeps(fc, fit(v.preferVisible(fc, ms))), fc.meta.Package)
 				}
 			}
 		}
 		return nil, ""
 	}
 	if same := filter(all, func(s Symbol) bool { return s.File == fc.meta.Path }); len(same) > 0 {
-		return capped(nearestFirst(same, rec.Line)), ImportResolved
+		same = nearestFirst(same, rec.Line)
+		if packageScoped[lang] && rec.Kind == facts.RefCall {
+			// Top-level functions of one package overload each other
+			// across files (Kotlin, Scala): the same-file ones come first.
+			same = append(slices.Clone(same), filter(all, func(s Symbol) bool {
+				return s.File != fc.meta.Path && s.Kind == facts.KindFunc && v.sameUnit(fc, s)
+			})...)
+		}
+		return capped(fit(same)), ImportResolved
 	}
 	if caller >= 0 && implicitThis[lang] && rec.Kind == facts.RefCall {
-		if ms := v.methodsOf(v.receiverOf(fc.seg, caller), name, 0); len(ms) > 0 {
-			return capped(ms), ImportResolved
+		if ms := v.implicitThis(fc, caller, name); len(ms) > 0 {
+			return capped(fit(ms)), ImportResolved
 		}
 	}
 	// Names an import lists explicitly shadow the unit's own declarations,
 	// which shadow names reached by wildcard or whole-module imports (Java
 	// single-type imports, then the package, then on-demand imports; C#
 	// the enclosing namespace before using directives).
-	named, broad := v.importedUnitsFor(fc, name)
-	if in := filter(all, func(s Symbol) bool { return named[s.Package] }); len(in) > 0 {
-		return capped(in), ImportResolved
+	sc := v.importedUnitsFor(fc, name)
+	if in := filter(all, sc.hasNamed); len(in) > 0 {
+		return capped(fit(in)), ImportResolved
 	}
-	if rec.Kind == facts.RefCall && len(named) > 0 {
+	if sc.anyNamed() {
+		// Re-exports: barrels (export … from), Python package __init__
+		// imports, Rust pub use.
+		if in := v.declaredAt(v.reexported(fc, name), kinds); len(in) > 0 {
+			return capped(fit(in)), ImportResolved
+		}
+	}
+	if rec.Kind == facts.RefCall && sc.anyNamed() {
 		if ms := v.importedMembers(fc, name); len(ms) > 0 {
-			return capped(ms), ImportResolved
+			return capped(fit(ms)), ImportResolved
 		}
 	}
 	if unitVisible[lang] {
-		if in := filter(all, func(s Symbol) bool { return s.Package == fc.meta.Package }); len(in) > 0 {
-			return capped(in), ImportResolved
+		if in := filter(all, func(s Symbol) bool { return v.sameUnit(fc, s) }); len(in) > 0 {
+			return capped(fit(in)), ImportResolved
 		}
 	}
-	if in := filter(all, func(s Symbol) bool { return broad[s.Package] }); len(in) > 0 {
-		return capped(in), ImportResolved
+	if in := filter(all, sc.hasBroad); len(in) > 0 {
+		return capped(fit(in)), ImportResolved
 	}
 	if lang == "go" {
 		return nil, ""
 	}
-	return v.labelByName(all, fc.meta.Package)
+	return v.labelByName(v.inBuildDeps(fc, fit(all)), fc.meta.Package)
+}
+
+// sameUnit reports whether s is in the file's unit: its directory, the
+// same declared package or namespace (Java, Kotlin, Scala, C#; C# code
+// also sees its enclosing namespaces), or the same SwiftPM target.
+//
+// In package-scoped languages only top-level declarations are visible by
+// simple name across files: a nested class or a member needs its owner.
+func (v *View) sameUnit(fc *fileCtx, s Symbol) bool {
+	lang := fc.meta.Lang
+	if packageScoped[lang] && s.ParentType {
+		return false
+	}
+	if s.Package == fc.meta.Package {
+		return true
+	}
+	switch {
+	case s.Lang != lang:
+		return false
+	case packageScoped[lang] && fc.meta.PkgName != "" && s.PkgName != "":
+		return s.PkgName == fc.meta.PkgName || lang == "csharp" && strings.HasPrefix(fc.meta.PkgName, s.PkgName+".")
+	case lang == "swift":
+		return v.sameTarget(path.Dir(s.File), path.Dir(fc.meta.Path))
+	}
+	return false
+}
+
+// byArity keeps the candidates of a call or instantiation that accept its
+// argument count, in languages with overloading, when the count is known
+// and some candidate accepts it; otherwise cands is returned unchanged.
+// Candidates of unknown arity (fields, classes, unread parameter lists)
+// always stay. extra is added to the count: 1 for a C# extension method,
+// whose this parameter is the receiver.
+//
+// C++ default arguments are written on the declaration, not on the
+// out-of-line definition, so a definition also accepts what a bodiless
+// declaration of the same member with as many parameters accepts. Apply
+// byArity before definitionsFirst, which drops those declarations.
+func byArity(lang string, rec segment.RefRec, cands []Symbol, extra int) []Symbol {
+	n, ok := rec.NArgs()
+	if !ok || len(cands) < 2 || !overloading[lang] {
+		return cands
+	}
+	n += extra
+	type member struct {
+		key string
+		max int
+	}
+	var declared map[member]bool // declarations accepting n, by member and parameter count
+	for _, s := range cands {
+		if s.Decl && s.Params.Known && s.Params.Accepts(n) {
+			if declared == nil {
+				declared = map[member]bool{}
+			}
+			declared[member{s.Kind + "\x00" + s.Qualified(), s.Params.Max}] = true
+		}
+	}
+	fit := filter(cands, func(s Symbol) bool {
+		return s.Params.Accepts(n) || declared[member{s.Kind + "\x00" + s.Qualified(), s.Params.Max}]
+	})
+	if len(fit) == 0 {
+		return cands
+	}
+	return fit
+}
+
+// activeFirst drops C-family declarations in branches the default
+// configuration does not compile when a compiled one is also a candidate
+// (a typedef made once per #if branch).
+func activeFirst(targets []Symbol) []Symbol {
+	if len(targets) < 2 || !slices.ContainsFunc(targets, func(t Symbol) bool { return t.Inactive }) {
+		return targets
+	}
+	if in := filter(targets, func(t Symbol) bool { return !t.Inactive }); len(in) > 0 {
+		return in
+	}
+	return targets
+}
+
+// implicitThis returns the methods named name of the caller's class, for
+// an unqualified call (implicit this). In languages with overloading the
+// supertypes' overloads with other parameter lists are candidates too.
+func (v *View) implicitThis(fc *fileCtx, caller int, name string) []Symbol {
+	recv := v.receiverOf(fc.seg, caller)
+	ms := preferCallable(v.methodsOf(recv, name, 0))
+	if len(ms) > 0 && overloading[fc.meta.Lang] {
+		ms = v.inheritedCallables(fc.meta.Lang, recv, name, ms)
+	}
+	return ms
+}
+
+// callerLast moves the calling declaration behind the other candidates: a
+// call to its own name inside one overload usually delegates to another
+// overload rather than recursing.
+func callerLast(targets []Symbol, caller int, symbol func(int) Symbol) []Symbol {
+	if caller < 0 {
+		return targets
+	}
+	c := symbol(caller)
+	at := slices.IndexFunc(targets, func(t Symbol) bool { return t.ID == c.ID })
+	if at < 0 || at == len(targets)-1 {
+		return targets
+	}
+	out := make([]Symbol, 0, len(targets))
+	out = append(out, targets[:at]...)
+	out = append(out, targets[at+1:]...)
+	return append(out, targets[at])
 }
 
 // definitionsFirst drops bodiless declarations (a C++ member declared in
@@ -392,17 +578,24 @@ func nearestFirst(cands []Symbol, line int) []Symbol {
 // Java import a.b.C and import static a.b.C.m, Rust use a::b::f); broad
 // are wildcard imports and whole-module imports in languages where those
 // bring every name.
-func (v *View) importedUnitsFor(fc *fileCtx, name string) (named, broad map[string]bool) {
-	named, broad = map[string]bool{}, map[string]bool{}
+//
+// In package-scoped languages the imports also name declared packages:
+// import a.b.C names C of package a.b, import a.b.* and C#'s using a.b
+// bring package a.b, wherever its files are.
+func (v *View) importedUnitsFor(fc *fileCtx, name string) importScope {
+	lang := fc.meta.Lang
+	sc := importScope{lang: lang, named: map[string]bool{}, broad: map[string]bool{}}
 	for _, imp := range fc.imports() {
-		into := broad
-		brings := imp.Kind == facts.ImportWildcard || imp.Kind == facts.ImportInclude || (importAll[fc.meta.Lang] && len(imp.Names) == 0 && imp.Name == "")
-		if fc.meta.Lang != "go" && imp.Kind != facts.ImportWildcard && len(imp.Names) == 0 && (imp.Name == name || imp.Name == "" && lastSegment(imp.Path) == name) {
-			brings, into = true, named
+		into, intoPkg := sc.broad, &sc.broadPkgs
+		brings := imp.Kind == facts.ImportWildcard || imp.Kind == facts.ImportInclude || (importAll[lang] && len(imp.Names) == 0 && imp.Name == "")
+		pkg := imp.Path // the package a wildcard or using directive brings
+		if lang != "go" && imp.Kind != facts.ImportWildcard && len(imp.Names) == 0 && (imp.Name == name || imp.Name == "" && lastSegment(imp.Path) == name) {
+			brings, into, intoPkg = true, sc.named, &sc.namedPkgs
+			_, pkg = splitLast(imp.Path)
 		}
 		for _, n := range imp.Names {
 			if n.Name == name || n.Alias == name {
-				brings, into = true, named
+				brings, into, intoPkg = true, sc.named, &sc.namedPkgs
 			}
 		}
 		if !brings {
@@ -411,51 +604,113 @@ func (v *View) importedUnitsFor(fc *fileCtx, name string) (named, broad map[stri
 		for _, u := range v.importUnits(fc, imp.Path) {
 			into[u] = true
 		}
+		if packageScoped[lang] && pkg != "" {
+			if *intoPkg == nil {
+				*intoPkg = map[string]bool{}
+			}
+			(*intoPkg)[pkg] = true
+		}
 	}
-	return named, broad
+	return sc
 }
+
+// importScope is what a file's imports bring into scope for one name:
+// units (directories), and declared packages in package-scoped languages.
+type importScope struct {
+	lang                 string
+	named, broad         map[string]bool
+	namedPkgs, broadPkgs map[string]bool
+}
+
+func (sc importScope) hasNamed(s Symbol) bool {
+	return sc.named[s.Package] || s.Lang == sc.lang && !s.ParentType && s.PkgName != "" && sc.namedPkgs[s.PkgName]
+}
+
+// hasBroad: import a.b.* brings the top-level declarations of a.b.
+func (sc importScope) hasBroad(s Symbol) bool {
+	return sc.broad[s.Package] && !(packageScoped[sc.lang] && s.ParentType) ||
+		s.Lang == sc.lang && !s.ParentType && s.PkgName != "" && sc.broadPkgs[s.PkgName]
+}
+
+func (sc importScope) anyNamed() bool { return len(sc.named) > 0 || len(sc.namedPkgs) > 0 }
+
+// declaredPackage reports whether a package-scoped language file declares
+// package pkg.
+func (v *View) declaredPackage(pkg string) bool { return pkg != "" && v.project().declared[pkg] }
 
 func (v *View) resolveImported(fc *fileCtx, rec segment.RefRec, kinds map[string]bool) ([]Symbol, string) {
 	spec := rec.Qualifier
+	lang := fc.meta.Lang
 	units := map[string]bool{}
 	for _, u := range v.importUnits(fc, spec) {
 		units[u] = true
 	}
-	if len(units) == 0 {
+	// In package-scoped languages the spec may name a declared package or
+	// a class in one (a.b.Helper), wherever its files are.
+	_, parent := splitLast(spec)
+	pkgs := map[string]bool{}
+	if packageScoped[lang] {
+		for _, p := range []string{spec, parent} {
+			if v.declaredPackage(p) {
+				pkgs[p] = true
+			}
+		}
+	}
+	if len(units) == 0 && len(pkgs) == 0 {
 		return nil, "" // an external package
 	}
 	// The import may name a type (Java a.b.Helper, Rust a::Helper): its
 	// static members come first.
 	owner := lastSegment(spec)
 	var members, free []Symbol
-	v.eachNamed(rec.Name, func(i, k int) {
-		s := v.symbol(i, k)
-		if !units[s.Package] || s.Kind == facts.KindEmbed {
-			return
+	collect := func(units map[string]bool) {
+		v.eachNamed(rec.Name, func(i, k int) {
+			s := v.symbol(i, k)
+			if !(units[s.Package] || s.Lang == lang && pkgs[s.PkgName]) || s.Kind == facts.KindEmbed {
+				return
+			}
+			switch {
+			case s.Receiver != "" && facts.BaseType(s.Receiver) == owner:
+				members = append(members, s)
+			case s.Kind != facts.KindMethod && (kinds[s.Kind] || lang == "go"):
+				free = append(free, s)
+			}
+		})
+	}
+	collect(units)
+	if len(members) == 0 && len(free) == 0 && len(units) > 0 && lang != "go" {
+		// A re-exported type (use krate::Item where lib.rs has pub use
+		// self::model::Item) or ns.f() on a barrel: follow re-exports.
+		for _, name := range []string{owner, rec.Name} {
+			rx := map[string]bool{}
+			for _, t := range v.followReexports(lang, keys(units), name, 0) {
+				if t.name == name {
+					rx[t.unit] = true
+				}
+			}
+			if len(rx) > 0 {
+				collect(rx)
+				break
+			}
 		}
-		switch {
-		case s.Receiver != "" && facts.BaseType(s.Receiver) == owner:
-			members = append(members, s)
-		case s.Kind != facts.KindMethod && (kinds[s.Kind] || fc.meta.Lang == "go"):
-			free = append(free, s)
-		}
-	})
+	}
 	if len(members) > 0 {
-		return capped(members), ImportResolved
+		return capped(v.fitCall(fc, rec.Enclosing, rec, members, 0)), ImportResolved
 	}
 	if len(free) > 0 {
-		return capped(free), ImportResolved
+		return capped(v.fitCall(fc, rec.Enclosing, rec, free, 0)), ImportResolved
 	}
 	return nil, ""
 }
 
 func (v *View) resolveMember(fc *fileCtx, caller int, rec segment.RefRec, kinds map[string]bool) ([]Symbol, string) {
+	fit := func(c []Symbol) []Symbol { return v.fitCall(fc, caller, rec, c, 0) }
 	if q := strings.TrimSuffix(rec.Qualifier, "()"); (q == "super" || q == "base") && caller >= 0 {
 		var ms []Symbol
 		for _, parent := range v.supertypes(v.receiverOf(fc.seg, caller)) {
 			ms = append(ms, v.methodsOf(parent, rec.Name, 1)...)
 		}
-		ms = definitionsFirst(ms)
+		ms = definitionsFirst(fit(ms))
 		switch len(ms) {
 		case 0:
 		case 1:
@@ -464,14 +719,14 @@ func (v *View) resolveMember(fc *fileCtx, caller int, rec segment.RefRec, kinds 
 			return capped(ms), Ambiguous
 		}
 	}
-	typ, known := v.qualifierType(fc, caller, rec.Qualifier, 0)
+	typ, known := v.qualifierType(fc, caller, rec.Qualifier, 0, true)
 	if typ != "" {
 		if ms := v.methodsOf(typ, rec.Name, 0); len(ms) > 0 {
-			ms = v.preferVisible(fc, ms)
+			ms = v.preferVisible(fc, v.byQualifiedOwner(typ, ms))
 			if rec.Kind == facts.RefCall {
 				ms = v.inheritedCallables(fc.meta.Lang, typ, rec.Name, preferCallable(ms))
 			}
-			ms = definitionsFirst(ms)
+			ms = definitionsFirst(fit(ms))
 			if len(ms) == 1 {
 				return ms, TypeHinted
 			}
@@ -489,14 +744,23 @@ func (v *View) resolveMember(fc *fileCtx, caller int, rec segment.RefRec, kinds 
 		// extension of that name is a candidate, labelled by name.
 		exact, any := v.extensionMethods(typ, rec.Name)
 		if len(exact) > 0 {
-			exact = definitionsFirst(v.preferVisible(fc, exact))
+			exact = definitionsFirst(v.fitCall(fc, caller, rec, v.preferVisible(fc, exact), 1))
 			if len(exact) == 1 {
 				return exact, TypeHinted
 			}
 			return capped(exact), Ambiguous
 		}
 		if len(any) > 0 {
-			return v.labelByName(v.preferVisible(fc, any), fc.meta.Package)
+			return v.labelByName(v.inBuildDeps(fc, v.fitCall(fc, caller, rec, v.preferVisible(fc, any), 1)), fc.meta.Package)
+		}
+	}
+	if typ != "" && rec.Kind == facts.RefCall && fc.meta.Lang == "kotlin" {
+		// Kotlin extension functions: fun Foo.f() for Foo or a supertype,
+		// or a generic fun <T> T.f() for any receiver.
+		if exact, generic := v.kotlinExtensions(typ, rec.Name); len(exact) > 0 {
+			return capped(fit(exact)), TypeHinted
+		} else if len(generic) > 0 {
+			return v.labelByName(fit(generic), fc.meta.Package)
 		}
 	}
 	if known {
@@ -516,7 +780,7 @@ func (v *View) resolveMember(fc *fileCtx, caller int, rec segment.RefRec, kinds 
 	if len(ms) == 0 {
 		return nil, ""
 	}
-	return v.labelByName(ms, fc.meta.Package)
+	return v.labelByName(v.inBuildDeps(fc, fit(ms)), fc.meta.Package)
 }
 
 // extensionMethods returns the C# extension methods named name: exact
@@ -650,15 +914,59 @@ func (v *View) labelByName(cands []Symbol, unit string) ([]Symbol, string) {
 		case bi && !ai:
 			return 1
 		}
+		// Ruby autoloading (Zeitwerk, Rails): UsersController lives in
+		// users_controller.rb.
+		if a.Lang == "ruby" && b.Lang == "ruby" {
+			ar, br := autoloaded(a), autoloaded(b)
+			switch {
+			case ar && !br:
+				return -1
+			case br && !ar:
+				return 1
+			}
+		}
 		return 0
 	})
 	return capped(cands), Ambiguous
+}
+
+// autoloaded reports whether s is declared in the file Ruby autoloading
+// expects for its name (snake_case of a constant).
+func autoloaded(s Symbol) bool {
+	return startsUpper(s.Name) && stripExt(path.Base(s.File)) == snakeCase(s.Name)
+}
+
+// snakeCase turns a CamelCase constant into snake_case (HTTPClient ->
+// http_client).
+func snakeCase(name string) string {
+	var b strings.Builder
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		upper := c >= 'A' && c <= 'Z'
+		if upper && i > 0 {
+			prevLower := name[i-1] >= 'a' && name[i-1] <= 'z' || name[i-1] >= '0' && name[i-1] <= '9'
+			nextLower := i+1 < len(name) && name[i+1] >= 'a' && name[i+1] <= 'z'
+			if prevLower || (nextLower && name[i-1] >= 'A' && name[i-1] <= 'Z') {
+				b.WriteByte('_')
+			}
+		}
+		if upper {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 // preferVisible keeps the candidates declared nearest to the file: in the
 // file itself, else in its unit, else in its unit or imported units, when
 // that leaves any (a same-file or same-package type shadows one reached by
 // a wildcard import).
+//
+// Members are ranked by their owner type as the file sees its name: an
+// owner declared in the file, then one an import names (Java's
+// single-type import shadows the package), then a top-level owner in the
+// file's unit, then one a wildcard or module import brings.
 func (v *View) preferVisible(fc *fileCtx, cands []Symbol) []Symbol {
 	if len(cands) <= 1 {
 		return cands
@@ -666,9 +974,40 @@ func (v *View) preferVisible(fc *fileCtx, cands []Symbol) []Symbol {
 	if in := filter(cands, func(s Symbol) bool { return s.File == fc.meta.Path }); len(in) > 0 {
 		return in
 	}
-	if in := filter(cands, func(s Symbol) bool { return s.Package == fc.meta.Package }); len(in) > 0 {
+	if !packageScoped[fc.meta.Lang] {
+		if in := filter(cands, func(s Symbol) bool { return v.sameUnit(fc, s) }); len(in) > 0 {
+			return in
+		}
+		return v.inImportedUnits(fc, cands)
+	}
+	scopes := map[string]importScope{}
+	owner := func(s Symbol) (Symbol, importScope) {
+		o, ok := v.ownerOf(s)
+		if !ok {
+			o = s
+		}
+		sc, done := scopes[o.Name]
+		if !done {
+			sc = v.importedUnitsFor(fc, o.Name)
+			scopes[o.Name] = sc
+		}
+		return o, sc
+	}
+	if in := filter(cands, func(s Symbol) bool { o, sc := owner(s); return sc.hasNamed(o) }); len(in) > 0 {
 		return in
 	}
+	if in := filter(cands, func(s Symbol) bool { o, _ := owner(s); return v.sameUnit(fc, o) }); len(in) > 0 {
+		return in
+	}
+	if in := filter(cands, func(s Symbol) bool { o, sc := owner(s); return sc.hasBroad(o) }); len(in) > 0 {
+		return in
+	}
+	return v.inImportedUnits(fc, cands)
+}
+
+// inImportedUnits keeps the candidates in the file's unit or a unit it
+// imports, when any are.
+func (v *View) inImportedUnits(fc *fileCtx, cands []Symbol) []Symbol {
 	units := map[string]bool{fc.meta.Package: true}
 	for _, imp := range fc.imports() {
 		for _, u := range v.importUnits(fc, imp.Path) {
@@ -679,6 +1018,48 @@ func (v *View) preferVisible(fc *fileCtx, cands []Symbol) []Symbol {
 		return in
 	}
 	return cands
+}
+
+// ownerOf returns the type declaring member s (the type named by its
+// receiver, in its file), or s itself when it is not a member.
+func (v *View) ownerOf(s Symbol) (Symbol, bool) {
+	if s.Receiver == "" {
+		return s, true
+	}
+	base := facts.BaseType(s.Receiver)
+	var found Symbol
+	ok := false
+	v.eachNamed(base, func(i, k int) {
+		if ok {
+			return
+		}
+		if o := v.symbol(i, k); o.File == s.File && isTypeKind(o.Kind) {
+			found, ok = o, true
+		}
+	})
+	return found, ok
+}
+
+// byQualifiedOwner narrows members of a qualified type (Connection.Request,
+// org.x.Foo) to those whose owner is nested in the qualifier's type or
+// declared in the qualifier's package, when any are.
+func (v *View) byQualifiedOwner(typ string, ms []Symbol) []Symbol {
+	_, qual := splitLast(typ)
+	if qual == "" || len(ms) < 2 {
+		return ms
+	}
+	outer := lastSegment(qual)
+	in := filter(ms, func(m Symbol) bool {
+		o, ok := v.ownerOf(m)
+		if !ok {
+			return false
+		}
+		return o.Parent == outer && o.ParentType || o.PkgName == qual || strings.HasSuffix(o.PkgName, "."+qual)
+	})
+	if len(in) == 0 {
+		return ms
+	}
+	return in
 }
 
 // named returns the live declarations called name of the given kinds, in
@@ -814,9 +1195,19 @@ func (v *View) supertypes(base string) []string {
 // reports that the expression has a type even if it is not in the
 // workspace (a local of type bytes.Buffer): then no name matching should
 // be attempted.
-func (v *View) qualifierType(fc *fileCtx, caller int, q string, depth int) (typ string, known bool) {
+//
+// counted says the call segments keep their arguments (a reference's
+// qualifier), so overloads can be told apart by argument count; hint
+// chains have their arguments stripped.
+func (v *View) qualifierType(fc *fileCtx, caller int, q string, depth int, counted bool) (typ string, known bool) {
 	if q == "" || depth > maxTypeDepth {
 		return "", false
+	}
+	args := func(seg string) argCount {
+		if !counted {
+			return argCount{}
+		}
+		return segmentArgs(seg)
 	}
 	segs := splitQualifier(q)
 	first := segs[0]
@@ -842,7 +1233,7 @@ func (v *View) qualifierType(fc *fileCtx, caller int, q string, depth int) (typ 
 			typ = first // a static call on a type: Helper.check()
 		}
 		if name, ok := callSegment(first); ok && typ == "" {
-			typ = v.callType(name, depth)
+			typ = v.callType(name, args(first), depth)
 		}
 	}
 	if typ == "" {
@@ -851,7 +1242,7 @@ func (v *View) qualifierType(fc *fileCtx, caller int, q string, depth int) (typ 
 	for _, seg := range segs[1:] {
 		var next string
 		if name, ok := callSegment(seg); ok {
-			next = v.memberCallType(typ, name, depth)
+			next = v.memberCallType(typ, name, args(seg), depth)
 		} else {
 			next = v.fieldType(typ, seg, depth)
 		}
@@ -914,11 +1305,11 @@ func callSegment(s string) (string, bool) {
 // memberCallType returns the type a call of member name on a value of
 // type typ returns (builder chains: T::new(x).m(y).n()); T::new() without
 // a declared new constructs T.
-func (v *View) memberCallType(typ, name string, depth int) string {
+func (v *View) memberCallType(typ, name string, args argCount, depth int) string {
 	if depth > maxTypeDepth {
 		return ""
 	}
-	for _, m := range v.methodsOf(typ, name, 0) {
+	for _, m := range args.fit(v.methodsOf(typ, name, 0)) {
 		switch rt := resultType(m.Signature, m.Name); rt {
 		case "":
 			continue
@@ -950,6 +1341,12 @@ func (v *View) externalBinding(fc *fileCtx, name string) bool {
 			bound = first == name || lastSegment(imp.Path) == name
 		}
 		if bound {
+			if packageScoped[fc.meta.Lang] {
+				_, parent := splitLast(imp.Path)
+				if v.declaredPackage(imp.Path) || v.declaredPackage(parent) {
+					return false
+				}
+			}
 			return len(v.importUnits(fc, imp.Path)) == 0
 		}
 	}
@@ -1021,15 +1418,15 @@ func (v *View) evalType(fc *fileCtx, t string, depth int) string {
 	}
 	if _, qual := splitLast(t); strings.Contains(qual, "(") {
 		// A call chain: T::new(a).m(b) or f().g().
-		typ, _ := v.qualifierType(fc, -1, t, depth+1)
+		typ, _ := v.qualifierType(fc, -1, t, depth+1, false)
 		return typ
 	}
 	name, _ := callSegment(t)
-	return v.callType(name, depth+1)
+	return v.callType(name, argCount{}, depth+1)
 }
 
 // callType returns the type a call to callee (f, pkg.f, T::new) returns.
-func (v *View) callType(callee string, depth int) string {
+func (v *View) callType(callee string, args argCount, depth int) string {
 	if depth > maxTypeDepth {
 		return ""
 	}
@@ -1037,7 +1434,7 @@ func (v *View) callType(callee string, depth int) string {
 	if name == "new" && qual != "" {
 		return qual
 	}
-	for _, s := range v.named(name, map[string]bool{facts.KindFunc: true, facts.KindMethod: true, facts.KindClass: true, facts.KindStruct: true, facts.KindConstructor: true}) {
+	for _, s := range args.fit(v.named(name, callResultKinds)) {
 		switch {
 		case isTypeKind(s.Kind):
 			return s.Name // a constructor call in call syntax: Foo()
@@ -1059,6 +1456,67 @@ func (v *View) callType(callee string, depth int) string {
 		}
 	}
 	return ""
+}
+
+var callResultKinds = map[string]bool{facts.KindFunc: true, facts.KindMethod: true, facts.KindClass: true, facts.KindStruct: true, facts.KindConstructor: true}
+
+// argCount is the argument count of a call segment in a receiver
+// expression, when known.
+type argCount struct {
+	n  int
+	ok bool
+}
+
+// fit keeps the declarations in languages with overloading that accept
+// the count, when some do (overloads can return different types).
+func (a argCount) fit(cands []Symbol) []Symbol {
+	if !a.ok || len(cands) < 2 {
+		return cands
+	}
+	in := filter(cands, func(s Symbol) bool { return !overloading[s.Lang] || s.Params.Accepts(a.n) })
+	if len(in) == 0 {
+		return cands
+	}
+	return in
+}
+
+// segmentArgs counts the arguments of a call segment "f(a, b)" of a
+// receiver expression. A truncated qualifier ("...") or unbalanced text
+// gives an unknown count.
+func segmentArgs(seg string) argCount {
+	open := strings.IndexByte(seg, '(')
+	if open < 0 || !strings.HasSuffix(seg, ")") || strings.Contains(seg, "...") {
+		return argCount{}
+	}
+	inner := strings.TrimSpace(seg[open+1 : len(seg)-1])
+	if inner == "" {
+		return argCount{0, true}
+	}
+	n, depth := 1, 0
+	for i := 0; i < len(inner); i++ {
+		switch c := inner[i]; c {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth--; depth < 0 {
+				return argCount{}
+			}
+		case '"', '\'':
+			j := strings.IndexByte(inner[i+1:], c)
+			if j < 0 {
+				return argCount{}
+			}
+			i += j + 1
+		case ',':
+			if depth == 0 {
+				n++
+			}
+		}
+	}
+	if depth != 0 {
+		return argCount{}
+	}
+	return argCount{n, true}
 }
 
 // isTypeParam reports whether t is a type parameter declared in the
@@ -1110,16 +1568,26 @@ func isTypeParam(sig, name, t string) bool {
 // (TypeScript, Kotlin, Scala, PHP), or the word before the name (Java, C#,
 // C, C++, Dart).
 func resultType(sig, name string) string {
+	raw, before := resultTypeRaw(sig, name)
+	if f := strings.Fields(raw); before && len(f) > 0 {
+		raw = f[len(f)-1] // the word before the name (Java, C#, C, C++, Dart)
+	}
+	return plainType(raw)
+}
+
+// resultTypeRaw is resultType's text before plainType: Go's results after
+// the parameters, "-> T", "): T", or (before) every word before the name.
+func resultTypeRaw(sig, name string) (string, bool) {
 	at := strings.Index(sig, name+"(")
 	if at < 0 {
 		at = strings.Index(sig, name+"<")
 	}
 	if at < 0 {
-		return ""
+		return "", false
 	}
 	open := strings.IndexByte(sig[at:], '(')
 	if open < 0 {
-		return ""
+		return "", false
 	}
 	depth, close := 0, -1
 	for j := at + open; j < len(sig); j++ {
@@ -1137,14 +1605,14 @@ func resultType(sig, name string) string {
 		}
 	}
 	if close < 0 {
-		return ""
+		return "", false
 	}
 	rest := strings.TrimSpace(sig[close+1:])
 	switch {
 	case strings.HasPrefix(rest, "->"):
-		return plainType(strings.TrimSpace(rest[2:]))
+		return strings.TrimSpace(rest[2:]), false
 	case strings.HasPrefix(rest, ":"):
-		return plainType(strings.TrimSpace(rest[1:]))
+		return strings.TrimSpace(rest[1:]), false
 	case strings.HasPrefix(sig, "func ") || strings.HasPrefix(sig, "func("):
 		if strings.HasPrefix(rest, "(") {
 			rest = rest[1:]
@@ -1152,13 +1620,14 @@ func resultType(sig, name string) string {
 				rest = rest[:j]
 			}
 		}
-		return plainType(rest)
+		return strings.TrimSpace(rest), false
 	}
 	before := strings.Fields(sig[:at])
 	if len(before) == 0 {
-		return ""
+		return "", false
 	}
-	return plainType(before[len(before)-1])
+	// the words before the name: const char* in C, unsigned int
+	return strings.Join(before, " "), true
 }
 
 // plainType strips pointer, reference, nullable, array and generic syntax
@@ -1282,7 +1751,10 @@ func (v *View) importUnits(fc *fileCtx, spec string) []string {
 	lang := fc.meta.Lang
 	dir := path.Dir(fc.meta.Path)
 	key := lang + "\x00" + spec
+	// Relative specs, and JS/TS specs (the nearest tsconfig applies),
+	// depend on the importing directory.
 	relative := strings.HasPrefix(spec, ".") || lang == "ruby" || lang == "shell" || lang == "c" || lang == "cpp" || lang == "objc" || lang == "dart" ||
+		lang == "javascript" || lang == "typescript" ||
 		(lang == "rust" && (strings.HasPrefix(spec, "crate::") || strings.HasPrefix(spec, "self::") || strings.HasPrefix(spec, "super::")))
 	if relative {
 		key += "\x00" + dir
@@ -1303,7 +1775,7 @@ func (v *View) computeUnits(lang, dir, spec string) []string {
 	switch lang {
 	case "javascript", "typescript":
 		if !strings.HasPrefix(spec, ".") {
-			return nil // a package; tsconfig paths and workspaces come with M7
+			return v.jsPackageUnits(dir, spec) // tsconfig paths, workspace packages; else external
 		}
 		base := path.Join(dir, spec)
 		return v.fileUnits([]string{stripExt(base), path.Join(base, "index")}, true)
@@ -1321,6 +1793,9 @@ func (v *View) computeUnits(lang, dir, spec string) []string {
 			}
 			full := path.Join(d, p)
 			return uniq(append(v.fileUnits([]string{full, path.Join(full, "__init__")}, true), v.dirUnits(full, true)...))
+		}
+		if u := v.pythonRootUnits(p); len(u) > 0 {
+			return u
 		}
 		cands = []string{p}
 	case "rust":
@@ -1345,6 +1820,10 @@ func (v *View) computeUnits(lang, dir, spec string) []string {
 			segs = append(strings.Split(dir, "/"), segs[1:]...)
 		case "super":
 			segs = append(strings.Split(path.Dir(dir), "/"), segs[1:]...)
+		default:
+			if u := v.rustCrateUnits(segs); len(u) > 0 {
+				return u // a workspace crate
+			}
 		}
 		cands = []string{strings.Join(segs, "/")}
 	case "ruby", "shell", "c", "cpp", "objc":
@@ -1353,8 +1832,16 @@ func (v *View) computeUnits(lang, dir, spec string) []string {
 		if u := v.fileUnits([]string{stripExt(local)}, true); len(u) > 0 {
 			return u
 		}
+		if lang == "c" || lang == "cpp" || lang == "objc" {
+			if u := v.includeUnits(rel); len(u) > 0 {
+				return u // an include directory of compile_commands.json
+			}
+		}
 		return v.fileUnits([]string{stripExt(rel)}, false)
 	case "dart":
+		if u, ok := v.dartPackageUnits(spec); ok && len(u) > 0 {
+			return u
+		}
 		rel := spec
 		if strings.HasPrefix(rel, "package:") {
 			rel = rel[len("package:"):]
@@ -1371,7 +1858,15 @@ func (v *View) computeUnits(lang, dir, spec string) []string {
 		}
 		return v.fileUnits([]string{stripExt(rel)}, false)
 	case "php":
+		if u := v.phpUnits(spec); len(u) > 0 {
+			return u // composer PSR-4
+		}
 		cands = []string{strings.ReplaceAll(strings.Trim(spec, "\\"), "\\", "/")}
+	case "swift":
+		if u := v.swiftModuleUnits(spec); len(u) > 0 {
+			return u
+		}
+		cands = []string{strings.ReplaceAll(spec, ".", "/")}
 	default: // java, kotlin, scala, csharp, swift and others: dotted
 		cands = []string{strings.ReplaceAll(spec, ".", "/")}
 	}

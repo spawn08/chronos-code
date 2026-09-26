@@ -16,3 +16,10 @@ tests:
   files: ["*Test.kt", "*Tests.kt"]
   dirs: [test]
   markers: ["@Test", "@ParameterizedTest"]
+calls:
+  arguments: [value_arguments]
+  trailing: [annotated_lambda]
+  through: [call_suffix]
+  receivers: true
+params:
+  variadic: [vararg]

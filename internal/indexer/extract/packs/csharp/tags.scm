@@ -67,3 +67,4 @@
 (variable_declaration
   (variable_declarator name: (identifier) @hint.name (object_creation_expression type: (_) @hint.type))) @hint
 (property_declaration type: (_) @hint.type name: (identifier) @hint.name) @hint
+(foreach_statement type: (_) @hint.type left: (identifier) @hint.name) @hint

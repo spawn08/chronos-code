@@ -7,14 +7,14 @@ symbols:
       sig: interface Props
   1. L5-5 public property Props.title in=0
       sig: title: string
-  2. L9-12 public func Counter
+  2. L9-12 public func Counter params=1..1
       sig: export function Counter({ title }: Props)
       doc: "Counter shows a count."
   3. L14-16 public func Panel
       sig: export const Panel: React.FC<Props> = (props) =>
   4. L18-22 public class App
       sig: export default class App extends React.Component<Props>
-  5. L19-21 public method App.render in=4
+  5. L19-21 public method App.render in=4 params=0..0
       sig: render()
 hints:
   L14 Panel: React.FC in=3

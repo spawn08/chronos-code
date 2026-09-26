@@ -18,3 +18,5 @@ imports:
 tests:
   files: ["*_test.cc", "*_test.cpp", "*_unittest.cc", "test_*.cpp"]
   dirs: [tests, test]
+calls:
+  arguments: [argument_list, initializer_list]

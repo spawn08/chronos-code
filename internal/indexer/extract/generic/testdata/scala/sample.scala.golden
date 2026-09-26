@@ -12,13 +12,13 @@ symbols:
       sig: private val cache = mutable.Map[String, User]()
   2. L10-10 protected field UserRepo.count in=0
       sig: protected var count: Int = 0
-  3. L12-16 public method UserRepo.find in=0 [override]
+  3. L12-16 public method UserRepo.find in=0 [override] params=1..1
       sig: override def find(id: String): Option[User]
-  4. L18-19 public method UserRepo.legacy in=0 [deprecated]
+  4. L18-19 public method UserRepo.legacy in=0 [deprecated] params=0..0
       sig: @deprecated("old", "1.0") def legacy(): Unit
   5. L22-24 public trait Repo
       sig: trait Repo
-  6. L23-23 public method Repo.find in=5 [decl]
+  6. L23-23 public method Repo.find in=5 [decl] params=1..1
       sig: def find(id: String): Option[User]
   7. L26-26 public class User
       sig: case class User(id: String)
@@ -26,11 +26,11 @@ symbols:
       sig: object UserRepo
   9. L29-29 public field UserRepo.Limit in=8
       sig: val Limit = 10
-  10. L30-30 public method UserRepo.apply in=8
+  10. L30-30 public method UserRepo.apply in=8 params=1..1
       sig: def apply(db: Database): UserRepo
   11. L33-33 public type_alias Id
       sig: type Id = String
-  12. L35-35 public func topLevel
+  12. L35-35 public func topLevel params=0..0
       sig: def topLevel(): Unit
 hints:
   L8 db: Database in=0
@@ -46,16 +46,16 @@ refs:
   L8:47 type User in=0
   L8:58 implements Repo in=0
   L8:68 implements AutoCloseable in=0
-  L9:31 call Map pkg="scala.collection.mutable" in=1
+  L9:31 call Map pkg="scala.collection.mutable" in=1 args=0
   L9:35 type String in=1
   L9:43 type User in=1
   L10:24 type Int in=2
   L12:25 type String in=3
   L12:34 type Option in=3
   L12:41 type User in=3
-  L13:12 call check on="Helper" in=3
-  L14:17 instantiate User in=3
-  L15:11 call get on="cache" in=3
+  L13:12 call check on="Helper" in=3 args=1 types=id
+  L14:17 instantiate User in=3 args=1 types=id
+  L15:11 call get on="cache" in=3 args=1 types=id
   L18:4 decorator deprecated in=4
   L19:17 type Unit in=4
   L23:16 type String in=6
@@ -64,7 +64,7 @@ refs:
   L26:21 type String in=7
   L30:17 type Database in=10
   L30:28 type UserRepo in=10
-  L30:43 instantiate UserRepo in=10
+  L30:43 instantiate UserRepo in=10 args=1 types=db
   L33:11 type String in=11
   L35:17 type Unit in=12
-  L35:24 call println in=12
+  L35:24 call println in=12 args=1 types=#s

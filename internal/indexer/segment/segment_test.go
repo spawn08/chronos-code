@@ -44,8 +44,11 @@ func v2File() *facts.File {
 		Symbols: []facts.Symbol{
 			{Name: "Svc", Kind: facts.KindClass, Signature: "export class Svc extends Base", Line: 3, EndLine: 9,
 				Exported: true, Visibility: facts.VisPublic, Modifiers: facts.ModAbstract},
-			{Name: "save", Kind: facts.KindMethod, Receiver: "Svc", Signature: "async save(r: Repo)", Line: 5, EndLine: 7,
-				Container: 1, Visibility: facts.VisProtected, Modifiers: facts.ModAsync | facts.ModOverride},
+			{Name: "save", Kind: facts.KindMethod, Receiver: "Svc", Signature: "async save(r: Repo, ...rest)", Line: 5, EndLine: 7,
+				Container: 1, Visibility: facts.VisProtected, Modifiers: facts.ModAsync | facts.ModOverride,
+				Params: facts.Arity{Min: 1, Max: facts.VarArgs, Known: true}, ParamList: "(r: Repo, ...rest)"},
+			{Name: "put", Kind: facts.KindMethod, Receiver: "Svc", Signature: "put(k, v = 0)", Line: 8, EndLine: 8,
+				Container: 1, Params: facts.Arity{Min: 1, Max: 2, Known: true}},
 		},
 		Imports: []facts.Import{
 			{Path: "./repo", Line: 1, Kind: facts.ImportModule, Names: []facts.ImportedName{{Name: "Repo"}, {Name: "Base", Alias: "B"}}},
@@ -54,8 +57,8 @@ func v2File() *facts.File {
 		Refs: []facts.Ref{
 			{Kind: facts.RefExtends, Enclosing: 0, Name: "Base", Line: 3, Col: 26},
 			{Kind: facts.RefTypeUse, Enclosing: 1, Name: "Repo", Line: 5, Col: 16},
-			{Kind: facts.RefCall, Enclosing: 1, Name: "put", Qualifier: "r", QualKind: facts.QualExpr, Line: 6, Col: 7},
-			{Kind: facts.RefDecorator, Enclosing: 1, Name: "logged", Line: 4, Col: 3},
+			{Kind: facts.RefCall, Enclosing: 1, Name: "put", Qualifier: "r", QualKind: facts.QualExpr, Line: 6, Col: 7, Args: 3, ArgTypes: "k,#n"},
+			{Kind: facts.RefDecorator, Enclosing: 1, Name: "logged", Line: 4, Col: 3, Lambda: 3},
 		},
 		Exports: []facts.Export{
 			{Name: "*", Source: "./util", Line: 10},
@@ -77,7 +80,7 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Generation() != 7 || s.Kind() != KindBase || s.NumFiles() != 4 || s.NumSymbols() != 5 || s.NumRefs() != 7 {
+	if s.Generation() != 7 || s.Kind() != KindBase || s.NumFiles() != 4 || s.NumSymbols() != 6 || s.NumRefs() != 7 {
 		t.Fatalf("counts: gen=%d files=%d syms=%d refs=%d", s.Generation(), s.NumFiles(), s.NumSymbols(), s.NumRefs())
 	}
 	byPath := map[string]*facts.File{}
@@ -96,6 +99,7 @@ func TestRoundTrip(t *testing.T) {
 		if want.Path == "web/svc.ts" { // refs decoded in source order
 			r := want.Refs
 			want.Refs = []facts.Ref{r[0], r[3], r[1], r[2]}
+			want.Refs[1].Lambda = 4 // input ref 2 is decoded as ref 3
 		}
 		if !reflect.DeepEqual(normalize(got), normalize(want)) {
 			t.Errorf("file %s:\n got %+v\nwant %+v", got.Path, got, want)
@@ -349,6 +353,19 @@ func TestV2FieldsValidated(t *testing.T) {
 		"file hint range out of range": func(b []byte) {
 			le.PutUint32(b[sectionOff(b, secFiles)+fileRecSize+108:], 5)
 		},
+		"arity above maximum": func(b []byte) {
+			b[sectionOff(b, secSymbols)+45] |= flagArity
+			b[sectionOff(b, secSymbols)+56] = facts.MaxArity + 1
+			b[sectionOff(b, secSymbols)+57] = varArgs
+		},
+		"lambda in another file": func(b []byte) {
+			le.PutUint32(b[sectionOff(b, secRefs)+44:], 0) // ref 0 is the only ref: itself
+		},
+		"arity max below min": func(b []byte) {
+			b[sectionOff(b, secSymbols)+45] |= flagArity
+			b[sectionOff(b, secSymbols)+56] = 3
+			b[sectionOff(b, secSymbols)+57] = 2
+		},
 	} {
 		b := append([]byte(nil), data...)
 		edit(b)
@@ -365,6 +382,8 @@ func TestEncodeRejectsUnknownValues(t *testing.T) {
 		"ref kind":    {Path: "a", Refs: []facts.Ref{{Name: "f", Kind: facts.NumRefKinds, Enclosing: facts.NoCaller}}},
 		"import kind": {Path: "a", Imports: []facts.Import{{Path: "x", Kind: facts.NumImportKinds}}},
 		"symbol kind": {Path: "a", Symbols: []facts.Symbol{{Name: "A", Kind: "gadget"}}},
+		"arity":       {Path: "a", Symbols: []facts.Symbol{{Name: "A", Kind: facts.KindFunc, Params: facts.Arity{Min: 2, Max: 1, Known: true}}}},
+		"large arity": {Path: "a", Symbols: []facts.Symbol{{Name: "A", Kind: facts.KindFunc, Params: facts.Arity{Min: facts.MaxArity + 1, Max: facts.VarArgs, Known: true}}}},
 	} {
 		if _, err := Encode([]*facts.File{f}, KindBase, 1); err == nil {
 			t.Errorf("%s: encode accepted an unknown value", name)

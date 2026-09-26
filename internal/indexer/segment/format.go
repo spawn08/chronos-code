@@ -19,8 +19,9 @@ var Magic = [8]byte{'C', 'H', 'X', 'S', 'E', 'G', 0, 1}
 // Version is the current format version. v2 added the symbol container;
 // v3 the search (terms, postings, names, trigrams) and package sections;
 // v4 language-neutral facts: symbol visibility and modifiers, reference
-// kinds, file flags, import kinds and names, exports and binding hints.
-const Version = 4
+// kinds, file flags, import kinds and names, exports and binding hints;
+// v5 symbol arities, reference argument counts and argument type hints.
+const Version = 5
 
 // Kind classifies a segment.
 type Kind uint16
@@ -38,10 +39,10 @@ const (
 	headerSize     = 64
 	sectionEntry   = 32
 	fileRecSize    = 112
-	symbolRecSize  = 56
+	symbolRecSize  = 72
 	importRecSize  = 40
 	impNameRecSize = 16
-	refRecSize     = 32
+	refRecSize     = 48
 	exportRecSize  = 32
 	hintRecSize    = 32
 	strRefSize     = 8
@@ -58,7 +59,13 @@ const (
 )
 
 // Symbol flags.
-const flagExported = 1
+const (
+	flagExported = 1
+	flagArity    = 2 // the arity bytes are set
+)
+
+// varArgs is the stored maximum arity of a variadic declaration.
+const varArgs = 0xFF
 
 // Section identifiers, in on-disk order.
 const (
@@ -117,7 +124,9 @@ func getRef(b []byte) strRef { return strRef{le.Uint32(b), le.Uint32(b[4:])} }
 // Symbol record (symbolRecSize): 0 name 8 receiver 16 signature 24 doc,
 // 32 file u32, 36 line u32, 40 endLine u32, 44 kind u8, 45 flags u8,
 // 46 visibility u8, 47 reserved, 48 container u32 (segment symbol index of
-// the enclosing symbol, in the same file, or noCaller), 52 modifiers u32.
+// the enclosing symbol, in the same file, or noCaller), 52 modifiers u32,
+// 56 minArgs u8, 57 maxArgs u8 (varArgs when variadic; both valid only
+// with flagArity), 58 reserved, 64 paramList strRef.
 //
 // Header: 0 magic, 8 version u16, 10 kind u16, 12 sections u32,
 // 16 generation u64, 24 table offset u64, 32 table xxh64, 40 xxh64 of bytes 0-39.
@@ -128,7 +137,9 @@ func getRef(b []byte) strRef { return strRef{le.Uint32(b), le.Uint32(b[4:])} }
 //
 // Ref record (refRecSize): 0 name 8 qualifier, 16 file u32,
 // 20 enclosing u32 (segment symbol index or noCaller), 24 line u32,
-// 28 col u16, 30 qualKind u8, 31 kind u8.
+// 28 col u16, 30 qualKind u8, 31 kind u8, 32 args u8 (facts.Ref.Args),
+// 33 reserved, 36 argTypes strRef, 44 lambda u32 (segment ref index of
+// the call whose lambda contains this ref, in the same file, or noCaller).
 //
 // Export record (exportRecSize): 0 name 8 source 16 sourceName, 24 file u32,
 // 28 line u32.

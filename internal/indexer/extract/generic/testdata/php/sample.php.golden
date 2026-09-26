@@ -14,20 +14,20 @@ symbols:
       sig: private array $users = []
   3. L19-19 protected field UserRepo.count in=0 [static]
       sig: protected static int $count = 0
-  4. L21-24 public constructor UserRepo.__construct in=0
+  4. L21-24 public constructor UserRepo.__construct in=0 params=1..1
       sig: public function __construct(private Db $db)
-  5. L26-32 public method UserRepo.find in=0
+  5. L26-32 public method UserRepo.find in=0 params=1..1
       sig: public function find(string $id): ?User
-  6. L35-35 protected method UserRepo.legacy in=0 [abstract,deprecated,decl]
+  6. L35-35 protected method UserRepo.legacy in=0 [abstract,deprecated,decl] params=0..0
       sig: abstract protected function legacy(): void
       doc: "@deprecated"
   7. L38-41 public interface Repo
       sig: interface Repo
-  8. L40-40 public method Repo.find in=7 [decl]
+  8. L40-40 public method Repo.find in=7 [decl] params=1..1
       sig: public function find(string $id): ?User
   9. L43-46 public trait Logging
       sig: trait Logging
-  10. L45-45 public method Logging.log in=9
+  10. L45-45 public method Logging.log in=9 params=1..1
       sig: public function log(string $m): void
   11. L48-52 public enum Mode
       sig: enum Mode: string
@@ -35,10 +35,16 @@ symbols:
       sig: case Read = 'r'
   13. L51-51 public enum_member Mode.Write in=11
       sig: case Write = 'w'
-  14. L54-57 public func top_level
+  14. L54-57 public func top_level params=1..1
       sig: function top_level(int $x): int
 hints:
+  L18 $users: array in=0
+  L19 $count: int in=0
+  L26 $id: string in=5
   L29 $u: User in=5
+  L40 $id: string in=8
+  L45 $m: string in=10
+  L54 $x: int in=14
 refs:
   L12:3 decorator Service in=0
   L13:30 extends BaseRepo in=0

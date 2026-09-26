@@ -46,3 +46,4 @@
     name: (identifier) @hint.name
     value: (object_creation_expression type: (_) @hint.type))) @hint
 (field_declaration type: (_) @hint.type declarator: (variable_declarator name: (identifier) @hint.name)) @hint
+(enhanced_for_statement type: (_) @hint.type name: (identifier) @hint.name) @hint

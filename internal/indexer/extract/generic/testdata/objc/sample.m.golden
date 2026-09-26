@@ -22,8 +22,10 @@ symbols:
       sig: - (id)find:(NSString *)key
   8. L30-30 private var counter [static]
       sig: static int counter = 0
-  9. L32-34 public func helper
+  9. L32-34 public func helper params=1..1
       sig: void helper(int n)
+hints:
+  L30 counter: int
 refs:
   L5:23 extends BaseRepo in=0
   L5:33 implements Repo in=0

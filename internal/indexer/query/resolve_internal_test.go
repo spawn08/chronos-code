@@ -1,6 +1,9 @@
 package query
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestCastType(t *testing.T) {
 	for in, want := range map[string]string{
@@ -36,6 +39,25 @@ func TestIsTypeParam(t *testing.T) {
 	} {
 		if got := isTypeParam(tc.sig, tc.name, tc.t); got != tc.want {
 			t.Errorf("isTypeParam(%q, %q) = %v, want %v", tc.sig, tc.t, got, tc.want)
+		}
+	}
+}
+
+func TestSegmentArgs(t *testing.T) {
+	for seg, want := range map[string]string{
+		"f()":           "0 true",
+		"f(a)":          "1 true",
+		"f(a, g(b, c))": "2 true",
+		`f("a,b", 'c')`: "2 true",
+		"f(x, [1, 2])":  "2 true",
+		"f(a, b...":     "0 false",
+		"f(a, ...)":     "0 false",
+		"f":             "0 false",
+		"f(a))":         "0 false",
+	} {
+		a := segmentArgs(seg)
+		if got := fmt.Sprintf("%d %v", a.n, a.ok); got != want {
+			t.Errorf("segmentArgs(%q) = %s, want %s", seg, got, want)
 		}
 	}
 }

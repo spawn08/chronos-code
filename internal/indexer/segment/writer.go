@@ -38,9 +38,9 @@ type symEntry struct {
 }
 
 type refEntry struct {
-	file      int
-	enclosing uint32
-	ref       *facts.Ref
+	file, local int
+	enclosing   uint32
+	ref         *facts.Ref
 }
 
 // Encode serializes files (in any order; duplicates by path are an error)
@@ -111,6 +111,18 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		}
 		le.PutUint32(b[48:], container)
 		le.PutUint32(b[52:], s.sym.Modifiers)
+		if a := s.sym.Params; a.Known {
+			if a.Min < 0 || a.Min > facts.MaxArity || a.Max > facts.MaxArity || (a.Max != facts.VarArgs && a.Max < a.Min) {
+				return nil, fmt.Errorf("encode segment: invalid arity %d..%d", a.Min, a.Max)
+			}
+			putRef(b[64:], e.ref(s.sym.ParamList))
+			b[45] |= flagArity
+			b[56] = uint8(a.Min)
+			b[57] = varArgs
+			if a.Max != facts.VarArgs {
+				b[57] = uint8(a.Max)
+			}
+		}
 	}
 	localSym := func(fi, i int) uint32 {
 		if i >= 0 && i < len(sorted[fi].Symbols) {
@@ -127,7 +139,7 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 			if r.Kind >= facts.NumRefKinds {
 				return nil, fmt.Errorf("encode segment: unknown reference kind %d", r.Kind)
 			}
-			refs = append(refs, refEntry{fi, localSym(fi, r.Enclosing), r})
+			refs = append(refs, refEntry{fi, ri, localSym(fi, r.Enclosing), r})
 		}
 	}
 	slices.SortFunc(refs, func(a, b refEntry) int {
@@ -148,6 +160,13 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		}
 		return cmp.Compare(a.ref.Kind, b.ref.Kind)
 	})
+	globalRef := make([][]uint32, len(sorted))
+	for fi, f := range sorted {
+		globalRef[fi] = make([]uint32, len(f.Refs))
+	}
+	for gi, r := range refs {
+		globalRef[r.file][r.local] = uint32(gi)
+	}
 	refSec := make([]byte, len(refs)*refRecSize)
 	byEnclosing := make([]uint32, 0, len(refs))
 	byFileRefs := make([][]uint32, len(sorted))
@@ -161,6 +180,13 @@ func Encode(files []*facts.File, kind Kind, generation uint64) ([]byte, error) {
 		le.PutUint16(b[28:], uint16(min(r.ref.Col, 0xFFFF)))
 		b[30] = r.ref.QualKind
 		b[31] = r.ref.Kind
+		b[32] = r.ref.Args
+		putRef(b[36:], e.ref(r.ref.ArgTypes))
+		lambda := noCaller
+		if l := r.ref.Lambda - 1; l >= 0 && l < len(globalRef[r.file]) && l != r.local {
+			lambda = globalRef[r.file][l]
+		}
+		le.PutUint32(b[44:], lambda)
 		if r.enclosing != noCaller {
 			byEnclosing = append(byEnclosing, uint32(gi))
 		}

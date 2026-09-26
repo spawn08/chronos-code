@@ -93,6 +93,12 @@ func (v *View) IncomingEdges(targets []Symbol) []CallEdge {
 			order[t.ID] = ti
 		}
 	}
+	ctors := map[int]*ctorSet{} // by target index, for constructors
+	for ti, t := range targets {
+		if t.Kind == facts.KindConstructor {
+			ctors[ti] = v.constructorsOf(t)
+		}
+	}
 	for _, name := range names {
 		for i := 0; i < v.sn.NumSegments(); i++ {
 			seg := v.sn.Segment(i)
@@ -112,7 +118,8 @@ func (v *View) IncomingEdges(targets []Symbol) []CallEdge {
 				}
 				for _, ti := range byName[name] {
 					t := targets[ti]
-					if kind == facts.RefInstantiate && t.Kind != facts.KindConstructor || !targetsInclude(resolved, t) {
+					if kind == facts.RefInstantiate && t.Kind != facts.KindConstructor || !targetsInclude(resolved, t) ||
+						!ctors[ti].selects(t, seg.Ref(r)) {
 						continue
 					}
 					cs := v.symbol(i, caller)

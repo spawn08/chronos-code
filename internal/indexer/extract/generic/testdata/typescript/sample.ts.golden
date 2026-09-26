@@ -10,7 +10,7 @@ symbols:
   0. L7-9 public interface Store
       sig: export interface Store<T> extends Reader
       doc: "Storage abstraction."
-  1. L8-8 public method Store.get in=0 [decl]
+  1. L8-8 public method Store.get in=0 [decl] params=1..1
       sig: get(id: string): T
   2. L11-11 public type_alias Id
       sig: export type Id = string | number
@@ -26,34 +26,39 @@ symbols:
       sig: private readonly cache = new Map<string, User>()
   8. L21-21 protected field UserService.instances in=6 [static]
       sig: protected static instances: number = 0
-  9. L23-25 public constructor UserService.constructor in=6
+  9. L23-25 public constructor UserService.constructor in=6 params=1..1
       sig: constructor(private repo: Repo)
-  10. L27-29 public method UserService.get in=6
+  10. L27-29 public method UserService.get in=6 params=1..1
       sig: public get(id: string): User
-  11. L31-34 public method UserService.dispose in=6 [async]
+  11. L31-34 public method UserService.dispose in=6 [async] params=0..0
       sig: async dispose(): Promise<void>
   12. L37-39 public class Shape [abstract]
       sig: export abstract class Shape
-  13. L38-38 public method Shape.area in=12 [abstract,decl]
+  13. L38-38 public method Shape.area in=12 [abstract,decl] params=0..0
       sig: abstract area(): number
   14. L41-45 private namespace Geometry
       sig: namespace Geometry
-  15. L42-44 public func area in=14
+  15. L42-44 public func area in=14 params=1..1
       sig: export function area(r: number): number
   16. L47-49 private module legacy
       sig: declare module "legacy"
-  17. L48-48 public func old in=16 [decl]
+  17. L48-48 public func old in=16 [decl] params=0..0
       sig: export function old(): void
   18. L51-51 public const DEFAULT_ID
       sig: export const DEFAULT_ID: Id = 0
   19. L52-52 private var counter
       sig: let counter = 0
-  20. L54-56 private func helper
+  20. L54-56 private func helper params=1..1
       sig: function helper(x: number): number
 hints:
+  L8 id: string in=1
   L20 cache: Map in=6
+  L21 instances: number in=6
   L23 repo: Repo in=9
+  L27 id: string in=10
+  L42 r: number in=15
   L51 DEFAULT_ID: Id
+  L54 x: number in=20
 refs:
   L7:24 type T in=0
   L7:35 extends Reader in=0

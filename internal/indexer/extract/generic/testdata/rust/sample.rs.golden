@@ -26,16 +26,16 @@ symbols:
       sig: Write
   7. L22-25 public trait Backend
       sig: pub trait Backend: Send
-  8. L23-23 public method Backend.get in=7 [decl]
+  8. L23-23 public method Backend.get in=7 [decl] params=1..1
       sig: fn get(&self, key: &str) -> Option<String>
-  9. L24-24 public method Backend.put in=7
+  9. L24-24 public method Backend.put in=7 params=1..1
       sig: fn put(&mut self, key: &str)
-  10. L29-33 public method Store.new
+  10. L29-33 public method Store.new params=1..1
       sig: pub fn new(name: &str) -> Self
       doc: "Creates a store."
-  11. L35-37 private method Store.flush [async]
+  11. L35-37 private method Store.flush [async] params=0..0
       sig: async fn flush(&self)
-  12. L41-43 private method Store.get
+  12. L41-43 private method Store.get params=1..1
       sig: fn get(&self, key: &str) -> Option<String>
   13. L46-46 public const LIMIT
       sig: pub const LIMIT: usize = 10
@@ -45,16 +45,17 @@ symbols:
       sig: type Result<T> = std::result::Result<T, StoreError>
   16. L50-52 private macro log
       sig: macro_rules! log
-  17. L55-57 private func helper [deprecated]
+  17. L55-57 private func helper [deprecated] params=1..1
       sig: fn helper(n: i32) -> i32
   18. L60-65 private module tests
       sig: mod tests
-  19. L62-64 private func it_works in=18 [test]
+  19. L62-64 private func it_works in=18 [test] params=0..0
       sig: fn it_works()
 hints:
   L13 name: String in=1
   L14 items: HashMap in=1
   L30 items: HashMap::new() in=10
+  L55 n: i32 in=17
 refs:
   L12:18 type K in=1
   L13:15 type String in=2

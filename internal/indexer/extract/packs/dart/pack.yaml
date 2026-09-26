@@ -19,3 +19,8 @@ imports:
 tests:
   files: ["*_test.dart"]
   dirs: [test]
+params:
+  optional_groups: true
+calls:
+  arguments: [arguments]
+  through: [argument_part]

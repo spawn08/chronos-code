@@ -49,3 +49,10 @@ int main() {
     store::Repo r;
     return r.find(1);
 }
+
+// A free prototype with a default and a variadic tail.
+int parse(const char* s, int len = -1, ...);
+
+namespace cfg {
+int limit = 3;
+}

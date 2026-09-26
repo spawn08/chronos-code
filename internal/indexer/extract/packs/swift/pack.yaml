@@ -17,3 +17,7 @@ tests:
   files: ["*Tests.swift", "*Test.swift"]
   dirs: [Tests]
   symbols: ["test*"]
+calls:
+  arguments: [value_arguments]
+  trailing: [lambda_literal]
+  through: [call_suffix]

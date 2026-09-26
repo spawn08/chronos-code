@@ -18,6 +18,8 @@ type Cache struct {
 	pkgs  *pkgList
 	stems map[*segment.Segment]map[string][]int32 // per segment: file stem -> files
 	units *unitMemo
+	segs  map[*segment.Segment]*segIndex // per segment: manifests, declared packages
+	proj  *projMemo                      // project model of the latest generation
 }
 
 // unitMemo memoizes import-spec resolution for one generation.

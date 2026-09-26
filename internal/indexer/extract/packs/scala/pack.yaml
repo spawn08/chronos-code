@@ -15,3 +15,6 @@ tests:
   files: ["*Test.scala", "*Spec.scala", "*Suite.scala"]
   dirs: [test]
   markers: ["@Test"]
+calls:
+  arguments: [arguments]
+  trailing: [block]

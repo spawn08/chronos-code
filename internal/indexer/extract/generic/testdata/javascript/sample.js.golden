@@ -20,16 +20,16 @@ symbols:
       sig: static count = 0
   3. L13-13 private field Widget.#secret in=1
       sig: #secret = 1
-  4. L15-18 public constructor Widget.constructor in=1
+  4. L15-18 public constructor Widget.constructor in=1 params=1..1
       sig: constructor(opts)
-  5. L20-25 public method Widget.render in=1 [async]
+  5. L20-25 public method Widget.render in=1 [async] params=0..0
       sig: async render()
-  6. L29-31 public func add
+  6. L29-31 public func add params=2..2
       sig: export function add(a, b)
       doc: "Adds numbers."
   7. L33-33 private func multiply
       sig: const multiply = (a, b) =>
-  8. L35-37 private func internal
+  8. L35-37 private func internal params=0..0
       sig: function internal()
 refs:
   L6:16 call require in=0

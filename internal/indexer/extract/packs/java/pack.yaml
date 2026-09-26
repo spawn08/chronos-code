@@ -18,3 +18,5 @@ tests:
   files: ["*Test.java", "*Tests.java", "*IT.java"]
   dirs: [test]
   markers: ["@Test", "@ParameterizedTest", "@RepeatedTest", "@TestFactory"]
+calls:
+  arguments: [argument_list]

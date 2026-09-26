@@ -16,3 +16,7 @@ wrappers: [field_declaration, event_field_declaration, variable_declaration]
 tests:
   files: ["*Tests.cs", "*Test.cs"]
   markers: [Test, TestMethod, Fact, Theory, TestCase]
+calls:
+  arguments: [argument_list]
+params:
+  variadic: [params]

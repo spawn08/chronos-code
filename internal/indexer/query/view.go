@@ -50,6 +50,12 @@ type Symbol struct {
 	Test      bool   // a test function or method (facts.ModTest), in any language
 	TestFile  bool   // declared in a test file (facts.File.Test)
 	Decl      bool   // a declaration without a body (facts.ModDecl): a C/C++ prototype, an abstract member
+	Params    facts.Arity
+	ParamList string // the parameter list when Signature is truncated
+	Inactive  bool   // in a C-family branch the default configuration does not compile (facts.ModInactive)
+	// ParentType: the enclosing symbol is a type (a member, or a nested
+	// type), not a namespace or package block.
+	ParentType bool
 }
 
 // Qualified returns Recv.Name for methods and Name otherwise, the identity
@@ -125,9 +131,11 @@ func (v *View) decodeSymbol(i, k int) Symbol {
 		Package: m.Package, PkgName: m.PkgName, File: m.Path, Lang: m.Lang,
 		Line: rec.Line, EndLine: rec.EndLine, Exported: rec.Exported,
 		Test: rec.Modifiers&facts.ModTest != 0, TestFile: m.Test, Decl: rec.Modifiers&facts.ModDecl != 0,
+		Params: rec.Params, ParamList: rec.ParamList, Inactive: rec.Modifiers&facts.ModInactive != 0,
 	}
 	if rec.Parent >= 0 {
 		s.Parent = strings.Clone(seg.SymbolName(rec.Parent))
+		s.ParentType = isTypeKind(seg.SymbolKind(rec.Parent))
 	}
 	s.ID = symbolID(s)
 	return s

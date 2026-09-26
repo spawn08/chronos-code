@@ -19,3 +19,5 @@ tests:
   files: ["test_*.py", "*_test.py", "conftest.py"]
   dirs: [tests]
   symbols: ["test*"]
+params:
+  receiver: [self, cls]

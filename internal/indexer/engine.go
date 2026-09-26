@@ -22,6 +22,7 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/indexer/extract/generic"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/golang"
+	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/treesitter"
 	"github.com/spawn08/chronos-code/internal/indexer/facts"
@@ -31,7 +32,7 @@ import (
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;
 // an index written by another version is discarded and rebuilt.
-const ExtractorVersion = "syntax-7"
+const ExtractorVersion = "syntax-12"
 
 // Tunables.
 const (
@@ -685,7 +686,11 @@ func (e *Engine) extract(rel string, info os.FileInfo, reuse func(string, uint64
 		Path: rel, Lang: golang.Lang, Package: e.unit(rel),
 		Size: info.Size(), MtimeNS: info.ModTime().UnixNano(),
 	}
-	if pk != nil {
+	kind := manifest.Kind(rel)
+	switch {
+	case kind != "":
+		f.Lang = kind
+	case pk != nil:
 		f.Lang = pk.Language
 	}
 	if info.Size() > maxFileBytes {
@@ -704,27 +709,31 @@ func (e *Engine) extract(rel string, info os.FileInfo, reuse func(string, uint64
 			return old
 		}
 	}
-	if pk != nil {
+	switch {
+	case kind != "":
+		manifest.Extract(f, src, e.opts.Root)
+	case pk != nil:
 		e.packs.Extract(f, pk, src)
-	} else {
+	default:
 		golang.Extract(f, src)
 	}
 	return f
 }
 
-// packFor returns the language pack extracting rel, or nil for Go.
+// packFor returns the language pack extracting rel, or nil for Go and
+// manifests.
 func packFor(rel string) *packs.Pack {
-	if strings.HasSuffix(rel, ".go") {
+	if strings.HasSuffix(rel, ".go") || manifest.Kind(rel) != "" {
 		return nil
 	}
 	return packs.Default().ForPath(rel)
 }
 
 // unit is a file's facts.File.Package: the Go import path, or the
-// directory for other languages until language resolvers (M7) assign
-// modules, crates or build targets.
+// directory for other languages and manifests. The language resolvers
+// read modules, crates and build units from the manifests' facts.
 func (e *Engine) unit(rel string) string {
-	if packFor(rel) != nil {
+	if packFor(rel) != nil || manifest.Kind(rel) != "" {
 		return path.Dir(rel)
 	}
 	return e.importPath(rel)

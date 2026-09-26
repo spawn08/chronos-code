@@ -119,7 +119,9 @@ func (x *Extractor) Extract(f *facts.File, pk *packs.Pack, src []byte) {
 		f.ParseErr = c.err.Error()
 		return
 	}
+	var inactive map[int]bool
 	if cFamily[pk.Language] {
+		inactive = inactiveLines(src)
 		src = normalizePreproc(src)
 	}
 	tree, err := x.rt.Parse(pk.Grammar, src)
@@ -135,7 +137,7 @@ func (x *Extractor) Extract(f *facts.File, pk *packs.Pack, src []byte) {
 	case root.HasError():
 		f.ParseErr = fmt.Sprintf("syntax error at line %d", firstError(root).StartPoint().Row+1)
 	}
-	w := &walker{pk: pk, lang: c.lang, src: src, f: f}
+	w := &walker{pk: pk, lang: c.lang, src: src, f: f, inactive: inactive}
 	w.run(c.q.ExecuteNode(root, c.lang, src))
 }
 
@@ -156,6 +158,7 @@ type ref struct {
 	kind      uint8
 	name      *gts.Node
 	qualifier *gts.Node
+	node      *gts.Node // the matched call or instantiation, for its arguments
 }
 
 type importGroup struct {
@@ -171,6 +174,8 @@ type walker struct {
 	lang *gts.Language
 	src  []byte
 	f    *facts.File
+
+	inactive map[int]bool // C-family lines the default configuration does not compile
 
 	defs     []*def
 	refs     []ref
@@ -383,6 +388,9 @@ func (w *walker) symbol(d *def) {
 	if d.decl {
 		s.Modifiers |= facts.ModDecl
 	}
+	if w.inactive[s.Line] {
+		s.Modifiers |= facts.ModInactive
+	}
 	words := w.headerWords(d)
 	s.Visibility = w.visibility(d, s, container, words)
 	s.Exported = s.Visibility == facts.VisPublic
@@ -404,6 +412,10 @@ func (w *walker) symbol(d *def) {
 		s.Modifiers |= facts.ModTest
 	}
 	s.Signature = w.signature(d)
+	s.Params = w.arity(d, s)
+	if s.Params.Known && strings.HasSuffix(s.Signature, "...") {
+		s.ParamList = w.paramList(d) // the signature lost part of its parameters
+	}
 	s.Doc = w.docFor(d)
 	if strings.Contains(s.Doc, "@deprecated") { // JSDoc, Javadoc, PHPDoc
 		s.Modifiers |= facts.ModDeprecated
@@ -723,7 +735,11 @@ func (w *walker) addRef(m gts.QueryMatch, main string) {
 	if !ok || name == nil {
 		return
 	}
-	w.refs = append(w.refs, ref{kind: kind, name: name, qualifier: capture(m, "ref.qualifier")})
+	r := ref{kind: kind, name: name, qualifier: capture(m, "ref.qualifier")}
+	if kind == facts.RefCall || kind == facts.RefInstantiate {
+		_, r.node = mainCapture(m)
+	}
+	w.refs = append(w.refs, r)
 }
 
 // references records refs in source order, each with its innermost
@@ -754,6 +770,8 @@ func (w *walker) references() {
 	}
 	var stack []*def
 	next := 0
+	var spans []lambdaSpan // lambda arguments and the ref of their call
+	var positions []uint32 // name position of each recorded ref, with Receivers
 	for _, r := range w.refs {
 		pos := r.name.StartByte()
 		if seen[pos] || (r.kind == facts.RefTypeUse && (defName[pos] || primitiveTypes[w.text(r.name)])) {
@@ -789,6 +807,14 @@ func (w *walker) references() {
 			Kind: r.kind, Enclosing: enclosing, Name: name,
 			Line: int(r.name.StartPoint().Row) + 1, Col: int(r.name.StartPoint().Column) + 1,
 		}
+		var lambdas []*gts.Node
+		out.Args, out.ArgTypes, lambdas = w.callArgsLambdas(r.node)
+		if w.pk.Calls.Receivers {
+			for _, l := range lambdas {
+				spans = append(spans, lambdaSpan{l.StartByte(), l.EndByte(), len(w.f.Refs)})
+			}
+			positions = append(positions, pos)
+		}
 		switch spec, ok := binds[qual]; {
 		case qual == "":
 		case ok:
@@ -800,6 +826,48 @@ func (w *walker) references() {
 			out.QualKind, out.Qualifier = facts.QualExpr, qual
 		}
 		w.f.Refs = append(w.f.Refs, out)
+	}
+	if len(spans) > 0 {
+		setLambdas(w.f.Refs, positions, spans)
+	}
+}
+
+// lambdaSpan is a lambda argument's byte range and the index in
+// File.Refs of the call it is passed to.
+type lambdaSpan struct {
+	start, end uint32
+	call       int
+}
+
+// setLambdas sets Ref.Lambda of every ref inside a lambda argument to the
+// innermost enclosing lambda's call. positions[i] is refs[i]'s position.
+func setLambdas(refs []facts.Ref, positions []uint32, spans []lambdaSpan) {
+	slices.SortStableFunc(spans, func(a, b lambdaSpan) int {
+		if a.start != b.start {
+			return int(a.start) - int(b.start)
+		}
+		return int(b.end) - int(a.end)
+	})
+	var stack []lambdaSpan
+	next := 0
+	for i := range refs {
+		pos := positions[i]
+		for next < len(spans) && spans[next].start <= pos {
+			for len(stack) > 0 && stack[len(stack)-1].end <= spans[next].start {
+				stack = stack[:len(stack)-1]
+			}
+			stack = append(stack, spans[next])
+			next++
+		}
+		for len(stack) > 0 && stack[len(stack)-1].end <= pos {
+			stack = stack[:len(stack)-1]
+		}
+		for k := len(stack) - 1; k >= 0; k-- {
+			if stack[k].call != i {
+				refs[i].Lambda = stack[k].call + 1
+				break
+			}
+		}
 	}
 }
 
@@ -868,8 +936,10 @@ func (w *walker) bindingHints() {
 			if typ = stripArgs(collapse(w.text(h.typ))); typ != "" {
 				typ += "()"
 			}
-		} else {
-			typ = normalizeType(w.text(h.typ))
+		} else if raw := w.text(h.typ); strings.Contains(raw, "->") || strings.Contains(raw, "=>") {
+			typ = "->" // a function type: (Int) -> Unit, T.() -> Boolean, (x: T) => void
+		} else if typ = normalizeType(raw); typ == "" {
+			typ = primitiveHint(raw) // int n: useless for members, useful for overloads
 		}
 		if name == "" || name == "_" || typ == "" || strings.ContainsAny(name, " (") {
 			continue
@@ -955,6 +1025,21 @@ var primitiveTypes = map[string]bool{
 	"instancetype": true, "id": true, "unsigned": true, "signed": true, "size_t": true,
 	"i8": true, "i16": true, "i32": true, "i64": true, "i128": true, "isize": true,
 	"u8": true, "u16": true, "u32": true, "u64": true, "u128": true, "usize": true, "f32": true, "f64": true,
+}
+
+// primitiveHint returns the builtin type a hint names (int, bool, f64),
+// or "" for anything else; pointers and references to them are not
+// builtins (char* is a string).
+func primitiveHint(raw string) string {
+	t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "const "))
+	switch t {
+	case "var", "auto", "let", "val", "dynamic", "id", "self", "instancetype", "void", "any", "unknown", "mixed":
+		return ""
+	}
+	if primitiveTypes[t] {
+		return t
+	}
+	return ""
 }
 
 // normalizeType reduces a type or callee as written to a plain, possibly

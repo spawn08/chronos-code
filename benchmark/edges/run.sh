@@ -17,7 +17,9 @@
 #                       dotnet-install.sh --channel 10.0 --install-dir
 #                       $cache/dotnet; scip-dotnet is installed into
 #                       $cache/tools. Its CLI state goes to $cache/dotnet-home.
-# Downloads are checked against the pinned SHA-256 sums. A repository whose
+# The reported numbers exclude the references listed in errata.tsv, and C/C++
+# calls are checked against clang's AST (the raw SCIP numbers are kept under
+# "raw"). Downloads are checked against the pinned SHA-256 sums. A repository whose
 # toolchain is missing is skipped with a message. Checkouts, build
 # directories and indexes are cached in $CHRONOS_EDGES_CACHE (default
 # ~/.cache/chronos-edges).
@@ -71,6 +73,7 @@ while IFS=$'\t' read -r name lang url tag indexer args; do
 	fi
 	commit="$(git -C "$dir" rev-parse HEAD)"
 	scip="$cache/$name.scip"
+	oracle=()
 	start=$SECONDS
 	case "$indexer" in
 	scip-go)
@@ -135,6 +138,7 @@ while IFS=$'\t' read -r name lang url tag indexer args; do
 		# shellcheck disable=SC2086 # args holds several options
 		cmake -S "$dir" -B "$build" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 $args >/dev/null
 		(cd "$dir" && "$cache/tools/scip-clang-$SCIP_CLANG" --compdb-path="$build/compile_commands.json" --index-output-path="$scip")
+		oracle=(-compdb "$build/compile_commands.json") # clang checks scip-clang's calls
 		;;
 	scip-dotnet) # args is the solution or project to index
 		if [[ ! -x "$cache/dotnet/dotnet" ]]; then
@@ -162,5 +166,5 @@ while IFS=$'\t' read -r name lang url tag indexer args; do
 	echo "indexed $name in $((SECONDS - start))s" >&2
 	echo "evaluating $name ($lang)" >&2
 	go run -C "$root" -tags "$tags" ./benchmark/edges -name "$name" -lang "$lang" -repo "$dir" -scip "$scip" \
-		-out "$out" -origin "$url" -commit "$commit" -indexer "$tool"
+		-out "$out" -origin "$url" -commit "$commit" -indexer "$tool" -errata "$here/errata.tsv" ${oracle[@]+"${oracle[@]}"}
 done <"$here/repos.tsv"

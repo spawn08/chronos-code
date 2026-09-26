@@ -26,14 +26,18 @@ symbols:
       sig: static int counter = 0
   10. L18-18 public var total
       sig: int total
-  11. L20-20 public func store_add [decl]
+  11. L20-20 public func store_add [decl] params=1..1
       sig: int store_add(struct item *it)
-  12. L23-27 public func store_add
+  12. L23-27 public func store_add params=1..1
       sig: int store_add(struct item *it)
       doc: "Adds an item."
-  13. L29-31 private func helper_internal [static]
+  13. L29-31 private func helper_internal [static] params=0..0
       sig: static void helper_internal(void)
 hints:
+  L9 id: int in=2
+  L10 name: char in=2
+  L17 counter: int
+  L18 total: int
   L20 it: item in=11
   L23 it: item in=12
 refs:

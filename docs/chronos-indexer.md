@@ -9,7 +9,11 @@ facts v2 and segment format v4 done; query packs for all 17 languages are
 indexed (M6.3); the generic resolver, type uses and binding hints are in
 (M6.4); the graph tools answer from resolved edges and detect tests in
 every language (M6.5); the SCIP baseline covers Go, Python, TypeScript,
-Rust, Java, Kotlin, C, C++ and C#. M7 (language resolvers) is next.
+Rust, Java, Kotlin, C, C++ and C#. M7 (2026-09-26): calls
+select overloads by argument count and argument types, project manifests
+feed language resolvers and build-graph scoping (M7.1–M7.6). M7 complete
+(2026-09-26): the precision targets are met in all nine languages
+against the corrected gold answer (M7.7, "M7 precision targets").
 Replaces the synchronous parts of `internal/graph` with an in-process
 indexer.
 
@@ -992,7 +996,8 @@ Observations:
   member in the right type is a candidate: "any" is 98–99% for
   `import_resolved` in jsoup and tinyxml2 while top1 is 45–68%
   (`Jsoup.parse` has 8 overloads, tinyxml2's `XMLTest` 4). Selecting
-  overloads by arity needs the argument count in the ref facts (M7). In
+  overloads by arity needs the argument count in the ref facts (done in
+  M7.1). In
   languages with overloading, a subtype's overload no longer hides the
   supertype's others (`Document.text(String)` vs `Element.text()`); such a
   call is `ambiguous`, not a wrong `type_hinted`.
@@ -1049,6 +1054,325 @@ runtime, yet `make build` still linked its cgo grammars.
   (which query `Reconcile` instead of the deleted `IndexAll`).
 - **Size:** release (linux/amd64) 52.9 → 51.7 MB; local `make build`
   (darwin/arm64) 77.4 → 52.2 MB.
+
+### M7.1 results (overloads by argument count, 2026-09-26)
+
+Calls in languages with overloading keep the overloads that accept their
+argument count:
+
+- **Facts (segment format v5, extractor `syntax-8`).** `Ref.Args` is 1 +
+  the argument count of a call or instantiation (0: not counted);
+  `Symbol.Params` is the declared arity of a function, method or
+  constructor (`facts.Arity`: Min, Max or `VarArgs`, Known). Symbol records
+  grow from 56 to 64 bytes and reference records from 32 to 36.
+- **Arguments** are counted by a pack's `calls` rule (argument-list node
+  types, Kotlin's trailing lambda, `call_suffix`), set for Java, Kotlin,
+  C++ and C#. An argument list with a syntax error is not counted.
+- **Parameters** are read from the text after the definition's name in
+  every pack: type parameters skipped, top-level commas split (strings,
+  comments, `->` and `=>` skipped), a top-level `=` or `?:` makes a
+  parameter optional, `...` or a leading `*` variadic. Pack `params`
+  rules add receivers (Python `self`/`cls`, Rust `self`), variadic words
+  (Kotlin `vararg`, C# `params`), Dart's optional groups, and shell
+  functions (no parameter list: unknown). C's `(void)` is 0. A second list
+  right after the first (Scala currying) or more than 254 parameters is
+  unknown.
+- **Resolution.** `byArity` runs on every candidate list of a call before
+  it is labelled, for `overloading` languages only (Java, C#, C++, Kotlin,
+  Scala, Swift, Dart; the last three have no call rule yet). Candidates
+  of unknown arity stay; when no candidate accepts the count, all stay. A
+  C# extension method counts its `this` parameter. C++ defaults are
+  written on the header declaration, so an out-of-line definition also
+  accepts what a declaration of the same member with as many parameters
+  accepts, and arity is applied before `definitionsFirst`.
+- **C++ prototypes.** The pack's pattern for free prototypes at namespace
+  level was a sibling group, not a parent, and never matched; it is split
+  into a `translation_unit` and a `declaration_list` pattern. The variable
+  pattern next to it has the same defect and is unchanged.
+
+SCIP edge baseline, calls (`benchmark/edges/baseline.json` now holds these
+numbers; the other five repositories are unchanged):
+
+| Repository | Calls recall | `import_resolved` top1 | `type_hinted` top1 | `ambiguous` refs |
+|---|---:|---:|---:|---:|
+| jsoup | 0.811 → 0.920 | 2458 → 3392 / 3599 | 5151 / 5251 → 7226 / 7391 | 4524 → 2219 |
+| mockito-kotlin | 0.755 → 0.787 | 111 → 121 / 157 | 53 / 53 → 57 / 57 | 31 → 20 |
+| MediatR | 0.857 → 0.882 | 274 → 278 / 298 | 79 / 79 → 79 / 79 | 185 → 173 |
+| tinyxml2 | 0.564 → 0.577 | 322 → 346 / 715 | 509 / 529 → 511 / 636 | 492 → 385 |
+
+Every call that lost its SCIP target compared with the previous run (118)
+was checked, and in each the SCIP target cannot take the call's argument
+count, so the gold is wrong, not the resolver:
+
+- tinyxml2 (109): scip-clang gives `doc.Parse(xml)` the symbol of the
+  private `XMLDocument::Parse()`, and 2-argument `Write(p, n)` calls that
+  of the inline 1-argument `Write(const char*)`. These 105 `Parse` sites
+  are why `type_hinted` looks 80% precise here.
+- MediatR (4): scip-dotnet gives the four generic `Publish<T>` overloads
+  of `Publisher` one symbol, so the harness scores against the nearest
+  preceding one (`definition`).
+- mockito-kotlin (5): scip-java targets `verify(mock, block)` for
+  `verify(m)` and the extension `Stubber.wheneverBlocking(mock, f)` for
+  `wheneverBlocking { … }`.
+
+Edit path and queries, measured on this repository against the same tree
+with the argument counting, parameter parsing and `byArity` switched off
+(benchstat, n=6, runs interleaved, load average 12–56). The format change
+is in both trees, so this measures the new logic, not the larger records.
+`IndexEditBody`, `IndexEditSignature`, `IndexFresh` and every
+`BenchmarkScope*` measured show no significant change (p ≥ 0.18); an
+ad-hoc benchmark extracting all 17 pack samples showed none either
+(13.34 → 13.53 ms, p = 0.39).
+
+Not in M7.1 (all but the Go item done in M7.2):
+
+- `new T(args)` still reaches every constructor of `T` in `find_callers`
+  (`targetsInclude` does not see the argument count).
+- The Go extractor records neither count; Go has no overloading.
+- Scala, Swift and Dart parameters are read, but their calls are not
+  counted (no `calls` rule yet).
+- Call-chain type inference (`memberCallType`, `callType`) takes the
+  first overload with a result type, whatever the argument count.
+
+### M7.2–M7.6 results (2026-09-26)
+
+**M7.2, overload follow-ups.**
+
+- `find_callers` and `IncomingCalls` reach only the constructors that
+  accept a `new T(args)` site's argument count (`ctorSet.selects`, with
+  the C++ declaration rule of M7.1); when none does, every one.
+- `calls` rules for Scala (`arguments`, a block argument), Swift
+  (`value_arguments`, trailing closures, also when the runtime nests
+  `f(a) { }` as a call of a call) and Dart (`arguments` under
+  `argument_part`).
+- Receiver chains pick the overload whose arity fits before taking its
+  result type (`segmentArgs` counts the arguments kept in the qualifier;
+  hint chains, whose arguments are stripped, stay uncounted).
+- The C++ pack's namespace-level variable pattern had the same sibling
+  group defect as the prototype pattern and is split the same way.
+
+**M7.3, project manifests.** `extract/manifest` indexes build and package
+manifests as files whose `Lang` is `manifest:<kind>`: package.json and
+pnpm-workspace.yaml, tsconfig/jsconfig (including `tsconfig.*.json`),
+Cargo.toml, composer.json, pom.xml, build.gradle(.kts) and
+settings.gradle(.kts), BUILD/BUILD.bazel/BUCK/TARGETS, *.csproj,
+compile_commands.json, pubspec.yaml, Package.swift and pyproject.toml.
+Each file's facts come from that file alone, with paths resolved against
+its directory and stored root-relative: `PkgName` is the declared name,
+three new import kinds carry dependencies (`ImportDepend`: a name and,
+when given, a directory), path aliases (`ImportAlias`: tsconfig `paths`,
+PSR-4 prefixes) and roots (`ImportRoot`: `baseUrl`, `-I` directories,
+workspace and module globs, SwiftPM targets), and `Exports` carry package
+entry points (package.json `exports`, `main`, `types`). JSON with
+comments, a TOML subset and Starlark dependency lists are parsed without
+new dependencies. `scan.Indexable` accepts manifests, so the watcher and
+reconcile keep them current; `ExtractorVersion` is `syntax-10`. The query
+side builds a `project` model once per generation from the few manifest
+files (a per-segment index lists them, and the declared packages of
+Java, Kotlin, Scala and C# files).
+
+**M7.4–M7.5, language resolvers.** Each maps an import spec to units
+before the generic suffix matching:
+
+| Language | Resolution |
+|---|---|
+| TypeScript / JavaScript | tsconfig `paths` and `baseUrl` of the nearest config, following `extends` (a config's `paths` replace its base's); workspace packages by name, through `exports`/`main`/`types` mapped from `dist`, `lib`, `build` or `out` back to `src`, then `src/index` |
+| Python | `pyproject.toml` source roots (src layouts) |
+| Rust | `use other_crate::…` to a workspace crate's `src` (Cargo.toml `name`, `-` as `_`) |
+| PHP | composer PSR-4 and PSR-0 prefixes, longest first |
+| C, C++, Objective-C | `compile_commands.json` include directories, before suffix matching |
+| Dart | `package:name/…` to the `lib` of the pubspec declaring `name` |
+| Swift | `import Target` to every unit under the SwiftPM target; files of one target see each other across subdirectories |
+| Java, Kotlin, Scala, C# | the declared package is a unit: files of one package see each other in any directory (tests in `src/test`), `import a.b.C` and `import a.b.*`/`using a.b` match declared packages (Kotlin files need not mirror them), and C# code sees its enclosing namespaces. Only top-level declarations are visible this way: a nested class or a member needs its owner |
+| Ruby | name matches list the file autoloading expects first (`UsersController` in `users_controller.rb`) |
+
+Across languages:
+
+- **Re-exports** are followed up to three hops (`followReexports`):
+  `export … from` and `export *` (barrels), Rust `pub use`, and in Python
+  the imports of a package's `__init__.py`. A renaming re-export
+  (`export { tokenize as lex }`) resolves to the original name.
+- **Aliased imports** (`import {a as b}`, `from x import a as b`) resolve
+  the original name in the import's units or through re-exports; before,
+  they matched declarations named like the alias.
+- Members of a qualified type (`Connection.Request`) prefer owners nested
+  in the qualifier's type; in package-scoped languages, members are ranked
+  by how the file sees their owner's name (declared in the file, named by
+  an import, top-level in the file's package, brought by a wildcard).
+- An unqualified call in a class of a language with overloading also
+  considers the supertypes' overloads (implicit this), and a call to its
+  own name inside one overload lists the caller last (delegation is more
+  common than recursion).
+
+**M7.6, build graphs.** A build unit is the nearest directory with a
+package.json, Cargo.toml, pom.xml, build script, BUILD file, .csproj or
+pubspec (or a SwiftPM target root). Its dependencies come from its
+manifests: paths (Bazel labels, Cargo path dependencies, project
+references) or names mapped to workspace units (npm packages, crates,
+artifactIds, Gradle project paths through settings or the default
+layout). When a name-only match (the last resolution step) has several
+candidates and the caller's unit declares its dependencies, the
+candidates in its unit and its transitive dependencies are kept
+(`inBuildDeps`). Go keeps its own package visibility.
+
+**Argument types.** Overloads with the same arity are told apart by cheap
+argument type hints recorded per call (`Ref.ArgTypes`: string, number,
+boolean, character and null literals, identifiers, `new T`). At query
+time an identifier gets its type from binding hints or, for an enum
+constant, its enum. Parameter types are read from the signature (type
+parameters after the name skipped). An overload an argument cannot be
+passed to is dropped, and the best total of exact matches and implicit
+conversions (C++ number to `bool`, unscoped enums to integers, anything to
+`Object`) wins; unknowns are neutral. Reference records grow to 44 bytes
+(the hints are one interned string).
+
+SCIP edge baseline, calls (`benchmark/edges/baseline.json`):
+
+| Repository | Recall M6 → M7.1 → now | `import_resolved` top1 | `type_hinted` top1 |
+|---|---|---:|---:|
+| cobra (Go) | 0.999 → 0.999 → 0.999 | 1419 / 1419 | 910 / 910 |
+| click (Python) | 0.966 → 0.966 → 0.966 | 422 / 432 | 233 / 233 |
+| ky (TypeScript) | 0.889 → 0.889 → 0.889 | 9 / 9 | 7 / 7 |
+| walkdir (Rust) | 0.961 → 0.961 → 0.973 | 148 / 151 | 271 / 271 |
+| jsoup (Java) | 0.811 → 0.920 → 0.957 | 3798 / 3858 | 8584 / 8641 |
+| mockito-kotlin (Kotlin) | 0.755 → 0.787 → 0.794 | 143 / 177 | 57 / 57 |
+| cJSON (C) | 0.998 → 0.998 → 0.998 | 825 / 825 | – |
+| tinyxml2 (C++) | 0.564 → 0.577 → 0.691 | 555 / 715 | 551 / 676 |
+| MediatR (C#) | 0.857 → 0.882 → 0.889 | 316 / 326 | 102 / 111 |
+
+Types recall is unchanged except walkdir (0.944 → 0.950). Every miss
+that argument types introduced in MediatR (13) was checked: scip-dotnet
+gives generic and extension-method calls the symbol of the first overload
+(`AddMediatR(cfg)` with a `MediatRServiceConfiguration`, `Publish(new
+Pinged())`, which C# resolves to the generic overload). In tinyxml2 the
+remaining `XMLTest` misses swap the `bool` overload and the template
+(`XMLTest("x", true, b)` has two `bool` arguments, and C++ prefers the
+non-template), the same kind of scip-clang symbol mix-up as `Parse` in
+M7.1.
+
+### M7.7 results: closing the precision targets (2026-09-26)
+
+**Resolution.**
+
+- **Kotlin lambdas and named arguments.** A trailing lambda (`#t`) binds
+  the last parameter and a lambda or function reference in the list
+  (`#f`) needs a function type; named arguments (`name = x`, C# `name:
+  x`, Swift and Dart labels) bind by name. After binding, an overload
+  with a required parameter left unbound is dropped. Binding runs even
+  when no argument has a hint, so `inOrder(t as Any)` no longer matches
+  an overload whose lambda parameter is required.
+- **Lambda receivers.** Kotlin refs record the call whose lambda contains
+  them (`Ref.Lambda`, a new pack rule `calls.receivers`). An unqualified
+  call inside `inOrder(a) { verify(a) }` looks up the receiver `R` of the
+  called function's `R.() -> Unit` parameter first, and `a.onType { }`
+  finds the extension's receiver the same way.
+- **Kotlin extensions.** `x.f()` also finds extension functions on `x`'s
+  type or its supertypes (`fun Foo.f()`), and generic ones (`fun <T>
+  T.f()`) by name. An unqualified call drops extensions unless it is made
+  inside an extension of, or a member of, their receiver type; top-level
+  functions of one package overload across files.
+- **Argument types.** Call arguments are typed from the callee's result
+  (`()f` hints: the declarations must agree, free functions first), class
+  literals (`Foo::class`, `Foo.class`), primitive-typed variables (hints
+  now keep `int`, `bool`, `number`...), for-each variables (Java, C#),
+  and values declared `object`/`Object`, which only an `object` parameter
+  or a type parameter accepts.
+- **Long parameter lists.** When the signature is cut at 200 characters,
+  the whole parameter list is kept (`Symbol.ParamList`), so Kotlin's
+  12-parameter `mock` overloads are still told apart.
+- **C conditional compilation.** Each `#if`/`#ifdef` group of a C-family
+  file is evaluated under a default configuration (macros defined earlier
+  in the file, a 64-bit LP64 platform's limits, others undefined;
+  unevaluable conditions stay active). Declarations in branches that are
+  not compiled carry `ModInactive`, and a compiled declaration of the
+  same name wins (`activeFirst`).
+- Implicit-this candidates prefer methods over fields of the same name.
+
+Segment records: symbols 72 bytes (parameter list), references 48 bytes
+(argument hints, lambda call). `ExtractorVersion` is `syntax-12`.
+
+**Measurement.** The harness now corrects SCIP where it is provably
+wrong, and keeps the raw numbers under `raw` in `baseline.json`:
+
+- **Clang oracle (C, C++).** With `-compdb`, every translation unit of
+  `compile_commands.json` is parsed by clang (`-ast-dump=json`), and the
+  declarations clang gives each call (a header declaration and its
+  definition are one group, across translation units) replace SCIP's
+  definition. In tinyxml2 this corrects 265 references, all scip-clang
+  giving a call the symbol of another overload (`doc.Parse(xml)` as
+  `Parse()`, `XMLTest(..., true, b)` as the template).
+- **Errata** (`benchmark/edges/errata.tsv`, 27 entries). References
+  whose SCIP target cannot be the callee are not scored, each with the
+  reason: it takes another number of arguments (`verify(t)` as the
+  zero-parameter `verify()`), needs a receiver the call lacks
+  (`whenever(x).doSuspendableAnswer { }` as a top-level non-extension
+  function), or cannot take the argument's type (a
+  `MediatRServiceConfiguration` passed where the target takes
+  `Action<MediatRServiceConfiguration>`). Targets that are merely a worse
+  overload are not errata: MediatR's `Publish(new Pinged())`, which C#
+  resolves to the generic overload and scip-dotnet to `Publish(object)`,
+  still counts as a miss.
+
+SCIP edge baseline, calls (corrected; raw in parentheses):
+
+| Repository | Recall | `import_resolved` top1 | `type_hinted` top1 |
+|---|---:|---:|---:|
+| cobra (Go) | 0.999 | 1419 / 1419 | 910 / 910 |
+| click (Python) | 0.966 | 422 / 432 | 233 / 233 |
+| ky (TypeScript) | 0.889 | 9 / 9 | 7 / 7 |
+| walkdir (Rust) | 0.973 | 148 / 151 | 271 / 271 |
+| jsoup (Java) | 0.964 | 3836 / 3858 | 8716 / 8773 |
+| mockito-kotlin (Kotlin) | 0.946 (0.900) | 159 / 160 | 78 / 78 |
+| cJSON (C) | 1.000 (0.998) | 825 / 825 | – |
+| tinyxml2 (C++) | 0.808 (0.695) | 681 / 715 | 669 / 678 |
+| MediatR (C#) | 0.915 (0.898) | 316 / 323 | 104 / 109 |
+
+Types: cJSON 0.977 (0.915 before `#if` evaluation), others unchanged.
+
+### M7 precision targets
+
+Set on 2026-09-26 from the M6 baseline, where labels were 97–100%
+precise in languages without overloading: for calls, `import_resolved`
+and `type_hinted` top1 precision at least 0.95 in every language; for
+types, `import_resolved` at least 0.95. Measured against the corrected
+gold answer above:
+
+| Language | Calls `import_resolved` | Calls `type_hinted` | Types `import_resolved` | Met |
+|---|---:|---:|---:|---|
+| Go | 1.000 | 1.000 | 1.000 | yes |
+| Python | 0.977 | 1.000 | 1.000 | yes |
+| TypeScript | 1.000 (n = 9) | 1.000 (n = 7) | 1.000 | yes, on a small sample |
+| Rust | 0.980 | 1.000 | 0.964 | yes |
+| Java | 0.994 | 0.994 | 1.000 | yes |
+| Kotlin | 0.994 | 1.000 | 1.000 | yes |
+| C | 1.000 | – | 0.978 | yes |
+| C++ | 0.952 | 0.987 | 1.000 | yes |
+| C# | 0.978 | 0.954 | 0.998 | yes |
+
+Against SCIP alone, Kotlin (0.941 / 0.929), C++ (0.787 / 0.814) and C#
+(0.969 / 0.937) stay below 0.95; every difference is an errata entry or a
+clang correction. cJSON's remaining types misses are `UNITY_DOUBLE`,
+whose branch the build configuration picks (`-DUNITY_INCLUDE_DOUBLE`);
+facts come from one file, so compile flags are not used.
+
+Edit path and queries against the M6.5 commit (benchstat, runs
+interleaved, load average 9–23): `IndexEditBody` and
+`IndexEditSignature` show no significant change at n = 10 (10.2 → 10.8
+ms, p = 0.35; 10.5 → 10.7 ms, p = 0.74); `IndexFresh` none at n = 6;
+`ScopeFindCallersDepth3` 2.07 → 2.24 ms (+8%, inside the 5 ms goal),
+`ScopeImpact` 7.90 → 8.46 ms (+7%), `ScopeCodebaseContext` 16.9 →
+11.1 ms, the other scope benchmarks unchanged. This repository is Go, so
+the manifest resolvers are exercised by the tests, not by these numbers.
+
+Not in M7:
+
+- `go.work` needs nothing: Go import paths already name modules.
+- Manifest-only directories (a root package.json) appear in the package
+  list.
+- Arguments that are expressions (other than calls, literals, variables
+  and `new T`) have no type hint.
+- Type-argument counts (`argumentCaptor<T>()` vs `<A, B>`) do not select
+  overloads.
 
 ## Plan after M2
 
@@ -1345,7 +1669,7 @@ acceptance criteria met.
 | M4 | `precise/` | Type-checked caller parity with the old graph; edits stay < 50 ms while precise loads run |
 | M5 (done) | Scale foundations: layered routing, streaming sharded base, compaction per shard, watcher backends, git-based reconcile, progressive build, portable segments | On a synthetic million-file corpus, every target in "Scale" is met; a test counts work on the edit path and shows none proportional to repository size; macOS watching uses no descriptor per file |
 | M6 (done) | Parser runtime spike (pure Go vs cgo: MB/s per language, memory, grammar load time); facts v2 with format version bump; query packs for every language in the table; generic resolver; binding hints | Runtime decision recorded with measurements; every listed language produces symbols, outlines and refs in release builds; parity with the old tree-sitter tier on its tests; baseline edge precision for each language against SCIP |
-| M7 | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline; no edit-latency regression |
+| M7 (done) | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline ("M7 precision targets"); no edit-latency regression |
 | M8 | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
 | M9 | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |
 | M10 | Precise tier for other languages through SCIP import, when the toolchain is present | A precise edge is used only when its file hash matches; indexing and edits never block on an external indexer |

@@ -13,6 +13,11 @@
 // references at which the indexer recorded one, and recall the share of
 // matched references resolved to the right declaration first. Results are
 // merged into -out by -name; run.sh drives it over pinned repositories.
+//
+// With -errata and -compdb the gold answer is corrected (corrections.go):
+// reviewed references whose SCIP target cannot be the callee are not
+// scored, and C/C++ calls are checked against clang's AST. The numbers
+// against SCIP alone are kept under "raw".
 package main
 
 import (
@@ -56,17 +61,29 @@ type Group struct {
 	Coverage float64                `json:"coverage"` // matched gold / gold
 	Recall   float64                `json:"recall"`   // top1-correct / matched
 	Labels   map[string]*LabelStats `json:"labels"`   // by resolution label; "unresolved" when none
+	// Corrections of the gold answer (see corrections); raw SCIP numbers
+	// are in Result.Raw.
+	Errata    int `json:"errata,omitempty"`    // matched references excluded by the errata file
+	Corrected int `json:"corrected,omitempty"` // matched references scored against clang where SCIP disagrees
+}
+
+// Groups are the two measurements, for Result.Raw.
+type Groups struct {
+	Calls Group `json:"calls"`
+	Types Group `json:"types"`
 }
 
 // Result is one repository's measurement.
 type Result struct {
-	Name     string  `json:"name"`
-	Lang     string  `json:"lang"`
-	Repo     string  `json:"repo,omitempty"`
-	Commit   string  `json:"commit,omitempty"`
-	Indexer  string  `json:"indexer,omitempty"`
-	Calls    Group   `json:"calls"`
-	Types    Group   `json:"types"`
+	Name    string `json:"name"`
+	Lang    string `json:"lang"`
+	Repo    string `json:"repo,omitempty"`
+	Commit  string `json:"commit,omitempty"`
+	Indexer string `json:"indexer,omitempty"`
+	Calls   Group  `json:"calls"`
+	Types   Group  `json:"types"`
+	// Raw is the measurement against SCIP alone, when corrections applied.
+	Raw      *Groups `json:"raw,omitempty"`
 	Measured string  `json:"measured"` // date
 	Seconds  float64 `json:"seconds"`  // indexing plus resolution time
 }
@@ -94,6 +111,9 @@ func run() error {
 		commit  = flag.String("commit", "", "commit, for the record")
 		tool    = flag.String("indexer", "", "SCIP indexer and version, for the record")
 		verbose = flag.Bool("v", false, "print every incorrect or unresolved reference")
+		errata  = flag.String("errata", "", "errata file: gold targets SCIP gets wrong, excluded from scoring")
+		compdb  = flag.String("compdb", "", "compile_commands.json: check C/C++ calls against clang's AST")
+		clang   = flag.String("clang", "clang", "clang for -compdb")
 	)
 	flag.Parse()
 	if *name == "" || *repo == "" || *scip == "" {
@@ -111,7 +131,11 @@ func run() error {
 		root = c
 	}
 	start := time.Now()
-	res, err := evaluate(root, idx, *verbose)
+	corr, err := loadCorrections(*name, root, *errata, *compdb, *clang)
+	if err != nil {
+		return err
+	}
+	res, err := evaluate(root, idx, *verbose, corr)
 	if err != nil {
 		return err
 	}
@@ -128,6 +152,10 @@ type gold struct {
 	defPath    string
 	defLine    int  // 1-based
 	callable   bool // a function or method (else a type)
+	// Corrections: errata excludes the reference; oracle holds clang's
+	// callee declarations, which replace SCIP's definition.
+	errata bool
+	oracle []lineKey
 }
 
 type lineKey struct {
@@ -141,7 +169,7 @@ type occKey struct {
 	symbol           string
 }
 
-func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
+func evaluate(root string, idx *scipIndex, verbose bool, corr *corrections) (Result, error) {
 	defs := map[string][]lineKey{}
 	for _, d := range idx.Documents {
 		for _, o := range d.Occurrences {
@@ -151,6 +179,7 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 		}
 	}
 	golds := map[lineKey][]gold{}
+	errataGold := map[bool]int{} // by callable
 	var res Result
 	skipped := map[string]int{} // occurrences not scored, by reason
 	for _, d := range idx.Documents {
@@ -226,11 +255,21 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 			def := definition(ds, path, o.StartLine+1)
 			g := gold{start: start, end: end, text: text, defPath: def.path, defLine: def.line, callable: callable}
 			k := lineKey{path, o.StartLine + 1}
+			if corr != nil {
+				site := siteKey{path, o.StartLine + 1, text}
+				_, g.errata = corr.errata[site]
+				if callable {
+					g.oracle = corr.oracle[site]
+				}
+			}
 			golds[k] = append(golds[k], g)
 			if g.callable {
 				res.Calls.Gold++
 			} else {
 				res.Types.Gold++
+			}
+			if g.errata {
+				errataGold[g.callable]++
 			}
 		}
 	}
@@ -256,7 +295,7 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 	v := query.NewView(sn, query.NewCache())
 
 	hit := map[lineKey]map[int]bool{} // matched gold starts, both groups
-	measure := func(grp *Group, callable bool, kinds []uint8) {
+	measure := func(grp *Group, callable bool, kinds []uint8, corrected, verbose bool) {
 		grp.Labels = map[string]*LabelStats{}
 		correct := 0
 		counted := map[lineKey]map[int]bool{} // this group's gold, for coverage
@@ -265,6 +304,10 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 			k := lineKey{r.File, r.Line}
 			g, ok := match(golds[k], r)
 			if !ok {
+				return
+			}
+			if corrected && g.errata {
+				grp.Errata++
 				return
 			}
 			grp.Matched++
@@ -288,11 +331,20 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 				grp.Labels[label] = ls
 			}
 			ls.N++
+			want := []lineKey{{g.defPath, g.defLine}}
+			if corrected && len(g.oracle) > 0 {
+				if !slices.Contains(g.oracle, want[0]) {
+					grp.Corrected++
+				}
+				want = g.oracle
+			}
 			top1, any := false, false
 			for i, t := range r.Targets {
-				if t.File == g.defPath && g.defLine >= t.Line && g.defLine <= max(t.Line, t.EndLine) {
-					any = true
-					top1 = top1 || i == 0
+				for _, w := range want {
+					if t.File == w.path && w.line >= t.Line && w.line <= max(t.Line, t.EndLine) {
+						any = true
+						top1 = top1 || i == 0
+					}
 				}
 			}
 			if top1 {
@@ -311,7 +363,7 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 				if r.Col-1 < g.start || r.Col-1 >= g.end {
 					note = " (other column)"
 				}
-				fmt.Fprintf(os.Stderr, "%s:%d %s [%s] want %s:%d got %v%s\n", r.File, r.Line, r.Name, label, g.defPath, g.defLine, got, note)
+				fmt.Fprintf(os.Stderr, "%s:%d %s [%s] want %s:%d got %v%s\n", r.File, r.Line, r.Name, label, want[0].path, want[0].line, got, note)
 			}
 		})
 		matchedGold := 0
@@ -325,8 +377,17 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 			grp.Recall = round(float64(correct) / float64(grp.Matched))
 		}
 	}
-	measure(&res.Calls, true, []uint8{facts.RefCall, facts.RefInstantiate})
-	measure(&res.Types, false, []uint8{facts.RefTypeUse, facts.RefExtends, facts.RefImplements})
+	calls, types := []uint8{facts.RefCall, facts.RefInstantiate}, []uint8{facts.RefTypeUse, facts.RefExtends, facts.RefImplements}
+	if corr != nil {
+		res.Raw = &Groups{Calls: Group{Gold: res.Calls.Gold}, Types: Group{Gold: res.Types.Gold}}
+		measure(&res.Raw.Calls, true, calls, false, false)
+		measure(&res.Raw.Types, false, types, false, false)
+		hit = map[lineKey]map[int]bool{}
+		res.Calls.Gold -= errataGold[true]
+		res.Types.Gold -= errataGold[false]
+	}
+	measure(&res.Calls, true, calls, corr != nil, verbose)
+	measure(&res.Types, false, types, corr != nil, verbose)
 	if verbose { // every gold reference without an indexer reference, in file order
 		keys := slices.Collect(maps.Keys(golds))
 		slices.SortFunc(keys, func(a, b lineKey) int {

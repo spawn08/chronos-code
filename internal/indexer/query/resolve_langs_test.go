@@ -69,7 +69,8 @@ fn builder() {
 // TestResolveJavaImportsAndOverloads: a single-type import shadows a
 // same-package class of that name, a static import brings a method into
 // scope, a cast gives the receiver's type, and a supertype's overload with
-// other parameters stays a candidate.
+// other parameters stays a candidate (and is the target when the argument
+// count selects it).
 func TestResolveJavaImportsAndOverloads(t *testing.T) {
 	v := newFixture(t, map[string]string{
 		"src/main/java/org/x/nodes/Comment.java": "package org.x.nodes;\n\npublic class Comment {\n}\n",
@@ -108,7 +109,7 @@ class Builder {
 		"Comment@10":  "import_resolved Comment",
 		"inSorted@11": "import_resolved Strings.inSorted",
 		"text@12":     "type_hinted Node.text",
-		"text@13":     "ambiguous Doc.text,Node.text",
+		"text@13":     "type_hinted Node.text",
 	})
 	if got := v.Symbols("Comment", "class"); len(got) != 2 {
 		t.Fatalf("Comment classes = %d, want 2", len(got))

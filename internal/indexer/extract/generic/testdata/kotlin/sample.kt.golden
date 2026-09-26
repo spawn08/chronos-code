@@ -14,17 +14,17 @@ symbols:
       sig: private val cache = mutableMapOf<String, User>()
   3. L11-11 internal property UserRepo.count in=0
       sig: internal var count: Int = 0
-  4. L13-17 public method UserRepo.find in=0 [override]
+  4. L13-17 public method UserRepo.find in=0 [override] params=1..1
       sig: override fun find(id: String): User?
-  5. L19-20 public method UserRepo.legacy in=0 [async,deprecated]
+  5. L19-20 public method UserRepo.legacy in=0 [async,deprecated] params=0..0
       sig: @Deprecated("old") suspend fun legacy()
   6. L23-23 public const UserRepo.LIMIT in=0
       sig: const val LIMIT = 10
-  7. L24-24 public method UserRepo.create in=0
+  7. L24-24 public method UserRepo.create in=0 params=0..0
       sig: fun create(): UserRepo
   8. L28-30 public interface Repo
       sig: interface Repo
-  9. L29-29 public method Repo.find in=8 [decl]
+  9. L29-29 public method Repo.find in=8 [decl] params=1..1
       sig: fun find(id: String): User?
   10. L32-32 public class User
       sig: data class User(val id: String)
@@ -38,13 +38,13 @@ symbols:
       sig: WRITE
   15. L36-38 public class Registry
       sig: object Registry
-  16. L37-37 public method Registry.register in=15
+  16. L37-37 public method Registry.register in=15 params=1..1
       sig: fun register(r: Repo)
   17. L40-40 public type_alias Id
       sig: typealias Id = String
-  18. L42-42 public func topLevel
+  18. L42-42 public func topLevel params=1..1
       sig: fun topLevel(x: Int): Int
-  19. L44-44 private func helper
+  19. L44-44 private func helper params=1..1
       sig: private fun helper(x: Int)
 hints:
   L9 db: Database in=0
@@ -64,19 +64,19 @@ refs:
   L9:53 type User in=0
   L9:62 implements Repo in=0
   L9:68 implements AutoCloseable in=0
-  L10:25 call mutableMapOf in=2
+  L10:25 call mutableMapOf in=2 args=0
   L10:38 type String in=2
   L10:46 type User in=2
   L11:25 type Int in=3
   L13:27 type String in=4
   L13:36 type User in=4
-  L14:11 call check pkg="com.example.util.Helper" in=4
-  L15:17 call User in=4
-  L16:32 call load on="db" in=4
+  L14:11 call check pkg="com.example.util.Helper" in=4 args=1 types=id
+  L15:17 call User in=4 args=1 types=id
+  L16:32 call load on="db" in=4 args=1 types=id
   L19:6 decorator Deprecated in=5
   L24:23 type UserRepo in=7
-  L24:34 call UserRepo in=7
-  L24:43 call Database in=7
+  L24:34 call UserRepo in=7 args=1 types=()Database
+  L24:43 call Database in=7 args=0
   L29:18 type String in=9
   L29:27 type User in=9
   L32:25 type String in=11
@@ -84,5 +84,5 @@ refs:
   L40:16 type String in=17
   L42:17 type Int in=18
   L42:23 type Int in=18
-  L42:29 call helper in=18
+  L42:29 call helper in=18 args=1 types=x
   L44:23 type Int in=19

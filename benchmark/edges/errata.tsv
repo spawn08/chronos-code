@@ -1,0 +1,32 @@
+# Gold targets SCIP gets wrong, excluded from scoring (docs/chronos-indexer.md,
+# "M7 precision targets"). Each entry is a reference whose SCIP target cannot
+# be the callee: it takes another number of arguments, or needs a receiver the
+# call does not have, or its parameter cannot take the argument's type.
+# repository	file:line	name	reason
+mockito-kotlin	mockito-kotlin/src/main/kotlin/org/mockito/kotlin/Verification.kt:231	verify	verify(t) passes 1 argument; the target is fun verify() (0 parameters) in the same class
+mockito-kotlin	mockito-kotlin/src/main/kotlin/org/mockito/kotlin/Verification.kt:236	verify	verify(t, mode) passes 2 arguments; the target fun verify() takes none
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:150	verify	verify(m) passes 1 argument and no lambda; the target verify(mock: T, block: VerifyScope<T>.() -> Unit) requires block
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:159	verify	verify(m) passes 1 argument and no lambda; the target verify(mock, block) requires block
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:249	verify	verify(fixture) passes 1 argument and no lambda; the target verify(mock, block) requires block
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:344	verify	verify(fixture) passes 1 argument and no lambda; the target verify(mock, block) requires block
+mockito-kotlin	mockito-kotlin/src/main/kotlin/org/mockito/kotlin/Verification.kt:244	verifyBlocking	verifyBlocking(t, f) passes 2 arguments; the target is the enclosing fun verifyBlocking(f) (1 parameter)
+mockito-kotlin	mockito-kotlin/src/main/kotlin/org/mockito/kotlin/Verification.kt:252	verifyBlocking	verifyBlocking(t, mode, f) passes 3 arguments; the target fun verifyBlocking(f) takes 1
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:63	wheneverBlocking	wheneverBlocking { } has no receiver and one lambda; the target is the extension Stubber.wheneverBlocking(mock, f), which needs a Stubber receiver and 2 arguments
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:196	doSuspendableAnswer	whenever(...).doSuspendableAnswer { } has a receiver; the target fun doSuspendableAnswer(answer) in Stubber.kt is not an extension or member
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:218	doSuspendableAnswer	has a receiver; the target fun doSuspendableAnswer(answer) in Stubber.kt is not an extension or member
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:236	doSuspendableAnswer	has a receiver; the target fun doSuspendableAnswer(answer) in Stubber.kt is not an extension or member
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:258	doSuspendableAnswer	has a receiver; the target fun doSuspendableAnswer(answer) in Stubber.kt is not an extension or member
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:269	doSuspendableAnswer	has a receiver; the target fun doSuspendableAnswer(answer) in Stubber.kt is not an extension or member
+mockito-kotlin	mockito-kotlin/src/test/kotlin/test/CoroutinesTest.kt:282	doSuspendableAnswer	has a receiver; the target fun doSuspendableAnswer(answer) in Stubber.kt is not an extension or member
+mediatr	src/MediatR/MicrosoftExtensionsDI/ServiceCollectionExtensions.cs:33	AddMediatR	the argument is a MediatRServiceConfiguration (line 29); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:686	AddMediatR	cfg is a MediatRServiceConfiguration (line 661); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:717	AddMediatR	cfg is a MediatRServiceConfiguration (line 694); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:749	AddMediatR	cfg is a MediatRServiceConfiguration (line 726); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:780	AddMediatR	cfg is a MediatRServiceConfiguration (line 757); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:811	AddMediatR	cfg is a MediatRServiceConfiguration (line 788); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:844	AddMediatR	cfg is a MediatRServiceConfiguration (line 819); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	test/MediatR.Tests/MicrosoftExtensionsDI/PipelineTests.cs:863	AddMediatR	cfg is a MediatRServiceConfiguration (line 852); the target overload takes Action<MediatRServiceConfiguration>
+mediatr	samples/MediatR.Examples.PublishStrategies/Publisher.cs:30	Publish	passes 3 arguments; scip-dotnet gives the four generic Publish<T> overloads one symbol, scored against Publish<T>(notification) (1 parameter)
+mediatr	samples/MediatR.Examples.PublishStrategies/Publisher.cs:35	Publish	passes 3 arguments; the target Publish<T>(notification) takes 1 (one symbol for four overloads)
+mediatr	samples/MediatR.Examples.PublishStrategies/Publisher.cs:40	Publish	passes 3 arguments; the target Publish<T>(notification) takes 1 (one symbol for four overloads)
+mediatr	samples/MediatR.Examples.PublishStrategies/Program.cs:33	Publish	passes 2 arguments; the target Publish<T>(notification) takes 1 (one symbol for four overloads)

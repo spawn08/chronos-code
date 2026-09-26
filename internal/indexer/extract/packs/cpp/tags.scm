@@ -52,9 +52,17 @@
     (array_declarator declarator: (field_identifier) @name) @def.field]))
 
 ; Free function prototypes and variables at namespace level.
-([(translation_unit) (declaration_list)]
+(translation_unit
   (declaration declarator: (function_declarator declarator: [(identifier) (qualified_identifier)] @name)) @def.func.decl)
-([(translation_unit) (declaration_list)]
+(declaration_list
+  (declaration declarator: (function_declarator declarator: [(identifier) (qualified_identifier)] @name)) @def.func.decl)
+(translation_unit
+  (declaration declarator: [
+    (identifier) @name @def.var
+    (init_declarator declarator: (identifier) @name) @def.var
+    (pointer_declarator declarator: (identifier) @name) @def.var
+    (init_declarator declarator: (pointer_declarator declarator: (identifier) @name)) @def.var]))
+(declaration_list
   (declaration declarator: [
     (identifier) @name @def.var
     (init_declarator declarator: (identifier) @name) @def.var

@@ -12,17 +12,17 @@ symbols:
       sig: let name: String
   3. L8-8 internal property UserRepo.limit in=0 [static]
       sig: static let limit = 10
-  4. L10-13 public constructor UserRepo.init in=0
+  4. L10-13 public constructor UserRepo.init in=0 params=1..1
       sig: public init(name: String)
-  5. L15-19 public method UserRepo.find in=0
+  5. L15-19 public method UserRepo.find in=0 params=1..1
       sig: public func find(_ id: String) -> User?
-  6. L21-22 private method UserRepo.legacy in=0 [deprecated]
+  6. L21-22 private method UserRepo.legacy in=0 [deprecated] params=0..0
       sig: @available(*, deprecated) fileprivate func legacy()
-  7. L24-26 internal method UserRepo.save in=0 [override]
+  7. L24-26 internal method UserRepo.save in=0 [override] params=0..0
       sig: override func save() async throws
   8. L29-31 internal protocol Repo
       sig: protocol Repo
-  9. L30-30 public method Repo.find in=8 [decl]
+  9. L30-30 public method Repo.find in=8 [decl] params=1..1
       sig: func find(_ id: String) -> User?
   10. L33-35 internal struct User
       sig: struct User
@@ -34,11 +34,11 @@ symbols:
       sig: case read
   14. L39-39 public enum_member Mode.write in=12
       sig: case write
-  15. L43-45 internal method UserRepo.reset
+  15. L43-45 internal method UserRepo.reset params=0..0
       sig: func reset()
   16. L48-48 internal type_alias Id
       sig: typealias Id = String
-  17. L50-52 internal func topLevel
+  17. L50-52 internal func topLevel params=0..0
       sig: func topLevel()
 hints:
   L7 name: String in=0
@@ -54,19 +54,19 @@ refs:
   L6:33 type User in=1
   L7:15 type String in=2
   L10:23 type String in=4
-  L12:15 call init on="super" in=4
+  L12:15 call init on="super" in=4 args=0
   L15:28 type String in=5
   L15:39 type User in=5
   L16:9 type Helper in=5
-  L16:16 call check on="Helper" in=5
-  L17:17 call User in=5
-  L18:16 call cache in=5
+  L16:16 call check on="Helper" in=5 args=1 types=id
+  L17:17 call User in=5 args=1 types=id=id
+  L18:16 call cache in=5 args=1 types=id
   L21:6 decorator available in=6
-  L25:19 call flush in=7
+  L25:19 call flush in=7 args=0
   L30:21 type String in=9
   L30:32 type User in=9
   L34:13 type String in=11
   L42:11 type UserRepo
-  L44:15 call removeAll on="cache" in=15
+  L44:15 call removeAll on="cache" in=15 args=0
   L48:16 type String in=16
-  L51:5 call print in=17
+  L51:5 call print in=17 args=1 types=#s

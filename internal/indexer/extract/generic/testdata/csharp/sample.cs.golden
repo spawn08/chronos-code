@@ -19,17 +19,17 @@ symbols:
       sig: internal static int Count
   5. L15-15 private const UserRepo.Limit in=1
       sig: const int Limit = 10
-  6. L17-20 public constructor UserRepo.UserRepo in=1
+  6. L17-20 public constructor UserRepo.UserRepo in=1 params=1..1
       sig: public UserRepo(string name) : base(name)
-  7. L22-28 public method UserRepo.Find in=1 [deprecated]
+  7. L22-28 public method UserRepo.Find in=1 [deprecated] params=1..1
       sig: [Obsolete] public virtual User Find(string id)
-  8. L30-30 protected method UserRepo.SaveAsync in=1 [async,override]
+  8. L30-30 protected method UserRepo.SaveAsync in=1 [async,override] params=0..0
       sig: protected override async Task SaveAsync()
-  9. L32-32 private method UserRepo.Dispose in=1
+  9. L32-32 private method UserRepo.Dispose in=1 params=0..0
       sig: void Dispose()
   10. L35-38 public interface IRepo in=0
       sig: public interface IRepo
-  11. L37-37 public method IRepo.Find in=10 [decl]
+  11. L37-37 public method IRepo.Find in=10 [decl] params=1..1
       sig: User Find(string id)
   12. L40-40 public struct Point in=0
       sig: public struct Point
@@ -51,7 +51,17 @@ symbols:
       sig: public class Zing : IRequest<Zong>
 hints:
   L12 _users: List in=1
+  L13 Name: string in=1
+  L14 Count: int in=1
+  L15 Limit: int in=1
+  L17 name: string in=6
+  L23 id: string in=7
   L26 u: User in=7
+  L37 id: string in=11
+  L40 X: int in=12
+  L44 A: string in=17
+  L44 B: int in=17
+  L46 code: int in=18
 refs:
   L9:6 decorator Serializable in=1
   L10:29 extends BaseRepo in=1
@@ -60,15 +70,15 @@ refs:
   L10:52 implements IDisposable in=1
   L12:26 type List in=2
   L12:31 type User in=2
-  L12:50 instantiate List in=2
+  L12:50 instantiate List in=2 args=0
   L12:55 type User in=2
   L22:10 decorator Obsolete in=7
   L23:24 type User in=7
-  L25:20 call Check on="Helper" in=7
-  L26:25 instantiate User in=7
-  L27:27 call Find on="_users" in=7
+  L25:20 call Check on="Helper" in=7 args=1 types=id
+  L26:25 instantiate User in=7 args=1 types=id
+  L27:27 call Find on="_users" in=7 args=1 types=#f
   L30:34 type Task in=8
-  L30:59 call Flush in=8
+  L30:59 call Flush in=8 args=0
   L37:9 type User in=11
   L49:21 implements IRequest in=19
   L49:30 type Pong in=19

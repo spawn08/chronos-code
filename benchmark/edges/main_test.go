@@ -75,7 +75,7 @@ func TestEvaluate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := evaluate(root, parsed, false)
+	res, err := evaluate(root, parsed, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestEvaluateSCIPJava(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := evaluate(root, parsed, false)
+	res, err := evaluate(root, parsed, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestEvaluateSCIPKotlin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := evaluate(root, parsed, false)
+	res, err := evaluate(root, parsed, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

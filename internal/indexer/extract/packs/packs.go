@@ -76,6 +76,11 @@ type Pack struct {
 	MemberOf []string `yaml:"member_of"`
 	Imports  Imports  `yaml:"imports"`
 	Tests    Tests    `yaml:"tests"`
+	// Calls says how the arguments of a call or instantiation are counted
+	// (facts.Ref.Args); without it they are not counted.
+	Calls Calls `yaml:"calls"`
+	// Params describes the language's parameter lists (facts.Symbol.Params).
+	Params Params `yaml:"params"`
 	// QueryFrom names another pack whose tags.scm comes before this pack's
 	// own (tsx adds JSX patterns to typescript's).
 	QueryFrom string `yaml:"query_from"`
@@ -124,6 +129,42 @@ type Tests struct {
 	Dirs    []string `yaml:"dirs"`    // directory names (tests)
 	Symbols []string `yaml:"symbols"` // name globs of test functions in test files
 	Markers []string `yaml:"markers"` // header words marking a test (Test, it)
+}
+
+// Calls names the nodes holding a call's arguments. They are looked for
+// among the children of the @ref.call or @ref.instantiate node, and of its
+// Through children.
+type Calls struct {
+	// Arguments are argument lists: each named child that is not a comment
+	// is one argument.
+	Arguments []string `yaml:"arguments"`
+	// Trailing are nodes that are one argument each (Kotlin's trailing
+	// lambda).
+	Trailing []string `yaml:"trailing"`
+	// Through are children searched as well (Kotlin's call_suffix).
+	Through []string `yaml:"through"`
+	// Receivers: a lambda passed to a call can have an implicit receiver
+	// (Kotlin's T.() -> Unit), so refs inside lambdas record the call
+	// (facts.Ref.Lambda).
+	Receivers bool `yaml:"receivers"`
+}
+
+// Params describes parameter lists. Defaults (a top-level "="), "..." and
+// a leading "*" are understood in every language.
+type Params struct {
+	// Receiver lists first parameters of a method that are its receiver,
+	// not an argument (Python self and cls, Rust self); "&" and "mut" are
+	// ignored.
+	Receiver []string `yaml:"receiver"`
+	// Variadic lists words that make a parameter variadic (Kotlin vararg,
+	// C# params).
+	Variadic []string `yaml:"variadic"`
+	// OptionalGroups: a parameter starting with "[" or "{" is a group of
+	// optional parameters (Dart); "required" makes a named one required.
+	OptionalGroups bool `yaml:"optional_groups"`
+	// None: definitions declare no parameters and take any arguments
+	// (shell functions); their arity is unknown.
+	None bool `yaml:"none"`
 }
 
 // Visibility names accepted in pack.yaml.

@@ -196,6 +196,12 @@ func render(f *facts.File) string {
 		if m := mods(s.Modifiers); m != "" {
 			fmt.Fprintf(&b, " [%s]", m)
 		}
+		if a := s.Params; a.Known {
+			fmt.Fprintf(&b, " params=%d..", a.Min)
+			if a.Max != facts.VarArgs {
+				fmt.Fprintf(&b, "%d", a.Max)
+			}
+		}
 		fmt.Fprintf(&b, "\n      sig: %s\n", s.Signature)
 		if s.Doc != "" {
 			fmt.Fprintf(&b, "      doc: %q\n", s.Doc)
@@ -226,6 +232,12 @@ func render(f *facts.File) string {
 		if r.Enclosing >= 0 {
 			fmt.Fprintf(&b, " in=%d", r.Enclosing)
 		}
+		if n, ok := r.NArgs(); ok {
+			fmt.Fprintf(&b, " args=%d", n)
+		}
+		if r.ArgTypes != "" {
+			fmt.Fprintf(&b, " types=%s", r.ArgTypes)
+		}
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -233,7 +245,7 @@ func render(f *facts.File) string {
 
 func mods(m uint32) string {
 	var out []string
-	for i, name := range []string{"static", "abstract", "async", "override", "deprecated", "test", "decl"} {
+	for i, name := range []string{"static", "abstract", "async", "override", "deprecated", "test", "decl", "inactive"} {
 		if m&(1<<i) != 0 {
 			out = append(out, name)
 		}

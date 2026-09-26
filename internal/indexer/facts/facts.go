@@ -65,6 +65,10 @@ const (
 	// ModDecl marks a declaration without a definition (a C/C++ prototype
 	// in a header, an abstract or interface member).
 	ModDecl
+	// ModInactive marks a C-family declaration in a conditional branch the
+	// default configuration does not compile (#if 0, the other side of
+	// #ifdef _WIN32 / #else).
+	ModInactive
 )
 
 // Qualifier kinds of a reference.
@@ -95,6 +99,21 @@ const (
 	ImportWildcard              // from x import *, import static a.*, Go dot import
 	ImportReexport              // export … from x (the import side of a re-export)
 	ImportInclude               // #include, #import
+
+	// Kinds recorded by project manifests (package.json, Cargo.toml, ...;
+	// see package extract/manifest). Paths are root-relative.
+
+	// ImportDepend is a dependency on another build unit: Name is its name
+	// as the language refers to it (npm package, crate, artifactId, Gradle
+	// project path), Path its directory when the manifest gives one.
+	ImportDepend
+	// ImportAlias maps an import spec pattern (Name: "@app/*", "App\\") to
+	// a path pattern (Path: "src/app/*", "src/"); a "*" matches the rest.
+	ImportAlias
+	// ImportRoot is a source root, include directory or member glob
+	// (baseUrl, -I, workspaces); Name labels it when the manifest does
+	// (a SwiftPM target).
+	ImportRoot
 	NumImportKinds
 )
 
@@ -107,8 +126,8 @@ type File struct {
 	Path string // root-relative, slash-separated
 	Lang string
 	// Package is the file's unit: the Go import path; for other languages
-	// the directory until language resolvers (M7) assign modules, crates or
-	// build targets.
+	// and manifests the directory. Modules, crates, declared packages and
+	// build units are read from the facts at query time.
 	Package  string
 	PkgName  string // declared package or namespace name, if any
 	Hash     uint64 // xxh64 of the content
@@ -147,6 +166,33 @@ type Symbol struct {
 	Container  int
 	Visibility uint8  // Vis* constant
 	Modifiers  uint32 // Mod* bits
+	// Params bounds the arguments a call of a function, method or
+	// constructor passes, from its declared parameter list.
+	Params Arity
+	// ParamList is the whole parameter list "(a: Int, b: String = x)" on
+	// one line when Signature is truncated, for overload selection.
+	ParamList string
+}
+
+// Arity bounds the number of arguments a call passes: Min required, Max
+// in all (VarArgs for a variadic declaration). The zero value, Known
+// false, means unknown.
+type Arity struct {
+	Min, Max int
+	Known    bool
+}
+
+// VarArgs is Arity.Max of a variadic declaration.
+const VarArgs = -1
+
+// MaxArity is the largest Min or Max a segment stores; larger arities are
+// recorded as unknown.
+const MaxArity = 254
+
+// Accepts reports whether a call with n arguments fits. An unknown arity
+// accepts any count.
+func (a Arity) Accepts(n int) bool {
+	return !a.Known || n >= a.Min && (a.Max == VarArgs || n <= a.Max)
 }
 
 // Parent returns the File.Symbols index of the enclosing symbol, if any.
@@ -208,7 +254,24 @@ type Ref struct {
 	QualKind  uint8
 	Line      int
 	Col       int
+	// Args is 1 + the number of arguments of a call or instantiation; 0
+	// means not counted (other kinds, packs without a call rule, more than
+	// MaxArity arguments). The offset keeps the zero value meaning
+	// "unknown".
+	Args uint8
+	// ArgTypes holds a comma-separated type hint per argument, for
+	// overload selection: #s, #n, #b, #c and #0 for string, number,
+	// boolean, character and null literals; an identifier's name; @T for a
+	// constructed T; "" when unknown. Empty when no argument has a hint.
+	ArgTypes string
+	// Lambda is 1 + the File.Refs index of the call whose lambda argument
+	// contains this reference (the innermost), 0 for none; recorded where
+	// lambdas can have an implicit receiver (Kotlin).
+	Lambda int
 }
+
+// NArgs returns the reference's argument count, if it was counted.
+func (r Ref) NArgs() (int, bool) { return int(r.Args) - 1, r.Args > 0 }
 
 // BindingHint records the declared or constructed type of a local variable
 // or field, so x.Save() can resolve to Repo.Save when x is a Repo:

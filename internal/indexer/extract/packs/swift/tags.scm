@@ -32,6 +32,7 @@
 
 ; Binding hints: typed parameters and properties; let x = Foo().
 (parameter (simple_identifier) @hint.name (user_type) @hint.type) @hint
+(parameter (simple_identifier) @hint.name (function_type) @hint.type) @hint
 (property_declaration
   name: (pattern bound_identifier: (simple_identifier) @hint.name)
   (type_annotation (user_type) @hint.type)) @hint
