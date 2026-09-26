@@ -354,7 +354,7 @@ func codeShaped(w string) bool {
 		}
 		// Engine.Update, os.Exit; not e.g, README.md
 		last := parts[len(parts)-1]
-		return strings.ToLower(w) != w && len(last) > 1 && (strings.ToLower(last) != last || len(last) > 4)
+		return strings.ToLower(w) != w && len(last) > 1 && !(strings.ToLower(last) == last && len(last) <= 4)
 	}
 	if strings.Contains(strings.Trim(w, "_"), "_") {
 		return strings.ToUpper(w) != w || len(w) > 4 // SCREAMING_CASE constants count too

@@ -42,3 +42,6 @@ linters:
       - path: internal/incctx/incctx\.go
         text: "S1033"
         linters: [staticcheck]
+      # De Morgan rewrites of negated compound conditions hurt readability.
+      - text: "QF1001"
+        linters: [staticcheck]

@@ -236,7 +236,7 @@ func Retrieve(v *query.View, req Request) Result {
 				continue
 			}
 			w := scale * math.Min(1, h.Score/top)
-			if h.Symbol.Kind == facts.KindSection {
+			if h.Kind == facts.KindSection {
 				w *= sectionScale
 			}
 			if nodes[h.ID] == nil {
@@ -479,9 +479,9 @@ func codeFirst(hits []query.Scored, limit, maxSections int) []query.Scored {
 	code, sections := 0, 0
 	for _, h := range hits {
 		switch {
-		case h.Symbol.Kind == facts.KindSection && sections < maxSections:
+		case h.Kind == facts.KindSection && sections < maxSections:
 			sections++
-		case h.Symbol.Kind != facts.KindSection && code < limit:
+		case h.Kind != facts.KindSection && code < limit:
 			code++
 		default:
 			continue
