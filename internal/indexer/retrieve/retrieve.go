@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/internal/indexer/scan"
 )
 
 // Zoom levels, most detailed first.
@@ -539,7 +540,7 @@ var commonWords = func() map[string]bool {
 }()
 
 func isPath(tok string) bool {
-	return strings.Contains(tok, "/") && strings.HasSuffix(tok, ".go")
+	return strings.Contains(tok, "/") && scan.Indexable(tok)
 }
 
 // codeShaped reports whether a token looks like an identifier rather than a

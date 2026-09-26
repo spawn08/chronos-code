@@ -1,0 +1,63 @@
+lang: rust
+imports:
+  L2 module "std::collections::HashMap"
+  L3 module "crate::store" {Repo} {Cache as LruCache}
+  L4 wildcard "super::util"
+  L5 module "self::model::User"
+  L6 module "crate::errors::Error" as StoreError
+exports:
+  L5 User from "self::model"
+  L6 StoreError = Error from "crate::errors"
+symbols:
+  0. L8-8 private module model
+      sig: mod model
+  1. L12-15 public struct Store
+      sig: pub struct Store<K>
+      doc: "A key-value store."
+  2. L13-13 public field Store.name in=1
+      sig: pub name: String
+  3. L14-14 private field Store.items in=1
+      sig: items: HashMap<K, String>
+  4. L17-20 internal enum Mode
+      sig: pub(crate) enum Mode
+  5. L18-18 public enum_member Mode.Read in=4
+      sig: Read
+  6. L19-19 public enum_member Mode.Write in=4
+      sig: Write
+  7. L22-25 public trait Backend
+      sig: pub trait Backend: Send
+  8. L23-23 public method Backend.get in=7 [decl]
+      sig: fn get(&self, key: &str) -> Option<String>
+  9. L24-24 public method Backend.put in=7
+      sig: fn put(&mut self, key: &str)
+  10. L29-33 public method Store.new
+      sig: pub fn new(name: &str) -> Self
+      doc: "Creates a store."
+  11. L35-37 private method Store.flush [async]
+      sig: async fn flush(&self)
+  12. L41-43 private method Store.get
+      sig: fn get(&self, key: &str) -> Option<String>
+  13. L46-46 public const LIMIT
+      sig: pub const LIMIT: usize = 10
+  14. L47-47 private var COUNTER
+      sig: static COUNTER: u32 = 0
+  15. L48-48 private type_alias Result
+      sig: type Result<T> = std::result::Result<T, StoreError>
+  16. L50-52 private macro log
+      sig: macro_rules! log
+  17. L55-57 private func helper [deprecated]
+      sig: fn helper(n: i32) -> i32
+  18. L60-65 private module tests
+      sig: mod tests
+  19. L62-64 private func it_works in=18 [test]
+      sig: fn it_works()
+refs:
+  L22:20 extends Send in=7
+  L30:30 call new pkg="std::collections::HashMap" in=10
+  L31:9 call helper in=10
+  L32:9 instantiate Store in=10
+  L32:28 call to_string on="name" in=10
+  L36:20 call clear on="self.items" in=11
+  L40:9 implements Backend
+  L42:15 call lookup on="util" in=12
+  L63:16 call helper on="super" in=19

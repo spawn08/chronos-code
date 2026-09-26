@@ -2,3 +2,13 @@
 language: objc
 grammar: objc
 extensions: [.m, .mm]
+visibility:
+  default: public
+  keywords: {static: private}
+modifiers:
+  "+": static
+  static: static
+wrappers: [declaration, init_declarator, pointer_declarator]
+tests:
+  files: ["*Tests.m", "*Test.m"]
+  symbols: ["test*"]

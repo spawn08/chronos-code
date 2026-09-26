@@ -2,3 +2,18 @@
 language: swift
 grammar: swift
 extensions: [.swift]
+visibility:
+  default: internal
+  members: {protocol: public, enum: public}
+  keywords: {public: public, open: public, private: private, fileprivate: private, internal: internal}
+modifiers:
+  static: static
+  override: override
+  async: async
+  deprecated: deprecated
+imports:
+  binds: last
+tests:
+  files: ["*Tests.swift", "*Test.swift"]
+  dirs: [Tests]
+  symbols: ["test*"]

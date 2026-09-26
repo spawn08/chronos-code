@@ -2,3 +2,19 @@
 language: java
 grammar: java
 extensions: [.java]
+visibility:
+  default: package
+  members: {interface: public, enum: public, "*": package}
+  keywords: {public: public, private: private, protected: protected}
+modifiers:
+  static: static
+  abstract: abstract
+  "@Override": override
+  "@Deprecated": deprecated
+wrappers: [field_declaration, constant_declaration]
+imports:
+  binds: last
+tests:
+  files: ["*Test.java", "*Tests.java", "*IT.java"]
+  dirs: [test]
+  markers: ["@Test", "@ParameterizedTest", "@RepeatedTest", "@TestFactory"]

@@ -1,0 +1,62 @@
+lang: typescript
+imports:
+  L1 module "@angular/core" {Injectable}
+  L2 module "./repo" {Repo}
+  L3 module "path" as path
+  L4 reexport "./service"
+exports:
+  L4 Svc = Service from "./service"
+symbols:
+  0. L7-9 public interface Store
+      sig: export interface Store<T> extends Reader
+      doc: "Storage abstraction."
+  1. L8-8 public method Store.get in=0 [decl]
+      sig: get(id: string): T
+  2. L11-11 public type_alias Id
+      sig: export type Id = string | number
+  3. L13-16 public enum Color
+      sig: export enum Color
+  4. L14-14 public enum_member Color.Red in=3
+      sig: Red
+  5. L15-15 public enum_member Color.Green in=3
+      sig: Green = "green"
+  6. L19-35 public class UserService
+      sig: @Injectable() export class UserService extends BaseService implements Store<User>, Disposable
+  7. L20-20 private field UserService.cache in=6
+      sig: private readonly cache = new Map<string, User>()
+  8. L21-21 protected field UserService.instances in=6 [static]
+      sig: protected static instances: number = 0
+  9. L23-25 public constructor UserService.constructor in=6
+      sig: constructor(private repo: Repo)
+  10. L27-29 public method UserService.get in=6
+      sig: public get(id: string): User
+  11. L31-34 public method UserService.dispose in=6 [async]
+      sig: async dispose(): Promise<void>
+  12. L37-39 public class Shape [abstract]
+      sig: export abstract class Shape
+  13. L38-38 public method Shape.area in=12 [abstract,decl]
+      sig: abstract area(): number
+  14. L41-45 private namespace Geometry
+      sig: namespace Geometry
+  15. L42-44 public func area in=14
+      sig: export function area(r: number): number
+  16. L47-49 private module legacy
+      sig: declare module "legacy"
+  17. L48-48 public func old in=16 [decl]
+      sig: export function old(): void
+  18. L51-51 public const DEFAULT_ID
+      sig: export const DEFAULT_ID: Id = 0
+  19. L52-52 private var counter
+      sig: let counter = 0
+  20. L54-56 private func helper
+      sig: function helper(x: number): number
+refs:
+  L7:35 extends Reader in=0
+  L18:2 decorator Injectable in=6
+  L19:34 extends BaseService in=6
+  L19:57 implements Store in=6
+  L19:70 implements Disposable in=6
+  L20:32 instantiate Map in=7
+  L28:22 call find on="this.repo" in=10
+  L32:10 call join pkg="path" in=11
+  L33:11 call flush in=11

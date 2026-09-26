@@ -45,11 +45,41 @@ func TestLoadRejectsBadPacks(t *testing.T) {
 		"upper-case extension": {"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [.X]\n")}},
 		"missing grammar":      {"a/pack.yaml": {Data: []byte("language: a\nextensions: [.x]\n")}},
 		"no dot":               {"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [x]\n")}},
+		"bad visibility":       {"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [.x]\nvisibility: {default: open}\n")}},
+		"bad modifier":         {"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [.x]\nmodifiers: {static: sticky}\n")}},
+		"bad binds":            {"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [.x]\nimports: {binds: all}\n")}},
+		"missing query_from":   {"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [.x]\nquery_from: b\n")}},
 	} {
 		if _, err := load(fsys); err == nil {
 			t.Errorf("%s: load succeeded", name)
 		} else if !strings.Contains(err.Error(), "pack") && !strings.Contains(err.Error(), "extension") {
 			t.Errorf("%s: unhelpful error %v", name, err)
 		}
+	}
+}
+
+func TestQueries(t *testing.T) {
+	r, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pk := range r.Packs() {
+		if pk.Query == "" {
+			t.Errorf("pack %s has no tags.scm", pk.ID)
+		}
+	}
+	tsx, ts := r.ForPath("a.tsx"), r.ForPath("a.ts")
+	if !strings.HasPrefix(tsx.Query, ts.Query) || !strings.Contains(tsx.Query, "jsx_opening_element") {
+		t.Error("tsx query should be the typescript query followed by its own JSX patterns")
+	}
+}
+
+func TestPackWithoutQuery(t *testing.T) {
+	r, err := load(fstest.MapFS{"a/pack.yaml": {Data: []byte("language: a\ngrammar: a\nextensions: [.x]\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := r.ForPath("f.x").Query; q != "" {
+		t.Errorf("query = %q, want empty (file-level indexing)", q)
 	}
 }

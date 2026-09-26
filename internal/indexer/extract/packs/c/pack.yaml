@@ -2,3 +2,12 @@
 language: c
 grammar: c
 extensions: [.c]
+visibility:
+  default: public
+  keywords: {static: private}
+modifiers:
+  static: static
+wrappers: [declaration, init_declarator, pointer_declarator, array_declarator]
+tests:
+  files: ["test_*.c", "*_test.c"]
+  dirs: [tests, test]

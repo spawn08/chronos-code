@@ -1,0 +1,56 @@
+lang: cpp
+imports:
+  L1 include "vector"
+  L2 include "repo.hpp"
+symbols:
+  0. L4-46 public namespace store
+      sig: namespace store
+  1. L7-19 public class Repo in=0
+      sig: class Repo : public Base, private Mixin
+      doc: "Base repository."
+  2. L9-9 public constructor Repo.Repo in=1 [decl]
+      sig: Repo()
+  3. L10-10 public method Repo.~Repo in=1 [decl]
+      sig: virtual ~Repo()
+  4. L11-11 public method Repo.find in=1 [decl]
+      sig: virtual int find(int id) const = 0
+  5. L12-12 public method Repo.create in=1 [static,decl]
+      sig: static Repo* create()
+  6. L15-15 protected field Repo.count_ in=1
+      sig: int count_
+  7. L18-18 private method Repo.reset in=1 [decl]
+      sig: void reset()
+  8. L21-25 public struct Point in=0
+      sig: struct Point
+  9. L22-22 public field Point.x in=8
+      sig: int x
+  10. L23-23 public field Point.y in=8
+      sig: int y
+  11. L24-24 public method Point.norm in=8
+      sig: int norm() const
+  12. L28-30 public func max_of in=0
+      sig: template <typename T> T max_of(T a, T b)
+  13. L32-34 public constructor Repo.Repo in=0
+      sig: Repo::Repo() : count_(0)
+  14. L36-40 public method Repo.find in=0
+      sig: int Repo::find(int id) const
+  15. L42-42 public enum Mode in=0
+      sig: enum class Mode
+  16. L42-42 public enum_member Mode.Read in=15
+      sig: Read
+  17. L42-42 public enum_member Mode.Write in=15
+      sig: Write
+  18. L44-44 public type_alias IdList in=0
+      sig: using IdList = std::vector<int>
+  19. L48-51 public func main
+      sig: int main()
+refs:
+  L7:21 extends Base in=1
+  L7:35 extends Mixin in=1
+  L33:5 call reset in=13
+  L37:18 instantiate Point in=14
+  L38:10 call sort on="std" in=14
+  L38:21 call begin on="items" in=14
+  L38:36 call end on="items" in=14
+  L39:20 call lookup on="helper" in=14
+  L50:14 call find on="r" in=19

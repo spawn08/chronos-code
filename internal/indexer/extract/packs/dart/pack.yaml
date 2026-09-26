@@ -2,3 +2,20 @@
 language: dart
 grammar: dart
 extensions: [.dart]
+visibility:
+  default: public
+  private_prefix: "_"
+modifiers:
+  static: static
+  abstract: abstract
+  async: async
+  "@override": override
+  "@deprecated": deprecated
+  "@Deprecated": deprecated
+wrappers: [declaration, initialized_identifier_list, static_final_declaration_list, method_signature]
+doc_skip: [annotation]
+imports:
+  binds: none
+tests:
+  files: ["*_test.dart"]
+  dirs: [test]

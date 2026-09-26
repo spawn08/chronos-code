@@ -1,0 +1,38 @@
+lang: python
+imports:
+  L2 module "os"
+  L2 module "sys" as system
+  L3 module "a.b" {c as d} {e}
+  L4 module "." {rel}
+  L5 wildcard "x"
+exports:
+  L7 Foo
+  L7 helper
+symbols:
+  0. L7-7 public var __all__
+      sig: __all__ = ["Foo", "helper"]
+  1. L10-21 public class Foo
+      sig: @dataclass class Foo(Base, metaclass=Meta)
+      doc: "Foo doc."
+  2. L12-12 public field Foo.x in=1
+      sig: x: int = 1
+  3. L14-16 public method Foo.__init__ in=1
+      sig: def __init__(self, repo: Repo)
+  4. L18-21 private method Foo._run in=1 [async]
+      sig: async def _run(self)
+  5. L23-25 public func helper
+      sig: def helper(n)
+  6. L27-27 public var MAX_SIZE
+      sig: MAX_SIZE = 10
+  7. L30-32 private class _Hidden
+      sig: class _Hidden
+  8. L31-32 public method _Hidden.__repr__ in=7
+      sig: def __repr__(self)
+refs:
+  L9:2 decorator dataclass in=1
+  L10:11 extends Base in=1
+  L16:9 call super in=3
+  L16:17 call __init__ on="super()" in=3
+  L19:17 call join on="os.path" in=4
+  L20:9 call helper in=4
+  L21:9 call Bar in=4

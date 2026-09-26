@@ -2,3 +2,11 @@
 language: shell
 grammar: bash
 extensions: [.sh, .bash]
+visibility:
+  default: public
+wrappers: [declaration_command]
+imports:
+  binds: none
+tests:
+  files: ["*_test.sh", "test_*.sh", "*.bats"]
+  dirs: [tests, test]

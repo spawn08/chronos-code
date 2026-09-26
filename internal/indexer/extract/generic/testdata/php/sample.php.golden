@@ -1,0 +1,51 @@
+lang: php
+package: App\Store
+imports:
+  L5 module "App\\Base\\BaseRepo"
+  L6 module "App\\Contracts" {Repo} {Cache as LruCache}
+  L7 module "App\\Util\\helper"
+symbols:
+  0. L12-36 public class UserRepo
+      sig: #[Service] final class UserRepo extends BaseRepo implements Repo, \Countable
+      doc: "A user repository."
+  1. L17-17 public const UserRepo.LIMIT in=0
+      sig: public const LIMIT = 10
+  2. L18-18 private field UserRepo.users in=0
+      sig: private array $users = []
+  3. L19-19 protected field UserRepo.count in=0 [static]
+      sig: protected static int $count = 0
+  4. L21-24 public constructor UserRepo.__construct in=0
+      sig: public function __construct(private Db $db)
+  5. L26-32 public method UserRepo.find in=0
+      sig: public function find(string $id): ?User
+  6. L35-35 protected method UserRepo.legacy in=0 [abstract,deprecated,decl]
+      sig: abstract protected function legacy(): void
+      doc: "@deprecated"
+  7. L38-41 public interface Repo
+      sig: interface Repo
+  8. L40-40 public method Repo.find in=7 [decl]
+      sig: public function find(string $id): ?User
+  9. L43-46 public trait Logging
+      sig: trait Logging
+  10. L45-45 public method Logging.log in=9
+      sig: public function log(string $m): void
+  11. L48-52 public enum Mode
+      sig: enum Mode: string
+  12. L50-50 public enum_member Mode.Read in=11
+      sig: case Read = 'r'
+  13. L51-51 public enum_member Mode.Write in=11
+      sig: case Write = 'w'
+  14. L54-57 public func top_level
+      sig: function top_level(int $x): int
+refs:
+  L12:3 decorator Service in=0
+  L13:30 extends BaseRepo in=0
+  L13:50 implements Repo in=0
+  L13:56 implements Countable in=0
+  L15:9 implements Logging in=0
+  L23:17 call __construct on="parent" in=4
+  L28:17 call check on="Helper" in=5
+  L29:18 instantiate User in=5
+  L30:16 call log on="$this" in=5
+  L31:16 call helper in=5
+  L56:12 call helper in=14

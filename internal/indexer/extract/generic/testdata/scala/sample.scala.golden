@@ -1,0 +1,45 @@
+lang: scala
+package: com.example.store
+imports:
+  L3 module "scala.collection.mutable"
+  L4 module "com.example.base" {BaseRepo} {Repo as R}
+  L5 wildcard "com.example.util"
+symbols:
+  0. L8-20 public class UserRepo
+      sig: class UserRepo(db: Database) extends BaseRepo[User] with Repo with AutoCloseable
+      doc: "A user repository."
+  1. L9-9 private field UserRepo.cache in=0
+      sig: private val cache = mutable.Map[String, User]()
+  2. L10-10 protected field UserRepo.count in=0
+      sig: protected var count: Int = 0
+  3. L12-16 public method UserRepo.find in=0 [override]
+      sig: override def find(id: String): Option[User]
+  4. L18-19 public method UserRepo.legacy in=0 [deprecated]
+      sig: @deprecated("old", "1.0") def legacy(): Unit
+  5. L22-24 public trait Repo
+      sig: trait Repo
+  6. L23-23 public method Repo.find in=5 [decl]
+      sig: def find(id: String): Option[User]
+  7. L26-26 public class User
+      sig: case class User(id: String)
+  8. L28-31 public class UserRepo
+      sig: object UserRepo
+  9. L29-29 public field UserRepo.Limit in=8
+      sig: val Limit = 10
+  10. L30-30 public method UserRepo.apply in=8
+      sig: def apply(db: Database): UserRepo
+  11. L33-33 public type_alias Id
+      sig: type Id = String
+  12. L35-35 public func topLevel
+      sig: def topLevel(): Unit
+refs:
+  L8:38 extends BaseRepo in=0
+  L8:58 implements Repo in=0
+  L8:68 implements AutoCloseable in=0
+  L9:31 call Map pkg="scala.collection.mutable" in=1
+  L13:12 call check on="Helper" in=3
+  L14:17 instantiate User in=3
+  L15:11 call get on="cache" in=3
+  L18:4 decorator deprecated in=4
+  L30:43 instantiate UserRepo in=10
+  L35:24 call println in=12

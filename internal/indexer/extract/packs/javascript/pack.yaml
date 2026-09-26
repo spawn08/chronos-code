@@ -2,3 +2,17 @@
 language: javascript
 grammar: javascript
 extensions: [.js, .jsx, .mjs, .cjs]
+visibility:
+  default: private
+  members: {"*": public}
+  export_wrapper: export_statement
+  private_prefix: "#"
+modifiers:
+  static: static
+  async: async
+wrappers: [export_statement, lexical_declaration, variable_declaration]
+imports:
+  binds: none
+tests:
+  files: ["*.test.js", "*.spec.js", "*.test.jsx", "*.spec.jsx", "*.test.mjs", "*.spec.mjs"]
+  dirs: [__tests__]

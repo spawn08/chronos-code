@@ -19,8 +19,8 @@ CGO_ENABLED ?= 1
 GRAMMARS := bash c cpp c_sharp dart java javascript kotlin objc php python ruby rust scala swift tsx typescript
 GRAMMAR_TAGS := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
 
-SIZE_LIMIT  := 41943040
-FULL_SIZE_LIMIT := 73400320
+SIZE_LIMIT  := 58720256
+FULL_SIZE_LIMIT := 83886080
 
 .PHONY: build build-core build-full build-release grammar-tags test lint size-check size-check-core size-check-full fmt vet tidy clean install install-core eval bench-index
 

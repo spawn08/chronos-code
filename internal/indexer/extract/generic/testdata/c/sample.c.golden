@@ -1,0 +1,39 @@
+lang: c
+imports:
+  L1 include "stdio.h"
+  L2 include "store.h"
+symbols:
+  0. L4-4 public macro MAX_ITEMS
+      sig: #define MAX_ITEMS 10
+  1. L5-5 public macro SQUARE
+      sig: #define SQUARE(x) ((x) * (x))
+  2. L8-11 public struct item
+      sig: struct item
+      doc: "A stored item."
+  3. L9-9 public field item.id in=2
+      sig: int id
+  4. L10-10 public field item.name in=2
+      sig: char *name
+  5. L13-13 public type_alias item_t
+      sig: typedef struct item item_t
+  6. L15-15 public enum color
+      sig: enum color
+  7. L15-15 public enum_member color.RED in=6
+      sig: RED
+  8. L15-15 public enum_member color.GREEN in=6
+      sig: GREEN
+  9. L17-17 private var counter [static]
+      sig: static int counter = 0
+  10. L18-18 public var total
+      sig: int total
+  11. L20-20 public func store_add [decl]
+      sig: int store_add(struct item *it)
+  12. L23-27 public func store_add
+      sig: int store_add(struct item *it)
+      doc: "Adds an item."
+  13. L29-31 private func helper_internal [static]
+      sig: static void helper_internal(void)
+refs:
+  L24:5 call printf in=12
+  L26:12 call helper in=12
+  L30:5 call store_add in=13

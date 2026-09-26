@@ -2,3 +2,17 @@
 language: kotlin
 grammar: kotlin
 extensions: [.kt, .kts]
+visibility:
+  default: public
+  keywords: {public: public, private: private, protected: protected, internal: internal}
+modifiers:
+  abstract: abstract
+  override: override
+  suspend: async
+  "@Deprecated": deprecated
+imports:
+  binds: last
+tests:
+  files: ["*Test.kt", "*Tests.kt"]
+  dirs: [test]
+  markers: ["@Test", "@ParameterizedTest"]

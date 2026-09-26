@@ -1,0 +1,41 @@
+lang: ruby
+imports:
+  L1 module "json"
+  L2 module "lib/base"
+symbols:
+  0. L4-33 public module Store
+      sig: module Store
+  1. L6-32 public class Store.UserRepo in=0
+      sig: class UserRepo < BaseRepo
+  2. L8-8 public const UserRepo.LIMIT in=1
+      sig: LIMIT = 10
+  3. L10-10 public property UserRepo.name in=1
+      sig: attr_reader :name
+  4. L12-15 public method UserRepo.initialize in=1
+      sig: def initialize(name)
+  5. L17-21 public method UserRepo.find in=1
+      sig: def find(id)
+  6. L23-25 public method UserRepo.create in=1 [static]
+      sig: def self.create
+  7. L29-31 private method UserRepo.reset in=1
+      sig: def reset
+  8. L35-37 public func top_level
+      sig: def top_level(x)
+  9. L39-43 public class Widget
+      sig: class Widget
+  10. L40-42 private method Widget.secret in=9
+      sig: private def secret
+refs:
+  L1:1 call require
+  L2:1 call require_relative
+  L6:20 extends BaseRepo in=1
+  L7:5 call include in=1
+  L7:13 implements Enumerable in=1
+  L10:5 call attr_reader in=3
+  L18:14 call check on="Helper" in=5
+  L19:11 instantiate User in=5
+  L19:16 call new on="User" in=5
+  L20:7 call helper in=5
+  L24:7 call new in=6
+  L30:14 call clear on="@items" in=7
+  L40:3 call private in=10

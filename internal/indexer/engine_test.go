@@ -324,3 +324,64 @@ func TestStatusReadyAndSync(t *testing.T) {
 		t.Fatalf("pending after Sync = %d", p)
 	}
 }
+
+// TestNonGoLanguages indexes pack languages next to Go: each file records
+// its language and directory unit, and edits and deletions go through the
+// same incremental path.
+func TestNonGoLanguages(t *testing.T) {
+	root, dir := newWorkspace(t)
+	writeFile(t, root, "py/store.py", "import os\n\nclass Store:\n    def save(self):\n        os.sync()\n\ndef helper():\n    Store().save()\n")
+	writeFile(t, root, "web/app.ts", "import { helper } from './util';\n\nexport function render(): void {\n  helper();\n}\n")
+	writeFile(t, root, "notes.txt", "not code\n")
+	e := openEngine(t, root, dir)
+	defer e.Close()
+	ctx := context.Background()
+
+	st, err := e.Reconcile(ctx)
+	if err != nil || st.Parsed != 4 {
+		t.Fatalf("reconcile = %+v, %v", st, err)
+	}
+	sn := e.Snapshot()
+	if got := strings.Join(sortedPaths(sn), ","); got != "a/a.go,b/b.go,py/store.py,web/app.ts" {
+		t.Fatalf("paths = %s", got)
+	}
+	if got := symbol(sn, "save"); len(got) != 1 || got[0] != "py:def save(self)" {
+		t.Fatalf("save = %v", got)
+	}
+	if got := callers(sn, "helper"); len(got) != 1 || got[0] != "render->" {
+		t.Fatalf("callers of helper = %v", got)
+	}
+	if got := callers(sn, "sync"); len(got) != 1 || got[0] != "Store.save->os" {
+		t.Fatalf("callers of sync = %v", got)
+	}
+	ref, _ := sn.Lookup("web/app.ts")
+	if m := sn.Segment(int(ref.Seg)).FileMeta(int(ref.File)); m.Lang != "typescript" || m.Package != "web" {
+		t.Fatalf("app.ts meta = %+v", m)
+	}
+	sn.Release()
+
+	writeFile(t, root, "web/app.ts", "export function render(): void {}\nexport function extra(): void { render(); }\n")
+	if st, err = e.Update(ctx, []string{filepath.Join(root, "web/app.ts")}); err != nil || st.Parsed != 1 {
+		t.Fatalf("update = %+v, %v", st, err)
+	}
+	sn = e.Snapshot()
+	if got := callers(sn, "helper"); len(got) != 0 {
+		t.Fatalf("callers of helper after edit = %v", got)
+	}
+	if got := callers(sn, "render"); len(got) != 1 || got[0] != "extra->" {
+		t.Fatalf("callers of render = %v", got)
+	}
+	sn.Release()
+
+	if err := os.Remove(filepath.Join(root, "py/store.py")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Update(ctx, []string{"py/store.py"}); err != nil {
+		t.Fatal(err)
+	}
+	sn = e.Snapshot()
+	defer sn.Release()
+	if len(symbol(sn, "save")) != 0 {
+		t.Fatal("deleted python file still indexed")
+	}
+}

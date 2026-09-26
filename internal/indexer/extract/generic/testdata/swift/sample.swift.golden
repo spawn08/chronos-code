@@ -1,0 +1,53 @@
+lang: swift
+imports:
+  L1 module "Foundation"
+  L2 module "UIKit"
+symbols:
+  0. L5-27 public class UserRepo
+      sig: public class UserRepo: BaseRepo, Repo
+      doc: "A user repository."
+  1. L6-6 private property UserRepo.cache in=0
+      sig: private var cache: [String: User] = [:]
+  2. L7-7 internal property UserRepo.name in=0
+      sig: let name: String
+  3. L8-8 internal property UserRepo.limit in=0 [static]
+      sig: static let limit = 10
+  4. L10-13 public constructor UserRepo.init in=0
+      sig: public init(name: String)
+  5. L15-19 public method UserRepo.find in=0
+      sig: public func find(_ id: String) -> User?
+  6. L21-22 private method UserRepo.legacy in=0 [deprecated]
+      sig: @available(*, deprecated) fileprivate func legacy()
+  7. L24-26 internal method UserRepo.save in=0 [override]
+      sig: override func save() async throws
+  8. L29-31 internal protocol Repo
+      sig: protocol Repo
+  9. L30-30 public method Repo.find in=8 [decl]
+      sig: func find(_ id: String) -> User?
+  10. L33-35 internal struct User
+      sig: struct User
+  11. L34-34 internal property User.id in=10
+      sig: var id: String
+  12. L37-40 internal enum Mode
+      sig: enum Mode
+  13. L38-38 public enum_member Mode.read in=12
+      sig: case read
+  14. L39-39 public enum_member Mode.write in=12
+      sig: case write
+  15. L43-45 internal method UserRepo.reset
+      sig: func reset()
+  16. L48-48 internal type_alias Id
+      sig: typealias Id = String
+  17. L50-52 internal func topLevel
+      sig: func topLevel()
+refs:
+  L5:24 extends BaseRepo in=0
+  L5:34 extends Repo in=0
+  L12:15 call init on="super" in=4
+  L16:16 call check on="Helper" in=5
+  L17:17 call User in=5
+  L18:16 call cache in=5
+  L21:6 decorator available in=6
+  L25:19 call flush in=7
+  L44:15 call removeAll on="cache" in=15
+  L51:5 call print in=17

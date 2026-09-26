@@ -1,0 +1,36 @@
+lang: objc
+imports:
+  L1 include "Foundation/Foundation.h"
+  L2 include "Repo.h"
+symbols:
+  0. L5-9 public class UserRepo
+      sig: @interface UserRepo : BaseRepo <Repo, NSCopying>
+      doc: "A user repository."
+  1. L6-6 public property UserRepo.name in=0
+      sig: @property (nonatomic, strong) NSString *name
+  2. L7-7 public method UserRepo.initWithName in=0 [decl]
+      sig: - (instancetype)initWithName:(NSString *)name
+  3. L8-8 public method UserRepo.shared in=0 [static,decl]
+      sig: + (UserRepo *)shared
+  4. L13-18 public method UserRepo.initWithName
+      sig: - (instancetype)initWithName:(NSString *)name
+  5. L20-22 public method UserRepo.shared [static]
+      sig: + (UserRepo *)shared
+  6. L26-28 public protocol Repo
+      sig: @protocol Repo <NSObject>
+  7. L27-27 public method Repo.find in=6 [decl]
+      sig: - (id)find:(NSString *)key
+  8. L30-30 private var counter [static]
+      sig: static int counter = 0
+  9. L32-34 public func helper
+      sig: void helper(int n)
+refs:
+  L5:23 extends BaseRepo in=0
+  L5:33 implements Repo in=0
+  L5:39 implements NSCopying in=0
+  L14:19 call init on="super" in=4
+  L16:13 call check on="Helper" in=4
+  L21:23 call alloc on="UserRepo" in=5
+  L21:30 call initWithName on="[UserRepo alloc]" in=5
+  L26:17 extends NSObject in=6
+  L33:5 call NSLog in=9

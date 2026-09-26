@@ -5,8 +5,8 @@ chronos indexer, `codebase_context` and per-turn prefetch use graph
 retrieval, and the store, reconcile and watcher are built for million-file
 repositories. M4 (precise tier) is still open. M6 in progress (2026-09-26):
 parser runtime decided and wrapped (`extract/treesitter`, `extract/packs`);
-facts v2 and segment format v4 done; query packs, the generic resolver and
-the graph switch-over are next. Replaces the synchronous parts of `internal/graph` with an
+facts v2 and segment format v4 done; query packs for all 17 languages are
+indexed (M6.3); the generic resolver and the graph switch-over are next. Replaces the synchronous parts of `internal/graph` with an
 in-process indexer.
 
 ## Goals
@@ -737,6 +737,83 @@ bytes, which cost 8% on query-after-edit; unstable sorts with a total order
 (ties broken by record index) are deterministic too
 (`TestEncodeDeterministic`).
 
+### M6.3 results (query packs)
+
+Every pack language is discovered and extracted in all builds
+(`ExtractorVersion` `syntax-5`, so older indexes are rebuilt):
+
+- **One extractor, data per language.** `extract/generic` runs a pack's
+  `tags.scm` and turns the captures into facts. The capture names are
+  documented in `extract/packs/packs.go`: `@def.<kind>` (a `.decl` suffix
+  marks bodiless declarations), `@ref.<kind>` with `@ref.qualifier`,
+  `@import` / `@include` with path, alias, listed names and wildcard,
+  `@export`, `@scope` (Rust `impl`, Swift `extension`, Objective-C
+  `@implementation`) and `@package`. Everything else is derived the same
+  way for every language: nesting and receivers from source ranges, doc
+  comments from the comments right before a definition, signatures from
+  the text before the body, and visibility and modifiers from the words
+  before the name plus the pack's rules in `pack.yaml` (keywords, member
+  defaults per container kind, a private name prefix, an export wrapper,
+  access labels such as C++ `public:` or a Ruby `private` line).
+- **Queries are written against this runtime's grammars**, which differ
+  from upstream in places (Python has no `expression_statement` around
+  assignments; Kotlin has almost no field names). Each pack has a sample
+  under `extract/generic/testdata/<pack>/` and a reviewed golden of its
+  facts (`TestPackGoldens`, `-update` to regenerate). `TestQueryCaptures`
+  rejects unknown capture names, so a typo cannot silently drop facts. `tsx`
+  reuses the typescript query and adds JSX patterns (`query_from`).
+- **Discovery.** `scan.Indexable` accepts Go and every pack extension. A
+  non-Go file's `Package` is its directory. Pack files above 1 MiB, and
+  minified files (at least 32 KiB with an average line over 1,000 bytes),
+  are recorded without symbols; minified files are also flagged
+  `Generated`.
+- **The old cgo tree-sitter tier no longer answers.** `IndexScope` stopped
+  merging it (`mergedBackend`, `RefreshNonGo` and the `GraphDB` option are
+  gone), because the indexer now holds the same files and cgo builds would
+  list them twice. Nothing constructs the old SQLite store or indexer
+  outside `internal/graph` tests any more; deleting it stays M11. Until
+  then `make build` still links its cgo grammars (about 24 MB).
+
+As built, this differs from the design above in these ways:
+
+- **No type-use references or binding hints yet.** As for Go (M6.2), they
+  come with the generic resolver (M6.4). References are calls,
+  instantiations, extends, implements and decorators or annotations.
+- **`QualPackage` means "the qualifier is a name an import binds"**, and
+  `Qualifier` is that import's spec. That can be a module (`os`, `path`)
+  or an imported type (Java `Helper.check()`, Rust `HashMap::new()`). The
+  current resolver matches the spec against `Package` exactly, so these
+  edges resolve only for Go until M6.4; `find_callers` still finds them by
+  name.
+- **Some syntax is ambiguous without types.** C# bases named `I` plus a
+  capital letter count as implemented interfaces, other bases as extended.
+  Swift and Kotlin superclasses and protocols are not distinguishable
+  (Swift records all of them as extends). A Swift `async` after the
+  parameters is not detected. Trait methods in a Rust `impl Trait for T`
+  get the default (private) visibility.
+- **Graph tools still detect tests the Go way** (`_test.go`, `IsTest`). The
+  facts carry `File.Test` and `ModTest` for every language; switching the
+  tools to them is part of the graph switch-over. Path-shaped arguments
+  (`l3Snippet`, `test_map`, retrieval tokens) now accept any pack
+  extension.
+
+Binary size (linux/amd64, stripped, release flags): 40.9 MB before, 52.9 MB
+after. The tree-sitter parser core with the grammars' scanners is about
+7.5 MB, the 17 grammar blobs with the runtime wrapper about 4.8 MB and the query engine 0.5 MB. The
+size gates are now 56 MiB (release and core) and 80 MiB (cgo full build).
+Two cuts in chronos are planned so the gates can come down again: loading
+only tiktoken's o200k vocabulary (about -5.0 MB; the other three are linked
+through `tokenizer.ForModel`) and keeping `storage/adapters/postgres` out
+of `sdk/agent`'s imports (about -2.0 MB of pgx).
+
+The edit path and fresh build are unchanged on this repository, whose only
+non-Go sources are two shell scripts and two small JavaScript files
+(benchstat, n=10, old and new runs interleaved): `IndexFresh` 289 → 265 ms
+(-8%, p=0.01), `IndexEditBody` 8.1 → 7.1 ms (not significant). The machine
+was loaded (load average about 45 on 10 cores), so these numbers resolve to
+about ±10%. Grammars load once per process (3–13 ms each); query compilation
+takes 0.1–4 ms per pack.
+
 ## Plan after M2
 
 Status: agreed direction (2026-09-25). The sections above still describe M1–M4
@@ -1005,6 +1082,7 @@ This runs from M3 onward. It is the counterpart to the M0 speed harness.
 internal/indexer/
   extract/treesitter/   pure-Go runtime wrapper: lazy grammars, deadline, memory budget
   extract/packs/<lang>/ YAML + .scm query packs, go:embed
+  extract/generic/      query-driven extractor shared by every pack
   resolve/              generic resolver; resolve/<lang>/ for language semantics
   graph/                resolved-graph segments (CSR), patches, global prior
   retrieve/             seeds, push-PPR expansion, scoring, packing (backs context/)

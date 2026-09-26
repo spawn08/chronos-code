@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"github.com/spawn08/chronos/engine/tool"
+
+	"github.com/spawn08/chronos-code/internal/indexer/scan"
 )
 
 // gitLogTimeout bounds how long co_change waits for `git log` before giving
@@ -126,7 +128,7 @@ func testMapTool(store Backend) *tool.Definition {
 				return nil, fmt.Errorf("test_map: symbol is required")
 			}
 
-			if strings.Contains(symbol, "/") || strings.HasSuffix(symbol, ".go") {
+			if strings.Contains(symbol, "/") || scan.Indexable(symbol) {
 				syms, err := store.SymbolsInFile(ctx, symbol)
 				if err != nil {
 					return nil, err

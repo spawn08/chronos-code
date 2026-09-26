@@ -2,3 +2,17 @@
 language: php
 grammar: php
 extensions: [.php]
+visibility:
+  default: public
+  keywords: {public: public, private: private, protected: protected}
+modifiers:
+  static: static
+  abstract: abstract
+imports:
+  binds: last
+  separators: "\\"
+wrappers: [const_declaration, property_declaration]
+tests:
+  files: ["*Test.php"]
+  dirs: [tests]
+  symbols: ["test*"]

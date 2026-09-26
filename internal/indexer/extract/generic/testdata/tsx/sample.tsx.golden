@@ -1,0 +1,25 @@
+lang: typescript
+imports:
+  L1 module "react" {default as React} {useState}
+  L2 module "./button" {Button}
+symbols:
+  0. L4-6 private interface Props
+      sig: interface Props
+  1. L5-5 public property Props.title in=0
+      sig: title: string
+  2. L9-12 public func Counter
+      sig: export function Counter({ title }: Props)
+      doc: "Counter shows a count."
+  3. L14-16 public func Panel
+      sig: export const Panel: React.FC<Props> = (props) =>
+  4. L18-22 public class App
+      sig: export default class App extends React.Component<Props>
+  5. L19-21 public method App.render in=4
+      sig: render()
+refs:
+  L10:21 call useState in=2
+  L11:11 instantiate Button in=2
+  L11:33 call setN in=2
+  L15:16 call format in=3
+  L18:40 extends Component pkg="react" in=4
+  L20:13 instantiate Counter in=5

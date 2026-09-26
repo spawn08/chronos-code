@@ -2,3 +2,19 @@
 language: cpp
 grammar: cpp
 extensions: [.cc, .cpp, .cxx, .c++, .hpp, .hh, .hxx, .h]
+visibility:
+  default: public
+  members: {class: private, "*": public}
+  keywords: {public: public, private: private, protected: protected}
+  labels: [access_specifier]
+modifiers:
+  static: static
+  override: override
+  "[[deprecated]]": deprecated
+  deprecated: deprecated
+wrappers: [template_declaration, declaration, init_declarator, pointer_declarator, reference_declarator, array_declarator, field_declaration]
+imports:
+  separators: ":"
+tests:
+  files: ["*_test.cc", "*_test.cpp", "*_unittest.cc", "test_*.cpp"]
+  dirs: [tests, test]

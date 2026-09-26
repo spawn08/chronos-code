@@ -1,0 +1,59 @@
+lang: dart
+package: store
+imports:
+  L3 module "dart:async"
+  L4 module "package:http/http.dart" as http
+  L5 module "package:store/models.dart" {User} {Mode}
+  L6 reexport "src/repo.dart"
+exports:
+  L6 * from "src/repo.dart"
+symbols:
+  0. L9-28 public class UserRepo
+      sig: class UserRepo extends BaseRepo<User> with Logging implements Repo
+      doc: "A user repository."
+  1. L10-10 private field UserRepo._cache in=0
+      sig: final Map<String, User> _cache = {}
+  2. L11-11 public field UserRepo.limit in=0 [static]
+      sig: static const int limit = 10
+  3. L12-12 public field UserRepo.name in=0
+      sig: String name
+  4. L14-14 public constructor UserRepo.UserRepo in=0
+      sig: UserRepo(this.name)
+  5. L16-16 public constructor UserRepo.named in=0
+      sig: UserRepo.named(String n)
+  6. L19-24 public method UserRepo.find in=0 [override]
+      sig: Future<User?> find(String id)
+  7. L27-27 private method UserRepo._legacy in=0 [deprecated]
+      sig: void _legacy()
+  8. L30-32 public class Repo [abstract]
+      sig: abstract class Repo
+  9. L31-31 public method Repo.find in=8 [decl]
+      sig: Future<User?> find(String id)
+  10. L34-34 public enum Mode
+      sig: enum Mode
+  11. L34-34 public enum_member Mode.read in=10
+      sig: read
+  12. L34-34 public enum_member Mode.write in=10
+      sig: write
+  13. L36-38 public trait Logging
+      sig: mixin Logging
+  14. L37-37 public method Logging.log in=13
+      sig: void log(String m)
+  15. L40-40 public type_alias Id
+      sig: typedef Id = String
+  16. L42-42 public func topLevel
+      sig: int topLevel(int x)
+  17. L44-44 private var _private
+      sig: _private = 0
+refs:
+  L9:24 extends BaseRepo in=0
+  L9:44 implements Logging in=0
+  L9:63 implements Repo in=0
+  L18:4 decorator override in=6
+  L20:12 call check on="Helper" in=6
+  L21:15 call User in=6
+  L22:16 call get pkg="package:http/http.dart" in=6
+  L22:24 call parse on="Uri" in=6
+  L26:4 decorator deprecated in=7
+  L37:25 call print in=14
+  L42:24 call helper in=16

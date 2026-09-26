@@ -2,3 +2,16 @@
 language: scala
 grammar: scala
 extensions: [.scala, .sc]
+visibility:
+  default: public
+  keywords: {private: private, protected: protected}
+modifiers:
+  abstract: abstract
+  override: override
+  "@deprecated": deprecated
+imports:
+  binds: last
+tests:
+  files: ["*Test.scala", "*Spec.scala", "*Suite.scala"]
+  dirs: [test]
+  markers: ["@Test"]

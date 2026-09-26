@@ -2,3 +2,20 @@
 language: typescript
 grammar: typescript
 extensions: [.ts, .mts, .cts]
+visibility:
+  default: private
+  members: {"*": public, namespace: private, module: private}
+  keywords: {public: public, private: private, protected: protected}
+  private_prefix: "#"
+  export_wrapper: export_statement
+modifiers:
+  static: static
+  abstract: abstract
+  async: async
+  override: override
+wrappers: [export_statement, lexical_declaration, variable_declaration, ambient_declaration, expression_statement]
+imports:
+  binds: none
+tests:
+  files: ["*.test.ts", "*.spec.ts", "*.test.mts", "*.spec.mts"]
+  dirs: [__tests__]

@@ -20,7 +20,10 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
+	"github.com/spawn08/chronos-code/internal/indexer/extract/generic"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/golang"
+	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/internal/indexer/extract/treesitter"
 	"github.com/spawn08/chronos-code/internal/indexer/facts"
 	"github.com/spawn08/chronos-code/internal/indexer/scan"
 	"github.com/spawn08/chronos-code/internal/indexer/store"
@@ -28,7 +31,7 @@ import (
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;
 // an index written by another version is discarded and rebuilt.
-const ExtractorVersion = "go-syntax-4"
+const ExtractorVersion = "syntax-5"
 
 // Tunables.
 const (
@@ -86,8 +89,9 @@ type Stats struct {
 
 // Engine owns one workspace index.
 type Engine struct {
-	opts Options
-	st   *store.Store
+	opts  Options
+	st    *store.Store
+	packs *generic.Extractor // every language but Go
 
 	mu      sync.Mutex        // serializes indexing passes
 	modules map[string]string // go.mod dir (root-relative, "." for root) -> module path
@@ -191,7 +195,10 @@ func Open(opts Options) (*Engine, error) {
 	if st.Recovered != "" {
 		opts.Logf("indexer: rebuilding index: %s", st.Recovered)
 	}
-	return &Engine{opts: opts, st: st, ready: make(chan struct{})}, nil
+	return &Engine{
+		opts: opts, st: st, ready: make(chan struct{}),
+		packs: generic.New(treesitter.New(treesitter.Options{})),
+	}, nil
 }
 
 // Root returns the workspace root.
@@ -603,7 +610,7 @@ func (e *Engine) index(ctx context.Context, sn *store.Snapshot, candidates, dele
 			}
 			continue
 		}
-		if m, ok := sn.Meta(rel); ok && m.Size == info.Size() && m.MtimeNS == info.ModTime().UnixNano() && m.Package == e.importPath(rel) {
+		if m, ok := sn.Meta(rel); ok && m.Size == info.Size() && m.MtimeNS == info.ModTime().UnixNano() && m.Package == e.unit(rel) {
 			continue
 		}
 		jobs = append(jobs, job{rel: rel, info: info})
@@ -614,7 +621,7 @@ func (e *Engine) index(ctx context.Context, sn *store.Snapshot, candidates, dele
 	var reused atomic.Int64
 	reuse := func(rel string, hash uint64) *facts.File {
 		m, ok := sn.Meta(rel)
-		if !ok || m.Hash != hash || m.ParseErr != "" || m.Package != e.importPath(rel) {
+		if !ok || m.Hash != hash || m.ParseErr != "" || m.Package != e.unit(rel) {
 			return nil
 		}
 		ref, _ := sn.Lookup(rel)
@@ -673,9 +680,13 @@ func (e *Engine) extractAll(ctx context.Context, jobs []job, reuse func(string, 
 }
 
 func (e *Engine) extract(rel string, info os.FileInfo, reuse func(string, uint64) *facts.File) *facts.File {
+	pk := packFor(rel)
 	f := &facts.File{
-		Path: rel, Lang: golang.Lang, Package: e.importPath(rel),
+		Path: rel, Lang: golang.Lang, Package: e.unit(rel),
 		Size: info.Size(), MtimeNS: info.ModTime().UnixNano(),
+	}
+	if pk != nil {
+		f.Lang = pk.Language
 	}
 	if info.Size() > maxFileBytes {
 		f.ParseErr = "file too large to index"
@@ -693,8 +704,30 @@ func (e *Engine) extract(rel string, info os.FileInfo, reuse func(string, uint64
 			return old
 		}
 	}
-	golang.Extract(f, src)
+	if pk != nil {
+		e.packs.Extract(f, pk, src)
+	} else {
+		golang.Extract(f, src)
+	}
 	return f
+}
+
+// packFor returns the language pack extracting rel, or nil for Go.
+func packFor(rel string) *packs.Pack {
+	if strings.HasSuffix(rel, ".go") {
+		return nil
+	}
+	return packs.Default().ForPath(rel)
+}
+
+// unit is a file's facts.File.Package: the Go import path, or the
+// directory for other languages until language resolvers (M7) assign
+// modules, crates or build targets.
+func (e *Engine) unit(rel string) string {
+	if packFor(rel) != nil {
+		return path.Dir(rel)
+	}
+	return e.importPath(rel)
 }
 
 // importPath maps a file to its package import path using the nearest

@@ -2,3 +2,17 @@
 language: rust
 grammar: rust
 extensions: [.rs]
+visibility:
+  default: private
+  members: {trait: public, enum: public, "*": private}
+  keywords: {pub: public, crate: internal, super: internal}
+modifiers:
+  async: async
+  deprecated: deprecated
+doc_skip: [attribute_item]
+imports:
+  binds: last
+  separators: ":"
+tests:
+  dirs: [tests, benches]
+  markers: [test, bench]

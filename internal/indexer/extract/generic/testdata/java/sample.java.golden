@@ -1,0 +1,49 @@
+lang: java
+package: com.example.store
+imports:
+  L3 module "java.util.List"
+  L4 wildcard "java.util"
+  L5 module "java.lang.Math.max"
+  L6 module "com.example.base.BaseRepo"
+symbols:
+  0. L11-41 public class UserRepo
+      sig: @Service public class UserRepo extends BaseRepo<User> implements Repo, AutoCloseable
+      doc: "Repository for users."
+  1. L13-13 private field UserRepo.LIMIT in=0 [static]
+      sig: private static final int LIMIT = 10
+  2. L14-14 protected field UserRepo.users in=0
+      sig: protected List<User> users
+  3. L15-15 package field UserRepo.name in=0
+      sig: String name
+  4. L17-20 public constructor UserRepo.UserRepo in=0
+      sig: public UserRepo(List<User> users)
+  5. L22-27 public method UserRepo.find in=0 [override]
+      sig: @Override public User find(String id)
+  6. L29-30 package method UserRepo.legacy in=0 [static,deprecated]
+      sig: @Deprecated static void legacy()
+  7. L32-32 private class UserRepo.Inner in=0 [static,abstract]
+      sig: private abstract static class Inner implements Runnable
+  8. L34-34 public enum UserRepo.Mode in=0
+      sig: public enum Mode
+  9. L34-34 public enum_member Mode.READ in=8
+      sig: READ
+  10. L34-34 public enum_member Mode.WRITE in=8
+      sig: WRITE
+  11. L36-38 package interface UserRepo.Callback in=0
+      sig: interface Callback
+  12. L37-37 public method Callback.done in=11 [decl]
+      sig: void done(int code)
+  13. L40-40 public class UserRepo.Pair in=0
+      sig: public record Pair(String a, int b)
+refs:
+  L11:2 decorator Service in=0
+  L12:31 extends BaseRepo in=0
+  L12:57 implements Repo in=0
+  L12:63 implements AutoCloseable in=0
+  L22:6 decorator Override in=5
+  L24:16 call check on="Helper" in=5
+  L25:22 instantiate User in=5
+  L26:22 call get on="users" in=5
+  L26:26 call max in=5
+  L29:6 decorator Deprecated in=6
+  L32:52 implements Runnable in=7

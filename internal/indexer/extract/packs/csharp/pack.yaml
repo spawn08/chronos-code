@@ -2,3 +2,17 @@
 language: csharp
 grammar: c_sharp
 extensions: [.cs]
+visibility:
+  default: internal
+  members: {interface: public, enum: public, "*": private}
+  keywords: {public: public, private: private, protected: protected, internal: internal}
+modifiers:
+  static: static
+  abstract: abstract
+  async: async
+  override: override
+  Obsolete: deprecated
+wrappers: [field_declaration, event_field_declaration, variable_declaration]
+tests:
+  files: ["*Tests.cs", "*Test.cs"]
+  markers: [Test, TestMethod, Fact, Theory, TestCase]

@@ -1,0 +1,24 @@
+lang: shell
+imports:
+  L2 module "./lib/common.sh"
+  L3 module "$HOME/.profile"
+symbols:
+  0. L5-5 public const VERSION
+      sig: readonly VERSION="1.0"
+  1. L6-6 public var LOG_LEVEL
+      sig: export LOG_LEVEL=info
+  2. L9-11 public func usage
+      sig: usage()
+      doc: "Prints usage."
+  3. L13-17 public func build
+      sig: function build
+  4. L19-21 public func main
+      sig: main()
+refs:
+  L2:1 call source
+  L10:3 call echo in=2
+  L14:3 call log_info in=3
+  L15:3 call make in=3
+  L16:3 call usage in=3
+  L20:3 call build in=4
+  L23:1 call main

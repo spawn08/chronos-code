@@ -2,3 +2,20 @@
 language: python
 grammar: python
 extensions: [.py, .pyi]
+visibility:
+  default: public
+  private_prefix: "_"
+modifiers:
+  async: async
+  "@staticmethod": static
+  "@classmethod": static
+  "@abstractmethod": abstract
+  "@override": override
+  "@deprecated": deprecated
+wrappers: [decorated_definition]
+imports:
+  binds: first
+tests:
+  files: ["test_*.py", "*_test.py", "conftest.py"]
+  dirs: [tests]
+  symbols: ["test*"]

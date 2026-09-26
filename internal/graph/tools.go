@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/spawn08/chronos/engine/tool"
+
+	"github.com/spawn08/chronos-code/internal/indexer/scan"
 )
 
 const (
@@ -436,7 +438,7 @@ func multiResolutionViewTool(store Backend, root string) *tool.Definition {
 func l3Snippet(ctx context.Context, store Backend, root, target string) (any, error) {
 	path := target
 	startLine, endLine := 0, 0
-	if !strings.Contains(target, string(os.PathSeparator)) && !strings.HasSuffix(target, ".go") {
+	if !strings.Contains(target, string(os.PathSeparator)) && !scan.Indexable(target) {
 		syms, err := store.FindSymbols(ctx, target, "")
 		if err != nil {
 			return nil, err

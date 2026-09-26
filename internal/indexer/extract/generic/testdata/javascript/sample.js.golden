@@ -1,0 +1,41 @@
+lang: javascript
+imports:
+  L1 module "fs" {default as fs}
+  L2 module "path" {join as pjoin} {resolve}
+  L3 module "./util.js" as util
+  L4 reexport "./helpers.js"
+  L5 reexport "./all.js"
+  L6 module "lodash" as lodash
+exports:
+  L4 help = helper from "./helpers.js"
+  L5 * from "./all.js"
+  L39 default = Widget
+symbols:
+  0. L6-6 private const lodash
+      sig: const lodash = require("lodash")
+  1. L11-26 public class Widget
+      sig: export class Widget extends Base
+      doc: "Widget renders things."
+  2. L12-12 public field Widget.count in=1 [static]
+      sig: static count = 0
+  3. L13-13 private field Widget.#secret in=1
+      sig: #secret = 1
+  4. L15-18 public constructor Widget.constructor in=1
+      sig: constructor(opts)
+  5. L20-25 public method Widget.render in=1 [async]
+      sig: async render()
+  6. L29-31 public func add
+      sig: export function add(a, b)
+      doc: "Adds numbers."
+  7. L33-33 private func multiply
+      sig: const multiply = (a, b) =>
+  8. L35-37 private func internal
+      sig: function internal()
+refs:
+  L6:16 call require in=0
+  L11:29 extends Base in=1
+  L21:10 call log pkg="./util.js" in=5
+  L22:5 call pjoin in=5
+  L23:10 call draw on="this" in=5
+  L24:16 instantiate Canvas in=5
+  L36:3 call add in=8

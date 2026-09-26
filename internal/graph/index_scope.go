@@ -26,21 +26,16 @@ const (
 	// maxExtraRoots bounds how many non-primary workspace roots (plan
 	// worktrees, request overrides) keep an open index at once.
 	maxExtraRoots = 4
-	// nonGoRefreshInterval throttles the tree-sitter tier's freshness scan.
-	nonGoRefreshInterval = time.Second
 	// maxSessions bounds the per-session delivered-source records kept.
 	maxSessions = 64
 )
 
 // IndexScopeOptions configures an IndexScope.
 type IndexScopeOptions struct {
-	Root    string // primary workspace root
-	DataDir string // per-project data directory; indexes live in DataDir/index
-	// GraphDB is the SQLite store of the tree-sitter tier (non-Go files).
-	// It is used only in builds with the treesitter tag; "" disables it.
-	GraphDB      string
-	IndexOnStart bool // reconcile the primary root in the background at once
-	Watch        bool // keep indexes current from filesystem events
+	Root         string // primary workspace root
+	DataDir      string // per-project data directory; indexes live in DataDir/index
+	IndexOnStart bool   // reconcile the primary root in the background at once
+	Watch        bool   // keep indexes current from filesystem events
 	Logf         func(format string, args ...any)
 }
 
@@ -59,7 +54,6 @@ type IndexScope struct {
 	closed bool
 	roots  map[string]*indexRoot
 	lru    []string // extra roots, least recently used first
-	nonGo  *nonGoTier
 	live   *liveBackend
 	seen   map[string]*retrieve.Seen // session + root -> delivered source
 	canon  sync.Map                  // requested root -> canonical root
@@ -103,22 +97,8 @@ func NewIndexScope(ctx context.Context, opts IndexScopeOptions) (*IndexScope, er
 		return nil, err
 	}
 	s.roots[root] = primary
-	if opts.GraphDB != "" && len(SupportedTreeSitterExtensions()) > 0 {
-		if st, err := OpenStore(opts.GraphDB); err != nil {
-			opts.Logf("code graph: non-Go tier unavailable: %v", err)
-		} else {
-			s.nonGo = &nonGoTier{store: st, ix: NewIndexer(st, root)}
-		}
-	}
 	if opts.IndexOnStart {
 		s.startInBackground(primary)
-		if s.nonGo != nil {
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				s.nonGo.refresh(s.ctx, s.opts.Logf)
-			}()
-		}
 	}
 	return s, nil
 }
@@ -354,12 +334,7 @@ func (s *IndexScope) backend(ctx context.Context) (Backend, string, func(), erro
 	st := r.engine.Status()
 	sn := r.engine.Snapshot()
 	b := &indexBackend{view: query.NewView(sn, r.cache), root: root, report: reportFrom(st), seen: s.seenFor(storage.SessionFromContext(ctx), root)}
-	var out Backend = b
-	if root == s.root && s.nonGo != nil {
-		s.nonGo.refresh(ctx, s.opts.Logf)
-		out = &mergedBackend{primary: b, extra: s.nonGo.store}
-	}
-	return out, root, func() { sn.Release(); s.release(r) }, nil
+	return b, root, func() { sn.Release(); s.release(r) }, nil
 }
 
 // canonical resolves a workspace root once per distinct spelling; a cached
@@ -496,30 +471,7 @@ func (s *IndexScope) Close() error {
 	for _, r := range roots {
 		s.closeRoot(r)
 	}
-	if s.nonGo != nil {
-		return s.nonGo.store.Close()
-	}
 	return nil
-}
-
-// nonGoTier keeps the SQLite store's tree-sitter facts current.
-type nonGoTier struct {
-	store *Store
-	ix    *Indexer
-	mu    sync.Mutex
-	last  time.Time
-}
-
-func (t *nonGoTier) refresh(ctx context.Context, logf func(string, ...any)) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if time.Since(t.last) < nonGoRefreshInterval {
-		return
-	}
-	if err := t.ix.RefreshNonGo(ctx); err != nil && ctx.Err() == nil {
-		logf("code graph: non-Go tier: %v", err)
-	}
-	t.last = time.Now()
 }
 
 // liveBackend forwards each call to a fresh snapshot backend.

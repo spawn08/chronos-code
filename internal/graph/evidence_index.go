@@ -24,8 +24,6 @@ func indexedOf(store Backend) *indexBackend {
 	switch b := store.(type) {
 	case *indexBackend:
 		return b
-	case *mergedBackend:
-		return indexedOf(b.primary)
 	}
 	return nil
 }

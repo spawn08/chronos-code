@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
 )
 
 const gitTimeout = 10 * time.Second
@@ -26,9 +28,9 @@ func SkipDir(name string) bool {
 }
 
 // Indexable reports whether a root-relative, slash-separated path is a
-// source file the indexer handles.
+// source file the indexer handles: Go, or a language pack's extension.
 func Indexable(rel string) bool {
-	if !strings.HasSuffix(rel, ".go") {
+	if !strings.HasSuffix(rel, ".go") && packs.Default().ForPath(rel) == nil {
 		return false
 	}
 	for _, dir := range strings.Split(path.Dir(rel), "/") {

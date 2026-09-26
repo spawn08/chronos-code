@@ -1,0 +1,58 @@
+lang: csharp
+package: Example.Store
+imports:
+  L1 module "System"
+  L2 module "System.Collections.Generic"
+  L3 module "Newtonsoft.Json" as Json
+  L4 wildcard "System.Math"
+symbols:
+  0. L6-47 internal namespace Example.Store
+      sig: namespace Example.Store
+  1. L9-33 public class UserRepo in=0
+      sig: [Serializable] public class UserRepo : BaseRepo<User>, IRepo, IDisposable
+      doc: "<summary>A user repository.</summary>"
+  2. L12-12 private field UserRepo._users in=1
+      sig: private readonly List<User> _users = new List<User>()
+  3. L13-13 public property UserRepo.Name in=1
+      sig: public string Name { get; set; }
+  4. L14-14 internal field UserRepo.Count in=1 [static]
+      sig: internal static int Count
+  5. L15-15 private const UserRepo.Limit in=1
+      sig: const int Limit = 10
+  6. L17-20 public constructor UserRepo.UserRepo in=1
+      sig: public UserRepo(string name) : base(name)
+  7. L22-28 public method UserRepo.Find in=1 [deprecated]
+      sig: [Obsolete] public virtual User Find(string id)
+  8. L30-30 protected method UserRepo.SaveAsync in=1 [async,override]
+      sig: protected override async Task SaveAsync()
+  9. L32-32 private method UserRepo.Dispose in=1
+      sig: void Dispose()
+  10. L35-38 public interface IRepo in=0
+      sig: public interface IRepo
+  11. L37-37 public method IRepo.Find in=10 [decl]
+      sig: User Find(string id)
+  12. L40-40 public struct Point in=0
+      sig: public struct Point
+  13. L40-40 public field Point.X in=12
+      sig: public int X
+  14. L42-42 public enum Mode in=0
+      sig: public enum Mode
+  15. L42-42 public enum_member Mode.Read in=14
+      sig: Read
+  16. L42-42 public enum_member Mode.Write in=14
+      sig: Write
+  17. L44-44 public class Pair in=0
+      sig: public record Pair(string A, int B)
+  18. L46-46 public type_alias Handler in=0
+      sig: public delegate void Handler(int code)
+refs:
+  L9:6 decorator Serializable in=1
+  L10:29 extends BaseRepo in=1
+  L10:45 implements IRepo in=1
+  L10:52 implements IDisposable in=1
+  L12:50 instantiate List in=2
+  L22:10 decorator Obsolete in=7
+  L25:20 call Check on="Helper" in=7
+  L26:25 instantiate User in=7
+  L27:27 call Find on="_users" in=7
+  L30:59 call Flush in=8
