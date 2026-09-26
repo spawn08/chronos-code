@@ -34,6 +34,21 @@ const (
 	KindModule      = "module"
 	KindNamespace   = "namespace"
 	KindMacro       = "macro"
+
+	// Contract kinds (M8). A contract node's Name is its global key: a
+	// normalised route "GET /v1/users/{}", an RPC "Service/Method" (the
+	// full "pkg.Service/Method" is its Signature), a message, topic or
+	// table name. Contract files (.proto, OpenAPI, ...) declare them, and
+	// framework recognisers declare the routes, RPCs and topics a handler
+	// serves, with a RefCall from the contract node to the handler.
+	KindRoute   = "route"
+	KindRPC     = "rpc"
+	KindMessage = "message"
+	KindTopic   = "topic"
+	KindTable   = "table"
+	// KindSection is a document section (Markdown heading or text file);
+	// its Doc holds the section text for search.
+	KindSection = "section"
 )
 
 // Kinds lists every symbol kind in its stable on-disk order. Append only.
@@ -41,7 +56,11 @@ var Kinds = []string{
 	KindFunc, KindMethod, KindType, KindInterface, KindStruct, KindVar, KindConst, KindEmbed,
 	KindClass, KindConstructor, KindTrait, KindProtocol, KindEnum, KindEnumMember,
 	KindField, KindProperty, KindTypeAlias, KindModule, KindNamespace, KindMacro,
+	KindRoute, KindRPC, KindMessage, KindTopic, KindTable, KindSection,
 }
+
+// ContractKinds are the kinds a RefContract can target.
+var ContractKinds = map[string]bool{KindRoute: true, KindRPC: true, KindMessage: true, KindTopic: true, KindTable: true}
 
 // Visibility of a symbol. Values are stored on disk; append only.
 const (
@@ -90,6 +109,13 @@ const (
 	RefImplements               // implemented interface, protocol or trait
 	RefInstantiate              // new T(), T{}, T()
 	RefDecorator                // @decorator, [Attribute], @Annotation
+	// RefContract is a use of a contract by its global key: a client call
+	// of a route or RPC, a message produced to a topic, a query of a
+	// table. Name is the key, Qualifier the contract kind (KindRoute, ...).
+	RefContract
+	// RefMention is a document section mentioning code. Name is the
+	// mentioned text, Qualifier one of the Mention* link kinds.
+	RefMention
 	NumRefKinds
 )
 
@@ -115,6 +141,16 @@ const (
 	// (a SwiftPM target).
 	ImportRoot
 	NumImportKinds
+)
+
+// Mention link kinds (facts.Ref.Qualifier of a RefMention), strongest
+// first.
+const (
+	MentionSymbol = "symbol" // a backticked identifier
+	MentionPath   = "path"   // a file path
+	MentionRoute  = "route"  // a route or URL path
+	MentionTicket = "ticket" // a ticket id (ABC-123)
+	MentionIdent  = "ident"  // a bare code-shaped identifier
 )
 
 // NoCaller marks a reference outside any declaration (package-level

@@ -20,14 +20,15 @@ const maxTypeDepth = 3
 type OutCall struct {
 	Callee, Qualifier string
 	QualKind          uint8
-	Kind              uint8 // facts.RefCall or facts.RefInstantiate
+	Kind              uint8 // facts.RefCall, facts.RefInstantiate or facts.RefContract
 	Line              int
 
 	seg, ref int // the reference record, for resolution
 }
 
 // Outgoing returns the calls and instantiations made inside declaration s,
-// in line order.
+// and the contracts it uses (facts.RefContract: a client call of a route
+// or RPC, a message produced to a topic), in line order.
 func (v *View) Outgoing(s Symbol) []OutCall {
 	i, k, ok := v.locate(s)
 	if !ok {
@@ -37,7 +38,7 @@ func (v *View) Outgoing(s Symbol) []OutCall {
 	var out []OutCall
 	for _, ci := range seg.RefsFrom(k) {
 		c := seg.Ref(ci)
-		if c.Kind != facts.RefCall && c.Kind != facts.RefInstantiate {
+		if c.Kind != facts.RefCall && c.Kind != facts.RefInstantiate && c.Kind != facts.RefContract {
 			continue
 		}
 		out = append(out, OutCall{Callee: c.Name, Qualifier: c.Qualifier, QualKind: c.QualKind, Kind: c.Kind, Line: c.Line, seg: i, ref: ci})
@@ -77,39 +78,50 @@ type Incoming struct {
 
 // IncomingCalls returns the call and instantiation sites that resolve to
 // s, with the caller and label of each. A constructor is reached through
-// its class's name.
+// its class's name. For a contract node they are its uses (RefContract).
 func (v *View) IncomingCalls(s Symbol) []Incoming {
-	name := s.Name
-	if s.Kind == facts.KindConstructor && s.Receiver != "" {
-		name = facts.BaseType(s.Receiver)
+	names := []string{s.Name}
+	switch {
+	case s.Kind == facts.KindConstructor && s.Receiver != "":
+		names[0] = facts.BaseType(s.Receiver)
+	case s.Kind == facts.KindRoute:
+		names = routeKeys(s.Name)
 	}
 	var out []Incoming
 	var ctors *ctorSet
 	if s.Kind == facts.KindConstructor {
 		ctors = v.constructorsOf(s)
 	}
+	contract := facts.ContractKinds[s.Kind]
 	for i := 0; i < v.sn.NumSegments(); i++ {
 		seg := v.sn.Segment(i)
-		lo, hi := seg.RefsTo(name)
-		for r := lo; r < hi; r++ {
-			kind := seg.RefKind(r)
-			if (kind != facts.RefCall && kind != facts.RefInstantiate) || !v.sn.Live(i, seg.RefFile(r)) {
-				continue
-			}
-			caller := seg.RefEnclosing(r)
-			if caller < 0 {
-				continue
-			}
-			targets, label := v.resolveRef(i, r)
-			if !targetsInclude(targets, s) || !ctors.selects(s, seg.Ref(r)) {
-				continue
-			}
-			cs := v.symbol(i, caller)
-			if cs.ID == s.ID {
-				continue
-			}
-			out = append(out, Incoming{Caller: cs, Line: seg.Ref(r).Line, Resolution: label, Candidates: max(1, len(targets))})
+		for _, name := range names {
+			out = v.incomingNamed(out, s, i, seg, name, contract, ctors)
 		}
+	}
+	return out
+}
+
+func (v *View) incomingNamed(out []Incoming, s Symbol, i int, seg *segment.Segment, name string, contract bool, ctors *ctorSet) []Incoming {
+	lo, hi := seg.RefsTo(name)
+	for r := lo; r < hi; r++ {
+		kind := seg.RefKind(r)
+		if contract != (kind == facts.RefContract) || (!contract && kind != facts.RefCall && kind != facts.RefInstantiate) || !v.sn.Live(i, seg.RefFile(r)) {
+			continue
+		}
+		caller := seg.RefEnclosing(r)
+		if caller < 0 {
+			continue
+		}
+		targets, label := v.resolveRef(i, r)
+		if !targetsInclude(targets, s) || !ctors.selects(s, seg.Ref(r)) {
+			continue
+		}
+		cs := v.symbol(i, caller)
+		if cs.ID == s.ID {
+			continue
+		}
+		out = append(out, Incoming{Caller: cs, Line: seg.Ref(r).Line, Resolution: label, Candidates: max(1, len(targets))})
 	}
 	return out
 }
@@ -292,6 +304,12 @@ func (v *View) resolveRefUncached(i, r int) ([]Symbol, string) {
 	seg := v.sn.Segment(i)
 	rec := seg.Ref(r)
 	fc := v.fileCtx(i, rec.File)
+	switch rec.Kind {
+	case facts.RefContract:
+		return v.resolveContract(rec.Qualifier, rec.Name)
+	case facts.RefMention:
+		return v.resolveMention(fc, rec)
+	}
 	kinds := callableKinds
 	switch rec.Kind {
 	case facts.RefInstantiate, facts.RefTypeUse, facts.RefExtends, facts.RefImplements:

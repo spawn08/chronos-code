@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/spawn08/chronos-code/internal/indexer/facts"
 	"github.com/spawn08/chronos-code/internal/indexer/segment"
 	"github.com/spawn08/chronos-code/internal/indexer/terms"
 )
@@ -36,6 +37,14 @@ type Scored struct {
 	Terms   int     // distinct terms in the query
 }
 
+// corpus returns 1 for a document section and 0 for code.
+func corpus(seg *segment.Segment, sym int) int {
+	if seg.SymbolKind(sym) == facts.KindSection {
+		return 1
+	}
+	return 0
+}
+
 // Search ranks live symbols for a free-text query with BM25 over name,
 // signature, doc, package and file terms. A symbol matching more of the
 // query's words ranks above one matching fewer; an exact name match ranks
@@ -50,40 +59,74 @@ func (v *View) Search(query string, topK int) []Scored {
 		score    float64
 		matched  int
 		idf      float64 // idf mass of the matched terms
+		corpus   int     // 0 code, 1 document sections
 	}
 	n, sumLen := 0, 0.0
+	var cn [2]int // documents per corpus: code, sections
+	var clen [2]float64
 	for i := 0; i < v.sn.NumSegments(); i++ {
-		docs, sl := v.sn.Segment(i).SearchStats()
+		seg := v.sn.Segment(i)
+		docs, sl := seg.SearchStats()
 		n += docs
 		sumLen += sl
+		ds := v.cache.sectionStats(v.sn, seg)
+		cn[1] += ds.n
+		clen[1] += ds.sumLen
 	}
 	if n == 0 {
 		return nil
 	}
-	avg := sumLen / float64(n)
+	cn[0], clen[0] = max(0, n-cn[1]), max(0, sumLen-clen[1])
+	var avg [2]float64
+	for c := range avg {
+		avg[c] = sumLen / float64(n)
+		if cn[c] > 0 && clen[c] > 0 {
+			avg[c] = clen[c] / float64(cn[c])
+		}
+	}
+	// Document sections and code are scored as two corpora: prose repeats
+	// the words code is named with, and must not lower their idf for code
+	// (nor code for sections).
 	hits := map[[2]int]*hit{}
-	idfs := map[string]float64{}
-	idfTotal := 0.0
-	dfs := make(map[string]int, len(terms))
+	var idfs [2]map[string]float64
+	idfs[0], idfs[1] = map[string]float64{}, map[string]float64{}
+	var idfTotal [2]float64
+	dfs := make(map[string]*[2]int, len(terms))
 	rare := false
 	for _, t := range terms {
+		df := &[2]int{}
+		dfs[t] = df
 		for i := 0; i < v.sn.NumSegments(); i++ {
-			lo, hi := v.sn.Segment(i).Postings(t)
-			dfs[t] += hi - lo
+			seg := v.sn.Segment(i)
+			lo, hi := seg.Postings(t)
+			if hi-lo > maxPostings {
+				df[0] += hi - lo
+				continue
+			}
+			for k := lo; k < hi; k++ {
+				sym, _ := seg.Posting(k)
+				df[corpus(seg, sym)]++
+			}
 		}
-		if dfs[t] > 0 && !common(dfs[t], n) {
+		if all := df[0] + df[1]; all > 0 && !common(all, n) {
 			rare = true
 		}
 	}
 	for _, t := range terms {
 		df := dfs[t]
-		if df == 0 || (rare && common(df, n)) {
+		if df[0]+df[1] == 0 || (rare && common(df[0]+df[1], n)) {
 			continue
 		}
+		var idf [2]float64
+		for c := range idf {
+			if df[c] > 0 {
+				nc := max(cn[c], df[c])
+				idf[c] = math.Log(1 + (float64(nc)-float64(df[c])+0.5)/(float64(df[c])+0.5))
+				idfs[c][t] = idf[c]
+				idfTotal[c] += idf[c]
+			}
+		}
 		visited := 0
-		idf := math.Log(1 + (float64(n)-float64(df)+0.5)/(float64(df)+0.5))
-		idfs[t] = idf
-		idfTotal += idf
 		for i := 0; i < v.sn.NumSegments(); i++ {
 			seg := v.sn.Segment(i)
 			lo, hi := seg.Postings(t)
@@ -93,18 +136,22 @@ func (v *View) Search(query string, topK int) []Scored {
 				if !v.sn.Live(i, seg.SymbolFile(sym)) {
 					continue
 				}
+				c := corpus(seg, sym)
+				if idf[c] == 0 {
+					c = 0 // counted as code (a very common term)
+				}
 				tf := float64(ptf)
 				dl := float64(seg.DocLen(sym))
-				s := idf * tf * (bm25K1 + 1) / (tf + bm25K1*(1-bm25B+bm25B*dl/avg))
+				s := idf[c] * tf * (bm25K1 + 1) / (tf + bm25K1*(1-bm25B+bm25B*dl/avg[c]))
 				key := [2]int{i, sym}
 				h := hits[key]
 				if h == nil {
-					h = &hit{seg: i, sym: sym}
+					h = &hit{seg: i, sym: sym, corpus: c}
 					hits[key] = h
 				}
 				h.score += s
 				h.matched++
-				h.idf += idf
+				h.idf += idf[c]
 			}
 		}
 	}
@@ -115,11 +162,14 @@ func (v *View) Search(query string, topK int) []Scored {
 	for _, h := range hits {
 		// Coverage by idf mass: matching the rare task words matters more
 		// than matching many generic ones.
-		coverage := h.idf / idfTotal
+		coverage := 0.0
+		if idfTotal[h.corpus] > 0 {
+			coverage = min(1, h.idf/idfTotal[h.corpus])
+		}
 		h.score *= coverage * coverage
 		seg := v.sn.Segment(h.seg)
 		name := seg.SymbolName(h.sym)
-		if idf, ok := idfs[stem(strings.ToLower(name))]; ok {
+		if idf, ok := idfs[h.corpus][stem(strings.ToLower(name))]; ok {
 			h.score += idf // a task word is this declaration's own name
 		}
 		if strings.EqualFold(name, lq) || strings.EqualFold(qualifiedOf(seg.SymbolReceiver(h.sym), name), lq) {

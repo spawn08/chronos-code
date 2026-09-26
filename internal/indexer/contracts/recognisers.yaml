@@ -1,0 +1,322 @@
+# Framework recognisers (docs/chronos-indexer.md, "Contracts (M8)").
+#
+# Each rule is a regular expression (RE2) run over one source file of the
+# listed languages when one of its prefilter literals occurs. See Rule in
+# recognise.go for the fields. Templates ($1, $1/$2) expand pattern groups.
+#
+#   serve   the file serves a contract: a node keyed like the contract
+#           file's (route "GET /users/{}", rpc "Service/Method", topic)
+#           is declared with a call to its handler
+#   use     the enclosing function uses a contract (RefContract)
+#   stub    a variable bound to a gRPC client; its calls are uses
+#   prefix  a path prefix for a class's or a file's routes
+rules:
+  # ---- HTTP servers -------------------------------------------------------
+  - id: express
+    langs: [javascript, typescript]
+    kind: route
+    role: serve
+    prefilter: [".get(", ".post(", ".put(", ".delete(", ".patch(", ".all("]
+    pattern: '\b(?:app|router|server|routes|route)\.(get|post|put|delete|patch|all|options|head)\(\s*[''"\x60]([^''"\x60]+)[''"\x60]\s*(?:,[^;]*?([A-Za-z_$][\w$.]*)\s*\))?'
+    method: "$1"
+    path: "$2"
+    handler: "$3"
+
+  - id: fastapi
+    langs: [python]
+    kind: route
+    role: serve
+    prefilter: ["@"]
+    pattern: '@\w+\.(get|post|put|delete|patch|options|head|api_route)\(\s*f?[''"]([^''"]*)[''"]'
+    method: "$1"
+    path: "$2"
+    handler: next
+
+  - id: flask
+    langs: [python]
+    kind: route
+    role: serve
+    prefilter: [".route("]
+    pattern: '@\w+\.route\(\s*[''"]([^''"]*)[''"](?:[^)]*?methods\s*=\s*[\[(]\s*[''"](\w+)[''"])?'
+    method: "$2"
+    default_method: GET
+    path: "$1"
+    handler: next
+
+  - id: python-router-prefix
+    langs: [python]
+    role: prefix
+    scope: file
+    prefilter: ["APIRouter(", "Blueprint("]
+    pattern: '(?:APIRouter|Blueprint)\([^)]*?(?:prefix|url_prefix)\s*=\s*[''"]([^''"]+)[''"]'
+    path: "$1"
+
+  - id: spring-mapping
+    langs: [java, kotlin]
+    kind: route
+    role: serve
+    prefilter: ["Mapping"]
+    pattern: '@(Get|Post|Put|Delete|Patch)Mapping\b(?:\(\s*(?:(?:value|path)\s*=\s*)?[\[{]?\s*"([^"]*)")?'
+    method: "$1"
+    path: "$2"
+    handler: next
+
+  - id: spring-request-mapping
+    langs: [java, kotlin]
+    kind: route
+    role: serve
+    prefilter: ["@RequestMapping"]
+    pattern: '@RequestMapping\b(?:\(\s*(?:(?:value|path)\s*=\s*)?[\[{]?\s*"([^"]*)"(?:[^)]*?method\s*=\s*[\[{]?\s*RequestMethod\.(\w+))?)?'
+    method: "$2"
+    path: "$1"
+    handler: next
+    type_prefix: true
+
+  - id: go-net-http
+    langs: [go]
+    kind: route
+    role: serve
+    prefilter: ["Handle"]
+    pattern: '\.(?:HandleFunc|Handle)\(\s*"([^"]+)"\s*,\s*(?:http\.HandlerFunc\(\s*)?([\w.]+)?'
+    path: "$1"
+    handler: "$2"
+
+  - id: go-router
+    langs: [go]
+    kind: route
+    role: serve
+    prefilter: [".GET(", ".POST(", ".PUT(", ".DELETE(", ".PATCH(", ".Get(", ".Post(", ".Put(", ".Delete(", ".Patch("]
+    pattern: '\b(\w+)\.(GET|POST|PUT|DELETE|PATCH|Get|Post|Put|Delete|Patch)\(\s*"(/[^"]*)"\s*,\s*(?:[\w.]+\s*,\s*)*([\w.]+)'
+    method: "$2"
+    path: "$3"
+    handler: "$4"
+    reject_group: 1
+    reject: [http, client, resty]
+
+  # ---- HTTP clients -------------------------------------------------------
+  - id: js-fetch
+    langs: [javascript, typescript]
+    kind: route
+    role: use
+    prefilter: ["fetch("]
+    pattern: '\bfetch\(\s*[''"\x60]([^''"\x60]+)[''"\x60](?:\s*,\s*\{[^}]*?method\s*:\s*[''"](\w+)[''"])?'
+    path: "$1"
+    method: "$2"
+    default_method: GET
+
+  - id: js-axios
+    langs: [javascript, typescript]
+    kind: route
+    role: use
+    prefilter: [".get(", ".post(", ".put(", ".delete(", ".patch("]
+    pattern: '\b(?:axios|api|http|client|instance|\$http)\.(get|post|put|delete|patch)\(\s*[''"\x60]([^''"\x60]+)[''"\x60]'
+    method: "$1"
+    path: "$2"
+
+  - id: python-requests
+    langs: [python]
+    kind: route
+    role: use
+    prefilter: [".get(", ".post(", ".put(", ".delete(", ".patch("]
+    pattern: '\b(?:requests|httpx|client|session|self\.client|self\.session|self\.http)\.(get|post|put|delete|patch)\(\s*f?[''"]([^''"]+)[''"]'
+    method: "$1"
+    path: "$2"
+
+  - id: go-http-client
+    langs: [go]
+    kind: route
+    role: use
+    prefilter: ["http.Get(", "http.Post(", "http.Head("]
+    pattern: '\bhttp\.(Get|Post|Head)\(\s*(?:fmt\.Sprintf\(\s*)?"([^"]+)"'
+    method: "$1"
+    path: "$2"
+
+  - id: go-http-request
+    langs: [go]
+    kind: route
+    role: use
+    prefilter: ["http.NewRequest"]
+    pattern: '\bhttp\.NewRequest(?:WithContext)?\((?:\s*[\w.()]+\s*,)?\s*(?:"(\w+)"|http\.Method(\w+))\s*,\s*(?:fmt\.Sprintf\(\s*)?"([^"]+)"'
+    method: "$1$2"
+    path: "$3"
+
+  - id: java-rest-template
+    langs: [java, kotlin]
+    kind: route
+    role: use
+    prefilter: ["ForObject(", "ForEntity("]
+    pattern: '\.(get|post|put|delete|patch)For(?:Object|Entity)\(\s*"([^"]+)"'
+    method: "$1"
+    path: "$2"
+
+  - id: java-rest-exchange
+    langs: [java, kotlin]
+    kind: route
+    role: use
+    prefilter: [".exchange("]
+    pattern: '\.exchange\(\s*"([^"]+)"\s*,\s*HttpMethod\.(\w+)'
+    method: "$2"
+    path: "$1"
+
+  - id: java-webclient
+    langs: [java, kotlin]
+    kind: route
+    role: use
+    prefilter: [".uri("]
+    pattern: '\.(get|post|put|delete|patch)\(\)\s*\.uri\(\s*"([^"]+)"'
+    method: "$1"
+    path: "$2"
+
+  # ---- gRPC ---------------------------------------------------------------
+  - id: go-grpc-server
+    langs: [go]
+    kind: rpc
+    role: serve
+    prefilter: ["Server("]
+    pattern: '\bRegister(\w+)Server\(\s*[\w.]+\s*,\s*&?(\w+)\s*\{'
+    service: "$1"
+    each_method: "$2"
+
+  - id: go-grpc-client
+    langs: [go]
+    kind: rpc
+    role: stub
+    prefilter: ["Client("]
+    pattern: '([\w.]+)\s*(?::=|=|:)\s*(?:\w+\.)?New(\w+)Client\('
+    var: "$1"
+    service: "$2"
+
+  - id: java-grpc-server
+    langs: [java, kotlin]
+    kind: rpc
+    role: serve
+    prefilter: ["ImplBase"]
+    pattern: '\bclass\s+(\w+)[^{]*?\b(\w+)Grpc\.(\w+)ImplBase\b'
+    service: "$2"
+    each_method: "$1"
+
+  - id: java-grpc-client
+    langs: [java, kotlin]
+    kind: rpc
+    role: stub
+    prefilter: ["Grpc.new"]
+    pattern: '([\w.]+)\s*=\s*(\w+)Grpc\.new(?:Blocking|Future)?Stub\('
+    var: "$1"
+    service: "$2"
+
+  - id: python-grpc-server
+    langs: [python]
+    kind: rpc
+    role: serve
+    prefilter: ["Servicer"]
+    pattern: '\bclass\s+(\w+)\s*\(\s*(?:\w+\.)*(\w+)Servicer\s*\)'
+    service: "$2"
+    each_method: "$1"
+
+  - id: python-grpc-client
+    langs: [python]
+    kind: rpc
+    role: stub
+    prefilter: ["Stub("]
+    pattern: '([\w.]+)\s*=\s*(?:\w+\.)*(\w+)Stub\('
+    var: "$1"
+    service: "$2"
+
+  # ---- GraphQL clients ----------------------------------------------------
+  - id: graphql-client
+    langs: [javascript, typescript, python]
+    kind: rpc
+    role: use
+    prefilter: ["query", "mutation", "subscription"]
+    pattern: '[\x60''"]\s*(query|mutation|subscription)\b[^{\x60''"]*\{\s*(\w+)'
+    key: "$1/$2"
+
+  # ---- Kafka --------------------------------------------------------------
+  - id: java-kafka-listener
+    langs: [java, kotlin]
+    kind: topic
+    role: serve
+    prefilter: ["@KafkaListener"]
+    pattern: '@KafkaListener\([^)]*?topics\s*=\s*[\[{]?\s*"([^"]+)"'
+    key: "$1"
+    handler: next
+
+  - id: java-kafka-producer
+    langs: [java, kotlin]
+    kind: topic
+    role: use
+    prefilter: [".send(", "ProducerRecord"]
+    pattern: '(?:\.send\(|ProducerRecord(?:<[^>]*>)?\()\s*"([\w.\-]+)"'
+    key: "$1"
+
+  - id: python-kafka-consumer
+    langs: [python]
+    kind: topic
+    role: serve
+    prefilter: ["KafkaConsumer(", ".subscribe("]
+    pattern: '(?:KafkaConsumer\(|\.subscribe\(\s*\[)\s*[''"]([\w.\-]+)[''"]'
+    key: "$1"
+    handler: enclosing
+
+  - id: python-kafka-producer
+    langs: [python]
+    kind: topic
+    role: use
+    prefilter: [".send(", ".produce("]
+    pattern: '\.(?:send|produce)\(\s*[''"]([\w.\-]+)[''"]'
+    key: "$1"
+
+  - id: go-kafka-consumer
+    langs: [go]
+    kind: topic
+    role: serve
+    prefilter: ["ReaderConfig", "ConsumePartition", "SubscribeTopics"]
+    pattern: '(?:ReaderConfig\{[^}]*?Topic:\s*|ConsumePartition\(\s*|SubscribeTopics\(\s*\[\]string\{\s*)"([\w.\-]+)"'
+    key: "$1"
+    handler: enclosing
+
+  - id: go-kafka-producer
+    langs: [go]
+    kind: topic
+    role: use
+    prefilter: ["Topic:"]
+    pattern: '(?:Writer|Message)\{[^}]*?Topic:\s*"([\w.\-]+)"'
+    key: "$1"
+
+  - id: js-kafka-consumer
+    langs: [javascript, typescript]
+    kind: topic
+    role: serve
+    prefilter: [".subscribe("]
+    pattern: '\.subscribe\(\s*\{\s*topics?\s*:\s*\[?\s*[''"\x60]([\w.\-]+)[''"\x60]'
+    key: "$1"
+    handler: enclosing
+
+  - id: js-kafka-producer
+    langs: [javascript, typescript]
+    kind: topic
+    role: use
+    prefilter: [".send("]
+    pattern: '\.send\(\s*\{\s*topic\s*:\s*[''"\x60]([\w.\-]+)[''"\x60]'
+    key: "$1"
+
+  # ---- SQL in code --------------------------------------------------------
+  - id: sql-query
+    langs: [go, python, java, kotlin, scala, javascript, typescript, ruby, php, csharp, rust, cpp, c]
+    kind: table
+    role: use
+    fold_case: true
+    prefilter: ["select", "insert", "delete"]
+    pattern: '(?i)[''"\x60]\s*(?:select\b[^''"\x60;]*?\bfrom|insert\s+into|delete\s+from)\s+[\x60"\[]?([A-Za-z_][\w.]*)'
+    key: "$1"
+    reject_group: 1
+    reject: [the, a, an, this, that, your, my, our, their, its, list, file, here, there, disk, server, which, where]
+
+  - id: sql-update
+    langs: [go, python, java, kotlin, scala, javascript, typescript, ruby, php, csharp, rust, cpp, c]
+    kind: table
+    role: use
+    fold_case: true
+    prefilter: ["update"]
+    pattern: '(?i)[''"\x60]\s*update\s+[\x60"\[]?([A-Za-z_][\w.]*)[\x60"\]]?\s+set\b'
+    key: "$1"

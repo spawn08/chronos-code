@@ -20,6 +20,50 @@ type Cache struct {
 	units *unitMemo
 	segs  map[*segment.Segment]*segIndex // per segment: manifests, declared packages
 	proj  *projMemo                      // project model of the latest generation
+	docs  map[*segment.Segment]docStats  // per segment: document-section search stats
+}
+
+// docStats counts a segment's document sections and their search length.
+type docStats struct {
+	n      int
+	sumLen float64
+}
+
+// sectionStats returns the number of document sections in seg and the sum
+// of their search lengths, so search can score them as their own corpus.
+// Segments are immutable: each is scanned once (its document files only).
+func (c *Cache) sectionStats(sn *store.Snapshot, seg *segment.Segment) docStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if st, ok := c.docs[seg]; ok {
+		return st
+	}
+	if c.docs == nil {
+		c.docs = map[*segment.Segment]docStats{}
+	}
+	live := map[*segment.Segment]bool{}
+	for i := 0; i < sn.NumSegments(); i++ {
+		live[sn.Segment(i)] = true
+	}
+	for s := range c.docs {
+		if !live[s] {
+			delete(c.docs, s)
+		}
+	}
+	var st docStats
+	for f := 0; f < seg.NumFiles(); f++ {
+		if lang := seg.FileLangView(f); lang != "markdown" && lang != "text" {
+			continue
+		}
+		for _, k := range seg.SymbolsInFile(f) {
+			if seg.SymbolKind(k) == facts.KindSection {
+				st.n++
+				st.sumLen += float64(seg.DocLen(k))
+			}
+		}
+	}
+	c.docs[seg] = st
+	return st
 }
 
 // unitMemo memoizes import-spec resolution for one generation.

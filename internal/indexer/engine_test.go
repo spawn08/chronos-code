@@ -332,7 +332,7 @@ func TestNonGoLanguages(t *testing.T) {
 	root, dir := newWorkspace(t)
 	writeFile(t, root, "py/store.py", "import os\n\nclass Store:\n    def save(self):\n        os.sync()\n\ndef helper():\n    Store().save()\n")
 	writeFile(t, root, "web/app.ts", "import { helper } from './util';\n\nexport function render(): void {\n  helper();\n}\n")
-	writeFile(t, root, "notes.txt", "not code\n")
+	writeFile(t, root, "notes.bin", "not code\n")
 	e := openEngine(t, root, dir)
 	defer e.Close()
 	ctx := context.Background()

@@ -20,6 +20,8 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
+	"github.com/spawn08/chronos-code/internal/indexer/contracts"
+	"github.com/spawn08/chronos-code/internal/indexer/docs"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/generic"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/golang"
 	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
@@ -32,7 +34,7 @@ import (
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;
 // an index written by another version is discarded and rebuilt.
-const ExtractorVersion = "syntax-12"
+const ExtractorVersion = "syntax-13"
 
 // Tunables.
 const (
@@ -686,10 +688,17 @@ func (e *Engine) extract(rel string, info os.FileInfo, reuse func(string, uint64
 		Path: rel, Lang: golang.Lang, Package: e.unit(rel),
 		Size: info.Size(), MtimeNS: info.ModTime().UnixNano(),
 	}
-	kind := manifest.Kind(rel)
+	kind, contract, doc := manifest.Kind(rel), "", ""
+	if kind == "" && pk == nil {
+		contract, doc = contracts.Kind(rel), docs.Kind(rel)
+	}
 	switch {
 	case kind != "":
 		f.Lang = kind
+	case contract != "":
+		f.Lang = contract
+	case doc != "":
+		f.Lang = doc
 	case pk != nil:
 		f.Lang = pk.Language
 	}
@@ -712,16 +721,22 @@ func (e *Engine) extract(rel string, info os.FileInfo, reuse func(string, uint64
 	switch {
 	case kind != "":
 		manifest.Extract(f, src, e.opts.Root)
+	case contract != "":
+		contracts.Extract(f, contract, src)
+	case doc != "":
+		docs.Extract(f, doc, src)
 	case pk != nil:
 		e.packs.Extract(f, pk, src)
+		contracts.Recognize(f, src)
 	default:
 		golang.Extract(f, src)
+		contracts.Recognize(f, src)
 	}
 	return f
 }
 
-// packFor returns the language pack extracting rel, or nil for Go and
-// manifests.
+// packFor returns the language pack extracting rel, or nil for Go,
+// manifests, contract files and documents.
 func packFor(rel string) *packs.Pack {
 	if strings.HasSuffix(rel, ".go") || manifest.Kind(rel) != "" {
 		return nil
@@ -730,10 +745,11 @@ func packFor(rel string) *packs.Pack {
 }
 
 // unit is a file's facts.File.Package: the Go import path, or the
-// directory for other languages and manifests. The language resolvers
-// read modules, crates and build units from the manifests' facts.
+// directory for other languages, manifests, contract files and documents.
+// The language resolvers read modules, crates and build units from the
+// manifests' facts.
 func (e *Engine) unit(rel string) string {
-	if packFor(rel) != nil || manifest.Kind(rel) != "" {
+	if !strings.HasSuffix(rel, ".go") || manifest.Kind(rel) != "" {
 		return path.Dir(rel)
 	}
 	return e.importPath(rel)

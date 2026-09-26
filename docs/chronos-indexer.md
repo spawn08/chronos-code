@@ -1374,6 +1374,138 @@ Not in M7:
 - Type-argument counts (`argumentCaptor<T>()` vs `<A, B>`) do not select
   overloads.
 
+### M8 results (contracts and documents, 2026-09-26)
+
+**Contract nodes.** Five symbol kinds are appended (`route`, `rpc`,
+`message`, `topic`, `table`) plus `section` for documents, and two
+reference kinds (`RefContract`, `RefMention`). The on-disk format is
+unchanged (kinds are stored as indexes); `ExtractorVersion` is
+`syntax-13`. A contract node's `Name` is its global key:
+
+| Kind | Key | Example |
+|---|---|---|
+| route | upper-case method (`ANY` when unknown), path without scheme, host, query or trailing slash, every parameter written `{}` | `GET /v1/users/{}` from `/v1/users/:id`, `${id}`, `<int:id>`, `%d`, `42` |
+| rpc | `Service/Method`, first letters upper-cased | proto `GetUser`, Java stub `getUser` → `UserService/GetUser`; GraphQL `Query/User` |
+| message, table | name (tables lower-case, no schema) | `User.Address`, `users` |
+| topic | topic name | `orders.created` |
+
+The proto package is the contract file's `PkgName`, not part of the rpc
+key: clients rarely know it (a Go `NewUserServiceClient`, a Python
+`UserServiceStub`). M9's federation joins on `PkgName + "." + Name`.
+
+**Contract files** (`internal/indexer/contracts`, one file each):
+Protobuf (services as namespaces holding their rpcs, nested messages as
+`Outer.Inner`), Thrift (services, structs, unions, exceptions),
+GraphQL (root-type fields as rpcs, other types as messages), OpenAPI 3 and
+Swagger 2 in YAML or JSON (`openapi*`, `swagger*`, `*.openapi` names;
+routes prefixed by the first server URL's path or `basePath`, schemas as
+messages), and SQL DDL (`CREATE TABLE`/`VIEW` as tables, a foreign key's
+`REFERENCES` as a `RefContract` to the referenced table).
+
+**Framework recognisers** are YAML rules in
+`contracts/recognisers.yaml`, run over every Go and pack-language file
+after extraction. A rule is an RE2 pattern with prefilter literals and a
+role: `serve` declares a contract node in the serving file with a
+`RefCall` to its handler (a captured expression, the definition a
+decorator or annotation precedes, the enclosing function, or each method
+of a type); `use` records a `RefContract` from the enclosing function;
+`stub` binds a gRPC client variable so each of its calls is a use;
+`prefix` scopes a path prefix to a class (Spring `@RequestMapping`) or a
+file (FastAPI `APIRouter(prefix=)`, Flask blueprints). Rules as shipped:
+Express, FastAPI, Flask, Spring MVC, Go `net/http` (1.22 method
+patterns included) and gin/chi/echo-style routers; fetch, axios,
+requests/httpx, Go `http.Get`/`NewRequest`, `RestTemplate`, `exchange` and
+`WebClient` clients; gRPC servers and stubs in Go, Java/Kotlin and
+Python; Kafka producers and consumers in Java (`@KafkaListener`,
+`KafkaTemplate`, `ProducerRecord`), Python, Go (segmentio, sarama,
+confluent) and kafkajs; GraphQL operations in `gql` strings; and table
+uses in SQL string literals.
+
+**Resolution.** A `RefContract` resolves by exact key to the nodes of its
+kind wherever they are declared (the `.proto`, the OpenAPI document, the
+serving file) and is labelled `import_resolved`, the contract analogue of
+an import; a route whose method is `ANY` on either side joins every
+method of its path. `Outgoing` includes contract uses and
+`IncomingCalls` of a contract node returns its uses, so
+`find_callers`/callees, impact and retrieval follow client → route →
+handler with no new tool. Retrieval expands contract nodes like
+functions.
+
+**Documents** (`internal/indexer/docs`): Markdown (`.md`, `.markdown`,
+`.mdx`; ATX and setext headings, fenced code and front matter skipped)
+is split into one `section` per heading, nested by level (`Signature` is
+the heading path, `Doc` the section's own text up to 2 KB, which BM25
+indexes). Text files (`.txt`, `.rst`, `.adoc`, not `CMakeLists.txt`,
+`requirements*.txt` or licences) are split into blocks of about 60 lines at
+blank lines. Mentions are `RefMention`s with the link kind in
+`Qualifier`: backticked identifiers (`symbol`), file paths and Markdown
+links (`path`, root-relative or relative to the document), routes and URL
+paths (`route`, keyed like contracts), ticket ids (`ticket`) and bare
+code-shaped identifiers (`ident`), at most 64 per section. The query side
+resolves identifiers by name (`name_matched`, or `ambiguous`), paths to
+the file's top-level declarations and routes like contracts
+(`import_resolved`), and tickets to the other sections that mention them.
+`View.Mentions(section)` gives document → code and
+`View.MentionedBy(symbol)` code → document (by name, qualified name or
+the declaring file's path). PDF and Word are not converted: no converter
+is added to the binary; text exported from them is indexed like any text
+file.
+
+**Search and retrieval.** Sections are scored as their own BM25 corpus
+(document frequency and average length per corpus; section counts per
+segment are cached once per immutable segment), so prose does not lower
+the idf or shift the length normalisation of code. Retrieval takes at
+most two section seeds from text search, at half a code hit's weight and
+score, never seeds sections by exact name (a heading like "Go" is not an
+anchor), follows a section's mentions (weighted by link kind), places
+the best section after the first four code items and everything else
+documents contributed after all code, and gives at most one section an
+excerpt (12 lines), only when the task names no code.
+
+Retrieval eval (`BenchmarkRetrievalEval`), before and after M8 on this
+repository, which now indexes its Markdown too:
+
+| | Code recall | Code excerpt recall | Tokens per task | Document recall |
+|---|---:|---:|---:|---:|
+| Before M8 | 40.9% | 31.8% | 3,131 | – |
+| M8 | 40.9% | 31.8% | 3,090 | 62.5% (5 of 8) |
+
+The 8 document tasks ask about this repository's documents, with the
+answering section as gold. Two misses return a related section instead
+("M11 results" for why the SQLite graph was slow); one returns no
+section. Without the corpus split and the ordering above, indexing the
+documents dropped code recall to 27%.
+
+Acceptance: client → route → handler paths in fixtures for every
+recogniser family (`query/contracts_test.go`: Express, FastAPI with a
+router prefix, Flask, Spring with a class prefix and `RequestMapping`
+methods, Go `net/http` and routers, gRPC across Go, Python and Java
+against a `.proto`, Kafka in Java, Python, Go and JavaScript, OpenAPI,
+GraphQL, Thrift and SQL DDL); document ↔ code links in both directions
+(`query/docs_test.go`); document tasks in the retrieval eval.
+
+Cost on this repository (n = 30 × 2, noisy machine): `IndexEditBody`
+5.7–6.4 → 7.5–8.0 ms, `IndexEditAddDecl` 1.5–1.7 → 2.2–2.9 ms (both
+far inside 50 ms; the one-file recogniser pass is negligible, the rest is
+compaction of a larger base), `IndexFresh` 283–294 → 333–350 ms (the
+Markdown files are new work), `ScopeCodebaseContext` 10.7 → 12.8 ms
+(target < 15 ms), `ScopeCodebaseSearch` 0.78 → 0.86 ms.
+
+Not in M8:
+
+- Recognisers are regular expressions over source text, not tree-sitter
+  query packs as planned: Go is not a pack, and one pass over the text
+  needs no second parse. A match inside a comment counts.
+- A handler registered by a variable (`r.Group("/v1")`, a router mounted
+  elsewhere with `app.use('/api', router)`) gets no prefix; a URL built by
+  concatenation (`"/users/" + id`) keeps only its literal part.
+- gRPC servers link the methods declared in the registering file only;
+  GraphQL resolvers are not recognised (clients and schema are).
+- Ticket ids link documents to documents; commit messages and code
+  comments are not indexed.
+- The graph tools expose no document-link tool yet; `Mentions` and
+  `MentionedBy` are used by retrieval.
+
 ## Plan after M2
 
 Status: agreed direction (2026-09-25). The sections above still describe M1–M4
@@ -1605,8 +1737,8 @@ one large real repository per major language):
   - Contract nodes join across repositories by global key: proto full name
     `pkg.Service/Method`, normalised route `GET /v1/users/{id}`, topic name,
     table name.
-- **Contracts (M8).** Framework recognisers are YAML query packs, like the
-  language packs. For example: Spring `@GetMapping`, Express `app.get`,
+- **Contracts (M8).** Framework recognisers are YAML rules (as built:
+  regular expressions, see "M8 results"). For example: Spring `@GetMapping`, Express `app.get`,
   FastAPI `@app.get`, `net/http` handlers, gRPC server and client stubs,
   Kafka producers and consumers. They emit contract refs, so the graph can go
   from a client call site to the route to the handler.
@@ -1619,8 +1751,8 @@ one large real repository per major language):
   - ticket ids
   - bare identifiers
 
-  Other formats (PDF, Word) are converted to text before indexing. How that
-  conversion happens is decided in M8.
+  Other formats (PDF, Word) are not converted (decided in M8; see "M8
+  results").
 
 ### Evaluation
 
@@ -1670,7 +1802,7 @@ acceptance criteria met.
 | M5 (done) | Scale foundations: layered routing, streaming sharded base, compaction per shard, watcher backends, git-based reconcile, progressive build, portable segments | On a synthetic million-file corpus, every target in "Scale" is met; a test counts work on the edit path and shows none proportional to repository size; macOS watching uses no descriptor per file |
 | M6 (done) | Parser runtime spike (pure Go vs cgo: MB/s per language, memory, grammar load time); facts v2 with format version bump; query packs for every language in the table; generic resolver; binding hints | Runtime decision recorded with measurements; every listed language produces symbols, outlines and refs in release builds; parity with the old tree-sitter tier on its tests; baseline edge precision for each language against SCIP |
 | M7 (done) | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline ("M7 precision targets"); no edit-latency regression |
-| M8 | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
+| M8 (done) | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
 | M9 | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |
 | M10 | Precise tier for other languages through SCIP import, when the toolchain is present | A precise edge is used only when its file hash matches; indexing and edits never block on an external indexer |
 | M11 (done) | Delete old `internal/graph` store and indexer, including its tree-sitter tier | No dead code; docs updated |

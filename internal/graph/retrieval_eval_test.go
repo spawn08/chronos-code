@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -28,6 +29,23 @@ var retrievalTasks = []struct {
 	{"BM25 ranking of symbols for codebase_search", []string{"Search", "buildSegIndex"}},
 	{"find implementations of an interface without type checking", []string{"Implementations", "methodSet"}},
 	{"two sessions must not write the same index; use a lock", []string{"lockDir", "openRoot"}},
+}
+
+// documentTasks (M8) ask about this repository's documents; the gold names
+// are the sections that answer them (Markdown headings). They are scored
+// separately so the code recall above stays comparable across milestones.
+var documentTasks = []struct {
+	task string
+	gold []string
+}{
+	{"why was the old SQLite code graph slow", []string{"Why the current graph is slow"}},
+	{"what must not be built in v1", []string{"10. Explicit rejects (do not build in v1)"}},
+	{"how does the writer lock stop two processes writing one index", []string{"Writer lock"}},
+	{"what precision must each language reach for import_resolved edges", []string{"M7 precision targets"}},
+	{"how are overlays routed and compacted", []string{"Overlays, routing, compaction"}},
+	{"binary size strategy to stay under 20 MB", []string{"6. Binary size strategy — hitting <20 MB"}},
+	{"precedence between global and project configuration", []string{"Precedence"}},
+	{"enterprise authentication for Claude and Codex", []string{"5.3 Enterprise Claude / Codex authentication"}},
 }
 
 func BenchmarkRetrievalEval(b *testing.B) {
@@ -60,12 +78,43 @@ func BenchmarkRetrievalEval(b *testing.B) {
 			}
 			if shown[g] {
 				excerpts++
+			} else if names[g] && os.Getenv("EVAL_DEBUG") != "" {
+				fmt.Printf("    no excerpt: %s\n", g)
 			}
 		}
 		if testing.Verbose() {
 			fmt.Printf("%-70q missed %v\n", task.task, missed)
 		}
 	}
+	docFound, docTotal := 0, 0
+	for _, task := range documentTasks {
+		out, err := def.Handler(context.Background(), map[string]any{"query": task.task, "max_tokens": 4096})
+		if err != nil {
+			b.Fatal(err)
+		}
+		names := map[string]bool{}
+		var got []string
+		for _, it := range out.(*evidenceResult).Items {
+			names[it.Name] = true
+			got = append(got, it.Name)
+		}
+		var missed []string
+		for _, g := range task.gold {
+			docTotal++
+			if names[g] {
+				docFound++
+			} else {
+				missed = append(missed, g)
+			}
+		}
+		if testing.Verbose() {
+			fmt.Printf("doc %-66q missed %v\n", task.task, missed)
+			if len(missed) > 0 && os.Getenv("EVAL_DEBUG") != "" {
+				fmt.Printf("    got %q\n", got)
+			}
+		}
+	}
+	b.ReportMetric(float64(docFound)/float64(docTotal), "doc_recall")
 	b.ReportMetric(float64(found)/float64(total), "recall")
 	b.ReportMetric(float64(excerpts)/float64(total), "excerpt_recall")
 	b.ReportMetric(float64(tokens)/float64(len(retrievalTasks)), "tokens/task")

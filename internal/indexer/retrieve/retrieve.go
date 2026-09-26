@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/spawn08/chronos-code/internal/indexer/facts"
 	"github.com/spawn08/chronos-code/internal/indexer/query"
 	"github.com/spawn08/chronos-code/internal/indexer/scan"
 )
@@ -46,9 +47,33 @@ const (
 	maxExcerpts    = 8
 	excerptLines   = 40
 	fileDecay      = 0.6 // score multiplier per item already taken from a file
-	tokensPerLine  = 12
-	handleTokens   = 24
+	// Document sections match many task words by sheer length, so text
+	// search seeds at most maxSectionSeeds of them, at sectionScale of a
+	// code hit's weight and score; their mentions carry mass to code.
+	maxSectionSeeds = 2
+	sectionScale    = 0.5
+	// Documents fill in after code: the best section comes after the
+	// first sectionAfter code items, everything else found through
+	// documents after all code. Section excerpts are shorter, and given
+	// to at most one section, only when the task names no code.
+	sectionAfter        = 4
+	sectionExcerptLines = 12
+	tokensPerLine       = 12
+	handleTokens        = 24
 )
+
+// expands are the kinds whose outgoing calls are followed: functions, and
+// contract nodes, which call their handlers.
+var expands = map[string]bool{
+	facts.KindFunc: true, facts.KindMethod: true, facts.KindConstructor: true,
+	facts.KindRoute: true, facts.KindRPC: true, facts.KindTopic: true,
+}
+
+// mentionWeight scales a document mention edge by how it links (backticked
+// names and routes are deliberate; bare identifiers are guesses).
+var mentionWeight = map[string]float64{
+	facts.MentionSymbol: 0.8, facts.MentionRoute: 0.8, facts.MentionPath: 0.5, facts.MentionIdent: 0.4, facts.MentionTicket: 0.3,
+}
 
 // Edge weights by resolution; ambiguous weight is split across candidates.
 var resolutionWeight = map[string]float64{
@@ -120,6 +145,7 @@ func Retrieve(v *query.View, req Request) Result {
 	nodes := map[uint64]*node{}
 	residual := map[uint64]float64{}
 	exact := true
+	anchored := false // the task names code: sections come without excerpts (else at most one)
 	add := func(s query.Symbol, w float64, why string) {
 		n := nodes[s.ID]
 		if n == nil {
@@ -165,7 +191,7 @@ func Retrieve(v *query.View, req Request) Result {
 				if len(tok) < 4 || commonWords[strings.ToLower(tok)] {
 					continue
 				}
-				syms := v.Symbols(tok, "")
+				syms := codeSymbols(v, tok)
 				exact = false
 				for _, s := range capSyms(syms, maxSeedsByName) {
 					add(s, 0.3/float64(min(len(syms), maxSeedsByName)), "name in the task: "+tok)
@@ -173,7 +199,7 @@ func Retrieve(v *query.View, req Request) Result {
 				exact = true
 				continue
 			}
-			syms := v.Symbols(tok, "")
+			syms := codeSymbols(v, tok)
 			if len(syms) == 0 {
 				if codeShaped(tok) {
 					res.Misses = append(res.Misses, tok)
@@ -186,27 +212,39 @@ func Retrieve(v *query.View, req Request) Result {
 		}
 		exact = false
 		limit, scale := searchSeeds, 0.4
-		if len(nodes) > 0 {
+		anchored = len(nodes) > 0
+		if anchored {
 			// Exact anchors exist: text matches only fill in around them.
 			limit, scale = 4, 0.1
 		}
-		hits := v.Search(q, limit)
-		top := 0.0
+		hits := codeFirst(v.Search(q, 2*limit+maxSectionSeeds), limit, maxSectionSeeds)
+		// Scores are relative to the best code hit: a long section
+		// outscoring all code must not shrink the code hits.
+		top, topAll := 0.0, 0.0
 		for _, h := range hits {
-			top = math.Max(top, h.Score)
+			topAll = math.Max(topAll, h.Score)
+			if h.Symbol.Kind != facts.KindSection {
+				top = math.Max(top, h.Score)
+			}
+		}
+		if top == 0 {
+			top = topAll
 		}
 		for _, h := range hits {
 			// A hit matching only one of several task words is noise.
 			if top <= 0 || (h.Terms > 1 && h.Matched < 2 && h.Score < 1000) {
 				continue
 			}
-			w := scale * h.Score / top
+			w := scale * math.Min(1, h.Score/top)
+			if h.Symbol.Kind == facts.KindSection {
+				w *= sectionScale
+			}
 			if nodes[h.ID] == nil {
 				add(h.Symbol, w, fmt.Sprintf("matches %d of %d task words", h.Matched, h.Terms))
 			} else {
 				residual[h.ID] += w
 			}
-			nodes[h.ID].bm25 = h.Score / top
+			nodes[h.ID].bm25 = math.Min(1, h.Score/top)
 		}
 	}
 	res.Seeds = len(nodes)
@@ -240,6 +278,9 @@ func Retrieve(v *query.View, req Request) Result {
 		if n.role != "test" && n.sym.TestFile && !req.Tests {
 			s *= 0.5
 		}
+		if n.sym.Kind == facts.KindSection {
+			s *= sectionScale
+		}
 		// Two hops away through a non-seed (a callee of a caller): related,
 		// but less than direct neighbours.
 		if !n.seed && n.pred != 0 && !nodes[n.pred].seed {
@@ -256,12 +297,12 @@ func Retrieve(v *query.View, req Request) Result {
 		}
 		return cmp.Compare(a.sym.Line, b.sym.Line)
 	})
-	picked := diversify(cands, score)
+	picked := docsLast(diversify(cands, score))
 	if len(picked) > maxItems {
 		res.Omitted["item_limit"] += len(picked) - maxItems
 		picked = picked[:maxItems]
 	}
-	pack(v, req, picked, score, nodes, &res)
+	pack(v, req, picked, score, nodes, anchored, &res)
 	return res
 }
 
@@ -284,7 +325,7 @@ func push(v *query.View, req Request, nodes map[uint64]*node, residual map[uint6
 			return nil
 		}
 		var out []edge
-		if u.Kind == "func" || u.Kind == "method" {
+		if expands[u.Kind] {
 			seen := map[uint64]bool{}
 			for _, c := range v.Outgoing(u) {
 				targets, label := v.Resolve(c)
@@ -294,6 +335,19 @@ func push(v *query.View, req Request, nodes map[uint64]*node, residual map[uint6
 					}
 					seen[t.ID] = true
 					out = append(out, edge{t, resolutionWeight[label] / float64(len(targets)), "calls", label})
+				}
+			}
+		}
+		if u.Kind == facts.KindSection {
+			// A document section links to the code it mentions.
+			seen := map[uint64]bool{}
+			for _, l := range v.Mentions(u) {
+				for _, t := range l.Targets {
+					if seen[t.ID] || t.ID == u.ID || len(out) >= maxNeighbors {
+						continue
+					}
+					seen[t.ID] = true
+					out = append(out, edge{t, mentionWeight[l.Kind] * resolutionWeight[l.Resolution] / float64(len(l.Targets)), "mentions", l.Resolution})
 				}
 			}
 		}
@@ -362,6 +416,8 @@ func push(v *query.View, req Request, nodes map[uint64]*node, residual map[uint6
 			n.why = "calls " + p.sym.Qualified()
 		case "callee":
 			n.why = "called by " + p.sym.Qualified()
+		case "related":
+			n.why = "mentioned in " + p.sym.File + ": " + p.sym.Name
 		}
 		if n.res != "" && n.res != query.ImportResolved {
 			n.why += " (" + n.res + ")"
@@ -370,7 +426,75 @@ func push(v *query.View, req Request, nodes map[uint64]*node, residual map[uint6
 	return scores
 }
 
+// docsLast orders code before what documents contributed (sections, and
+// declarations reached only through a section's mentions), except that
+// the best section follows the first sectionAfter code items: prose must
+// not take the budget from code, but a task about the documents should
+// still see its section.
+func docsLast(picked []*node) []*node {
+	var code, docs []*node
+	for _, n := range picked {
+		if n.sym.Kind == facts.KindSection || n.role == "related" {
+			docs = append(docs, n)
+		} else {
+			code = append(code, n)
+		}
+	}
+	if len(docs) == 0 {
+		return picked
+	}
+	out := make([]*node, 0, len(picked))
+	k := min(sectionAfter, len(code))
+	out = append(out, code[:k]...)
+	var rest []*node
+	for _, n := range docs {
+		if n.sym.Kind == facts.KindSection && len(out) == k {
+			out = append(out, n)
+		} else {
+			rest = append(rest, n)
+		}
+	}
+	out = append(out, code[k:]...)
+	return append(out, rest...)
+}
+
+// codeSymbols returns the declarations named name, without document
+// sections: a heading that happens to be a task word ("Go", "Search") is
+// not an anchor.
+func codeSymbols(v *query.View, name string) []query.Symbol {
+	syms := v.Symbols(name, "")
+	out := syms[:0:0]
+	for _, s := range syms {
+		if s.Kind != facts.KindSection {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// codeFirst keeps the first limit code hits and at most maxSections
+// document sections, in rank order.
+func codeFirst(hits []query.Scored, limit, maxSections int) []query.Scored {
+	var out []query.Scored
+	code, sections := 0, 0
+	for _, h := range hits {
+		switch {
+		case h.Symbol.Kind == facts.KindSection && sections < maxSections:
+			sections++
+		case h.Symbol.Kind != facts.KindSection && code < limit:
+			code++
+		default:
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 func roleFor(kind string, s query.Symbol) string {
+	if kind == "mentions" {
+		return "related"
+	}
 	if kind == "called_by" {
 		if query.IsTest(s) {
 			return "test"
@@ -404,12 +528,12 @@ func diversify(cands []*node, score func(*node) float64) []*node {
 
 // pack assigns zoom levels greedily by score within the estimated budget,
 // subtracting source ranges the session has already been given.
-func pack(v *query.View, req Request, picked []*node, score func(*node) float64, nodes map[uint64]*node, res *Result) {
+func pack(v *query.View, req Request, picked []*node, score func(*node) float64, nodes map[uint64]*node, anchored bool, res *Result) {
 	budget := req.Budget
 	if budget <= 0 {
 		budget = 4096
 	}
-	excerpts := 0
+	excerpts, sectionExcerpts := 0, 0
 	overhead := max(req.ItemOverhead, handleTokens)
 	invalidated := map[string]bool{}
 	for _, n := range picked {
@@ -424,14 +548,21 @@ func pack(v *query.View, req Request, picked []*node, score func(*node) float64,
 			res.Invalidated = append(res.Invalidated, s.File)
 		}
 		sig := estimate(s.Signature) + estimate(it.Why) + overhead
-		start, end := s.Line, min(max(s.Line, s.EndLine), s.Line+excerptLines-1)
+		lines := excerptLines
+		if s.Kind == facts.KindSection {
+			lines = sectionExcerptLines
+		}
+		start, end := s.Line, min(max(s.Line, s.EndLine), s.Line+lines-1)
 		lineTokens := req.LineTokens
 		if lineTokens <= 0 {
 			lineTokens = tokensPerLine
 		}
 		ex := sig + (end-start+1)*lineTokens
 		switch {
-		case req.Excerpts && excerpts < maxExcerpts && ex <= budget:
+		case req.Excerpts && excerpts < maxExcerpts && ex <= budget && (s.Kind != facts.KindSection || !anchored && sectionExcerpts == 0):
+			if s.Kind == facts.KindSection {
+				sectionExcerpts++
+			}
 			if req.Seen != nil && req.Seen.Covered(s.File, meta.Hash, start, end) {
 				res.Omitted["already_seen"]++
 				it.Zoom, it.Why = Signature, it.Why+"; source already delivered in this session"

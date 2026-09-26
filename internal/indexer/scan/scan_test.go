@@ -8,10 +8,11 @@ import (
 
 func TestIndexable(t *testing.T) {
 	for rel, want := range map[string]bool{
-		"a.go": true, "a/b/c.go": true, "a.txt": false, "vendor/x.go": false, "a/node_modules/x.go": false,
+		"a.go": true, "a/b/c.go": true, "a.bin": false, "a.txt": true, "CMakeLists.txt": false, "vendor/x.go": false, "a/node_modules/x.go": false,
 		".hidden/x.go": false, "pkg/testdata/x.go": false, "a/.git/x.go": false,
 		"app/main.py": true, "web/App.TSX": true, "src/lib.rs": true, "inc/x.h": true, "run.sh": true,
-		"README.md": false, "Makefile": false, "node_modules/x/index.js": false, "vendor/a.rb": false,
+		"README.md": true, "docs/x.mdx": true, "api/users.proto": true, "api/openapi.yaml": true, "db/001_init.sql": true,
+		"config.yaml": false, "Makefile": false, "node_modules/x/index.js": false, "vendor/a.rb": false,
 	} {
 		if got := Indexable(rel); got != want {
 			t.Errorf("Indexable(%q) = %v", rel, got)
