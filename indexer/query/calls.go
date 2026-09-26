@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // CallSite is one live call of a named function or method.

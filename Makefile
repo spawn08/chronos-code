@@ -15,7 +15,7 @@ LDFLAGS  := -s -w \
 CGO_ENABLED ?= 0
 
 # Tree-sitter grammars embedded in the binary: one per language pack under
-# internal/indexer/extract/packs. Without these tags gotreesitter embeds all
+# indexer/extract/packs. Without these tags gotreesitter embeds all
 # of its ~200 grammars (about 18 MiB instead of 5 MiB); the build still works.
 GRAMMARS := bash c cpp c_sharp dart java javascript kotlin objc php python ruby rust scala swift tsx typescript
 GRAMMAR_TAGS := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
@@ -84,7 +84,7 @@ eval-edges:
 # expensive, so they run a fixed count; queries use -benchtime.
 BENCH_COUNT ?= 5
 bench-index:
-	go test ./internal/indexer -tags "$(GRAMMAR_TAGS)" -run '^$$' -bench '^BenchmarkIndex' -benchtime=20x -count=$(BENCH_COUNT) -timeout 30m
+	go test ./indexer -tags "$(GRAMMAR_TAGS)" -run '^$$' -bench '^BenchmarkIndex' -benchtime=20x -count=$(BENCH_COUNT) -timeout 30m
 	go test ./internal/graph -tags "$(GRAMMAR_TAGS)" -run '^$$' -bench '^BenchmarkScope' -benchtime=1s -count=$(BENCH_COUNT) -benchmem -timeout 30m
 
 fmt:

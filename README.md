@@ -88,7 +88,7 @@ The TUI and HTTP server are surfaces, not a second runtime. They do not talk to 
 | | `internal/defaults` | Embedded agents, skills, guardrails, routing (`go:embed`) |
 | | `internal/router` | Intent patterns, model routing, complexity paths, PPD policy |
 | Workspace | `internal/workspace` | Project root, ignore rules, file indexing |
-| | `internal/graph` | Graph tools served by the chronos indexer (`internal/indexer`) |
+| | `internal/graph` | Graph tools served by the chronos indexer (`indexer`) |
 | | `internal/projectdocs` | Watches project docs for context |
 | | `internal/lsp` | Optional `lsp` tag: diagnostics, hover, references, rename preview |
 | Context | `internal/session` | Session persistence and resume |
@@ -182,6 +182,7 @@ chronos-code config show|validate    Resolved config
 chronos-code session list|delete|export
 chronos-code memory list|search|forget
 chronos-code mcp add|list|test|remove
+chronos-code indexer mcp [--repo DIR] Serve the code graph tools over MCP stdio
 chronos-code learn suggest|list|show|accept|reject
 chronos-code eval run|ppd
 chronos-code team list|run
@@ -354,6 +355,8 @@ Explicit memory intents: `remember <category>: <fact>`, `forget: <mem_ID>`, `rec
 ## MCP and safety
 
 Manage `.mcp.json` with `chronos-code mcp add`, `list`, `test`, and `remove`. Only stdio and HTTPS SSE are accepted. Credential-like arguments and query values must be `${ENV_VAR}` references; list and test output redacts them.
+
+`chronos-code indexer mcp` goes the other way: it serves the read-only code graph tools (the same ones agents call in process) to other MCP hosts over stdio. Other repositories listed in `workspace.indexer.federation` (or passed with `--repo [name=]dir`) are indexed separately, and symbol lookup, search and callers follow imports and API contracts across them, in and out of process. See `docs/chronos-indexer.md`, "M9 results".
 
 At startup, denied, untrusted, malformed, or unavailable servers do not block healthy servers or chat. MCP tools are namespaced, require approval by default, and close during cleanup.
 

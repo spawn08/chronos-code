@@ -3,7 +3,7 @@ package query_test
 import (
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 // outCall is a call made inside a declaration with its targets' files in

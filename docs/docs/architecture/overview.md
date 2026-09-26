@@ -114,7 +114,7 @@ sequenceDiagram
 | Package | Role |
 |---------|------|
 | `internal/workspace` | Project root, ignore rules, file indexing |
-| `internal/graph` | Graph tools served by the chronos indexer (`internal/indexer`): Go and 17 tree-sitter languages |
+| `internal/graph` | Graph tools served by the chronos indexer (`indexer`): Go and 17 tree-sitter languages |
 | `internal/projectdocs` | Watches project docs for context injection |
 | `internal/lsp` | Optional `lsp` tag: diagnostics, hover, references, rename preview |
 

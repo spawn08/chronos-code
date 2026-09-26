@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spawn08/chronos-code/internal/indexer/contracts"
-	"github.com/spawn08/chronos-code/internal/indexer/docs"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/contracts"
+	"github.com/spawn08/chronos-code/indexer/docs"
+	"github.com/spawn08/chronos-code/indexer/extract/manifest"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
 )
 
 const gitTimeout = 10 * time.Second

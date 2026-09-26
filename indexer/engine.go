@@ -20,16 +20,16 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/spawn08/chronos-code/internal/indexer/contracts"
-	"github.com/spawn08/chronos-code/internal/indexer/docs"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/generic"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/golang"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
-	"github.com/spawn08/chronos-code/internal/indexer/extract/treesitter"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/scan"
-	"github.com/spawn08/chronos-code/internal/indexer/store"
+	"github.com/spawn08/chronos-code/indexer/contracts"
+	"github.com/spawn08/chronos-code/indexer/docs"
+	"github.com/spawn08/chronos-code/indexer/extract/generic"
+	"github.com/spawn08/chronos-code/indexer/extract/golang"
+	"github.com/spawn08/chronos-code/indexer/extract/manifest"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/extract/treesitter"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/scan"
+	"github.com/spawn08/chronos-code/indexer/store"
 )
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;

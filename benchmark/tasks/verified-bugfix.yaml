@@ -25,7 +25,7 @@ success_measures:
   - {id: SM-04, status: covered, artifact: internal/learning/telemetry_test.go, marker: TestTelemetryCorrelatesModelAndToolEvents}
   - {id: SM-05, status: covered, artifact: internal/orchestrator/execution_test.go, marker: TestExecuteRejectsUnsupportedVerifiedCompletion}
   - {id: SM-06, status: covered, artifact: internal/config/capabilities_test.go, marker: TestCapabilityManifestValidateRejectsMissingRequiredCapability}
-  - {id: SM-07, status: covered, artifact: internal/indexer/engine_test.go, marker: TestReconcileAndIncrementalUpdates}
+  - {id: SM-07, status: covered, artifact: indexer/engine_test.go, marker: TestReconcileAndIncrementalUpdates}
   - {id: SM-08, status: covered, artifact: internal/learning/learning_test.go, marker: TestStorePatternApprovalRetrievalAndRollback}
   - {id: SM-09, status: covered, artifact: internal/mcpdiscover/defaults_test.go, marker: TestDefaultDocumentationProvider}
   - {id: SM-10, status: covered, artifact: internal/integration/surfaces_test.go, marker: TestSurfacesTrustFailuresFailClosed}

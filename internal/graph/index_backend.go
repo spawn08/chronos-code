@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/query"
-	"github.com/spawn08/chronos-code/internal/indexer/retrieve"
+	"github.com/spawn08/chronos-code/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/retrieve"
 )
 
 // indexBackend answers the graph tools from one chronos-indexer snapshot.

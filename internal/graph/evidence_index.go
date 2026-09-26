@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/retrieve"
+	"github.com/spawn08/chronos-code/indexer/retrieve"
 )
 
 // Evidence packing estimates for the JSON rendering: each item's keys and
@@ -24,6 +24,8 @@ func indexedOf(store Backend) *indexBackend {
 	switch b := store.(type) {
 	case *indexBackend:
 		return b
+	case *federatedBackend:
+		return b.indexBackend
 	}
 	return nil
 }
@@ -158,7 +160,7 @@ func (s *IndexScope) Prefetch(ctx context.Context, message string, maxTokens int
 	if maxTokens <= 0 || strings.TrimSpace(message) == "" {
 		return "", nil
 	}
-	store, root, release, err := s.backend(ctx)
+	store, root, release, err := s.backend(ctx, false)
 	if err != nil {
 		return "", err
 	}

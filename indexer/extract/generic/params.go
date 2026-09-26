@@ -6,8 +6,8 @@ import (
 
 	gts "github.com/odvcencio/gotreesitter"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // arity reads the parameter list that follows the name of a function,

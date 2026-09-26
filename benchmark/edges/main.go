@@ -39,9 +39,9 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/spawn08/chronos-code/internal/indexer"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 // LabelStats counts references with one resolution label.

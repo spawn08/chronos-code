@@ -14,9 +14,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
-	"github.com/spawn08/chronos-code/internal/indexer/scan"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/scan"
 )
 
 // Zoom levels, most detailed first.

@@ -4,8 +4,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/extract/manifest"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // Language module resolution from the project manifests (M7). Each
@@ -57,6 +57,14 @@ func (v *View) jsPackageUnits(dir, spec string) []string {
 			}
 		}
 	}
+	return v.npmPackageUnits(spec)
+}
+
+// npmPackageUnits resolves a bare JS/TS spec to the workspace package of
+// that name (package.json exports, main and types, mapped from build
+// output back to sources), or nil.
+func (v *View) npmPackageUnits(spec string) []string {
+	p := v.project()
 	name, sub := jsPackageName(spec)
 	pkgDir, ok := p.named(manifest.KindNPM, name)
 	if !ok {

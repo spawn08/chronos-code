@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 func arityString(a facts.Arity) string {

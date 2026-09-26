@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/extract/manifest"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 func dep(name, p string) facts.Import {

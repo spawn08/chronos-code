@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
-	"github.com/spawn08/chronos-code/internal/indexer/store"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/store"
 )
 
 // BenchmarkScale builds a synthetic index of CHRONOS_SCALE_FILES files
@@ -19,7 +19,7 @@ import (
 // store — no source files are written — and reports the scale targets of
 // docs/chronos-indexer.md. Each file declares 4 symbols and makes 6 calls.
 //
-//	CHRONOS_SCALE_FILES=1000000 go test ./internal/indexer/query -run '^$' -bench Scale -benchtime=1x -timeout 60m
+//	CHRONOS_SCALE_FILES=1000000 go test ./indexer/query -run '^$' -bench Scale -benchtime=1x -timeout 60m
 func BenchmarkScale(b *testing.B) {
 	n := 100000
 	if v, err := strconv.Atoi(os.Getenv("CHRONOS_SCALE_FILES")); err == nil && v > 0 {

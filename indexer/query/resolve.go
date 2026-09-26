@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/segment"
 )
 
 // maxCandidates bounds the targets returned for one ambiguous reference.

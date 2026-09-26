@@ -613,3 +613,39 @@ func TestLoadDiscoversUserAndProjectAgentDirectories(t *testing.T) {
 		t.Errorf("shared agent name = %q, want project override", got)
 	}
 }
+
+func TestWorkspaceIndexerFederationMerges(t *testing.T) {
+	base := mustConfig(t, `
+workspace:
+  indexer:
+    prefetch_tokens: 900
+    federation:
+      - root: ../users-svc
+`)
+	overlay := mustConfig(t, `
+workspace:
+  indexer:
+    federation:
+      - name: billing
+        root: /srv/billing
+      - root: ../web
+`)
+	mergeConfig(base, overlay, "project")
+	want := []FederatedRepo{{Name: "billing", Root: "/srv/billing"}, {Root: "../web"}}
+	if got := base.Workspace.Indexer.Federation; !reflect.DeepEqual(got, want) {
+		t.Errorf("federation = %+v, want %+v", got, want)
+	}
+	if got := base.Workspace.Indexer.PrefetchTokensOrDefault(); got != 900 {
+		t.Errorf("prefetch_tokens = %d, want inherited 900", got)
+	}
+}
+
+func TestFederationRootsResolveAgainstWorkspace(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "billing")
+	c := IndexerConfig{Federation: []FederatedRepo{{Root: "../users"}, {Name: "b", Root: abs}}}
+	got := c.FederationRoots("/work/app")
+	want := []FederatedRepo{{Root: filepath.Join("/work/app", "../users")}, {Name: "b", Root: abs}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("FederationRoots = %+v, want %+v", got, want)
+	}
+}

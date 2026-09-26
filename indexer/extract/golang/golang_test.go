@@ -3,7 +3,7 @@ package golang
 import (
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 const sample = `package demo

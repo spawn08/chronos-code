@@ -19,8 +19,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/contracts"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/contracts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // Languages recorded as facts.File.Lang.

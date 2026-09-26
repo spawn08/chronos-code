@@ -13,7 +13,10 @@ Rust, Java, Kotlin, C, C++ and C#. M7 (2026-09-26): calls
 select overloads by argument count and argument types, project manifests
 feed language resolvers and build-graph scoping (M7.1–M7.6). M7 complete
 (2026-09-26): the precision targets are met in all nine languages
-against the corrected gold answer (M7.7, "M7 precision targets").
+against the corrected gold answer (M7.7, "M7 precision targets"). M8 complete (2026-09-26): contracts and
+documents. M9 complete (2026-09-26): the indexer is the public package
+`indexer/`, graph tools answer across federated repositories, and
+`chronos-code indexer mcp` serves them to external agents ("M9 results").
 Replaces the synchronous parts of `internal/graph` with an in-process
 indexer.
 
@@ -66,7 +69,7 @@ queries ◄── snapshot (mmap'd segments + in-memory overlay routing) ◄─�
 Package layout (new):
 
 ```
-internal/indexer/
+indexer/
   scan/      discovery, ignore rules, stat/hash cache, dirty-set management
   extract/   per-language extractors; extract/golang uses go/parser
   segment/   on-disk format: writer, reader, checksums, mmap
@@ -277,7 +280,11 @@ Rewritten in `context/`. Techniques:
   in the context report), backed by `context/`.
 - `chronos-code indexer status` reports generation, segments, overlay count,
   file counts, precise-tier coverage and stage timings. `indexer verify` runs a
-  full scrub.
+  full scrub. (Not built yet; M9 added only `chronos-code indexer mcp`.)
+- M9 adds `workspace.indexer.federation` (other repositories the graph tools
+  answer from) and `chronos-code indexer mcp` (the same tools over MCP
+  stdio, for agents outside chronos-code). The in-process path still uses
+  no MCP.
 
 M0 removed the earlier external sidecar integration completely: its build,
 release and install steps, its client package, its tools, its config section
@@ -338,7 +345,7 @@ because `packages.Load` sits on the edit path and on the first query after it.
 
 ### M1 results (chronos indexer, not yet wired in)
 
-Same machine, corpus and probe as the baseline; `internal/indexer/index_bench_test.go`,
+Same machine, corpus and probe as the baseline; `indexer/index_bench_test.go`,
 median of 3 runs of 20 iterations.
 
 | Scenario | Current graph | Chronos indexer | Target |
@@ -460,7 +467,7 @@ As built, M2 differs from the design or from the old graph in these ways:
 
 ### M3 results (graph retrieval, prefetch)
 
-`internal/indexer/retrieve` implements "Graph retrieval" below for Go:
+`indexer/retrieve` implements "Graph retrieval" below for Go:
 seeds, push-PPR over call edges resolved at query time, file
 diversification, packing at three zoom levels, reasons per item, and
 session `seen` subtraction. `codebase_context` on the index and the new
@@ -695,7 +702,7 @@ Decision:
   repositories are slow. A WebAssembly build of the C runtime (wazero) is
   the unmeasured alternative if this matters.
 
-Reproduce with `BenchmarkParse` in `internal/indexer/extract/treesitter`
+Reproduce with `BenchmarkParse` in `indexer/extract/treesitter`
 (`CHRONOS_TS_CORPUS=<dir>`, one subdirectory per grammar name). With the
 1 s deadline it reports dropped and partial files per language.
 
@@ -1393,7 +1400,7 @@ The proto package is the contract file's `PkgName`, not part of the rpc
 key: clients rarely know it (a Go `NewUserServiceClient`, a Python
 `UserServiceStub`). M9's federation joins on `PkgName + "." + Name`.
 
-**Contract files** (`internal/indexer/contracts`, one file each):
+**Contract files** (`indexer/contracts`, one file each):
 Protobuf (services as namespaces holding their rpcs, nested messages as
 `Outer.Inner`), Thrift (services, structs, unions, exceptions),
 GraphQL (root-type fields as rpcs, other types as messages), OpenAPI 3 and
@@ -1431,7 +1438,7 @@ method of its path. `Outgoing` includes contract uses and
 handler with no new tool. Retrieval expands contract nodes like
 functions.
 
-**Documents** (`internal/indexer/docs`): Markdown (`.md`, `.markdown`,
+**Documents** (`indexer/docs`): Markdown (`.md`, `.markdown`,
 `.mdx`; ATX and setext headings, fenced code and front matter skipped)
 is split into one `section` per heading, nested by level (`Signature` is
 the heading path, `Doc` the section's own text up to 2 KB, which BM25
@@ -1505,6 +1512,143 @@ Not in M8:
   comments are not indexed.
 - The graph tools expose no document-link tool yet; `Mentions` and
   `MentionedBy` are used by retrieval.
+
+### M9 results (federation, public package, MCP adapter, 2026-09-26)
+
+**Public package.** `internal/indexer` moved to `indexer/`
+(`github.com/spawn08/chronos-code/indexer/...`). Nothing under it imports
+another chronos-code package; `TestPublicImportBoundary` enforces that for
+non-test files. The graph tools stay in `internal/graph`: they depend on
+the Chronos tool API, and the MCP adapter serves them as they are.
+
+**Federation** (`indexer/federation`). A `Workspace` is an ordered set of
+members, each a repository's own `query.View` over its own snapshot; the
+first is the primary. Symbol lookup, fuzzy lookup and search fan out
+(search merges by score; BM25 statistics stay per index, so scores compare
+only roughly across members). Edges carry `Via`: local, `import` or
+`contract`.
+
+- **Imports.** The importing view lists its external references
+  (`View.ExternalRefsTo`, `View.ExternalRefsFrom`): a package-qualified
+  reference, or a name brought in by a listed import (`from x import a`,
+  `import {a as b}`, Java `import a.b.C` or `import static a.b.C.m`, Rust
+  `use a::b::f`), whose spec maps to no local unit and which the local
+  resolver did not resolve through an import or a hint. Wildcard imports
+  count only when nothing local matches. The declaring view resolves them
+  (`View.ResolveExternal`) only against modules it owns by name: an exact
+  Go import path (so exported declarations of `example.com/b/users` and
+  never another module's `users`), an npm package name from `package.json`
+  (exports and main mapped back to sources, barrels followed), a Cargo
+  crate name, a declared Java/Kotlin/Scala/C# package, a Python module at
+  the root or a `pyproject.toml` source root, and (not yet covered by
+  tests) PSR-4, pub and SwiftPM names. The suffix matching used inside one repository is not applied
+  across repositories. Such edges are `import_resolved`. Incoming edges
+  also follow aliased imports: the declaring view proposes the specs that
+  name a target (`View.ImportSpecs`: the npm name, the Python module and
+  its packages), and the importing view searches files importing them
+  (`Importers`) for the alias.
+- **Contracts.** A use (`View.ContractUses`, or `Outgoing` for a caller)
+  joins the other members' nodes of the same key (`View.ContractNodes`,
+  routes joining `ANY` as in M8). RPCs and messages declared in a proto,
+  Thrift or GraphQL file carry their package (`query.ContractPackage`):
+  when the use resolves locally to such a node (the client repository has
+  its own copy of the proto), a member whose package-carrying nodes all
+  have another package does not join. This is the `PkgName + "." + Name`
+  join M8 left for M9; nodes declared by recognisers (a gRPC server's
+  registration) know no package and always join. A use joining nodes in
+  one member is `import_resolved`; in several (a topic consumed by two
+  services, `GET /health` everywhere), `ambiguous`.
+- **Parity.** A workspace with one member answers exactly as that
+  member's view (`TestSingleMemberMatchesView`).
+
+**Integration.** `workspace.indexer.federation` lists repositories
+(`root`, absolute or relative to the workspace root, and an optional
+`name`, default the directory name). `IndexScope` opens each with its own
+index (`<data>/index/roots/<key>/v1`), pinned (never evicted), reconciled
+and watched like the primary. Graph tool calls on the primary root use a
+federated backend: `graph_query`, `codebase_search`, `resolve_symbol`,
+`find_callers` (every depth), `multi_resolution_view` L2 and the batched
+forms fan out, and `impact_analysis` and `test_map` count callers and
+tests in other repositories (an exported declaration another repository
+calls is a potential breaking change). Primary symbols are unchanged; another repository's carry
+`repo` and a `file` relative to the primary root (`../users-svc/api.go`),
+and cross-repository callers read `Show (app/app.go:10, this workspace via
+import)`; elsewhere their identities read `repo:Name`. The `index` report lists every federated repository with its
+generation, file count, freshness or the error that left it out (an
+unreadable root, a duplicate name). A repository with no index yet is
+waited for once, like the primary. Package, file and implementation
+queries, `codebase_map`, `codebase_context` and per-turn prefetch stay on
+the primary repository.
+
+**MCP adapter.** `chronos-code indexer mcp [--repo [name=]dir ...]`
+serves the graph and impact tools over newline-delimited JSON-RPC on
+stdio (Chronos `engine/interop/mcpserver`, protocol 2024-11-05), for the
+workspace root and its federation (configuration plus `--repo`). The
+definitions are the in-process ones, exposed with their own permission
+(allow; the server default stays require-approval). Stdout carries only
+JSON-RPC.
+
+Acceptance:
+
+- Cross-repository import joins: `federation_test.go` for Go (with a
+  second module declaring the same package name and function, not
+  joined, and unexported declarations not importable), TypeScript (npm
+  name, aliased import, barrel re-export), Python (aliased `from … import`),
+  Java (static import of a declared package) and Rust (Cargo crate), both
+  directions.
+- Cross-repository contract joins: an Express route served in one
+  repository called by `fetch` in another (client → route → handler), a
+  Go gRPC client with its own proto copy joining the server's proto and
+  Python servicer but not a third repository's `other.v1` package, and a
+  Kafka topic consumed in two repositories (`ambiguous`).
+- Tools: `TestFederatedToolsCrossRepositories`,
+  `TestFederatedImpactAnalysis`, `TestFederationKeepsPrimaryAnswers`
+  (federating an unrelated repository changes no primary answer but the
+  index report).
+- MCP: `TestMCPMatchesInProcessTools` sends `initialize`, `tools/list` and
+  16 tool calls (every tool, batched names, a federated result and an
+  error) through `ServeStdio` and compares each with the in-process
+  handler's result on a separate scope over the same repositories: same
+  tool list, descriptions and schemas, same results, errors as MCP tool
+  errors. `TestIndexerMCPServesFederatedIndex` runs the CLI command.
+
+On this repository federating `../chronos` (770 files), 54 of the 152
+caller edges of `NewRegistry` and 22 of the 29 of `SessionFromContext`
+cross into chronos-code's imports of the chronos module.
+
+Cost (n = 3, same noisy machine; baselines re-measured the same day, since
+the machine ran about 20% slower than for M8): federation off, nothing
+changes on the query or edit path (`IndexEditBody` 9.8–10.2 → 10.4–10.5 ms,
+`IndexEditAddDecl` 3.1 → 2.0–2.4 ms, `ScopeCodebaseSearch` 0.89–0.93 →
+0.91–0.96 ms, `ScopeFindCallersDepth3` 2.5 → 2.4–2.5 ms). Federating
+`../chronos`: `ScopeFederatedGraphQuery` 22–25 µs (18.8 µs alone),
+`ScopeFederatedCodebaseSearch` 1.5 ms (0.9 ms alone),
+`ScopeFederatedFindCallersDepth3` 6.0–6.2 ms (2.5 ms alone),
+`ScopeFederatedFindCallers` (`NewRegistry`, depth 2) 5.4–6.6 ms.
+
+`ScopeCodebaseContext` rose from 14.7–15.8 to 16.4–17.5 ms (7.5 → 18 MB
+allocated) with the move alone: the same commit with only the directory
+renamed measures the same, as the renamed paths change which items the
+`Reconcile` task packs. The retrieval eval is unchanged by the move (40.9%
+code recall, 31.8% excerpts, 62.5% documents, pristine and renamed); with
+M9's new code in the corpus one gold item (`batchNames`) is displaced,
+giving 36.4% code recall and 27.3% excerpt recall at 3,084 tokens per task.
+Retrieval code is unchanged.
+
+Not in M9:
+
+- Method calls on another repository's types (`c := users.New(); c.Find()`)
+  and `Type.staticMethod()` qualifiers stay local; only package-qualified
+  and imported-name references cross. Instantiations cross for
+  constructors only, as in one repository.
+- Aliased imports are found for incoming edges only through the specs
+  `ImportSpecs` proposes (npm package names, Python modules); a JS subpath
+  import under an alias (`import {a as b} from '@x/y/sub'`) is found from
+  the caller side only.
+- C and C++ includes do not cross (include paths are per build).
+- `codebase_context`, prefetch, `codebase_map`, implementations and
+  package views are single-repository.
+- Search scores are per-index BM25; there is no global corpus.
 
 ## Plan after M2
 
@@ -1594,7 +1738,7 @@ matching. `x.Save()` resolves to `Repo.Save` when a hint says `x` is a
 `type_checked` > `import_resolved` > `type_hinted` > `name_matched` > `ambiguous`
 
 Extraction is YAML-first, following repository convention. Each language is a
-pack under `internal/indexer/extract/packs/<lang>/`, embedded with `go:embed`.
+pack under `indexer/extract/packs/<lang>/`, embedded with `go:embed`.
 A pack has a YAML file (extensions, kinds, visibility rules, test-file
 patterns) and tree-sitter query files (`.scm`) that capture definitions,
 imports, exports, refs and binding hints. The upstream grammars' `tags.scm`
@@ -1771,7 +1915,7 @@ This runs from M3 onward. It is the counterpart to the M0 speed harness.
 ### Package layout additions
 
 ```
-internal/indexer/
+indexer/
   extract/treesitter/   pure-Go runtime wrapper: lazy grammars, deadline, memory budget
   extract/packs/<lang>/ YAML + .scm query packs, go:embed
   extract/generic/      query-driven extractor shared by every pack
@@ -1783,9 +1927,10 @@ internal/indexer/
   federation/           workspace of several indexes
 ```
 
-The import-boundary rule still applies: nothing under `internal/indexer/`
-imports other chronos-code packages. It moves to a public package path, with
-an MCP adapter, in M9.
+The import-boundary rule still applies: nothing under `indexer/`
+imports other chronos-code packages (`TestPublicImportBoundary`). Since M9
+it is the public package path `github.com/spawn08/chronos-code/indexer`,
+with an MCP adapter (see "M9 results").
 
 ## Milestones
 
@@ -1803,7 +1948,7 @@ acceptance criteria met.
 | M6 (done) | Parser runtime spike (pure Go vs cgo: MB/s per language, memory, grammar load time); facts v2 with format version bump; query packs for every language in the table; generic resolver; binding hints | Runtime decision recorded with measurements; every listed language produces symbols, outlines and refs in release builds; parity with the old tree-sitter tier on its tests; baseline edge precision for each language against SCIP |
 | M7 (done) | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline ("M7 precision targets"); no edit-latency regression |
 | M8 (done) | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
-| M9 | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |
+| M9 (done) | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |
 | M10 | Precise tier for other languages through SCIP import, when the toolchain is present | A precise edge is used only when its file hash matches; indexing and edits never block on an external indexer |
 | M11 (done) | Delete old `internal/graph` store and indexer, including its tree-sitter tier | No dead code; docs updated |
 

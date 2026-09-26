@@ -5,10 +5,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/manifest"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
-	"github.com/spawn08/chronos-code/internal/indexer/store"
+	"github.com/spawn08/chronos-code/indexer/extract/manifest"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/segment"
+	"github.com/spawn08/chronos-code/indexer/store"
 )
 
 // project is what the manifests of one generation say about the

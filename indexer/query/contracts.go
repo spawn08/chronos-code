@@ -4,9 +4,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/contracts"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
+	"github.com/spawn08/chronos-code/indexer/contracts"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/segment"
 )
 
 // Contract and document references (M8).

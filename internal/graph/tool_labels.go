@@ -35,6 +35,17 @@ func labelResult(store Backend, out map[string]any, relation, empty bool, note s
 	if report.Error != "" {
 		index["error"] = report.Error
 	}
+	if len(report.Repos) > 0 {
+		repos := make([]map[string]any, 0, len(report.Repos))
+		for _, r := range report.Repos {
+			entry := map[string]any{"name": r.Name, "root": r.Root, "generation": r.Generation, "files": r.Files, "up_to_date": r.UpToDate}
+			if r.Error != "" {
+				entry["error"] = r.Error
+			}
+			repos = append(repos, entry)
+		}
+		index["repos"] = repos
+	}
 	out["index"] = index
 	if relation && report.Relations != "" {
 		out["resolution"] = report.Relations

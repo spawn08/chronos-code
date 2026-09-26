@@ -1,10 +1,10 @@
-// Package graph exposes the chronos indexer (internal/indexer) to agents as
+// Package graph exposes the chronos indexer (indexer) to agents as
 // zero-LLM-cost (T0) tools for structural code navigation: symbol lookup,
 // callers and callees, implementations, impact analysis and graph-based
 // codebase context.
 package graph
 
-import "github.com/spawn08/chronos-code/internal/indexer/facts"
+import "github.com/spawn08/chronos-code/indexer/facts"
 
 // SymbolKind classifies a graph symbol.
 type SymbolKind string
@@ -34,6 +34,10 @@ type Symbol struct {
 	Exported  bool // visible outside its package or module
 	Test      bool // a test function or method, in any language
 	TestFile  bool // declared in a test file
+	// Repo names the federated repository declaring the symbol (M9); ""
+	// for the primary workspace. File is then relative to the primary
+	// workspace root (for example ../users-svc/api/users.go).
+	Repo string
 }
 
 // Qualified returns Recv.Name for methods and Name otherwise, the identity
@@ -52,6 +56,7 @@ type CallEdge struct {
 	Line           int    // call site line in Caller.File
 	Resolution     string // import_resolved, type_hinted, name_matched, ambiguous, or unresolved (no indexed declaration)
 	Candidates     int    // declarations the call site could equally target (>= 1)
+	Via            string // across federated repositories: "import" or "contract"; "" inside one
 }
 
 // FileRecord is file-level metadata recorded in the graph.

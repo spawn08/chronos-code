@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/segment"
 )
 
 // Overload selection by argument types (M7). A call's arguments carry

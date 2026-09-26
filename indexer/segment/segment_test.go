@@ -9,7 +9,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 func sampleFiles() []*facts.File {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spawn08/chronos-code/internal/indexer/store"
+	"github.com/spawn08/chronos-code/indexer/store"
 )
 
 func run(t *testing.T, dir string, args ...string) {

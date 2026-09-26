@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
 )
 
 // samples holds one small, valid file per pack.

@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 var shopFiles = map[string]string{

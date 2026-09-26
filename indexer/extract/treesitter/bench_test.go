@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
 )
 
 // BenchmarkParse measures full-parse throughput per pack over a corpus of
@@ -16,7 +16,7 @@ import (
 // See docs/chronos-indexer.md, "M6 parser runtime spike".
 //
 //	CHRONOS_TS_CORPUS=/tmp/corpus go test -tags "$(make -s grammar-tags)" \
-//	  ./internal/indexer/extract/treesitter -run '^$' -bench Parse -benchtime 3x
+//	  ./indexer/extract/treesitter -run '^$' -bench Parse -benchtime 3x
 func BenchmarkParse(b *testing.B) {
 	dir := os.Getenv("CHRONOS_TS_CORPUS")
 	if dir == "" {

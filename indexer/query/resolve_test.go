@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 // resolved maps "callee@line" to "label targets" for the calls made inside

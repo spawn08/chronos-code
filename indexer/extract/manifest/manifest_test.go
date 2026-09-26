@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 func render(f *facts.File) string {

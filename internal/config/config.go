@@ -353,6 +353,34 @@ type IndexerConfig struct {
 	// PrefetchTokens bounds the task-ranked repository context added before
 	// each turn's first model call; 0 disables it.
 	PrefetchTokens *int `yaml:"prefetch_tokens,omitempty"`
+	// Federation lists other repositories the graph tools also answer
+	// from: symbol lookup, search and call edges follow imports of their
+	// modules and contracts (routes, RPCs, topics, tables) across them.
+	// Each repository keeps its own index.
+	Federation []FederatedRepo `yaml:"federation,omitempty"`
+}
+
+// FederationRoots returns workspace.indexer.federation with relative
+// roots resolved against the workspace root.
+func (c IndexerConfig) FederationRoots(root string) []FederatedRepo {
+	out := make([]FederatedRepo, 0, len(c.Federation))
+	for _, r := range c.Federation {
+		if r.Root != "" && !filepath.IsAbs(r.Root) {
+			r.Root = filepath.Join(root, r.Root)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// FederatedRepo is one repository of workspace.indexer.federation.
+type FederatedRepo struct {
+	// Name identifies the repository in tool results; defaults to the
+	// root directory's name.
+	Name string `yaml:"name,omitempty"`
+	// Root is the repository's directory: absolute, or relative to the
+	// workspace root.
+	Root string `yaml:"root"`
 }
 
 // PrefetchTokensOrDefault returns the configured prefetch budget.

@@ -409,7 +409,7 @@ func TestRuntimeStartupFailureClosesWatchersAndStorage(t *testing.T) {
 	countWorkers := func() int {
 		var profile bytes.Buffer
 		_ = pprof.Lookup("goroutine").WriteTo(&profile, 2)
-		return strings.Count(profile.String(), "internal/indexer.(*Watcher).loop") +
+		return strings.Count(profile.String(), "chronos-code/indexer.(*Watcher).loop") +
 			strings.Count(profile.String(), "internal/graph.(*IndexScope).startInBackground") +
 			strings.Count(profile.String(), "internal/projectdocs.(*Watcher).loop") +
 			strings.Count(profile.String(), "internal/learning.(*TelemetryRecorder).run")

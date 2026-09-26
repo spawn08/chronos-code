@@ -10,8 +10,8 @@ import (
 
 	"github.com/spawn08/chronos/engine/tool"
 
-	"github.com/spawn08/chronos-code/internal/indexer/query"
-	"github.com/spawn08/chronos-code/internal/indexer/scan"
+	"github.com/spawn08/chronos-code/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/scan"
 )
 
 const (
@@ -246,7 +246,7 @@ func findCallersTool(store Backend) *tool.Definition {
 					if e.Callee.ID != 0 {
 						seen[e.Callee.ID] = true
 					}
-					key := e.Callee.Qualified()
+					key := repoQualified(e.Callee)
 					if level[key] == nil {
 						level[key] = map[string][]string{}
 					}
@@ -277,10 +277,35 @@ func findCallersTool(store Backend) *tool.Definition {
 // callerEntry renders one caller as "Caller (file:line)", with the number
 // of declarations an ambiguous call site could target.
 func callerEntry(e CallEdge) string {
+	var extra string
 	if e.Candidates > 1 {
-		return fmt.Sprintf("%s (%s:%d, 1 of %d candidates)", e.Caller.Qualified(), e.Caller.File, e.Line, e.Candidates)
+		extra = fmt.Sprintf(", 1 of %d candidates", e.Candidates)
 	}
-	return fmt.Sprintf("%s (%s:%d)", e.Caller.Qualified(), e.Caller.File, e.Line)
+	if e.Caller.Repo != "" || e.Via != "" {
+		extra += ", " + repoLabel(e.Caller.Repo)
+		if e.Via != "" {
+			extra += " via " + e.Via
+		}
+	}
+	return fmt.Sprintf("%s (%s:%d%s)", e.Caller.Qualified(), e.Caller.File, e.Line, extra)
+}
+
+// repoLabel names a federated repository in tool output; "" is the
+// primary workspace.
+func repoLabel(repo string) string {
+	if repo == "" {
+		return "this workspace"
+	}
+	return "repo " + repo
+}
+
+// repoQualified is a symbol's qualified name, prefixed "repo:" when a
+// federated repository declares it.
+func repoQualified(s Symbol) string {
+	if s.Repo != "" {
+		return s.Repo + ":" + s.Qualified()
+	}
+	return s.Qualified()
 }
 
 func findImplementationsTool(store Backend) *tool.Definition {
@@ -529,7 +554,7 @@ func isPathWithin(root, path string) bool {
 }
 
 func symbolSummary(s Symbol) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"name":      s.Name,
 		"kind":      string(s.Kind),
 		"package":   s.Package,
@@ -539,6 +564,10 @@ func symbolSummary(s Symbol) map[string]any {
 		"doc":       s.Doc,
 		"receiver":  s.Receiver,
 	}
+	if s.Repo != "" {
+		out["repo"] = s.Repo
+	}
+	return out
 }
 
 func symbolSummaries(syms []Symbol) []map[string]any {

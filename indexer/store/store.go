@@ -17,8 +17,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/segment"
 )
 
 // FormatVersion is the manifest format; a mismatch discards the index.

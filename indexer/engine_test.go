@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spawn08/chronos-code/internal/indexer/store"
+	"github.com/spawn08/chronos-code/indexer/store"
 )
 
 func writeFile(t *testing.T, root, rel, content string) {

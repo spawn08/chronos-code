@@ -10,7 +10,7 @@ Default layout (`CHRONOS_CODE_DATA_HOME` overrides `~/.chronos-code`):
   projects/<basename>-<128-bit-id>/
     project.json                    # canonical root and identifier
     sessions.db
-    index/                          # code index segments (internal/indexer)
+    index/                          # code index segments (indexer)
     telemetry.db
     artifacts/                      # oversized TUI input and receipts
     checkpoints/                    # file-write undo artifacts

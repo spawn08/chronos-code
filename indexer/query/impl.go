@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // wellKnown gives the method sets of common standard-library interfaces, so

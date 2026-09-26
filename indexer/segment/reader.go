@@ -11,7 +11,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // Segment is a validated, read-only view of one segment image.

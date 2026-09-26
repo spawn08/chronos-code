@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 const designDoc = `---

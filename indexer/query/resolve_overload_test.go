@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 // Overload selection by argument count (M7), one fixture per language with

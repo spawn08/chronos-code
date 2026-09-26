@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // Lang is the language identifier recorded for Go files.

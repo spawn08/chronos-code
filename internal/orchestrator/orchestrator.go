@@ -1739,8 +1739,13 @@ func setupGraph(ctx context.Context, cfg *config.Config, dataDir string, agents 
 	}
 
 	indexOnStart := cfg.Workspace.IndexOnStart == nil || *cfg.Workspace.IndexOnStart
+	var federation []graph.FederatedRoot
+	for _, r := range cfg.Workspace.Indexer.FederationRoots(root) {
+		federation = append(federation, graph.FederatedRoot{Name: r.Name, Root: r.Root})
+	}
 	scope, err := graph.NewIndexScope(ctx, graph.IndexScopeOptions{
 		Root: root, DataDir: dataDir, IndexOnStart: indexOnStart, Watch: indexOnStart,
+		Federation: federation,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: open code index: %v\n", err)

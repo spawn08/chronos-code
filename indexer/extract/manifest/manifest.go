@@ -29,7 +29,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 // Manifest kinds, recorded as facts.File.Lang.

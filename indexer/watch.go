@@ -15,7 +15,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/spawn08/chronos-code/internal/indexer/scan"
+	"github.com/spawn08/chronos-code/indexer/scan"
 )
 
 // Watch timing: flush a quiet burst after watchDebounce, and never hold a

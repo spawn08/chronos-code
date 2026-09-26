@@ -99,6 +99,8 @@ func Execute() error {
 		return runMemory()
 	case "mcp":
 		return runMCP()
+	case "indexer":
+		return runIndexer()
 	case "learn":
 		return runLearn()
 	case "eval":
@@ -339,6 +341,7 @@ Usage:
   chronos-code mcp remove <name> [--scope project|user]  Remove a canonical MCP server
   chronos-code mcp test <name> [--timeout 10s] [--scope project|user]  Initialize, list tools, and close
   MCP transports: stdio and HTTPS SSE only; HTTP transport is not supported. Credential values must remain ${ENV_VAR} references.
+  chronos-code indexer mcp [--repo [name=]dir ...]        Serve the code index's graph tools to MCP hosts over stdio
   chronos-code learn suggest [agent]                     Distill traced sessions into a reviewable suggestion
   chronos-code learn list                                List pending suggestions
   chronos-code learn show <id>                           Show a suggestion's full YAML and rationale

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 // Language resolvers from project manifests (M7). Each fixture has a decoy

@@ -93,7 +93,7 @@ func BenchmarkScopeFindImplementations(b *testing.B) {
 func BenchmarkScopeImpact(b *testing.B) {
 	s, root := benchScope(b)
 	benchTool(b, s.ImpactTools(), "impact_analysis", map[string]any{
-		"file": filepath.Join(root, "internal/indexer/engine.go"), "start_line": 1, "end_line": 700,
+		"file": filepath.Join(root, "indexer/engine.go"), "start_line": 1, "end_line": 700,
 	})
 }
 
@@ -174,4 +174,67 @@ func benchTool(b *testing.B, defs []*tool.Definition, name string, args map[stri
 			b.Fatal(err)
 		}
 	}
+}
+
+// Federation benchmarks (M9): this repository federating ../chronos, whose
+// Go module it imports. Skipped when ../chronos is absent.
+var fedScope struct {
+	once  sync.Once
+	scope *IndexScope
+	err   error
+}
+
+func benchFederatedScope(b *testing.B) *IndexScope {
+	b.Helper()
+	fedScope.once.Do(func() {
+		root, err := filepath.Abs("../..")
+		if err == nil {
+			root, err = filepath.EvalSymlinks(root)
+		}
+		if err != nil {
+			fedScope.err = err
+			return
+		}
+		chronos := filepath.Join(filepath.Dir(root), "chronos")
+		if _, err := os.Stat(filepath.Join(chronos, "go.mod")); err != nil {
+			fedScope.err = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "scope-bench-fed-*")
+		if err != nil {
+			fedScope.err = err
+			return
+		}
+		scope, err := NewIndexScope(context.Background(), IndexScopeOptions{
+			Root: root, DataDir: dir, IndexOnStart: true, Federation: []FederatedRoot{{Root: chronos}},
+		})
+		if err != nil {
+			fedScope.err = err
+			return
+		}
+		<-scope.Engine().Ready()
+		fedScope.scope = scope
+	})
+	if fedScope.err != nil {
+		b.Skipf("federated scope: %v", fedScope.err)
+	}
+	return fedScope.scope
+}
+
+func BenchmarkScopeFederatedGraphQuery(b *testing.B) {
+	benchTool(b, benchFederatedScope(b).Tools(), "graph_query", map[string]any{"name": "Reconcile"})
+}
+
+// Callers of chronos's tool registry constructor, most of them in this
+// repository (cross-repository import edges).
+func BenchmarkScopeFederatedFindCallers(b *testing.B) {
+	benchTool(b, benchFederatedScope(b).Tools(), "find_callers", map[string]any{"name": "NewRegistry", "depth": 2})
+}
+
+func BenchmarkScopeFederatedFindCallersDepth3(b *testing.B) {
+	benchTool(b, benchFederatedScope(b).Tools(), "find_callers", map[string]any{"name": "Execute", "depth": 3})
+}
+
+func BenchmarkScopeFederatedCodebaseSearch(b *testing.B) {
+	benchTool(b, benchFederatedScope(b).Tools(), "codebase_search", map[string]any{"query": "graph index store", "top_k": 10})
 }

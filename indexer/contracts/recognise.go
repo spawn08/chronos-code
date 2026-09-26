@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 //go:embed recognisers.yaml

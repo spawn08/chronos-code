@@ -5,8 +5,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/extract/packs"
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
+	"github.com/spawn08/chronos-code/indexer/facts"
 )
 
 func TestEvalCond(t *testing.T) {

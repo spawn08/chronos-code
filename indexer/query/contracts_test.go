@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/indexer/facts"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/query"
 )
 
 // contractPaths follows client → contract → handler from declaration from:

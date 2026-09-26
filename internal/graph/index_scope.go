@@ -16,10 +16,11 @@ import (
 	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/storage"
 
-	"github.com/spawn08/chronos-code/internal/indexer"
-	"github.com/spawn08/chronos-code/internal/indexer/query"
-	"github.com/spawn08/chronos-code/internal/indexer/retrieve"
-	"github.com/spawn08/chronos-code/internal/indexer/store"
+	"github.com/spawn08/chronos-code/indexer"
+	"github.com/spawn08/chronos-code/indexer/federation"
+	"github.com/spawn08/chronos-code/indexer/query"
+	"github.com/spawn08/chronos-code/indexer/retrieve"
+	"github.com/spawn08/chronos-code/indexer/store"
 )
 
 const (
@@ -37,7 +38,18 @@ type IndexScopeOptions struct {
 	IndexOnStart bool   // reconcile the primary root in the background at once
 	Watch        bool   // keep indexes current from filesystem events
 	Logf         func(format string, args ...any)
+	// Federation lists other repositories whose indexes the graph tools
+	// also answer from (M9). Each keeps its own index.
+	Federation []FederatedRoot
 }
+
+// FederatedRoot is one federated repository.
+type FederatedRoot struct {
+	Name string // names the repository in results; defaults to the root's base name
+	Root string // absolute path
+}
+
+type federatedMember struct{ name, root string }
 
 // IndexScope serves the graph tools from the chronos indexer. It never
 // type-checks and never rebuilds on the request path: each call applies changes the watcher has already seen, then answers from
@@ -56,6 +68,10 @@ type IndexScope struct {
 	live   *liveBackend
 	seen   map[string]*retrieve.Seen // session + root -> delivered source
 	canon  sync.Map                  // requested root -> canonical root
+
+	primaryName string            // the primary root's name among federated repositories
+	members     []federatedMember // federated repositories, pinned in roots
+	skipped     []RepoReport      // federated repositories that could not be opened
 }
 
 type indexRoot struct {
@@ -70,6 +86,7 @@ type indexRoot struct {
 	launched  bool // guarded by IndexScope.mu
 	watcher   *indexer.Watcher
 	refs      int
+	pinned    bool // a federated repository: never evicted
 }
 
 // NewIndexScope opens the primary root's index. It returns at once; with
@@ -99,7 +116,51 @@ func NewIndexScope(ctx context.Context, opts IndexScopeOptions) (*IndexScope, er
 	if opts.IndexOnStart {
 		s.startInBackground(primary)
 	}
+	s.openFederation()
 	return s, nil
+}
+
+// openFederation opens the federated repositories' indexes, pinned for the
+// scope's lifetime. A repository that cannot be opened is logged and left
+// out; it never disables the primary index.
+func (s *IndexScope) openFederation() {
+	s.primaryName = filepath.Base(s.root)
+	names := map[string]bool{s.primaryName: true}
+	skip := func(name, root string, err error) {
+		s.opts.Logf("code graph: federated repository %s: %v", root, err)
+		s.skipped = append(s.skipped, RepoReport{Name: name, Root: root, Error: err.Error()})
+	}
+	for _, f := range s.opts.Federation {
+		root, err := canonicalGraphRoot(f.Root)
+		if err != nil {
+			skip(f.Name, f.Root, err)
+			continue
+		}
+		name := f.Name
+		if name == "" {
+			name = filepath.Base(root)
+		}
+		if _, dup := s.roots[root]; dup {
+			skip(name, root, errors.New("already indexed"))
+			continue
+		}
+		if names[name] {
+			skip(name, root, fmt.Errorf("name %q is already used", name))
+			continue
+		}
+		r, err := s.openRoot(root, filepath.Join(s.opts.DataDir, "index", "roots", rootKey(root), "v1"))
+		if err != nil {
+			skip(name, root, err)
+			continue
+		}
+		r.pinned = true
+		names[name] = true
+		s.roots[root] = r
+		s.members = append(s.members, federatedMember{name: name, root: root})
+		if s.opts.IndexOnStart {
+			s.startInBackground(r)
+		}
+	}
 }
 
 // Root returns the canonical primary workspace root.
@@ -266,7 +327,7 @@ func (s *IndexScope) acquire(root string) (*indexRoot, error) {
 }
 
 func (s *IndexScope) touch(root string) {
-	if root == s.root {
+	if r := s.roots[root]; root == s.root || r != nil && r.pinned {
 		return
 	}
 	s.lru = slices.DeleteFunc(s.lru, func(r string) bool { return r == root })
@@ -312,8 +373,9 @@ func (s *IndexScope) closeRoot(r *indexRoot) {
 }
 
 // backend returns a Backend over the current snapshot of the workspace root
-// the request targets, and its release function.
-func (s *IndexScope) backend(ctx context.Context) (Backend, string, func(), error) {
+// the request targets, and its release function. With federate, requests
+// for the primary root also answer from the federated repositories.
+func (s *IndexScope) backend(ctx context.Context, federate bool) (Backend, string, func(), error) {
 	root, err := s.canonical(builtins.WorkspaceRoot(ctx, s.opts.Root))
 	if err != nil {
 		return nil, s.opts.Root, nil, err
@@ -333,7 +395,62 @@ func (s *IndexScope) backend(ctx context.Context) (Backend, string, func(), erro
 	st := r.engine.Status()
 	sn := r.engine.Snapshot()
 	b := &indexBackend{view: query.NewView(sn, r.cache), root: root, report: reportFrom(st), seen: s.seenFor(storage.SessionFromContext(ctx), root)}
-	return b, root, func() { sn.Release(); s.release(r) }, nil
+	release := func() { sn.Release(); s.release(r) }
+	if federate && root == s.root && len(s.opts.Federation) > 0 {
+		fb, fr := s.federate(ctx, b)
+		return fb, root, func() { fr(); release() }, nil
+	}
+	return b, root, release, nil
+}
+
+// federate wraps the primary backend with the federated repositories'
+// current snapshots. A repository without an index yet waits for its
+// first build (bounded by ctx), like the primary; one that fails is
+// reported in the index report and left out.
+func (s *IndexScope) federate(ctx context.Context, primary *indexBackend) (Backend, func()) {
+	members := []federation.Member{{Name: s.primaryName, View: primary.view}}
+	roots := map[string]string{s.primaryName: s.root}
+	reports := slices.Clone(s.skipped)
+	var releases []func()
+	for _, m := range s.members {
+		rep := RepoReport{Name: m.name, Root: m.root}
+		if rel, err := filepath.Rel(s.root, m.root); err == nil {
+			rep.Root = filepath.ToSlash(rel)
+		}
+		r, err := s.acquire(m.root)
+		if err == nil {
+			if err = s.ready(ctx, r); err == nil {
+				err = r.engine.Sync(ctx)
+			}
+			if err != nil {
+				s.release(r)
+			}
+		}
+		if err != nil {
+			rep.Error = err.Error()
+			reports = append(reports, rep)
+			continue
+		}
+		st := r.engine.Status()
+		sn := r.engine.Snapshot()
+		fr := reportFrom(st)
+		rep.Generation, rep.Files, rep.UpToDate, rep.Error = fr.Generation, fr.Files, fr.UpToDate, fr.Error
+		reports = append(reports, rep)
+		members = append(members, federation.Member{Name: m.name, View: query.NewView(sn, r.cache)})
+		roots[m.name] = m.root
+		releases = append(releases, func() { sn.Release(); s.release(r) })
+	}
+	releaseAll := func() {
+		for _, f := range releases {
+			f()
+		}
+	}
+	ws, err := federation.New(members...)
+	if err != nil {
+		releaseAll()
+		return primary, func() {}
+	}
+	return &federatedBackend{indexBackend: primary, ws: ws, primary: s.primaryName, roots: roots, repos: reports}, releaseAll
 }
 
 // canonical resolves a workspace root once per distinct spelling; a cached
@@ -427,7 +544,7 @@ func (s *IndexScope) wrap(templates []*tool.Definition, build func(Backend, stri
 		def := *template
 		name := template.Name
 		def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
-			b, root, release, err := s.backend(ctx)
+			b, root, release, err := s.backend(ctx, true)
 			if err != nil {
 				return graphUnavailable(root, err), nil
 			}
@@ -479,7 +596,7 @@ type liveBackend struct{ s *IndexScope }
 var _ Backend = (*liveBackend)(nil)
 
 func live[T any](ctx context.Context, l *liveBackend, fn func(Backend) (T, error)) (T, error) {
-	b, _, release, err := l.s.backend(ctx)
+	b, _, release, err := l.s.backend(ctx, false)
 	if err != nil {
 		var zero T
 		return zero, err

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/spawn08/chronos-code/internal/indexer/segment"
+	"github.com/spawn08/chronos-code/indexer/segment"
 )
 
 // segRef is an open segment shared by snapshots. The mapping is released and

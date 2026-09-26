@@ -23,7 +23,7 @@ type indexBench struct {
 
 func newIndexBench(b *testing.B, build bool) *indexBench {
 	b.Helper()
-	src, err := filepath.Abs("../..")
+	src, err := filepath.Abs("..")
 	if err != nil {
 		b.Fatal(err)
 	}

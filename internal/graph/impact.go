@@ -11,7 +11,7 @@ import (
 
 	"github.com/spawn08/chronos/engine/tool"
 
-	"github.com/spawn08/chronos-code/internal/indexer/scan"
+	"github.com/spawn08/chronos-code/indexer/scan"
 )
 
 // gitLogTimeout bounds how long co_change waits for `git log` before giving
@@ -82,7 +82,7 @@ func impactAnalysisTool(store Backend) *tool.Definition {
 					if e.Caller.Package != sym.Package {
 						externalCaller = true
 					}
-					if q := e.Caller.Qualified(); !seen[q] {
+					if q := repoQualified(e.Caller); !seen[q] {
 						seen[q] = true
 						callers = append(callers, q)
 					}
@@ -202,7 +202,7 @@ func testsFor(ctx context.Context, edges *edgeMemo, targets []Symbol, depth int)
 			}
 			seen[e.Caller.ID] = true
 			if e.Caller.Test {
-				found[e.Caller.Qualified()] = true
+				found[repoQualified(e.Caller)] = true
 				continue
 			}
 			next = append(next, e.Caller)
