@@ -4,7 +4,7 @@
 // codebase context.
 package graph
 
-import "strings"
+import "github.com/spawn08/chronos-code/internal/indexer/facts"
 
 // SymbolKind classifies a graph symbol.
 type SymbolKind string
@@ -31,6 +31,27 @@ type Symbol struct {
 	Signature string
 	Doc       string
 	Receiver  string
+	Exported  bool // visible outside its package or module
+	Test      bool // a test function or method, in any language
+	TestFile  bool // declared in a test file
+}
+
+// Qualified returns Recv.Name for methods and Name otherwise, the identity
+// callers and callees are reported under.
+func (s Symbol) Qualified() string {
+	if s.Receiver == "" {
+		return s.Name
+	}
+	return facts.BaseType(s.Receiver) + "." + s.Name
+}
+
+// CallEdge is a resolved call from one declaration to another: its first
+// call site with the strongest resolution label.
+type CallEdge struct {
+	Caller, Callee Symbol
+	Line           int    // call site line in Caller.File
+	Resolution     string // import_resolved, type_hinted, name_matched, ambiguous, or unresolved (no indexed declaration)
+	Candidates     int    // declarations the call site could equally target (>= 1)
 }
 
 // FileRecord is file-level metadata recorded in the graph.
@@ -51,14 +72,4 @@ type Stats struct {
 	Packages int
 	Symbols  int
 	Edges    int
-}
-
-// callTarget maps a caller identity ("Recv.Method" or "Func") to the short
-// name its own callers are recorded under, for the next hop of a caller
-// traversal.
-func callTarget(name string) string {
-	if i := strings.LastIndexByte(name, '.'); i >= 0 {
-		return name[i+1:]
-	}
-	return name
 }

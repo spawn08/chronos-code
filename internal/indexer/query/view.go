@@ -3,9 +3,10 @@
 // names against the snapshot's live symbol table at query time, so results
 // always reflect exactly one generation.
 //
-// Every relationship answered here is syntactic: callers are matched by the
-// callee's name and implementations by method names. Results say so through
-// the Resolution labels; the precise tier (M4) upgrades them later.
+// Every relationship answered here is syntactic: call sites are resolved
+// through imports, binding hints and names (resolve.go), and Go
+// implementations are matched by method names. Results say how through the
+// Resolution labels; the precise tier (M4) upgrades them later.
 package query
 
 import (
@@ -46,6 +47,9 @@ type Symbol struct {
 	EndLine   int
 	Exported  bool
 	Parent    string // Name of the enclosing symbol, if any (interface of a method spec)
+	Test      bool   // a test function or method (facts.ModTest), in any language
+	TestFile  bool   // declared in a test file (facts.File.Test)
+	Decl      bool   // a declaration without a body (facts.ModDecl): a C/C++ prototype, an abstract member
 }
 
 // Qualified returns Recv.Name for methods and Name otherwise, the identity
@@ -68,6 +72,7 @@ type View struct {
 	files    map[fileKey]*fileCtx       // resolution context by (segment, file)
 	resolved map[fileKey]resolution     // resolved references by (segment, ref)
 	byName   map[string][]Symbol        // live declarations by name
+	byKinds  map[namedKey][]Symbol      // byName filtered by a kind set
 }
 
 type fileKey struct{ seg, file int }
@@ -119,6 +124,7 @@ func (v *View) decodeSymbol(i, k int) Symbol {
 		Name: rec.Name, Kind: rec.Kind, Receiver: rec.Receiver, Signature: rec.Signature, Doc: rec.Doc,
 		Package: m.Package, PkgName: m.PkgName, File: m.Path, Lang: m.Lang,
 		Line: rec.Line, EndLine: rec.EndLine, Exported: rec.Exported,
+		Test: rec.Modifiers&facts.ModTest != 0, TestFile: m.Test, Decl: rec.Modifiers&facts.ModDecl != 0,
 	}
 	if rec.Parent >= 0 {
 		s.Parent = strings.Clone(seg.SymbolName(rec.Parent))

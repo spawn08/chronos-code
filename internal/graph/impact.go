@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spawn08/chronos/engine/tool"
 
@@ -65,33 +64,38 @@ func impactAnalysisTool(store Backend) *tool.Definition {
 
 			var affected []map[string]any
 			breaking := false
+			edges := newEdgeMemo(store)
 			for _, sym := range symbols {
 				if !rangesOverlap(sym.Line, sym.EndLine, startLine, endLine) {
 					continue
 				}
-				callers, err := store.CallersOf(ctx, sym.Name)
+				in, err := edges.incoming(ctx, sym)
 				if err != nil {
 					return nil, err
 				}
-				tests := testsForSymbol(ctx, store, sym.Name, 3)
+				tests := testsFor(ctx, edges, []Symbol{sym}, 3)
 
+				var callers []string
+				seen := map[string]bool{}
 				externalCaller := false
-				callerSyms, _ := store.SymbolsByQualified(ctx, callers)
-				for _, c := range callers {
-					for _, cs := range callerSyms[c] {
-						if cs.Package != sym.Package {
-							externalCaller = true
-						}
+				for _, e := range in {
+					if e.Caller.Package != sym.Package {
+						externalCaller = true
+					}
+					if q := e.Caller.Qualified(); !seen[q] {
+						seen[q] = true
+						callers = append(callers, q)
 					}
 				}
-				if isExported(sym.Name) && externalCaller {
+				sort.Strings(callers)
+				if sym.Exported && externalCaller {
 					breaking = true
 				}
 
 				affected = append(affected, map[string]any{
 					"symbol":       sym.Name,
 					"kind":         string(sym.Kind),
-					"exported":     isExported(sym.Name),
+					"exported":     sym.Exported,
 					"caller_count": len(callers),
 					"callers":      callers,
 					"tests":        tests,
@@ -128,27 +132,17 @@ func testMapTool(store Backend) *tool.Definition {
 				return nil, fmt.Errorf("test_map: symbol is required")
 			}
 
+			var syms []Symbol
+			var err error
 			if strings.Contains(symbol, "/") || scan.Indexable(symbol) {
-				syms, err := store.SymbolsInFile(ctx, symbol)
-				if err != nil {
-					return nil, err
-				}
-				seen := map[string]bool{}
-				var tests []string
-				for _, sym := range syms {
-					for _, t := range testsForSymbol(ctx, store, sym.Name, 3) {
-						if !seen[t] {
-							seen[t] = true
-							tests = append(tests, t)
-						}
-					}
-				}
-				sort.Strings(tests)
-				return map[string]any{"target": symbol, "tests": tests}, nil
+				syms, err = store.SymbolsInFile(ctx, symbol)
+			} else {
+				syms, err = store.FindSymbols(ctx, symbol, "")
 			}
-
-			tests := testsForSymbol(ctx, store, symbol, 3)
-			return map[string]any{"target": symbol, "tests": tests}, nil
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"target": symbol, "tests": testsFor(ctx, newEdgeMemo(store), syms, 3)}, nil
 		},
 	}
 }
@@ -188,59 +182,74 @@ func coChangeTool(root string) *tool.Definition {
 	}
 }
 
-// testsForSymbol walks the caller graph of name up to depth levels, keeping
-// any caller that looks like a Go test function (name starts with "Test" and
-// its declaring file ends with "_test.go" — the file is recovered via
-// FindSymbols since CallersOf only returns names).
-func testsForSymbol(ctx context.Context, store Backend, name string, depth int) []string {
-	seen := map[string]bool{name: true}
-	frontier := []string{name}
-	var tests []string
-	testSeen := map[string]bool{}
-
-	for d := 0; d < depth; d++ {
-		callersOf, err := store.CallersOfMany(ctx, frontier)
-		if err != nil {
-			break
-		}
-		var next, candidates []string
-		for _, n := range frontier {
-			for _, c := range callersOf[n] {
-				// Callers are qualified identities; their own callers record
-				// the short name.
-				target := callTarget(c)
-				if seen[target] && seen[c] {
-					continue
-				}
-				seen[c] = true
-				if !seen[target] {
-					seen[target] = true
-					next = append(next, target)
-				}
-				if strings.HasPrefix(target, "Test") && !testSeen[c] {
-					candidates = append(candidates, c)
-				}
+// testsFor walks the resolved callers of targets up to depth levels and
+// returns the sorted qualified identities of the test functions among them
+// (Symbol.Test: Go Test*/Benchmark*/Example*/Fuzz* in _test.go files, and
+// each language pack's test names and markers). Tests are not expanded
+// further.
+func testsFor(ctx context.Context, edges *edgeMemo, targets []Symbol, depth int) []string {
+	seen := map[int64]bool{}
+	for _, t := range targets {
+		seen[t.ID] = true
+	}
+	found := map[string]bool{}
+	frontier := targets
+	for d := 0; d < depth && len(frontier) > 0; d++ {
+		var next []Symbol
+		for _, e := range edges.incomingAll(ctx, frontier) {
+			if seen[e.Caller.ID] {
+				continue
 			}
-		}
-		if len(candidates) > 0 {
-			if syms, err := store.SymbolsByQualified(ctx, candidates); err == nil {
-				for _, c := range candidates {
-					for _, s := range syms[c] {
-						if strings.HasSuffix(s.File, "_test.go") && !testSeen[c] {
-							testSeen[c] = true
-							tests = append(tests, c)
-						}
-					}
-				}
+			seen[e.Caller.ID] = true
+			if e.Caller.Test {
+				found[e.Caller.Qualified()] = true
+				continue
 			}
-		}
-		if len(next) == 0 {
-			break
+			next = append(next, e.Caller)
 		}
 		frontier = next
 	}
+	tests := make([]string, 0, len(found))
+	for t := range found {
+		tests = append(tests, t)
+	}
 	sort.Strings(tests)
 	return tests
+}
+
+// edgeMemo caches the incoming calls of each declaration for one tool
+// call, since the callers of neighbouring symbols overlap.
+type edgeMemo struct {
+	store Backend
+	by    map[int64][]CallEdge
+}
+
+func newEdgeMemo(store Backend) *edgeMemo {
+	return &edgeMemo{store: store, by: map[int64][]CallEdge{}}
+}
+
+func (m *edgeMemo) incoming(ctx context.Context, s Symbol) ([]CallEdge, error) {
+	if e, ok := m.by[s.ID]; ok {
+		return e, nil
+	}
+	e, err := m.store.IncomingCalls(ctx, []Symbol{s})
+	if err != nil {
+		return nil, err
+	}
+	m.by[s.ID] = e
+	return e, nil
+}
+
+// incomingAll returns the incoming calls of every symbol; symbols whose
+// lookup fails contribute none.
+func (m *edgeMemo) incomingAll(ctx context.Context, syms []Symbol) []CallEdge {
+	var out []CallEdge
+	for _, s := range syms {
+		if e, err := m.incoming(ctx, s); err == nil {
+			out = append(out, e...)
+		}
+	}
+	return out
 }
 
 func coChangedFiles(root, file string, days int) ([]map[string]any, error) {
@@ -304,14 +313,4 @@ func rangesOverlap(aStart, aEnd, bStart, bEnd int) bool {
 		aEnd = aStart
 	}
 	return aStart <= bEnd && bStart <= aEnd
-}
-
-// isExported reports whether a Go identifier is exported (starts with an
-// uppercase letter).
-func isExported(name string) bool {
-	if name == "" {
-		return false
-	}
-	r := []rune(name)[0]
-	return unicode.IsUpper(r)
 }

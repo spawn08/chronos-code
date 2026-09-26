@@ -119,6 +119,9 @@ func (x *Extractor) Extract(f *facts.File, pk *packs.Pack, src []byte) {
 		f.ParseErr = c.err.Error()
 		return
 	}
+	if cFamily[pk.Language] {
+		src = normalizePreproc(src)
+	}
 	tree, err := x.rt.Parse(pk.Grammar, src)
 	if err != nil {
 		f.ParseErr = err.Error()
@@ -859,12 +862,17 @@ func (w *walker) bindingHints() {
 	seen := map[facts.BindingHint]bool{}
 	for _, h := range w.hints {
 		name := collapse(w.text(h.name))
-		typ := normalizeType(w.text(h.typ))
+		var typ string
+		if h.call {
+			// A callee, possibly a chain (T::new(p).m(q)): arguments dropped.
+			if typ = stripArgs(collapse(w.text(h.typ))); typ != "" {
+				typ += "()"
+			}
+		} else {
+			typ = normalizeType(w.text(h.typ))
+		}
 		if name == "" || name == "_" || typ == "" || strings.ContainsAny(name, " (") {
 			continue
-		}
-		if h.call {
-			typ += "()"
 		}
 		bh := facts.BindingHint{Scope: w.hintScope(h.name.StartByte()), Name: name, Type: typ, Line: int(h.name.StartPoint().Row) + 1}
 		if !seen[bh] {
@@ -873,6 +881,52 @@ func (w *walker) bindingHints() {
 		}
 	}
 	slices.SortStableFunc(w.f.Hints, func(a, b facts.BindingHint) int { return a.Line - b.Line })
+}
+
+// stripArgs empties every parenthesized argument list in a callee
+// expression and drops type arguments and spaces: "a.b(x, y).c" becomes
+// "a.b().c", "make<Foo>" and "collect::<Vec<_>>" become "make" and
+// "collect". It returns "" for text with unbalanced parentheses.
+func stripArgs(s string) string {
+	var b strings.Builder
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == '<' && depth == 0 {
+			angle := 0
+			for ; i < len(s); i++ {
+				if s[i] == '<' {
+					angle++
+				} else if s[i] == '>' {
+					if angle--; angle == 0 {
+						break
+					}
+				}
+			}
+			out := strings.TrimSuffix(b.String(), "::")
+			b.Reset()
+			b.WriteString(out)
+			continue
+		}
+		switch c := s[i]; {
+		case c == '(':
+			if depth == 0 {
+				b.WriteByte('(')
+			}
+			depth++
+		case c == ')':
+			if depth--; depth < 0 {
+				return ""
+			} else if depth == 0 {
+				b.WriteByte(')')
+			}
+		case depth == 0 && c != ' ' && c != '\t' && c != '\n':
+			b.WriteByte(c)
+		}
+	}
+	if depth != 0 {
+		return ""
+	}
+	return b.String()
 }
 
 // hintScope is the innermost function or type whose extent contains pos.

@@ -42,7 +42,26 @@ func toSymbol(s query.Symbol) Symbol {
 	return Symbol{
 		ID: int64(s.ID), Name: s.Name, Kind: SymbolKind(s.Kind), Package: s.Package, File: s.File,
 		Line: s.Line, EndLine: s.EndLine, Signature: s.Signature, Doc: s.Doc, Receiver: s.Receiver,
+		Exported: s.Exported, Test: s.Test, TestFile: s.TestFile,
 	}
+}
+
+// fromSymbol maps a Symbol this backend returned back to the index's form;
+// the fields resolution matches on (ID, name, kind, receiver, file, line)
+// round-trip.
+func fromSymbol(s Symbol) query.Symbol {
+	return query.Symbol{
+		ID: uint64(s.ID), Name: s.Name, Kind: string(s.Kind), Receiver: s.Receiver, Package: s.Package,
+		File: s.File, Line: s.Line, EndLine: s.EndLine, Exported: s.Exported, Test: s.Test, TestFile: s.TestFile,
+	}
+}
+
+func toEdges(in []query.CallEdge) []CallEdge {
+	out := make([]CallEdge, len(in))
+	for i, e := range in {
+		out[i] = CallEdge{Caller: toSymbol(e.Caller), Callee: toSymbol(e.Callee), Line: e.Line, Resolution: e.Resolution, Candidates: e.Candidates}
+	}
+	return out
 }
 
 func toSymbols(in []query.Symbol) []Symbol {
@@ -109,6 +128,24 @@ func (b *indexBackend) SymbolsInFile(ctx context.Context, file string) ([]Symbol
 		return nil, err
 	}
 	return toSymbols(b.view.FileSymbols(b.rel(file))), nil
+}
+
+func (b *indexBackend) CallerEdges(ctx context.Context, name string) ([]CallEdge, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return toEdges(b.view.CallerEdges(name)), nil
+}
+
+func (b *indexBackend) IncomingCalls(ctx context.Context, targets []Symbol) ([]CallEdge, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	in := make([]query.Symbol, len(targets))
+	for i, t := range targets {
+		in[i] = fromSymbol(t)
+	}
+	return toEdges(b.view.IncomingEdges(in)), nil
 }
 
 func (b *indexBackend) CallersOf(ctx context.Context, name string) ([]string, error) {

@@ -45,3 +45,7 @@ namespace Example.Store
 
     public delegate void Handler(int code);
 }
+
+public class Ping : IRequest<Pong> { }
+
+public class Zing : IRequest<Zong> { }

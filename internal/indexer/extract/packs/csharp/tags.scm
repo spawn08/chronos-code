@@ -4,7 +4,11 @@
 ; Definitions.
 (namespace_declaration name: (_) @name body: (_) @body) @def.namespace
 (file_scoped_namespace_declaration name: (_) @name) @def.namespace
-(class_declaration name: (identifier) @name body: (_) @body) @def.class
+; Positional, not name:/body: fields: the runtime (gotreesitter v0.55.0)
+; drops the fields of a class_declaration with a generic base
+; (class Ping : IRequest<Pong>) when another such class follows it. The
+; name is the only identifier child of a class_declaration.
+(class_declaration (identifier) @name (declaration_list) @body) @def.class
 (record_declaration name: (identifier) @name) @def.class
 (struct_declaration name: (identifier) @name body: (_) @body) @def.struct
 (interface_declaration name: (identifier) @name body: (_) @body) @def.interface

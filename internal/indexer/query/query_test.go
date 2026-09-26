@@ -165,7 +165,9 @@ func TestCallersCalleesAndRecursion(t *testing.T) {
 	if got := v.CallerSymbols("Handle"); len(got) != 1 || got[0].Name != "TestHandle" {
 		t.Fatalf("CallerSymbols(Handle) = %+v", got)
 	}
-	if got := v.Callees("Handle"); !slices.Equal(got, []string{"NewRepo", "Save"}) {
+	// Callees are resolved identities: r.Save() on a Repo is the interface
+	// method; the Order{} literal is an instantiation, not a call.
+	if got := v.Callees("Handle"); !slices.Equal(got, []string{"NewRepo", "Repo.Save"}) {
 		t.Fatalf("Callees(Handle) = %v", got)
 	}
 	if got := v.Callees("memRepo.helper"); len(got) != 0 {

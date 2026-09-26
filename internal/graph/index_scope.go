@@ -512,6 +512,14 @@ func (l *liveBackend) SymbolsInFile(ctx context.Context, file string) ([]Symbol,
 	return live(ctx, l, func(b Backend) ([]Symbol, error) { return b.SymbolsInFile(ctx, file) })
 }
 
+func (l *liveBackend) CallerEdges(ctx context.Context, name string) ([]CallEdge, error) {
+	return live(ctx, l, func(b Backend) ([]CallEdge, error) { return b.CallerEdges(ctx, name) })
+}
+
+func (l *liveBackend) IncomingCalls(ctx context.Context, targets []Symbol) ([]CallEdge, error) {
+	return live(ctx, l, func(b Backend) ([]CallEdge, error) { return b.IncomingCalls(ctx, targets) })
+}
+
 func (l *liveBackend) CallersOf(ctx context.Context, name string) ([]string, error) {
 	return live(ctx, l, func(b Backend) ([]string, error) { return b.CallersOf(ctx, name) })
 }

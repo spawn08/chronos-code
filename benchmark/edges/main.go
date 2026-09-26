@@ -18,13 +18,16 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -132,35 +135,97 @@ type lineKey struct {
 	line int // 1-based
 }
 
+// occKey identifies an occurrence within a document.
+type occKey struct {
+	line, start, end int // SCIP positions
+	symbol           string
+}
+
 func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
-	defs := map[string]lineKey{}
+	defs := map[string][]lineKey{}
 	for _, d := range idx.Documents {
 		for _, o := range d.Occurrences {
 			if o.Roles&roleDefinition != 0 && !strings.HasPrefix(o.Symbol, "local ") {
-				if _, ok := defs[o.Symbol]; !ok {
-					defs[o.Symbol] = lineKey{filepath.ToSlash(d.Path), o.StartLine + 1}
-				}
+				defs[o.Symbol] = append(defs[o.Symbol], lineKey{filepath.ToSlash(d.Path), o.StartLine + 1})
 			}
 		}
 	}
 	golds := map[lineKey][]gold{}
 	var res Result
+	skipped := map[string]int{} // occurrences not scored, by reason
 	for _, d := range idx.Documents {
 		lines, err := readLines(filepath.Join(root, filepath.FromSlash(d.Path)))
 		if err != nil {
 			continue
 		}
+		path := filepath.ToSlash(d.Path)
+		// scip-clang attributes the references inside a macro expansion to
+		// the macro name (CJSON_PUBLIC(cJSON *) references cJSON# at
+		// "CJSON_PUBLIC"); such an occurrence shares its range with the
+		// macro's (descriptor suffix "!") and is not scored.
+		expansions := map[occKey]bool{}
 		for _, o := range d.Occurrences {
-			def, ok := defs[o.Symbol]
+			if strings.HasSuffix(o.Symbol, "!") {
+				expansions[occKey{o.StartLine, o.StartChar, o.EndChar, ""}] = true
+			}
+		}
+		seen := map[occKey]bool{}
+		for _, o := range d.Occurrences {
+			ds, ok := defs[o.Symbol]
 			if !ok || o.Roles&(roleDefinition|roleImport) != 0 || !evaluated(o.Symbol) || o.StartLine >= len(lines) {
 				continue
 			}
-			start, end, text := slice(lines[o.StartLine], o.StartChar, o.EndChar, d.Encoding)
+			if expansions[occKey{o.StartLine, o.StartChar, o.EndChar, ""}] {
+				skipped["macro expansion"]++
+				continue
+			}
+			// scip-clang can emit the same occurrence twice.
+			key := occKey{o.StartLine, o.StartChar, o.EndChar, o.Symbol}
+			if seen[key] {
+				skipped["duplicate"]++
+				continue
+			}
+			seen[key] = true
+			if strings.HasPrefix(o.Symbol, "semanticdb ") && strings.HasPrefix(strings.TrimSpace(lines[o.StartLine]), "import ") {
+				skipped["import"]++ // scip-java does not give imports the import role
+				continue
+			}
+			sc, ec := o.StartChar, o.EndChar
+			if strings.HasPrefix(o.Symbol, "semanticdb ") && strings.HasSuffix(path, ".java") {
+				// scip-java takes some columns from javac, which expands
+				// tabs to multiples of 8, and others from the text.
+				l := lines[o.StartLine]
+				if _, _, t := slice(l, sc, ec, d.Encoding); t != symbolName(o.Symbol) {
+					if _, _, t := slice(l, untab(l, sc), untab(l, ec), d.Encoding); t == symbolName(o.Symbol) {
+						sc, ec = untab(l, sc), untab(l, ec)
+					}
+				}
+			}
+			start, end, text := slice(lines[o.StartLine], sc, ec, d.Encoding)
+			if m := typeExpr.FindStringSubmatch(text); m != nil {
+				// scip-java's Kotlin plugin covers a whole type expression
+				// (KArgumentCaptor<T>, UseConstructor?); score its name.
+				text, end = m[1], start+len(m[1])
+			}
 			if text == "" {
 				continue
 			}
-			g := gold{start: start, end: end, text: text, defPath: def.path, defLine: def.line, callable: strings.HasSuffix(o.Symbol, ").")}
-			k := lineKey{filepath.ToSlash(d.Path), o.StartLine + 1}
+			callable := strings.HasSuffix(o.Symbol, ").")
+			if callable && strings.HasPrefix(o.Symbol, "semanticdb ") && strings.HasSuffix(path, ".kt") && text != symbolName(o.Symbol) {
+				// scip-java's Kotlin plugin adds the accessor (getFirst().)
+				// to a property's references; the property is not scored.
+				skipped["property accessor"]++
+				continue
+			}
+			if strings.HasPrefix(o.Symbol, "cxx ") && callable {
+				if reason := clangNotReference(o.Symbol, text, lines, o.StartLine, start, end); reason != "" {
+					skipped[reason]++
+					continue
+				}
+			}
+			def := definition(ds, path, o.StartLine+1)
+			g := gold{start: start, end: end, text: text, defPath: def.path, defLine: def.line, callable: callable}
+			k := lineKey{path, o.StartLine + 1}
 			golds[k] = append(golds[k], g)
 			if g.callable {
 				res.Calls.Gold++
@@ -168,6 +233,9 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 				res.Types.Gold++
 			}
 		}
+	}
+	if verbose && len(skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "not scored: %v\n", skipped)
 	}
 
 	dir, err := os.MkdirTemp("", "chronos-edges-*")
@@ -239,7 +307,11 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 				for _, t := range r.Targets {
 					got = append(got, fmt.Sprintf("%s:%d", t.File, t.Line))
 				}
-				fmt.Fprintf(os.Stderr, "%s:%d %s [%s] want %s:%d got %v\n", r.File, r.Line, r.Name, label, g.defPath, g.defLine, got)
+				note := "" // matched by text only: SCIP's reference is elsewhere on the line
+				if r.Col-1 < g.start || r.Col-1 >= g.end {
+					note = " (other column)"
+				}
+				fmt.Fprintf(os.Stderr, "%s:%d %s [%s] want %s:%d got %v%s\n", r.File, r.Line, r.Name, label, g.defPath, g.defLine, got, note)
 			}
 		})
 		matchedGold := 0
@@ -255,13 +327,19 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 	}
 	measure(&res.Calls, true, []uint8{facts.RefCall, facts.RefInstantiate})
 	measure(&res.Types, false, []uint8{facts.RefTypeUse, facts.RefExtends, facts.RefImplements})
-	if verbose {
-		shown := 0
-		for k, gs := range golds {
-			for _, g := range gs {
-				if !hit[k][g.start] && shown < 40 {
-					fmt.Fprintf(os.Stderr, "unmatched gold %s:%d %q -> %s:%d\n", k.path, k.line, g.text, g.defPath, g.defLine)
-					shown++
+	if verbose { // every gold reference without an indexer reference, in file order
+		keys := slices.Collect(maps.Keys(golds))
+		slices.SortFunc(keys, func(a, b lineKey) int {
+			return cmp.Or(strings.Compare(a.path, b.path), cmp.Compare(a.line, b.line))
+		})
+		for _, k := range keys {
+			for _, g := range golds[k] {
+				if !hit[k][g.start] {
+					kind := "type"
+					if g.callable {
+						kind = "call"
+					}
+					fmt.Fprintf(os.Stderr, "unmatched gold %s:%d %q %s -> %s:%d\n", k.path, k.line, g.text, kind, g.defPath, g.defLine)
 				}
 			}
 		}
@@ -273,6 +351,29 @@ func evaluate(root string, idx *scipIndex, verbose bool) (Result, error) {
 // function descriptors end in ")." and type descriptors in "#".
 func evaluated(symbol string) bool {
 	return strings.HasSuffix(symbol, ").") || strings.HasSuffix(symbol, "#")
+}
+
+// definition picks the definition a reference at path:line is scored
+// against when its symbol has several: the nearest preceding one in the
+// same document, else the nearest following one there, else the first.
+// scip-clang gives same-named static functions in different translation
+// units one symbol, and scip-python a function defined twice in one file.
+func definition(defs []lineKey, path string, line int) lineKey {
+	best, found := defs[0], false
+	for _, d := range defs {
+		if d.path != path {
+			continue
+		}
+		switch {
+		case !found:
+			best, found = d, true
+		case d.line <= line && (best.line > line || d.line > best.line):
+			best = d
+		case d.line > line && best.line > line && d.line < best.line:
+			best = d
+		}
+	}
+	return best
 }
 
 // match finds the gold reference on the ref's line with the same text,
@@ -293,6 +394,30 @@ func match(cands []gold, r query.ResolvedRef) (gold, bool) {
 		}
 	}
 	return found[0], true
+}
+
+// typeExpr matches a type name with type arguments or a nullable mark.
+var typeExpr = regexp.MustCompile(`^([\pL_][\pL\pN_]*)(?:<.*>)?\??$`)
+
+// untab converts a column that counts a tab as advancing to the next
+// multiple of 8 into a UTF-16 offset on line.
+func untab(line string, col int) int {
+	if !strings.Contains(line, "\t") {
+		return col
+	}
+	c, u := 0, 0 // expanded column, UTF-16 offset
+	for _, r := range line {
+		if c >= col {
+			break
+		}
+		if r == '\t' {
+			c = (c/8 + 1) * 8
+		} else {
+			c++
+		}
+		u += len(utf16.Encode([]rune{r}))
+	}
+	return u
 }
 
 // slice returns the byte range and text of [startChar, endChar) on line in

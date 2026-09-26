@@ -215,3 +215,149 @@ def second():
 		t.Fatalf("nearest Foo first: %+v", targets)
 	}
 }
+
+// edgeList renders edges as "caller->callee label" in order.
+func edgeList(edges []query.CallEdge) []string {
+	out := make([]string, len(edges))
+	for i, e := range edges {
+		out[i] = e.Caller.Qualified() + "->" + e.Callee.Qualified() + " " + e.Resolution
+	}
+	return out
+}
+
+// TestCallerEdgesResolved checks that callers come from resolution, not
+// the callee's name: a same-named method on another type is not a caller,
+// each edge carries its label, a constructor is reached through new T(),
+// and a name with no declaration falls back to its call sites, labelled
+// unresolved.
+func TestCallerEdgesResolved(t *testing.T) {
+	v := newFixture(t, map[string]string{
+		"src/main/java/shop/Repo.java": `package shop;
+
+public class Repo {
+    public Repo() {}
+    public void save() {}
+}
+`,
+		"src/main/java/shop/Cache.java": `package shop;
+
+public class Cache {
+    public void save() {}
+}
+`,
+		"src/main/java/shop/Service.java": `package shop;
+
+public class Service {
+    private Repo repo = new Repo();
+    private Cache cache;
+
+    public void run() {
+        repo.save();
+        cache.save();
+        System.out.println("x");
+    }
+
+    public void again() {
+        repo.save();
+        repo.save();
+    }
+
+    public Repo make() {
+        return new Repo();
+    }
+}
+`,
+	}).view(t)
+	repoSave := v.ByQualified([]string{"Repo.save"})["Repo.save"]
+	if len(repoSave) != 1 {
+		t.Fatalf("Repo.save = %+v", repoSave)
+	}
+	got := edgeList(v.IncomingEdges(repoSave))
+	want := []string{"Service.run->Repo.save type_hinted", "Service.again->Repo.save type_hinted"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("IncomingEdges(Repo.save) = %q, want %q", got, want)
+	}
+	// By name: both save methods are declarations, each with its own caller.
+	got = edgeList(v.CallerEdges("save"))
+	slices.Sort(got)
+	want = []string{"Service.again->Repo.save type_hinted", "Service.run->Cache.save type_hinted", "Service.run->Repo.save type_hinted"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("CallerEdges(save) = %q, want %q", got, want)
+	}
+	// new Repo() reaches the constructor; the class has no call edges.
+	got = edgeList(v.CallerEdges("Repo"))
+	if !slices.Contains(got, "Service.make->Repo.Repo import_resolved") || slices.ContainsFunc(got, func(e string) bool { return strings.HasSuffix(e, "->Repo import_resolved") }) {
+		t.Fatalf("CallerEdges(Repo) = %q", got)
+	}
+	if got := edgeList(v.CallerEdges("println")); len(got) != 1 || got[0] != "Service.run->println unresolved" {
+		t.Fatalf("CallerEdges(println) = %q", got)
+	}
+	if got := v.Callees("Service.run"); !slices.Equal(got, []string{"Cache.save", "Repo.save"}) {
+		t.Fatalf("Callees(Service.run) = %v", got)
+	}
+}
+
+func TestImplementationsDeclared(t *testing.T) {
+	v := newFixture(t, map[string]string{
+		"web/store.ts": `export interface Store {
+  get(key: string): string;
+}
+
+export interface CachedStore extends Store {
+  flush(): void;
+}
+`,
+		"web/impl.ts": `import { Store, CachedStore } from "./store";
+
+export class MemStore implements Store {
+  get(key: string): string { return key; }
+}
+
+export class LruStore implements CachedStore {
+  get(key: string): string { return key; }
+  flush(): void {}
+}
+
+export class TinyLru extends LruStore {}
+
+class Unrelated {
+  get(key: string): string { return key; }
+}
+`,
+	}).view(t)
+	if got := v.Implementations("Store"); !slices.Equal(got, []string{"LruStore", "MemStore", "TinyLru"}) {
+		t.Fatalf("Implementations(Store) = %v", got)
+	}
+	store := v.Symbols("Store", "interface")
+	if len(store) != 1 {
+		t.Fatalf("Store = %+v", store)
+	}
+	subs := v.Subtypes(store[0])
+	if len(subs) != 2 || subs[0].Resolution != query.ImportResolved {
+		t.Fatalf("Subtypes(Store) = %+v", subs)
+	}
+}
+
+func TestIsTestAcrossLanguages(t *testing.T) {
+	v := newFixture(t, map[string]string{
+		"app/calc.py":                 "def add(a, b):\n    return a + b\n",
+		"tests/test_calc.py":          "from app.calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n\n\ndef helper():\n    pass\n",
+		"src/test/java/CalcTest.java": "import org.junit.Test;\n\npublic class CalcTest {\n    @Test\n    public void adds() {}\n\n    void util() {}\n}\n",
+	}).view(t)
+	for name, want := range map[string]bool{"test_add": true, "helper": false, "adds": true, "util": false, "add": false} {
+		syms := v.Symbols(name, "")
+		if len(syms) != 1 {
+			t.Fatalf("%s: %+v", name, syms)
+		}
+		if got := query.IsTest(syms[0]); got != want {
+			t.Errorf("IsTest(%s) = %v, want %v", name, got, want)
+		}
+		if name != "add" && !syms[0].TestFile {
+			t.Errorf("%s: TestFile = false", name)
+		}
+	}
+	add := v.Symbols("add", "")[0]
+	if in := v.IncomingEdges([]query.Symbol{add}); len(in) != 1 || !query.IsTest(in[0].Caller) || in[0].Resolution != query.ImportResolved {
+		t.Fatalf("IncomingEdges(add) = %+v", in)
+	}
+}

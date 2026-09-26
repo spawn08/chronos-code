@@ -24,14 +24,24 @@ var wellKnown = map[string][]string{
 	"http.Handler": {"ServeHTTP"}, "heap.Interface": {"Len", "Less", "Swap", "Push", "Pop"},
 }
 
-// Implementations returns the sorted short names of concrete types whose
-// method names cover every method of an interface named iface, including
-// methods promoted from embedded fields declared in the same package. The
-// match is by method name only (Resolution NameMatched): signatures are not
-// compared. Interfaces without methods are skipped, since every type
-// satisfies them.
+// Implementations returns the sorted short names of the types
+// implementing an interface (or extending a type) named iface:
+//
+//   - Go: concrete types whose method names cover every method of the
+//     interface, including methods promoted from embedded fields declared
+//     in the same package. The match is by method name only (Resolution
+//     NameMatched): signatures are not compared. Interfaces without methods
+//     are skipped, since every type satisfies them.
+//   - Other languages: types whose extends or implements clauses resolve
+//     to it (see Subtypes), transitively; interfaces, traits and protocols
+//     in the chain are followed but not listed.
 func (v *View) Implementations(iface string) []string {
 	found := map[string]bool{}
+	for _, s := range v.Symbols(iface, "") {
+		if s.Name == iface && s.Lang != "go" && isTypeKind(s.Kind) {
+			v.collectSubtypes(s, found)
+		}
+	}
 	for _, it := range v.Symbols(iface, facts.KindInterface) {
 		if it.Name != iface {
 			continue
@@ -54,6 +64,64 @@ func (v *View) Implementations(iface string) []string {
 		out = append(out, n)
 	}
 	slices.Sort(out)
+	return out
+}
+
+// maxSubtypeDepth bounds the inheritance chain Implementations follows.
+const maxSubtypeDepth = 6
+
+func (v *View) collectSubtypes(root Symbol, found map[string]bool) {
+	visited := map[uint64]bool{root.ID: true}
+	frontier := []Symbol{root}
+	for d := 0; d < maxSubtypeDepth && len(frontier) > 0; d++ {
+		var next []Symbol
+		for _, t := range frontier {
+			for _, sub := range v.Subtypes(t) {
+				if visited[sub.Caller.ID] {
+					continue
+				}
+				visited[sub.Caller.ID] = true
+				next = append(next, sub.Caller)
+				switch sub.Caller.Kind {
+				case facts.KindInterface, facts.KindTrait, facts.KindProtocol:
+				default:
+					found[sub.Caller.Name] = true
+				}
+			}
+		}
+		frontier = next
+	}
+}
+
+// Subtypes returns the type declarations whose extends or implements
+// clauses name s and resolve to it, with the label of each, in file and
+// line order. Caller is the subtype.
+func (v *View) Subtypes(s Symbol) []Incoming {
+	var out []Incoming
+	for i := 0; i < v.sn.NumSegments(); i++ {
+		seg := v.sn.Segment(i)
+		lo, hi := seg.RefsTo(s.Name)
+		for r := lo; r < hi; r++ {
+			kind := seg.RefKind(r)
+			if (kind != facts.RefExtends && kind != facts.RefImplements) || !v.sn.Live(i, seg.RefFile(r)) {
+				continue
+			}
+			enc := seg.RefEnclosing(r)
+			if enc < 0 {
+				continue
+			}
+			sub := v.symbol(i, enc)
+			if sub.ID == s.ID || !isTypeKind(sub.Kind) {
+				continue
+			}
+			targets, label := v.resolveRef(i, r)
+			if !targetsInclude(targets, s) {
+				continue
+			}
+			out = append(out, Incoming{Caller: sub, Line: seg.Ref(r).Line, Resolution: label, Candidates: max(1, len(targets))})
+		}
+	}
+	slices.SortFunc(out, func(a, b Incoming) int { return compareSites(a.Caller, b.Caller, a.Line, b.Line) })
 	return out
 }
 

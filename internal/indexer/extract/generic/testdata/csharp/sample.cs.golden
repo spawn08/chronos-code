@@ -45,6 +45,10 @@ symbols:
       sig: public record Pair(string A, int B)
   18. L46-46 public type_alias Handler in=0
       sig: public delegate void Handler(int code)
+  19. L49-49 public class Ping
+      sig: public class Ping : IRequest<Pong>
+  20. L51-51 public class Zing
+      sig: public class Zing : IRequest<Zong>
 hints:
   L12 _users: List in=1
   L26 u: User in=7
@@ -66,3 +70,7 @@ refs:
   L30:34 type Task in=8
   L30:59 call Flush in=8
   L37:9 type User in=11
+  L49:21 implements IRequest in=19
+  L49:30 type Pong in=19
+  L51:21 implements IRequest in=20
+  L51:30 type Zong in=20

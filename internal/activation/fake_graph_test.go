@@ -119,3 +119,34 @@ func (g *fakeGraph) CallersOfMany(_ context.Context, names []string) (map[string
 	}
 	return out, nil
 }
+
+// symbolNamed returns the first symbol called name, or a placeholder with
+// an ID derived from the name so callers stay distinct.
+func (g *fakeGraph) symbolNamed(name string) graph.Symbol {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, s := range g.symbols {
+		if s.Name == name {
+			return s
+		}
+	}
+	var id int64 = 1 << 40
+	for _, r := range name {
+		id = id*31 + int64(r)
+	}
+	return graph.Symbol{ID: id, Name: name}
+}
+
+func (g *fakeGraph) CallerEdges(ctx context.Context, name string) ([]graph.CallEdge, error) {
+	return g.IncomingCalls(ctx, []graph.Symbol{g.symbolNamed(name)})
+}
+
+func (g *fakeGraph) IncomingCalls(_ context.Context, targets []graph.Symbol) ([]graph.CallEdge, error) {
+	var out []graph.CallEdge
+	for _, t := range targets {
+		for _, c := range g.edgeNames(t.Name, true) {
+			out = append(out, graph.CallEdge{Caller: g.symbolNamed(c), Callee: t, Resolution: "import_resolved", Candidates: 1})
+		}
+	}
+	return out, nil
+}

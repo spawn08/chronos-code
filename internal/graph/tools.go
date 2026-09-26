@@ -10,6 +10,7 @@ import (
 
 	"github.com/spawn08/chronos/engine/tool"
 
+	"github.com/spawn08/chronos-code/internal/indexer/query"
 	"github.com/spawn08/chronos-code/internal/indexer/scan"
 )
 
@@ -205,7 +206,7 @@ func findCallersTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_callers",
 		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Find functions that call a given function or method, up to a bounded call-chain depth.",
+		Description: "Find functions that call a given function or method, up to a bounded call-chain depth. Callers are grouped by callee and by how the call was resolved (import_resolved, type_hinted, name_matched, ambiguous; unresolved when the callee is not indexed), each as \"Caller (file:line)\". Ambiguous callers are not followed to the next depth.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object",
@@ -227,54 +228,66 @@ func findCallersTool(store Backend) *tool.Definition {
 			if depth > 3 {
 				depth = 3
 			}
-			// Callers are recorded by qualified identity ("Recv.Method"); the
-			// next hop looks up their short name, which is what call sites
-			// record. One batched query answers each whole level.
-			frontier := []string{name}
-			seen := map[string]bool{name: true}
-			levels := make([]map[string][]string, 0, depth)
+			edges, err := store.CallerEdges(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			// Each level keys callers by the callee's qualified identity, then
+			// by resolution label; the next level asks for the callers of
+			// those callers, by declaration. Ambiguous callers are listed but
+			// not followed: their fan-out is mostly noise.
+			seen := map[int64]bool{}
+			levels := make([]map[string]map[string][]string, 0, depth)
+			empty := true
 			for d := 0; d < depth; d++ {
-				level := make(map[string][]string)
-				var next []string
-				callersOf, err := store.CallersOfMany(ctx, frontier)
-				if err != nil {
-					return nil, err
-				}
-				for _, n := range frontier {
-					callers := callersOf[n]
-					level[n] = callers
-					for _, c := range callers {
-						if target := callTarget(c); !seen[target] {
-							seen[target] = true
-							next = append(next, target)
-						}
+				level := map[string]map[string][]string{}
+				var next []Symbol
+				for _, e := range edges {
+					if e.Callee.ID != 0 {
+						seen[e.Callee.ID] = true
 					}
+					key := e.Callee.Qualified()
+					if level[key] == nil {
+						level[key] = map[string][]string{}
+					}
+					level[key][e.Resolution] = append(level[key][e.Resolution], callerEntry(e))
+					empty = false
+					if !seen[e.Caller.ID] && e.Resolution != query.Ambiguous {
+						seen[e.Caller.ID] = true
+						next = append(next, e.Caller)
+					}
+				}
+				if len(level) == 0 && d == 0 {
+					level[name] = map[string][]string{}
 				}
 				levels = append(levels, level)
-				if len(next) == 0 {
+				if len(next) == 0 || d+1 == depth {
 					break
 				}
-				frontier = next
-			}
-			empty := true
-			for _, level := range levels {
-				for _, callers := range level {
-					if len(callers) > 0 {
-						empty = false
-					}
+				if edges, err = store.IncomingCalls(ctx, next); err != nil {
+					return nil, err
 				}
 			}
-			return labelResult(store, map[string]any{"name": name, "callers_by_depth": levels}, true, empty,
-				fmt.Sprintf("No callers of %q: no indexed call site calls a function or method with that name; calls through function values or reflection are not visible", name)), nil
+			return labelResult(store, map[string]any{"name": name, "callers_by_depth": levels}, false, empty,
+				fmt.Sprintf("No callers of %q: no indexed call site resolves to a declaration with that name; calls through function values or reflection are not visible", name)), nil
 		},
 	}
+}
+
+// callerEntry renders one caller as "Caller (file:line)", with the number
+// of declarations an ambiguous call site could target.
+func callerEntry(e CallEdge) string {
+	if e.Candidates > 1 {
+		return fmt.Sprintf("%s (%s:%d, 1 of %d candidates)", e.Caller.Qualified(), e.Caller.File, e.Line, e.Candidates)
+	}
+	return fmt.Sprintf("%s (%s:%d)", e.Caller.Qualified(), e.Caller.File, e.Line)
 }
 
 func findImplementationsTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_implementations",
 		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Find concrete types that implement a given interface.",
+		Description: "Find concrete types that implement a given interface or extend a given type.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object",
@@ -292,7 +305,7 @@ func findImplementationsTool(store Backend) *tool.Definition {
 			if err != nil {
 				return nil, err
 			}
-			note := fmt.Sprintf("No indexed type declares every method of interface %q (matched by method name)", name)
+			note := fmt.Sprintf("No indexed type implements %q (Go: a type declaring every method of the interface, matched by method name; other languages: a type whose extends or implements clause resolves to it)", name)
 			if len(impls) == 0 {
 				if _, reports := store.(Reporter); reports {
 					if ifaces, err := store.FindSymbols(ctx, name, string(KindInterface)); err == nil && len(ifaces) == 0 {
@@ -414,8 +427,12 @@ func multiResolutionViewTool(store Backend, root string) *tool.Definition {
 				}
 				out := make([]map[string]any, 0, len(syms))
 				for _, s := range syms {
-					callers, _ := store.CallersOf(ctx, s.Name)
-					callees, _ := store.CalleesOf(ctx, s.Name)
+					edges, _ := store.IncomingCalls(ctx, []Symbol{s})
+					callers := map[int64]bool{}
+					for _, e := range edges {
+						callers[e.Caller.ID] = true
+					}
+					callees, _ := store.CalleesOf(ctx, s.Qualified())
 					sum := symbolSummary(s)
 					sum["caller_count"] = len(callers)
 					sum["callee_count"] = len(callees)

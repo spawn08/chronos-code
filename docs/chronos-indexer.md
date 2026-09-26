@@ -3,13 +3,15 @@
 Status: M5 complete (2026-09-25): agents' graph tools are served by the
 chronos indexer, `codebase_context` and per-turn prefetch use graph
 retrieval, and the store, reconcile and watcher are built for million-file
-repositories. M4 (precise tier) is still open. M6 in progress (2026-09-26):
+repositories. M4 (precise tier) is still open. M6 complete (2026-09-26):
 parser runtime decided and wrapped (`extract/treesitter`, `extract/packs`);
 facts v2 and segment format v4 done; query packs for all 17 languages are
 indexed (M6.3); the generic resolver, type uses and binding hints are in
-(M6.4); the SCIP baseline covers Go, Python and TypeScript; the graph
-switch-over is next. Replaces the synchronous parts of `internal/graph` with an
-in-process indexer.
+(M6.4); the graph tools answer from resolved edges and detect tests in
+every language (M6.5); the SCIP baseline covers Go, Python, TypeScript,
+Rust, Java, Kotlin, C, C++ and C#. M7 (language resolvers) is next.
+Replaces the synchronous parts of `internal/graph` with an in-process
+indexer.
 
 ## Goals
 
@@ -793,7 +795,7 @@ As built, this differs from the design above in these ways:
   get the default (private) visibility.
 - **Graph tools still detect tests the Go way** (`_test.go`, `IsTest`). The
   facts carry `File.Test` and `ModTest` for every language; switching the
-  tools to them is part of the graph switch-over. Path-shaped arguments
+  tools to them is part of the graph switch-over (done in M6.5). Path-shaped arguments
   (`l3Snippet`, `test_map`, retrieval tokens) now accept any pack
   extension.
 
@@ -860,7 +862,7 @@ As built, this differs from the design above in these ways:
 - **`Outgoing` now includes instantiations**, so graph expansion follows
   `new T()` to the class. Call-site queries (`CallSites`, `Callers`,
   `Callees`) still count calls only, and the graph tools still match
-  callers by name until the switch-over.
+  callers by name until the switch-over (done in M6.5).
 - **Type inference is shallow on purpose:** three levels of field chains
   and call results, no flow analysis, and the first matching hint in scope
   wins.
@@ -877,59 +879,146 @@ resolved references, lazily decoded file context) brought it down from
 excerpt recall 0.32); the resolver's effect on other languages is what the
 SCIP baseline measures.
 
-### SCIP edge baseline (Tier 1, 2026-09-26)
+### M6.5 results (graph switch-over, 2026-09-26)
+
+The graph tools answer from resolved edges instead of callee names, and
+detect tests in every language:
+
+- **Callers and callees are resolved.** `query.CallerEdges(name)` resolves
+  every call site of the name and keeps those whose targets include one of
+  the declarations `Symbols(name)` finds; `IncomingEdges(targets)` does the
+  same for known declarations (the next hop of a traversal), and
+  `OutgoingEdges` / `Callees` return the workspace declarations a function
+  calls. Each edge is one (caller, callee) pair with its first call site
+  and the strongest label among its sites. Instantiations count only for
+  constructors (`new T()` reaches `T`'s constructor); calls into external
+  code are not edges. A name with no indexed declaration (`Println`) falls
+  back to its call sites, labelled `unresolved`.
+- **`find_callers`** groups callers by callee and label, each as
+  `"Caller (file:line)"`, so an agent gets the call site without a second
+  lookup. Levels follow declarations, not short names, and ambiguous
+  callers are listed but not followed to the next depth. With the call
+  sites included, the depth-3 output on this repository is the same size
+  as before (40.7 KB for `Execute`); the old answer for `Reconcile`
+  included callers of unrelated `Reconcile` methods.
+- **`impact_analysis`, `test_map` and L2 counts** use the resolved callers
+  of the exact declaration. A breaking change is an exported declaration
+  (`Symbol.Exported`, any language) with a caller in another unit.
+- **Tests in every language.** `Symbol.Test` (from `facts.ModTest`: Go
+  `Test*`/`Benchmark*`/`Example*`/`Fuzz*` in `_test.go`, and each pack's
+  test names and markers such as JUnit `@Test`, pytest `test_*`, Rust
+  `#[test]`) replaces the `_test.go` + `Test` prefix check in `test_map`,
+  `impact_analysis` and retrieval roles; `Symbol.TestFile` replaces the
+  `_test.go` suffix in retrieval's test penalty.
+- **`find_implementations`** also lists, for languages other than Go, the
+  types whose extends or implements clauses resolve to the interface or
+  class (`query.Subtypes`), transitively through sub-interfaces. Go keeps
+  method-set matching.
+- `IndexReport.Relations` now describes implementations only; call edges
+  carry their own labels, so `find_callers` has no top-level
+  `resolution` field.
+
+Measured on this repository against the M6.4 commit (benchstat, n=6, runs
+interleaved, load average about 10): `ScopeFindCallersDepth3` 0.40 →
+2.2 ms (inside the 5 ms goal; it now resolves every candidate call site
+instead of reading names), `ScopeImpact` (every symbol of `engine.go`)
+6.1 → 8.5 ms (a per-call memo of incoming edges keeps overlapping test
+searches from repeating), `ScopeFindImplementations` +5%;
+`ScopeCodebaseContext`, `ScopePrefetch` and `ScopeGraphQuery` unchanged.
+
+### SCIP edge baseline (Tier 1 and Tier 2, 2026-09-26)
 
 `make eval-edges` (`benchmark/edges/run.sh`) clones pinned repositories
-(`benchmark/edges/repos.tsv`), indexes each with a SCIP indexer fetched into
-the npm or Go module cache, and scores the indexer's resolved references
-against SCIP's definitions (`benchmark/edges`, decoding SCIP with
-`protowire`; nothing is added to the binary). Results are merged into
-`benchmark/edges/baseline.json`. It needs network access and is not part of
-CI.
+(`benchmark/edges/repos.tsv`), indexes each with a SCIP indexer, and scores
+the indexer's resolved references against SCIP's definitions
+(`benchmark/edges`, decoding SCIP with `protowire`; nothing is added to the
+binary). Results are merged into `benchmark/edges/baseline.json`. It needs
+network access and is not part of CI. Nothing is installed globally:
+
+- scip-typescript and scip-python run through `npx` (npm cache), scip-go
+  through `go run` (module cache), rust-analyzer from rustup.
+- scip-java 0.12.3 and scip-clang 0.4.0 are downloaded into
+  `~/.cache/chronos-edges/tools`, checked against pinned SHA-256 sums.
+  scip-java runs with JDK 17 (`$JAVA17_HOME`, default SDKMAN's
+  17.0.18-tem; 0.13 needs a newer bash than macOS ships). Maven projects
+  need `mvn`; Gradle projects use their wrapper (`~/.gradle`).
+- C and C++ projects are configured with `cmake` into
+  `~/.cache/chronos-edges/<name>-build` for `compile_commands.json`.
+- C# uses a .NET SDK in `~/.cache/chronos-edges/dotnet`
+  (`dotnet-install.sh --channel 10.0 --install-dir …`), scip-dotnet 0.2.14
+  installed there with `--tool-path`, and CLI and NuGet state in
+  `~/.cache/chronos-edges/dotnet-home`.
+- A repository whose toolchain is missing is skipped with a message.
 
 A reference is scored where SCIP has a reference (not an import) to an
 in-repository declaration at the same line and name. Top1 means the first
-target is SCIP's definition. Calls are calls and instantiations; types are
-type uses, extends and implements.
+target is SCIP's definition; "any" that some target is. Calls are calls
+and instantiations; types are type uses, extends and implements. The
+harness drops occurrences SCIP records that are not references in source
+text: scip-clang's macro expansions, duplicate occurrences and forward
+declarations, scip-java's imports and Kotlin property accessors (counts in
+`-v` output).
 
 | Repository | Calls: coverage | Calls: recall | Types: coverage | Types: recall |
 |---|---:|---:|---:|---:|
 | cobra v1.8.1 (Go, scip-go 0.2.7) | 0.755 | 0.999 | 0.347 | 1.000 |
-| click 8.1.7 (Python, scip-python 0.6.6) | 0.507 | 0.964 | 0.265 | 1.000 |
+| click 8.1.7 (Python, scip-python 0.6.6) | 0.507 | 0.966 | 0.265 | 1.000 |
 | ky v1.7.2 (TypeScript, scip-typescript 0.4.0) | 0.900 | 0.889 | 0.661 | 1.000 |
-| walkdir 2.5.0 (Rust, rust-analyzer) | not run: rust-analyzer is not installed here | | | |
+| walkdir 2.5.0 (Rust, rust-analyzer 1.93.0) | 0.571 | 0.961 | 0.446 | 0.944 |
+| jsoup 1.18.1 (Java, scip-java 0.12.3) | 0.992 | 0.811 | 0.605 | 0.990 |
+| mockito-kotlin 6.0.0 (Kotlin, scip-java 0.12.3) | 0.981 | 0.755 | 1.000 | 1.000 |
+| cJSON 1.7.18 (C, scip-clang 0.4.0) | 0.982 | 0.998 | 0.947 | 0.915 |
+| tinyxml2 10.0.0 (C++, scip-clang 0.4.0) | 0.856 | 0.564 | 0.701 | 0.987 |
+| MediatR 12.4.1 (C#, scip-dotnet 0.2.14) | 0.965 | 0.857 | 0.719 | 0.995 |
 
-Precision by label, calls (top1 / references):
+Precision by label, calls (top1 / references, any in parentheses when it
+differs):
 
-| Label | cobra | click | ky |
-|---|---:|---:|---:|
-| `import_resolved` | 1419 / 1419 | 421 / 431 | 9 / 9 |
-| `type_hinted` | 888 / 888 | 233 / 233 | 7 / 7 |
-| `name_matched` | 186 / 186 | 14 / 15 | – |
-| `ambiguous` | – | 31 / 35 (any: 35) | – |
-| unresolved | 2 | 11 | 2 |
+| Label | cobra | click | ky | walkdir | jsoup | mockito-kotlin | cJSON | tinyxml2 | MediatR |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `import_resolved` | 1419 / 1419 | 422 / 431 (428) | 9 / 9 | 147 / 150 (150) | 2458 / 3599 (3565) | 111 / 157 (144) | 825 / 825 | 322 / 715 (711) | 274 / 298 (292) |
+| `type_hinted` | 910 / 910 | 233 / 233 | 7 / 7 | 266 / 266 | 5151 / 5251 | 53 / 53 | – | 509 / 529 | 79 / 79 |
+| `name_matched` | 164 / 164 | 14 / 15 | – | 81 / 81 | 427 / 432 | 40 / 40 | 302 / 302 | 65 / 65 | 76 / 76 |
+| `ambiguous` | – | 31 / 35 (35) | – | 5 / 15 (15) | 3192 / 4524 (4376) | 30 / 31 (31) | 0 / 2 (2) | 173 / 492 (484) | 118 / 185 (169) |
+| unresolved | 2 | 11 | 2 | 7 | 33 | 29 | 0 | 96 | 0 |
 
 Observations:
 
-- **Labels are honest.** `import_resolved` and `type_hinted` are 97–100%
-  precise in all three languages; `ambiguous` is where the misses are.
-- **Coverage is the gap, not precision.** Calls coverage is limited by
-  SCIP references that are not calls (functions passed as values,
-  decorators applied by name) and, in Python, by attribute calls on values
-  the hints do not type. Types coverage is lower because instantiations
-  (`T{}`, `Foo()`) are scored as calls, and SCIP also counts type
-  positions no pack captures yet (Go composite-literal keys, Python string
-  annotations).
-- The first click run found three resolver gaps, all fixed before this
-  baseline: several same-name definitions in one file (now nearest
-  preceding first), `super()` calls (now looked up on the supertypes), and
-  `Optional[...]` / quoted annotations (now unwrapped). Click's calls
-  recall went from 0.905 to 0.964.
-- ky is small and type-heavy (20 call references). It still exercises
-  relative TypeScript imports, namespace imports and `this.x` fields.
-- Tier 2 (Java, Kotlin, C/C++, C#) needs projects that build and is not
-  set up yet; Swift, Objective-C, Dart, Bash, Ruby and PHP have no reliable
-  SCIP indexer.
+- **Labels mean what they say where the language has no overloading.**
+  `import_resolved` and `type_hinted` are 97–100% top1-precise for Go,
+  Python, TypeScript, Rust and C, and `type_hinted` is 96–100% everywhere.
+- **Overloads are the remaining precision gap** (Java, Kotlin, C++, C#).
+  A reference records no argument count, so every overload of the right
+  member in the right type is a candidate: "any" is 98–99% for
+  `import_resolved` in jsoup and tinyxml2 while top1 is 45–68%
+  (`Jsoup.parse` has 8 overloads, tinyxml2's `XMLTest` 4). Selecting
+  overloads by arity needs the argument count in the ref facts (M7). In
+  languages with overloading, a subtype's overload no longer hides the
+  supertype's others (`Document.text(String)` vs `Element.text()`); such a
+  call is `ambiguous`, not a wrong `type_hinted`.
+- **Coverage** is limited by SCIP references that are not calls
+  (functions passed as values, decorators, method references), by
+  attribute calls on values the hints do not type (Python, Kotlin DSLs),
+  and for types by instantiations being scored as calls.
+- **tinyxml2 exposes runtime gaps** (risk 6). The pure-Go runtime
+  mis-parses `if (a && T::f(b->c(), d()))` as an rvalue-reference
+  declaration, and its error recovery then wraps most of `tinyxml2.cpp`
+  and `tinyxml2.h` in error nodes. Queries still find most definitions
+  inside them; hints and scopes inside the broken regions are lost.
+
+Fixes the Tier 2 runs found, all in before the numbers above (calls recall
+before → after):
+
+| Language | Fix | Recall |
+|---|---|---|
+| Rust | `use crate::X` resolves from the crate root (the directory of the nearest `lib.rs`/`main.rs`; `crate::`/`self::`/`super::` specs are memoized per directory); builder chains `T::new(a).m(b).n()` follow each call's declared result, `Self` included, in receivers and in `let` hints (call hints keep the chain, arguments and type arguments dropped); a call prefers a method over a field of the same name | 0.776 → 0.961 |
+| Java | an import of one item binds its last segment, so single-type imports shadow the package and `import static a.b.C.m` resolves `m()`; casts `((T) x).m()` give the receiver's type | 0.738 → 0.811 |
+| Kotlin | a same-file or same-unit type wins over one reached by a wildcard import; a function whose result is its own type parameter (`mock<T>(): T`) gives an unknown type, not an external one; calls inside lambdas with receivers fall back to methods by name (Kotlin, Swift, Scala, Ruby) | 0.561 → 0.755 |
+| C / C++ | a bodiless declaration is dropped when a definition of the same member is a candidate (header vs out-of-line definition); before parsing, null directives (`#  // …`), conditional groups opened inside an expression and export macros (`class FOO_API Bar`) are blanked, keeping offsets | C 0.991 → 0.998, C++ 0.351 → 0.564 (types 0.163 → 0.987) |
+| C# | the enclosing namespace wins over `using` directives (explicit imports, then the unit, then wildcard and whole-module imports, for every language); extension methods resolve on their `this` parameter's type; `class_declaration` is matched positionally because the runtime drops its fields after a generic base list | 0.760 → 0.857 |
+
+Swift, Objective-C, Dart, Bash, Ruby and PHP have no reliable SCIP
+indexer and are covered by the per-pack goldens only.
 
 ### M11 results (old graph removed, 2026-09-26)
 
@@ -1255,7 +1344,7 @@ acceptance criteria met.
 | M3 (done) | `context/` backed by `graph/` (resolved-graph segments) and `retrieve/` (push-PPR expansion, packing at several zoom levels); per-turn prefetch; retrieval and turn-count eval for Go | `codebase_context` and prefetch < 15 ms uncached; budget never exceeded; `seen` and invalidation tests; eval baseline recorded in this doc |
 | M4 | `precise/` | Type-checked caller parity with the old graph; edits stay < 50 ms while precise loads run |
 | M5 (done) | Scale foundations: layered routing, streaming sharded base, compaction per shard, watcher backends, git-based reconcile, progressive build, portable segments | On a synthetic million-file corpus, every target in "Scale" is met; a test counts work on the edit path and shows none proportional to repository size; macOS watching uses no descriptor per file |
-| M6 | Parser runtime spike (pure Go vs cgo: MB/s per language, memory, grammar load time); facts v2 with format version bump; query packs for every language in the table; generic resolver; binding hints | Runtime decision recorded with measurements; every listed language produces symbols, outlines and refs in release builds; parity with the old tree-sitter tier on its tests; baseline edge precision for each language against SCIP |
+| M6 (done) | Parser runtime spike (pure Go vs cgo: MB/s per language, memory, grammar load time); facts v2 with format version bump; query packs for every language in the table; generic resolver; binding hints | Runtime decision recorded with measurements; every listed language produces symbols, outlines and refs in release builds; parity with the old tree-sitter tier on its tests; baseline edge precision for each language against SCIP |
 | M7 | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline; no edit-latency regression |
 | M8 | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
 | M9 | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |

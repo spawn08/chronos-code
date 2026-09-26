@@ -1,6 +1,68 @@
 {
   "results": [
     {
+      "name": "cjson",
+      "lang": "c",
+      "repo": "https://github.com/DaveGamble/cJSON",
+      "commit": "acc76239bee01d8e9c858ae2cab296704e52d916",
+      "indexer": "scip-clang 0.4.0",
+      "calls": {
+        "refs": 5646,
+        "gold": 1150,
+        "matched": 1129,
+        "coverage": 0.982,
+        "recall": 0.998,
+        "labels": {
+          "ambiguous": {
+            "n": 2,
+            "top1": 0,
+            "any": 2
+          },
+          "import_resolved": {
+            "n": 825,
+            "top1": 825,
+            "any": 825
+          },
+          "name_matched": {
+            "n": 302,
+            "top1": 302,
+            "any": 302
+          }
+        }
+      },
+      "types": {
+        "refs": 2021,
+        "gold": 889,
+        "matched": 898,
+        "coverage": 0.947,
+        "recall": 0.915,
+        "labels": {
+          "ambiguous": {
+            "n": 145,
+            "top1": 145,
+            "any": 145
+          },
+          "import_resolved": {
+            "n": 722,
+            "top1": 651,
+            "any": 722
+          },
+          "name_matched": {
+            "n": 26,
+            "top1": 26,
+            "any": 26
+          },
+          "unresolved": {
+            "n": 5,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.470721125
+    },
+    {
       "name": "click",
       "lang": "python",
       "repo": "https://github.com/pallets/click",
@@ -11,7 +73,7 @@
         "gold": 1275,
         "matched": 725,
         "coverage": 0.507,
-        "recall": 0.964,
+        "recall": 0.966,
         "labels": {
           "ambiguous": {
             "n": 35,
@@ -20,7 +82,7 @@
           },
           "import_resolved": {
             "n": 431,
-            "top1": 421,
+            "top1": 422,
             "any": 428
           },
           "name_matched": {
@@ -55,7 +117,7 @@
         }
       },
       "measured": "2026-09-26",
-      "seconds": 0.302995875
+      "seconds": 0.330447333
     },
     {
       "name": "cobra",
@@ -76,14 +138,14 @@
             "any": 1419
           },
           "name_matched": {
-            "n": 186,
-            "top1": 186,
-            "any": 186
+            "n": 164,
+            "top1": 164,
+            "any": 164
           },
           "type_hinted": {
-            "n": 888,
-            "top1": 888,
-            "any": 888
+            "n": 910,
+            "top1": 910,
+            "any": 910
           },
           "unresolved": {
             "n": 2,
@@ -107,7 +169,79 @@
         }
       },
       "measured": "2026-09-26",
-      "seconds": 0.333526959
+      "seconds": 0.25933425
+    },
+    {
+      "name": "jsoup",
+      "lang": "java",
+      "repo": "https://github.com/jhy/jsoup",
+      "commit": "19e8539fbfae80432fc4d8e9b562a39f786f547e",
+      "indexer": "scip-java 0.12.3",
+      "calls": {
+        "refs": 22016,
+        "gold": 13922,
+        "matched": 13839,
+        "coverage": 0.992,
+        "recall": 0.811,
+        "labels": {
+          "ambiguous": {
+            "n": 4524,
+            "top1": 3192,
+            "any": 4376
+          },
+          "import_resolved": {
+            "n": 3599,
+            "top1": 2458,
+            "any": 3565
+          },
+          "name_matched": {
+            "n": 432,
+            "top1": 427,
+            "any": 427
+          },
+          "type_hinted": {
+            "n": 5251,
+            "top1": 5151,
+            "any": 5151
+          },
+          "unresolved": {
+            "n": 33,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 9803,
+        "gold": 8589,
+        "matched": 5335,
+        "coverage": 0.605,
+        "recall": 0.99,
+        "labels": {
+          "ambiguous": {
+            "n": 99,
+            "top1": 59,
+            "any": 60
+          },
+          "import_resolved": {
+            "n": 3519,
+            "top1": 3518,
+            "any": 3519
+          },
+          "name_matched": {
+            "n": 1462,
+            "top1": 1448,
+            "any": 1448
+          },
+          "type_hinted": {
+            "n": 255,
+            "top1": 255,
+            "any": 255
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.660918958
     },
     {
       "name": "ky",
@@ -159,7 +293,275 @@
         }
       },
       "measured": "2026-09-26",
-      "seconds": 0.199176084
+      "seconds": 0.249923584
+    },
+    {
+      "name": "mediatr",
+      "lang": "csharp",
+      "repo": "https://github.com/jbogard/MediatR",
+      "commit": "fb309026775ef953a64fb5339d074426c1ad2c37",
+      "indexer": "scip-dotnet 0.2.14 (.NET SDK 10.0.401)",
+      "calls": {
+        "refs": 2770,
+        "gold": 432,
+        "matched": 638,
+        "coverage": 0.965,
+        "recall": 0.857,
+        "labels": {
+          "ambiguous": {
+            "n": 185,
+            "top1": 118,
+            "any": 169
+          },
+          "import_resolved": {
+            "n": 298,
+            "top1": 274,
+            "any": 292
+          },
+          "name_matched": {
+            "n": 76,
+            "top1": 76,
+            "any": 76
+          },
+          "type_hinted": {
+            "n": 79,
+            "top1": 79,
+            "any": 79
+          }
+        }
+      },
+      "types": {
+        "refs": 2539,
+        "gold": 1465,
+        "matched": 1054,
+        "coverage": 0.719,
+        "recall": 0.995,
+        "labels": {
+          "ambiguous": {
+            "n": 37,
+            "top1": 36,
+            "any": 36
+          },
+          "import_resolved": {
+            "n": 844,
+            "top1": 842,
+            "any": 844
+          },
+          "name_matched": {
+            "n": 171,
+            "top1": 171,
+            "any": 171
+          },
+          "unresolved": {
+            "n": 2,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 1.11856375
+    },
+    {
+      "name": "mockito-kotlin",
+      "lang": "kotlin",
+      "repo": "https://github.com/mockito/mockito-kotlin",
+      "commit": "0d1ea6c5e7d13dc7fbbc939b0415e5ea223086b9",
+      "indexer": "scip-java 0.12.3",
+      "calls": {
+        "refs": 2158,
+        "gold": 316,
+        "matched": 310,
+        "coverage": 0.981,
+        "recall": 0.755,
+        "labels": {
+          "ambiguous": {
+            "n": 31,
+            "top1": 30,
+            "any": 31
+          },
+          "import_resolved": {
+            "n": 157,
+            "top1": 111,
+            "any": 144
+          },
+          "name_matched": {
+            "n": 40,
+            "top1": 40,
+            "any": 40
+          },
+          "type_hinted": {
+            "n": 53,
+            "top1": 53,
+            "any": 53
+          },
+          "unresolved": {
+            "n": 29,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 1134,
+        "gold": 46,
+        "matched": 48,
+        "coverage": 1,
+        "recall": 1,
+        "labels": {
+          "import_resolved": {
+            "n": 48,
+            "top1": 48,
+            "any": 48
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.290083834
+    },
+    {
+      "name": "tinyxml2",
+      "lang": "cpp",
+      "repo": "https://github.com/leethomason/tinyxml2",
+      "commit": "321ea883b7190d4e85cae5512a12e5eaa8f8731f",
+      "indexer": "scip-clang 0.4.0",
+      "calls": {
+        "refs": 2883,
+        "gold": 2166,
+        "matched": 1897,
+        "coverage": 0.856,
+        "recall": 0.564,
+        "labels": {
+          "ambiguous": {
+            "n": 492,
+            "top1": 173,
+            "any": 484
+          },
+          "import_resolved": {
+            "n": 715,
+            "top1": 322,
+            "any": 711
+          },
+          "name_matched": {
+            "n": 65,
+            "top1": 65,
+            "any": 65
+          },
+          "type_hinted": {
+            "n": 529,
+            "top1": 509,
+            "any": 509
+          },
+          "unresolved": {
+            "n": 96,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 913,
+        "gold": 1165,
+        "matched": 818,
+        "coverage": 0.701,
+        "recall": 0.987,
+        "labels": {
+          "import_resolved": {
+            "n": 806,
+            "top1": 806,
+            "any": 806
+          },
+          "name_matched": {
+            "n": 3,
+            "top1": 0,
+            "any": 0
+          },
+          "type_hinted": {
+            "n": 1,
+            "top1": 1,
+            "any": 1
+          },
+          "unresolved": {
+            "n": 8,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.445556
+    },
+    {
+      "name": "walkdir",
+      "lang": "rust",
+      "repo": "https://github.com/BurntSushi/walkdir",
+      "commit": "4f26be4d450910916ea11533b2efc52b9a6483bc",
+      "indexer": "rust-analyzer 1.93.0 (254b5960 2026-01-19)",
+      "calls": {
+        "refs": 1171,
+        "gold": 855,
+        "matched": 519,
+        "coverage": 0.571,
+        "recall": 0.961,
+        "labels": {
+          "ambiguous": {
+            "n": 15,
+            "top1": 5,
+            "any": 15
+          },
+          "import_resolved": {
+            "n": 150,
+            "top1": 147,
+            "any": 150
+          },
+          "name_matched": {
+            "n": 81,
+            "top1": 81,
+            "any": 81
+          },
+          "type_hinted": {
+            "n": 266,
+            "top1": 266,
+            "any": 266
+          },
+          "unresolved": {
+            "n": 7,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "types": {
+        "refs": 467,
+        "gold": 352,
+        "matched": 160,
+        "coverage": 0.446,
+        "recall": 0.944,
+        "labels": {
+          "import_resolved": {
+            "n": 137,
+            "top1": 131,
+            "any": 137
+          },
+          "name_matched": {
+            "n": 1,
+            "top1": 1,
+            "any": 1
+          },
+          "type_hinted": {
+            "n": 19,
+            "top1": 19,
+            "any": 19
+          },
+          "unresolved": {
+            "n": 3,
+            "top1": 0,
+            "any": 0
+          }
+        }
+      },
+      "measured": "2026-09-26",
+      "seconds": 0.216614
     }
   ]
 }

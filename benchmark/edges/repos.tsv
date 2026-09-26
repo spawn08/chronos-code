@@ -1,6 +1,11 @@
-# Pinned repositories for the SCIP edge baseline (Tier 1).
-# name	lang	url	tag	indexer
+# Pinned repositories for the SCIP edge baseline (Tier 1 and Tier 2).
+# name	lang	url	tag	indexer	[args: cmake options for scip-clang, the solution for scip-dotnet]
 cobra	go	https://github.com/spf13/cobra	v1.8.1	scip-go
 ky	typescript	https://github.com/sindresorhus/ky	v1.7.2	scip-typescript
 click	python	https://github.com/pallets/click	8.1.7	scip-python
 walkdir	rust	https://github.com/BurntSushi/walkdir	2.5.0	rust-analyzer
+jsoup	java	https://github.com/jhy/jsoup	jsoup-1.18.1	scip-java
+mockito-kotlin	kotlin	https://github.com/mockito/mockito-kotlin	v6.0.0	scip-java
+cjson	c	https://github.com/DaveGamble/cJSON	v1.7.18	scip-clang	-DENABLE_CJSON_UTILS=ON
+tinyxml2	cpp	https://github.com/leethomason/tinyxml2	10.0.0	scip-clang
+mediatr	csharp	https://github.com/jbogard/MediatR	v12.4.1	scip-dotnet	MediatR.sln

@@ -150,12 +150,14 @@ func TestIndexScopeLabelsEmptyResults(t *testing.T) {
 	if note, _ := q["note"].(string); !strings.Contains(note, `No declaration named "Missing"`) || !strings.Contains(note, "index up to date") {
 		t.Fatalf("graph_query note: %q", note)
 	}
+	// Each caller carries its own label and call site; a test caller is marked.
 	c := call(t, ctx, toolFrom(t, scope.Tools(), "find_callers"), map[string]any{"name": "Handle"})
-	if c["resolution"] != "name_matched" || c["note"] != nil {
-		t.Fatalf("non-empty callers must be labelled without a note: %+v", c)
+	levels, _ := c["callers_by_depth"].([]map[string]map[string][]string)
+	if c["note"] != nil || len(levels) != 1 || !reflect.DeepEqual(levels[0]["Handle"], map[string][]string{"import_resolved": {"TestHandle (handler_test.go:5)"}}) {
+		t.Fatalf("non-empty callers must be listed without a note: %+v", c)
 	}
 	c = call(t, ctx, toolFrom(t, scope.Tools(), "find_callers"), map[string]any{"name": "TestHandle"})
-	if note, _ := c["note"].(string); c["resolution"] != "name_matched" || !strings.Contains(note, `No callers of "TestHandle"`) {
+	if note, _ := c["note"].(string); !strings.Contains(note, `No callers of "TestHandle"`) {
 		t.Fatalf("empty callers label: %+v", c)
 	}
 	i := call(t, ctx, toolFrom(t, scope.Tools(), "find_implementations"), map[string]any{"name": "Nope"})
@@ -337,5 +339,92 @@ func TestIndexScopeLazyFirstBuild(t *testing.T) {
 	r := call(t, context.Background(), toolFrom(t, s.Tools(), "graph_query"), map[string]any{"name": "Card"})
 	if r["found"] != true {
 		t.Fatalf("lazy build: %+v", r)
+	}
+}
+
+// TestIndexScopeResolvedCallGraph checks the graph tools on resolved edges
+// in a language without a type checker: a method with the same name on an
+// unrelated class is not a caller, depth follows declarations, tests are
+// found through the pack's test markers, and impact reports callers from
+// other modules of a public method as a breaking change.
+func TestIndexScopeResolvedCallGraph(t *testing.T) {
+	root := canonicalTempDir(t)
+	writeTree(t, root, map[string]string{
+		"app/repo.py": `class Repo:
+    def save(self, item):
+        return item
+
+
+class Cache:
+    def save(self, item):
+        return None
+`,
+		"app/service.py": `from app.repo import Repo, Cache
+
+
+class Service:
+    def __init__(self, repo: Repo, cache: Cache):
+        self.repo = repo
+        self.cache = cache
+
+    def store(self, item):
+        return self.repo.save(item)
+
+    def warm(self, item):
+        self.cache.save(item)
+`,
+		"api/views.py": `from app.service import Service
+
+
+def create(svc: Service):
+    return svc.store(1)
+`,
+		"tests/test_service.py": `from api.views import create
+
+
+def test_create():
+    assert create(None) == 1
+`,
+	})
+	scope := newTestScope(t, root, false)
+	ctx := context.Background()
+
+	c := call(t, ctx, toolFrom(t, scope.Tools(), "find_callers"), map[string]any{"name": "Repo.save", "depth": 3})
+	levels, _ := c["callers_by_depth"].([]map[string]map[string][]string)
+	var got []string
+	for d, level := range levels {
+		for callee, byLabel := range level {
+			for label, callers := range byLabel {
+				for _, e := range callers {
+					got = append(got, fmt.Sprintf("%d %s<-%s %s", d, callee, e, label))
+				}
+			}
+		}
+	}
+	want := []string{
+		"0 Repo.save<-Service.store (app/service.py:10) type_hinted",
+		"1 Service.store<-create (api/views.py:5) type_hinted",
+		"2 create<-test_create (tests/test_service.py:5) import_resolved",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("find_callers(Repo.save) = %q, want %q", got, want)
+	}
+
+	tm := call(t, ctx, toolFrom(t, scope.ImpactTools(), "test_map"), map[string]any{"symbol": "app/repo.py"})
+	if tests, _ := tm["tests"].([]string); !reflect.DeepEqual(tests, []string{"test_create"}) {
+		t.Fatalf("test_map(app/repo.py) = %+v", tm)
+	}
+
+	im := call(t, ctx, toolFrom(t, scope.ImpactTools(), "impact_analysis"), map[string]any{"file": "app/service.py", "start_line": 9, "end_line": 10})
+	affected, _ := im["affected_symbols"].([]map[string]any)
+	var store map[string]any
+	for _, a := range affected { // the enclosing class overlaps the range too
+		if a["symbol"] == "store" {
+			store = a
+		}
+	}
+	if store == nil || im["potential_breaking_change"] != true ||
+		!reflect.DeepEqual(store["callers"], []string{"create"}) || !reflect.DeepEqual(store["tests"], []string{"test_create"}) {
+		t.Fatalf("impact_analysis = %+v", im)
 	}
 }

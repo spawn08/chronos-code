@@ -237,7 +237,7 @@ func Retrieve(v *query.View, req Request) Result {
 		if n.exact {
 			s += 1
 		}
-		if n.role != "test" && strings.HasSuffix(n.sym.File, "_test.go") && !req.Tests {
+		if n.role != "test" && n.sym.TestFile && !req.Tests {
 			s *= 0.5
 		}
 		// Two hops away through a non-seed (a callee of a caller): related,

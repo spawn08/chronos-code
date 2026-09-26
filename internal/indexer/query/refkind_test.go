@@ -1,7 +1,6 @@
 package query_test
 
 import (
-	"slices"
 	"testing"
 
 	"github.com/spawn08/chronos-code/internal/indexer/facts"
@@ -45,8 +44,10 @@ func TestCallQueriesIgnoreOtherRefKinds(t *testing.T) {
 	if got := v.Callers([]string{"Repo", "trace"}); len(got) != 0 {
 		t.Errorf("Callers = %v, want none", got)
 	}
-	if got := v.Callees("use"); !slices.Equal(got, []string{"save"}) {
-		t.Errorf("Callees(use) = %v, want [save]", got)
+	// save is declared nowhere, so the call is external; the instantiation
+	// of Repo is not a call.
+	if got := v.Callees("use"); len(got) != 0 {
+		t.Errorf("Callees(use) = %v, want none", got)
 	}
 	use := v.Symbols("use", "")
 	if len(use) != 1 {

@@ -63,4 +63,8 @@
 (let_declaration
   pattern: (identifier) @hint.name
   value: (call_expression function: [(identifier) (scoped_identifier)] @hint.call)) @hint
+; Builder chains: let wd = WalkDir::new(p).follow_links(true);
+(let_declaration
+  pattern: (identifier) @hint.name
+  value: (call_expression function: (field_expression) @hint.call)) @hint
 (field_declaration name: (field_identifier) @hint.name type: (_) @hint.type) @hint
