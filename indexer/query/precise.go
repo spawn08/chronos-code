@@ -16,15 +16,23 @@ import (
 // the hash the facts were computed from; a package's method sets are used
 // only while every one of its non-test files is unchanged and no file was
 // added. Anything else falls back to the syntactic resolution.
+//
+// Other languages (M10) get the same per-site facts from SCIP indexes
+// (package scip), gated the same way, with the target located by its
+// definition line while the target's file is unchanged too.
 
-// preciseFile returns the precise facts of fc's file if they are current.
+// preciseFile returns the precise facts of fc's file if they are current:
+// go/types facts for Go, SCIP facts for other languages.
 func (v *View) preciseFile(fc *fileCtx) *precise.File {
 	if fc.preciseDone {
 		return fc.precise
 	}
 	fc.preciseDone = true
 	ps := v.cache.precise
-	if ps == nil || fc.meta.Lang != "go" || fc.meta.Hash == 0 {
+	if fc.meta.Lang != "go" {
+		ps = v.cache.scip
+	}
+	if ps == nil || fc.meta.Hash == 0 {
 		return nil
 	}
 	d := ps.Get(path.Dir(fc.meta.Path))
@@ -32,34 +40,42 @@ func (v *View) preciseFile(fc *fileCtx) *precise.File {
 		return nil
 	}
 	if f, ok := d.Files[fc.meta.Path]; ok && f.Hash == fc.meta.Hash && len(f.Calls)+len(f.TypeRefs) > 0 {
-		fc.precise = &f
+		fc.precise, fc.preciseDefs = &f, d.Defs
 	}
 	return fc.precise
 }
 
-// preciseCall resolves a Go call from current precise facts. ok is false
+// preciseCall resolves a call from current precise facts. ok is false
 // when there are none for this site; a site whose callee has no workspace
 // declaration (the standard library, a builtin, a function value) resolves
-// to nothing, type_checked.
+// to nothing, type_checked. SCIP may record a call of a class (Python's
+// Foo()) as a type reference.
 func (v *View) preciseCall(fc *fileCtx, rec segment.RefRec) (targets []Symbol, ok bool) {
 	f := v.preciseFile(fc)
 	if f == nil {
 		return nil, false
 	}
-	return v.preciseTarget(f.Calls, rec, false)
+	if targets, ok := v.preciseTarget(fc, f.Calls, rec, false); ok || fc.meta.Lang == "go" {
+		return targets, ok
+	}
+	return v.preciseTarget(fc, f.TypeRefs, rec, true)
 }
 
-// preciseTypeRef resolves a Go type reference (T{}, var x T, extends of an
-// embedded type) from current precise facts.
+// preciseTypeRef resolves a type reference (T{}, var x T, extends of an
+// embedded type) from current precise facts. SCIP records an
+// instantiation (new Foo()) as a call of the constructor.
 func (v *View) preciseTypeRef(fc *fileCtx, rec segment.RefRec) ([]Symbol, bool) {
 	f := v.preciseFile(fc)
 	if f == nil {
 		return nil, false
 	}
-	return v.preciseTarget(f.TypeRefs, rec, true)
+	if targets, ok := v.preciseTarget(fc, f.TypeRefs, rec, true); ok || fc.meta.Lang == "go" || rec.Kind != facts.RefInstantiate {
+		return targets, ok
+	}
+	return v.preciseTarget(fc, f.Calls, rec, false)
 }
 
-func (v *View) preciseTarget(sites []precise.Call, rec segment.RefRec, typeOnly bool) (targets []Symbol, ok bool) {
+func (v *View) preciseTarget(fc *fileCtx, sites []precise.Call, rec segment.RefRec, typeOnly bool) (targets []Symbol, ok bool) {
 	i, found := slices.BinarySearchFunc(sites, [2]int32{int32(rec.Line), int32(rec.Col)}, func(c precise.Call, k [2]int32) int {
 		if c.Line != k[0] {
 			return int(c.Line - k[0])
@@ -72,6 +88,9 @@ func (v *View) preciseTarget(sites []precise.Call, rec segment.RefRec, typeOnly 
 	c := sites[i]
 	if c.File == "" {
 		return nil, c.Name == rec.Name
+	}
+	if c.DefLine > 0 {
+		return v.scipTarget(fc, c, typeOnly)
 	}
 	for _, s := range v.fileDecls(c.File)[c.Name] {
 		if facts.BaseType(s.Receiver) != c.Recv {
@@ -91,6 +110,87 @@ func (v *View) preciseTarget(sites []precise.Call, rec segment.RefRec, typeOnly 
 		return nil, false // the declaration moved or is not indexed: syntactic
 	}
 	return targets, true
+}
+
+// scipCallKinds are the declarations a SCIP call target may be.
+var scipCallKinds = func() map[string]bool {
+	m := map[string]bool{facts.KindMethod: true}
+	for k := range callableKinds {
+		m[k] = true
+	}
+	return m
+}()
+
+// scipTarget locates a SCIP call or type target. While the target's file
+// is unchanged since the import, it is the innermost declaration of that
+// name spanning the definition line (or, for a constructor defined at its
+// keyword, the one declaration starting on that line). Otherwise only a
+// declaration unique by name in that file is used, as for go/types facts.
+// Anything else, or a C++ call target scipOverloadOK refuses, falls back
+// to the syntactic resolution.
+func (v *View) scipTarget(fc *fileCtx, c precise.Call, typeOnly bool) ([]Symbol, bool) {
+	targets, ok := v.scipLocate(fc, c, typeOnly)
+	if ok && !typeOnly && !v.scipOverloadOK(targets[0]) {
+		return nil, false
+	}
+	return targets, ok
+}
+
+// scipOverloadOK reports whether a C++ SCIP call target may be used.
+// scip-clang picks overloads clang's AST resolves otherwise; where the
+// member has overloads with another parameter count, the syntactic
+// resolver, which selects overloads by argument count, was right more
+// often (tinyxml2), so those calls keep its answer. Other languages are
+// not checked: their indexers were not seen to pick wrong overloads.
+func (v *View) scipOverloadOK(t Symbol) bool {
+	if t.Lang != "cpp" {
+		return true
+	}
+	for _, d := range v.Symbols(t.Name, "") {
+		if d.Receiver == t.Receiver && d.Parent == t.Parent && !d.Decl && (d.File != t.File || d.Line != t.Line) && d.Params != t.Params {
+			return false // an overload with another parameter count
+		}
+	}
+	return true
+}
+
+func (v *View) scipLocate(fc *fileCtx, c precise.Call, typeOnly bool) ([]Symbol, bool) {
+	kinds := scipCallKinds
+	if typeOnly {
+		kinds = typeKinds
+	}
+	var named []Symbol
+	for _, s := range v.fileDecls(c.File)[c.Name] {
+		if kinds[s.Kind] {
+			named = append(named, s)
+		}
+	}
+	line := int(c.DefLine)
+	if m, ok := v.sn.Meta(c.File); ok && m.Hash != 0 && fc.preciseDefs[c.File] == m.Hash {
+		var best *Symbol
+		for i, s := range named {
+			if s.Line <= line && line <= max(s.Line, s.EndLine) && (best == nil || s.Line > best.Line) {
+				best = &named[i]
+			}
+		}
+		if best != nil {
+			return []Symbol{*best}, true
+		}
+		var at []Symbol
+		for _, s := range v.FileSymbols(c.File) {
+			if s.Line == line && kinds[s.Kind] {
+				at = append(at, s)
+			}
+		}
+		if len(at) == 1 {
+			return at, true
+		}
+		return nil, false
+	}
+	if len(named) == 1 {
+		return named, true
+	}
+	return nil, false
 }
 
 // fileDecls returns a file's declarations by name, once per view.

@@ -25,6 +25,7 @@ import (
 	"github.com/spawn08/chronos/storage"
 	"github.com/spawn08/chronos/storage/adapters/sqlite"
 
+	"github.com/spawn08/chronos-code/indexer"
 	"github.com/spawn08/chronos-code/internal/activation"
 	"github.com/spawn08/chronos-code/internal/apierror"
 	"github.com/spawn08/chronos-code/internal/attention"
@@ -306,7 +307,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	sessionMgr := session.NewManager(store, dsn)
 	sessions := setupSessions(ctx, cfg, sessionMgr, agents, resumeSessionID)
 
-	graphStore, graphScope := setupGraph(ctx, cfg, paths.Dir, agents)
+	graphStore, graphScope := setupGraph(ctx, cfg, paths.Dir, projectDir, userDir, agents)
 	orch.graphStore, orch.graphScope = graphStore, graphScope
 
 	root := cfg.Workspace.Root
@@ -1667,6 +1668,20 @@ func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*a
 // project overlays, then attaches the effective guard to every agent. Invalid
 // or weakening overlays fail startup rather than dropping to an empty policy.
 func setupSecurity(projectDir, userDir, root string, store storage.Storage, agents map[string]*agent.Agent) (*security.Policy, error) {
+	policy, err := ResolvePolicy(projectDir, userDir)
+	if err != nil {
+		return nil, err
+	}
+	guard := security.NewGuard(policy, root, store)
+	for _, a := range agents {
+		a.Hooks = append(a.Hooks, guard)
+	}
+	return policy, nil
+}
+
+// ResolvePolicy resolves the embedded security floor with the optional
+// user and project overlays (security.yaml in userDir and projectDir).
+func ResolvePolicy(projectDir, userDir string) (*security.Policy, error) {
 	floor, err := defaults.ReadFile("security.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded security floor: %w", err)
@@ -1691,15 +1706,31 @@ func setupSecurity(projectDir, userDir, root string, store storage.Storage, agen
 		}
 		overlays = append(overlays, security.Overlay{Source: candidate.source, Data: data})
 	}
-	policy, err := security.ResolvePolicy(floor, overlays...)
+	return security.ResolvePolicy(floor, overlays...)
+}
+
+// IndexerSCIPSources returns workspace.indexer.scip.sources for the
+// indexer. Commands from the project config that user policy does not
+// admit are removed (their indexes are still imported) and reported
+// through warn.
+func IndexerSCIPSources(cfg *config.Config, projectDir, userDir string, warn func(string)) []indexer.SCIPSource {
+	sources := cfg.SCIPSources()
+	if len(sources) == 0 {
+		return nil
+	}
+	policy, err := ResolvePolicy(projectDir, userDir)
 	if err != nil {
-		return nil, err
+		policy = nil // no trust granted; startup reports the policy error
 	}
-	guard := security.NewGuard(policy, root, store)
-	for _, a := range agents {
-		a.Hooks = append(a.Hooks, guard)
+	admitted, refused := security.AdmitSCIPCommands(sources, policy)
+	for _, msg := range refused {
+		warn(msg)
 	}
-	return policy, nil
+	out := make([]indexer.SCIPSource, 0, len(admitted))
+	for _, s := range admitted {
+		out = append(out, indexer.SCIPSource{Index: s.Index, Dir: s.Dir, Command: s.Command})
+	}
+	return out
 }
 
 // readOverridableFile prefers <projectDir>/<overridePath> when projectDir is
@@ -1728,7 +1759,7 @@ const repositoryContextTimeout = 250 * time.Millisecond
 // without the graph, just without the T0 navigation tools.
 // setupGraph opens the code index for the workspace; the index lives under
 // the project data directory (dataDir/index).
-func setupGraph(ctx context.Context, cfg *config.Config, dataDir string, agents map[string]*agent.Agent) (graph.Backend, *graph.IndexScope) {
+func setupGraph(ctx context.Context, cfg *config.Config, dataDir, projectDir, userDir string, agents map[string]*agent.Agent) (graph.Backend, *graph.IndexScope) {
 	root := cfg.Workspace.Root
 	if root == "" {
 		root = config.WorkspaceRoot()
@@ -1743,9 +1774,16 @@ func setupGraph(ctx context.Context, cfg *config.Config, dataDir string, agents 
 	for _, r := range cfg.Workspace.Indexer.FederationRoots(root) {
 		federation = append(federation, graph.FederatedRoot{Name: r.Name, Root: r.Root})
 	}
+	var scipSources []indexer.SCIPSource
+	if cfg.Workspace.Indexer.SCIPOrDefault() {
+		scipSources = IndexerSCIPSources(cfg, projectDir, userDir, func(msg string) {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", msg)
+		})
+	}
 	scope, err := graph.NewIndexScope(ctx, graph.IndexScopeOptions{
 		Root: root, DataDir: dataDir, IndexOnStart: indexOnStart, Watch: indexOnStart,
 		Federation: federation, Precise: cfg.Workspace.Indexer.PreciseOrDefault(),
+		SCIP: cfg.Workspace.Indexer.SCIPOrDefault(), SCIPSources: scipSources,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: open code index: %v\n", err)

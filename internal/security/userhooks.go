@@ -294,6 +294,31 @@ func AdmitHooks(hooks config.HooksConfig, policy *Policy) error {
 	return nil
 }
 
+// AdmitSCIPCommands returns sources with the commands policy does not
+// admit removed (the index itself is still imported), and a message for
+// each. A command from the project config runs only when user policy
+// trusts its digest (hooks.trusted_digests), as for project hooks; other
+// layers are the user's own.
+func AdmitSCIPCommands(sources []config.SCIPSourceConfig, policy *Policy) (admitted []config.SCIPSourceConfig, refused []string) {
+	trusted := make(map[string]struct{})
+	if policy != nil {
+		for _, digest := range policy.TrustedHookDigests {
+			trusted[digest] = struct{}{}
+		}
+	}
+	for _, s := range sources {
+		if s.Command != "" && s.Source == "project" {
+			digest := s.IdentityDigest()
+			if _, ok := trusted[digest]; !ok {
+				refused = append(refused, fmt.Sprintf("SCIP command for %s from the project config is not admitted by user policy (digest %s); importing the index only", s.Index, digest))
+				s.Command = ""
+			}
+		}
+		admitted = append(admitted, s)
+	}
+	return admitted, refused
+}
+
 // ExecuteHook is a convenience for one-off execution in workspaceRoot.
 func ExecuteHook(ctx context.Context, workspaceRoot string, def config.HookDef, vars map[string]any) (HookResult, error) {
 	runner, err := NewHookRunner(workspaceRoot)

@@ -13,6 +13,9 @@ import (
 
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
+
+	"github.com/spawn08/chronos-code/indexer/scip"
+	"github.com/spawn08/chronos-code/indexer/scip/sciptest"
 )
 
 var payFiles = map[string]string{
@@ -462,5 +465,49 @@ func TestIndexScopePrecise(t *testing.T) {
 	levels, _ = got["callers_by_depth"].([]map[string]map[string][]string)
 	if len(levels) != 1 || !reflect.DeepEqual(levels[0]["Payer.Pay"]["type_checked"], []string{"Handle (handler.go:3)"}) {
 		t.Errorf("find_callers Payer.Pay = %+v", got)
+	}
+}
+
+// TestIndexScopeSCIP imports <root>/index.scip: find_callers answers the
+// TypeScript call type_checked and the index report shows the tier.
+func TestIndexScopeSCIP(t *testing.T) {
+	root := canonicalTempDir(t)
+	lib := "export function record(): number {\n  return 1;\n}\n"
+	main := "import { record } from \"./lib\";\n\nexport function pay(): number {\n  return record();\n}\n"
+	writeTree(t, root, map[string]string{"lib.ts": lib, "main.ts": main})
+	old := time.Now().Add(-time.Hour)
+	for _, name := range []string{"lib.ts", "main.ts"} {
+		_ = os.Chtimes(filepath.Join(root, name), old, old)
+	}
+	sym := "scip-typescript npm pay 1.0.0 `lib.ts`/record()."
+	pay := "scip-typescript npm pay 1.0.0 `main.ts`/pay()."
+	err := sciptest.Write(filepath.Join(root, "index.scip"), "file:///ci",
+		sciptest.Document{Path: "lib.ts", Occurrences: []sciptest.Occurrence{sciptest.At(lib, "record", 0, sym, scip.RoleDefinition)}},
+		sciptest.Document{Path: "main.ts", Occurrences: []sciptest.Occurrence{
+			sciptest.At(main, "record", 0, sym, scip.RoleImport),
+			sciptest.At(main, "pay", 0, pay, scip.RoleDefinition),
+			sciptest.At(main, "record", 1, sym, 0),
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewIndexScope(context.Background(), IndexScopeOptions{Root: root, DataDir: t.TempDir(), IndexOnStart: true, SCIP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	<-s.Engine().Ready()
+	if err := s.Engine().RunSCIP(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := call(t, ctx, toolFrom(t, s.Tools(), "find_callers"), map[string]any{"name": "record"})
+	levels, _ := got["callers_by_depth"].([]map[string]map[string][]string)
+	if len(levels) != 1 || !reflect.DeepEqual(levels[0]["record"]["type_checked"], []string{"pay (main.ts:4)"}) {
+		t.Errorf("find_callers record = %+v", got)
+	}
+	idx, _ := got["index"].(map[string]any)
+	if idx["mode"] != "syntactic+type_checked" || idx["scip"] != "ready: 2 documents imported" {
+		t.Errorf("index report = %+v", idx)
 	}
 }

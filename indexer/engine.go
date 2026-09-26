@@ -30,6 +30,7 @@ import (
 	"github.com/spawn08/chronos-code/indexer/facts"
 	"github.com/spawn08/chronos-code/indexer/precise"
 	"github.com/spawn08/chronos-code/indexer/scan"
+	"github.com/spawn08/chronos-code/indexer/scip"
 	"github.com/spawn08/chronos-code/indexer/store"
 )
 
@@ -81,6 +82,18 @@ type Options struct {
 	Precise      bool
 	PreciseQuiet time.Duration
 	PreciseEnv   []string
+	// SCIP enables the precise tier for other languages (M10,
+	// scip_runner.go): SCIPSources and <Root>/index.scip are imported in
+	// the background when they change, and sources with a command are
+	// rerun once indexing has been quiet for SCIPQuiet (0 = default)
+	// after files their index covers changed. Calls and type references
+	// resolve type_checked while their file is unchanged. SCIPPoll is how
+	// often index files are checked; SCIPTimeout bounds a command.
+	SCIP        bool
+	SCIPSources []SCIPSource
+	SCIPQuiet   time.Duration
+	SCIPPoll    time.Duration
+	SCIPTimeout time.Duration
 }
 
 // Stats describes one indexing pass.
@@ -123,6 +136,7 @@ type Engine struct {
 	lastMode   atomic.Value // string
 
 	precise *preciseRunner // nil when the type-checked tier is off
+	scip    *scipRunner    // nil when the SCIP tier is off
 }
 
 type errorHolder struct{ err error }
@@ -142,6 +156,7 @@ type Status struct {
 	LastPass   time.Time // zero before the first pass
 	LastError  error     // error of the last pass, if it failed
 	Precise    PreciseStatus
+	SCIP       SCIPStatus
 }
 
 // Status reports the current generation and freshness.
@@ -164,6 +179,7 @@ func (e *Engine) Status() Status {
 		st.LastError = h.err
 	}
 	st.Precise = e.PreciseStatus()
+	st.SCIP = e.SCIPStatus()
 	return st
 }
 
@@ -223,6 +239,18 @@ func Open(opts Options) (*Engine, error) {
 		}
 		e.precise = newPreciseRunner(e, ps)
 	}
+	if opts.SCIP {
+		dir := filepath.Join(opts.Dir, "scip")
+		ss, err := precise.OpenStoreVersion(dir, scip.Version)
+		if err != nil {
+			if e.precise != nil {
+				e.precise.close()
+			}
+			_ = st.Close()
+			return nil, err
+		}
+		e.scip = newSCIPRunner(e, ss, dir)
+	}
 	return e, nil
 }
 
@@ -240,6 +268,9 @@ func (e *Engine) Close() error {
 	e.closed.Store(true)
 	if e.precise != nil {
 		e.precise.close()
+	}
+	if e.scip != nil {
+		e.scip.close()
 	}
 	e.wg.Wait()
 	e.mu.Lock()
@@ -275,6 +306,9 @@ func (e *Engine) Reconcile(ctx context.Context) (st Stats, err error) {
 			e.lastMode.Store(st.Mode)
 			e.reconciled.Store(true)
 			e.readyOnce.Do(func() { close(e.ready) })
+			if e.scip != nil {
+				e.scip.note(nil, true) // snapshots now describe the workspace
+			}
 		}
 	}()
 	start := time.Now()
@@ -689,6 +723,13 @@ func (e *Engine) index(ctx context.Context, sn *store.Snapshot, candidates, dele
 			changed[i] = f.Path
 		}
 		e.precise.note(changed, false)
+	}
+	if e.scip != nil {
+		changed := make([]string, len(files))
+		for i, f := range files {
+			changed[i] = f.Path
+		}
+		e.scip.note(changed, false)
 	}
 	return st, nil
 }

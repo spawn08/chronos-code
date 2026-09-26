@@ -49,6 +49,10 @@ type Dir struct {
 	// method sets were computed from.
 	Types []Type
 	API   map[string]uint64
+	// Defs, for facts imported from SCIP (package scip), holds the hashes
+	// of the files declaring the calls' targets: a target is located by
+	// its definition line only while its file is unchanged.
+	Defs map[string]uint64
 }
 
 // File is the facts of one parsed file.
@@ -69,6 +73,9 @@ type Call struct {
 	File      string // root-relative file declaring the callee
 	Name      string
 	Recv      string // the receiver's base type name, for methods (an interface's for interface methods)
+	// DefLine is the 1-based line of the callee's definition, for facts
+	// imported from SCIP; 0 for go/types facts.
+	DefLine int32
 }
 
 // Type is a named type and its method set. For interfaces, Methods is the

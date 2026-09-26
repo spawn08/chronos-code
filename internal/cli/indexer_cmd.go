@@ -11,8 +11,10 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/spawn08/chronos-code/indexer"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/graph"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 const indexerUsage = "usage: chronos-code indexer mcp [--repo [name=]dir ...]"
@@ -45,9 +47,17 @@ func runIndexerCommand(ctx context.Context, cfg *config.Config, args []string, s
 	if err := os.MkdirAll(paths.Dir, 0o755); err != nil {
 		return fmt.Errorf("create project data directory: %w", err)
 	}
+	var scipSources []indexer.SCIPSource
+	if cfg.Workspace.Indexer.SCIPOrDefault() {
+		_, userDir, _ := config.Discover()
+		scipSources = orchestrator.IndexerSCIPSources(cfg, paths.LegacyDir, userDir, func(msg string) {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", msg) // stdout carries only JSON-RPC
+		})
+	}
 	scope, err := graph.NewIndexScope(ctx, graph.IndexScopeOptions{
 		Root: paths.Root, DataDir: paths.Dir, IndexOnStart: true, Watch: true, Federation: federation,
 		Precise: cfg.Workspace.Indexer.PreciseOrDefault(),
+		SCIP:    cfg.Workspace.Indexer.SCIPOrDefault(), SCIPSources: scipSources,
 	})
 	if err != nil {
 		return fmt.Errorf("open code index: %w", err)

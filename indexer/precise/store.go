@@ -36,17 +36,22 @@ const (
 
 // OpenStore opens (or creates) a store in dir. A store written by another
 // Version is emptied.
-func OpenStore(dir string) (*Store, error) {
+func OpenStore(dir string) (*Store, error) { return OpenStoreVersion(dir, Version) }
+
+// OpenStoreVersion opens a store whose facts are of the given version (for
+// facts from another source, such as SCIP imports). A store written by
+// another version is emptied.
+func OpenStoreVersion(dir, version string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("precise: %w", err)
 	}
 	vf := filepath.Join(dir, versionFile)
-	if data, err := os.ReadFile(vf); err != nil || strings.TrimSpace(string(data)) != Version {
+	if data, err := os.ReadFile(vf); err != nil || strings.TrimSpace(string(data)) != version {
 		names, _ := os.ReadDir(dir)
 		for _, n := range names {
 			_ = os.Remove(filepath.Join(dir, n.Name()))
 		}
-		if err := os.WriteFile(vf, []byte(Version+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(vf, []byte(version+"\n"), 0o644); err != nil {
 			return nil, fmt.Errorf("precise: %w", err)
 		}
 	}

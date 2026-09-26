@@ -61,6 +61,11 @@ type IndexReport struct {
 	// unavailable: why); "" when it is off. Go calls resolve type_checked
 	// where its facts are current, whatever the state.
 	Precise string
+	// SCIP is the SCIP tier's state when it has an index to import
+	// (ready: documents imported and left out, running, importing), ""
+	// otherwise. Other languages' calls resolve type_checked where its
+	// facts are current.
+	SCIP string
 	// Repos are the federated repositories answering with the primary
 	// workspace (workspace.indexer.federation), if any.
 	Repos []RepoReport

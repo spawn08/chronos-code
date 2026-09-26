@@ -45,6 +45,12 @@ type IndexScopeOptions struct {
 	// packages are type-checked in the background and calls resolve
 	// type_checked while their file is unchanged.
 	Precise bool
+	// SCIP enables the SCIP tier (M10) for every index: <root>/index.scip
+	// is imported when present, and calls of other languages resolve
+	// type_checked while their file is unchanged. SCIPSources (commands
+	// already admitted by the caller) apply to the primary root only.
+	SCIP        bool
+	SCIPSources []indexer.SCIPSource
 }
 
 // FederatedRoot is one federated repository.
@@ -192,7 +198,10 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 		dir = filepath.Join(base, "chronos-code", "index", rootKey(root), "v1")
 	}
 	r := &indexRoot{root: root, cache: query.NewCache(), started: make(chan struct{})}
-	opts := indexer.Options{Root: root, Dir: dir, Logf: s.opts.Logf, Focus: focusDir(root), Precise: s.opts.Precise}
+	opts := indexer.Options{Root: root, Dir: dir, Logf: s.opts.Logf, Focus: focusDir(root), Precise: s.opts.Precise, SCIP: s.opts.SCIP}
+	if root == s.root {
+		opts.SCIPSources = s.opts.SCIPSources
+	}
 	eng, err := indexer.Open(opts)
 	if errors.Is(err, store.ErrLocked) {
 		base := filepath.Join(filepath.Dir(dir), "sessions")
@@ -215,7 +224,7 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 		return nil, fmt.Errorf("graph index: %w", err)
 	}
 	r.engine = eng
-	r.cache.SetPrecise(eng.Precise())
+	r.cache.SetPrecise(eng.Precise()).SetSCIP(eng.SCIP())
 	return r, nil
 }
 
@@ -532,6 +541,19 @@ func reportFrom(st indexer.Status) IndexReport {
 		r.Precise = st.Precise.State
 		if st.Precise.State == indexer.PreciseUnavailable && st.Precise.LastError != "" {
 			r.Precise += ": " + st.Precise.LastError
+		}
+	}
+	if sc := st.SCIP; sc.State != indexer.SCIPOff && (sc.Indexes > 0 || sc.LastError != "") {
+		r.Mode = "syntactic+type_checked"
+		r.SCIP = sc.State
+		if sc.State == indexer.SCIPReady && sc.Indexes > 0 {
+			r.SCIP = fmt.Sprintf("ready: %d documents imported", sc.Docs)
+			if sc.Rejected > 0 {
+				r.SCIP += fmt.Sprintf(", %d left out as changed since indexed", sc.Rejected)
+			}
+		}
+		if sc.LastError != "" {
+			r.SCIP += "; " + sc.LastError
 		}
 	}
 	if st.LastError != nil {

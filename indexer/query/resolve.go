@@ -232,7 +232,8 @@ type fileCtx struct {
 	hintList               []segment.HintRec
 
 	preciseDone bool
-	precise     *precise.File // current type-checked facts (M4), if any
+	precise     *precise.File     // current type-checked facts (M4), if any
+	preciseDefs map[string]uint64 // SCIP facts: hashes of the target files (M10)
 }
 
 func (fc *fileCtx) imports() []facts.Import {

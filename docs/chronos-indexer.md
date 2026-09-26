@@ -19,7 +19,9 @@ documents. M9 complete (2026-09-26): the indexer is the public package
 `chronos-code indexer mcp` serves them to external agents ("M9 results").
 M4 complete (2026-09-27): Go calls and type references resolve
 `type_checked` from a background go/packages tier, gated by file hashes
-("M4 results").
+("M4 results"). M10 complete (2026-09-27): other languages' calls and type
+references resolve `type_checked` from imported SCIP indexes, gated the
+same way ("M10 results"). Every indexer milestone is done.
 Replaces the synchronous parts of `internal/graph` with an in-process
 indexer.
 
@@ -67,6 +69,7 @@ fsnotify ─► dirty set ─► worker pool ─────────► sing
 queries ◄── snapshot (mmap'd segments + in-memory overlay routing) ◄──────┘
     ▲
     └── precise tier (background): go/packages type-check ─► precise segment
+                                   SCIP index import (M10) ─► precise facts
 ```
 
 Package layout (new):
@@ -80,6 +83,7 @@ indexer/
   query/     symbols, calls, search, map, impact; resolution at query time
   context/   evidence selection, budgeting, seen-subtraction, memoization
   precise/   background go/packages enrichment
+  scip/      SCIP index reader and import (other languages, M10)
   engine.go  lifecycle: Open, Start, Notify, Snapshot, Close, Status
 ```
 
@@ -210,7 +214,9 @@ read-only and follows the manifest; it does not index.
 ## Precise tier
 
 As built in M4 (see "M4 results"): facts per package directory, not
-segments, and method sets instead of `implements` edges.
+segments, and method sets instead of `implements` edges. Other languages
+get the same facts and gate from imported SCIP indexes (see "M10
+results").
 
 - After the dirty set has been quiet for 1 s, the existing loader logic
   (`loadGoPackagesWithTests`) is moved to `precise/` and run on the dirty
@@ -1643,6 +1649,180 @@ Not in M4:
   `PreciseEnv` can pin it (tests use `-mod=mod`, `GOTOOLCHAIN=local`).
 - Other languages are M10.
 
+### M10 results (SCIP import for other languages, 2026-09-27)
+
+**What it reuses.** M4's facts, store and gate: an imported document
+becomes a `precise.File` (per call and type-reference site, the target
+declaration, plus the file's hash) in a `precise.Store` of its own
+(`<index>/scip/`, version `scip-1`; the Go tier's scan deletes directories
+without Go files, and a directory can hold both). A site resolves
+`type_checked` only while its file's indexed hash equals the recorded one;
+otherwise the syntactic resolver answers. Two gob-compatible fields were
+added: `Call.DefLine` and `Dir.Defs` (the hashes of the target files).
+
+**Reading** (`indexer/scip`). A streaming protowire reader (one document in
+memory at a time) and a parser for the SCIP symbol grammar. Go documents
+are skipped (M4 covers Go), as are documents of files the index does not
+hold. A site is keyed like the extractor's refs: the identifier's line and
+1-based byte column, converted from the document's position encoding
+(UTF-16 by default). Its target is the symbol's definition occurrence
+(file, line, the text there), the nearest one in the same file when there
+are several; a symbol of another package with no definition in the index
+(standard library, dependencies) resolves to nothing, `type_checked`; a
+workspace symbol whose definition was not imported is left out. Only
+occurrences that spell their symbol at their range are imported (aliases,
+`os.path.dirname` recorded by scip-python as `ntpath/join()`, implicit
+constructor calls at a variable name are not), and a position with
+conflicting targets is dropped.
+
+**Gating a document.** SCIP records no content hash, so the import decides
+which content a document describes, in this order:
+
+1. The document embeds its text: its hash must equal the file's.
+2. A run chronos watched wrote the index (a configured command, below): the
+   file's hash must equal the one recorded before the run and after it,
+   and the file must not have been modified during the run.
+3. Otherwise (an index from CI or a manual run): the file must not be
+   newer than the index, and its occurrences of calls and types must still
+   fit. A definition whose range spells another identifier, any range that
+   splits an identifier, starts or ends in blank space or runs past its
+   line, or more than max(3, 10%) references spelling another whole
+   identifier reject the document. Constructor and operator references
+   (spelled by syntax: `T x;`, `[Fact]`, enum constants, `f()` for
+   `invoke`) and ranges covering an expression (Kotlin function types) are
+   not checked. This is inferred, not exact: an edit that changes a
+   binding without moving any occurrence (switching `from a import f` to
+   `from b import f`) and keeps the file older than the index passes.
+
+In every case the file must also equal its indexed version (else "not
+indexed yet", retried after the next pass), and the recorded hash is then
+the file's, so queries gate on it as for Go.
+
+Measured on the SCIP baseline corpus (`TestCorpusFreshIndexes`,
+`TestCorpusStaleDetection`, `CHRONOS_SCIP_CORPUS=1`), rule 3 alone, with
+the modification-time check bypassed for the stale case:
+
+| | Documents | Rejected | Sites imported |
+|---|---:|---:|---:|
+| Fresh indexes, 8 non-Go repositories | 448 | 0 | 58,180 |
+| One blank line inserted at half of each file | 448 | 387 (86%) | 45 from the 61 accepted, 0 misplaced |
+| One blank line inserted at 9/10 of each file | 448 | 328 (73%) | 1,051 from the 120 accepted, 0 misplaced |
+
+A stale document that passes had no checked occurrence below the edit, so
+its facts are still in place. The first version of the check rejected 63
+fresh documents; each class of mismatch (listed in rule 3) was inspected
+and exempted, and the stale case was measured after.
+
+**Targets** (`query/precise.go`). A SCIP site's target is the innermost
+declaration of that name spanning the definition line while the target's
+file is unchanged since the import (for a constructor defined at its
+keyword, the one declaration starting on that line), else a declaration
+unique by name in that file, else the syntactic answer. A call may resolve
+to a type (Python's `Foo()`) and an instantiation to a constructor
+(`new Foo()`). For C++, a call of a member with overloads of another
+parameter count keeps the syntactic answer: scip-clang picks overloads
+clang's AST resolves otherwise, and there the syntactic resolver, which
+selects by argument count, was right more often (below).
+
+**Runner** (`indexer/scip_runner.go`, `Options.SCIP`). `<root>/index.scip`
+and configured sources are checked every 5 s (`SCIPPoll`) and imported
+together when one is written, rewritten or removed; a reopened index whose
+index files are unchanged imports nothing (`state.json` next to the facts).
+A source with a command runs it with `sh -c` in its directory when its
+index is missing, or when files with the extensions its index describes
+changed since the last run, once indexing has been quiet for 30 s
+(`SCIPQuiet`), one job at a time, bounded by `SCIPTimeout` (30 min).
+Nothing waits for an import or a run and nothing cancels one; `Close`
+does. `Engine.Status().SCIP` reports `waiting`, `running`, `importing` or
+`ready` with documents imported and left out.
+
+**Integration.** `workspace.indexer.scip` (default on):
+
+```yaml
+workspace:
+  indexer:
+    scip:
+      sources:
+        - index: web/index.scip          # imported when it changes
+          dir: web                       # its paths' base, and the command's directory
+          command: npx -y @sourcegraph/scip-typescript index --output index.scip
+```
+
+A command from the project config runs only when user policy trusts its
+digest (`hooks.trusted_digests` in the user `security.yaml`, the list that
+admits project hooks; domain `chronos-code/scip/v1`); otherwise it is
+dropped with a warning naming the digest and the index is imported as it
+is. Federated repositories import their own `index.scip`; configured
+sources apply to the primary workspace. The `index` report gains
+`"scip": "ready: N documents imported[, M left out as changed since
+indexed]"` once an index exists. `benchmark/edges -scip-import` scores
+with the index imported. Nothing is downloaded: the indexers are the
+user's.
+
+**Resolution with the import** (`-scip-import`, same indexes, corrected
+gold; top-1 over matched references, and the `type_checked` share):
+
+| Repository | Calls top-1 syntactic → import | `type_checked` calls (top-1) | Types top-1 syntactic → import | `type_checked` types (top-1) |
+|---|---|---:|---|---:|
+| cjson (C) | 1.000 → 0.998 | 1,129 (1,127) | 0.977 → 0.994 | 837 (837) |
+| click (Python) | 0.966 → 0.999 | 724 (724) | 1.000 → 1.000 | 154 (154) |
+| jsoup (Java) | 0.964 → 1.000 | 13,788 (13,785) | 0.990 → 0.999 | 5,202 (5,197) |
+| ky (TypeScript) | 0.889 → 1.000 | 18 (18) | 1.000 → 1.000 | 127 (127) |
+| mediatr (C#) | 0.915 → 1.000 | 626 (626) | 0.995 → 1.000 | 1,054 (1,054) |
+| mockito-kotlin (Kotlin) | 0.946 → 0.986 | 291 (291) | 1.000 → 1.000 | 46 (46) |
+| tinyxml2 (C++) | 0.808 → 0.917 | 1,245 (1,219) | 0.987 → 0.990 | 810 (810) |
+| walkdir (Rust) | 0.973 → 1.000 | 512 (512) | 0.950 → 0.981 | 141 (138) |
+
+Most of this is circular: the gold answer is the same SCIP index, so it
+shows that positions, targets and gating carry SCIP's answers through
+intact, not that SCIP is right. The exceptions are C and C++ calls, whose
+gold answer is clang's AST. There scip-clang is wrong: importing every
+C++ call gave 1,716 `type_checked` calls in tinyxml2, 1,527 of them
+correct (89%). Leaving calls of members overloaded with another parameter
+count to the syntactic resolver gives 1,245 at 97.9% and the best overall
+top-1 (0.917); leaving every overloaded call to it gives 977 at 99.2% but
+0.865 overall; rejecting only targets that cannot take the argument count
+gives 1,607 at 95.0% and 0.899. The 26 still wrong are same-arity
+overloads chosen by type (`LoadFile(const char*)` against
+`LoadFile(FILE*)`) and constructors. In C#, the argument-count check
+would have discarded 59 correct targets (extension methods declare their
+receiver), so it applies to C++ only. Imports took 8–142 ms per
+repository.
+
+Tests: `scip_test.go` (sites and targets, UTF-16 columns, stale and
+future-dated documents, the indexed-hash gate, observed runs, embedded
+text, project root and `Dir`, symbol grammar), `query/scip_test.go`
+(`type_checked` where the syntactic resolver cannot tell two `run`
+methods apart, stale after an edit, current again after reverting, a
+moved target found by name, C++ overloads), `scip_runner_test.go`
+(discovery by polling, no re-import on reopen, a removed index removes its
+facts, exact gating of a command's run, a covered edit making it due, an
+edit during a run applied at once and its document left out, `Close`
+stopping a run, a failing command reported), `TestIndexScopeSCIP`,
+config provenance and `AdmitSCIPCommands`.
+
+**Edits** (acceptance 2). The engine only records which paths a pass
+changed; imports and commands run in their own goroutine or process. In
+`TestSCIPEditsDuringARunAreNotBlocked`, an edit applied while a command
+runs returns at once (asserted under 500 ms; the edit path is otherwise
+unchanged). Release binary 52.0 MiB (M4: 51.9; gate 56).
+
+Not in M10:
+
+- Implementations and method sets for other languages: SCIP's
+  `relationships` are not read; `find_implementations` stays syntactic
+  outside Go.
+- Checked on the corpus: scip-typescript, scip-python, scip-java (Java,
+  Kotlin), scip-clang (C, C++), scip-dotnet, rust-analyzer. scip-ruby,
+  scip-php, Scala and Dart indexers are read the same way but unmeasured.
+- An external index's document that passes rule 3 while stale (see above)
+  gives wrong `type_checked` answers until the file changes; a configured
+  command (rule 2) avoids that.
+- Rule 2 assumes the command indexes the files as they are when it runs;
+  an edit reverted during a run is caught by its modification time, not
+  its content.
+- Commands run under `sh`, so not on Windows without one.
+
 ### M9 results (federation, public package, MCP adapter, 2026-09-26)
 
 **Public package.** `internal/indexer` moved to `indexer/`
@@ -2079,7 +2259,7 @@ acceptance criteria met.
 | M7 (done) | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline ("M7 precision targets"); no edit-latency regression |
 | M8 (done) | Contracts (Protobuf/gRPC, Thrift, GraphQL, OpenAPI, SQL DDL, framework recognisers) and documents (Markdown and text sections, mention links) | Client call → route → handler paths are found in fixtures for each recogniser; document↔code links are tested; retrieval eval includes document tasks |
 | M9 (done) | Federation across repositories; public package path; MCP adapter | Cross-repo import and contract joins are tested; an external agent gets the same results over MCP as the in-process tools |
-| M10 | Precise tier for other languages through SCIP import, when the toolchain is present | A precise edge is used only when its file hash matches; indexing and edits never block on an external indexer |
+| M10 (done) | Precise tier for other languages through SCIP import, when the toolchain is present | A precise edge is used only when its file hash matches; indexing and edits never block on an external indexer |
 | M11 (done) | Delete old `internal/graph` store and indexer, including its tree-sitter tier | No dead code; docs updated |
 
 Order: M2 → M3 → M5 → M6 → M7 → M8 → M9. M4 and M10 are independent and can

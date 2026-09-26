@@ -200,3 +200,23 @@ func TestHookRunnerRequiresProcessEffect(t *testing.T) {
 		t.Fatalf("Run() error = %v, want process effect denial", err)
 	}
 }
+
+func TestAdmitSCIPCommandsRequiresTrustedProjectDigest(t *testing.T) {
+	project := config.SCIPSourceConfig{Index: "index.scip", Command: "npx scip-typescript index", Source: "project"}
+	user := config.SCIPSourceConfig{Index: "u.scip", Command: "make scip", Source: "user"}
+	importOnly := config.SCIPSourceConfig{Index: "ci.scip", Source: "project"}
+	got, refused := AdmitSCIPCommands([]config.SCIPSourceConfig{project, user, importOnly}, &Policy{})
+	if len(got) != 3 || got[0].Command != "" || got[1].Command != "make scip" || got[2].Index != "ci.scip" {
+		t.Fatalf("admitted = %+v", got)
+	}
+	if len(refused) != 1 || !strings.Contains(refused[0], project.IdentityDigest()) {
+		t.Fatalf("refused = %v", refused)
+	}
+	got, refused = AdmitSCIPCommands([]config.SCIPSourceConfig{project}, &Policy{TrustedHookDigests: []string{project.IdentityDigest()}})
+	if len(refused) != 0 || got[0].Command != project.Command {
+		t.Fatalf("trusted: %+v, %v", got, refused)
+	}
+	if got, _ := AdmitSCIPCommands([]config.SCIPSourceConfig{project}, nil); got[0].Command != "" {
+		t.Fatal("no policy admitted a project command")
+	}
+}

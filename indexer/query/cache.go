@@ -25,6 +25,7 @@ type Cache struct {
 
 	precise *precise.Store // the type-checked tier's facts, if on (M4)
 	valid   *validMemo     // precise directories current in the latest generation
+	scip    *precise.Store // facts imported from SCIP indexes, other languages (M10)
 }
 
 // SetPrecise attaches the type-checked tier's facts (Engine.Precise); nil
@@ -33,6 +34,16 @@ type Cache struct {
 func (c *Cache) SetPrecise(p *precise.Store) *Cache {
 	c.mu.Lock()
 	c.precise, c.valid = p, nil
+	c.mu.Unlock()
+	return c
+}
+
+// SetSCIP attaches the facts imported from SCIP indexes (Engine.SCIP); nil
+// detaches them. Views then resolve calls and type references of other
+// languages type_checked where the facts are current.
+func (c *Cache) SetSCIP(p *precise.Store) *Cache {
+	c.mu.Lock()
+	c.scip = p
 	c.mu.Unlock()
 	return c
 }

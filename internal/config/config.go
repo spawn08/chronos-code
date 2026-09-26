@@ -362,10 +362,62 @@ type IndexerConfig struct {
 	// PATH, changed Go packages are type-checked in the background and
 	// calls resolve type_checked. Default true.
 	Precise *bool `yaml:"precise,omitempty"`
+	// SCIP is the precise tier for other languages: SCIP indexes are
+	// imported in the background and calls resolve type_checked while
+	// their file is unchanged.
+	SCIP SCIPConfig `yaml:"scip,omitempty"`
 }
 
 // PreciseOrDefault reports whether the type-checked tier is enabled.
 func (c IndexerConfig) PreciseOrDefault() bool { return c.Precise == nil || *c.Precise }
+
+// SCIPConfig configures SCIP index imports.
+type SCIPConfig struct {
+	// Enabled turns the imports on (default true). <root>/index.scip is
+	// imported whenever it is present.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// Sources lists further indexes, optionally with the command that
+	// writes them (run in the background after files change). A command
+	// from the project config runs only when user policy trusts its
+	// digest (security hooks.trusted_digests).
+	Sources []SCIPSourceConfig `yaml:"sources,omitempty"`
+}
+
+// SCIPOrDefault reports whether SCIP imports are enabled.
+func (c IndexerConfig) SCIPOrDefault() bool { return c.SCIP.Enabled == nil || *c.SCIP.Enabled }
+
+// SCIPSourceConfig is one SCIP index.
+type SCIPSourceConfig struct {
+	Index   string `yaml:"index"`             // .scip file, relative to dir
+	Dir     string `yaml:"dir,omitempty"`     // root-relative; the index's paths and command's directory
+	Command string `yaml:"command,omitempty"` // run with sh -c to write index
+	Source  string `yaml:"-"`                 // config layer that supplied it
+}
+
+// IdentityDigest identifies a source's command for admission by user
+// policy, like HookDef.IdentityDigest.
+func (s SCIPSourceConfig) IdentityDigest() string {
+	hash := sha256.New()
+	for _, value := range []string{"chronos-code/scip/v1", s.Source, s.Index, s.Dir, s.Command} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
+// SCIPSources returns workspace.indexer.scip.sources, each with the config
+// layer that supplied the list.
+func (c *Config) SCIPSources() []SCIPSourceConfig {
+	source := c.sources["workspace.indexer.scip.sources"]
+	out := make([]SCIPSourceConfig, len(c.Workspace.Indexer.SCIP.Sources))
+	for i, s := range c.Workspace.Indexer.SCIP.Sources {
+		s.Source = source
+		out[i] = s
+	}
+	return out
+}
 
 // FederationRoots returns workspace.indexer.federation with relative
 // roots resolved against the workspace root.

