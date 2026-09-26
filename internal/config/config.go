@@ -358,7 +358,14 @@ type IndexerConfig struct {
 	// modules and contracts (routes, RPCs, topics, tables) across them.
 	// Each repository keeps its own index.
 	Federation []FederatedRepo `yaml:"federation,omitempty"`
+	// Precise enables the type-checked tier: when a Go toolchain is on
+	// PATH, changed Go packages are type-checked in the background and
+	// calls resolve type_checked. Default true.
+	Precise *bool `yaml:"precise,omitempty"`
 }
+
+// PreciseOrDefault reports whether the type-checked tier is enabled.
+func (c IndexerConfig) PreciseOrDefault() bool { return c.Precise == nil || *c.Precise }
 
 // FederationRoots returns workspace.indexer.federation with relative
 // roots resolved against the workspace root.

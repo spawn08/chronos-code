@@ -57,6 +57,10 @@ type IndexReport struct {
 	Partial    bool   // only the working set is indexed so far (progressive first build)
 	Relations  string // weakest matching behind implementations, e.g. "name_matched"; call edges carry their own label
 	Error      string // last indexing error, if any
+	// Precise is the type-checked tier's state (waiting, loading, ready,
+	// unavailable: why); "" when it is off. Go calls resolve type_checked
+	// where its facts are current, whatever the state.
+	Precise string
 	// Repos are the federated repositories answering with the primary
 	// workspace (workspace.indexer.federation), if any.
 	Repos []RepoReport

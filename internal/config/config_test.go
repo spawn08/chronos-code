@@ -649,3 +649,13 @@ func TestFederationRootsResolveAgainstWorkspace(t *testing.T) {
 		t.Errorf("FederationRoots = %+v, want %+v", got, want)
 	}
 }
+
+func TestIndexerPreciseDefaultsOn(t *testing.T) {
+	if !(IndexerConfig{}).PreciseOrDefault() {
+		t.Error("precise tier off by default")
+	}
+	cfg := mustConfig(t, "workspace:\n  indexer:\n    precise: false\n")
+	if cfg.Workspace.Indexer.PreciseOrDefault() {
+		t.Error("precise: false ignored")
+	}
+}

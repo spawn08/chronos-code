@@ -28,6 +28,7 @@ import (
 	"github.com/spawn08/chronos-code/indexer/extract/packs"
 	"github.com/spawn08/chronos-code/indexer/extract/treesitter"
 	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/precise"
 	"github.com/spawn08/chronos-code/indexer/scan"
 	"github.com/spawn08/chronos-code/indexer/store"
 )
@@ -72,6 +73,14 @@ type Options struct {
 	FsnotifyMaxFiles int
 	// PollInterval is the git polling period; 0 = default.
 	PollInterval time.Duration
+	// Precise enables the type-checked tier (M4, precise_runner.go): Go
+	// packages changed since the last load are type-checked in the
+	// background once indexing has been quiet for PreciseQuiet (0 =
+	// default), and call sites resolve type_checked while their file is
+	// unchanged. PreciseEnv is added to the go command's environment.
+	Precise      bool
+	PreciseQuiet time.Duration
+	PreciseEnv   []string
 }
 
 // Stats describes one indexing pass.
@@ -112,6 +121,8 @@ type Engine struct {
 	lastErr    atomic.Pointer[errorHolder] // last pass error, nil after a success
 	reconciled atomic.Bool
 	lastMode   atomic.Value // string
+
+	precise *preciseRunner // nil when the type-checked tier is off
 }
 
 type errorHolder struct{ err error }
@@ -130,6 +141,7 @@ type Status struct {
 	Backend    string    // active watch backend, if watching
 	LastPass   time.Time // zero before the first pass
 	LastError  error     // error of the last pass, if it failed
+	Precise    PreciseStatus
 }
 
 // Status reports the current generation and freshness.
@@ -151,6 +163,7 @@ func (e *Engine) Status() Status {
 	if h := e.lastErr.Load(); h != nil {
 		st.LastError = h.err
 	}
+	st.Precise = e.PreciseStatus()
 	return st
 }
 
@@ -198,10 +211,19 @@ func Open(opts Options) (*Engine, error) {
 	if st.Recovered != "" {
 		opts.Logf("indexer: rebuilding index: %s", st.Recovered)
 	}
-	return &Engine{
+	e := &Engine{
 		opts: opts, st: st, ready: make(chan struct{}),
 		packs: generic.New(treesitter.New(treesitter.Options{})),
-	}, nil
+	}
+	if opts.Precise {
+		ps, err := precise.OpenStore(filepath.Join(opts.Dir, "precise"))
+		if err != nil {
+			_ = st.Close()
+			return nil, err
+		}
+		e.precise = newPreciseRunner(e, ps)
+	}
+	return e, nil
 }
 
 // Root returns the workspace root.
@@ -216,6 +238,9 @@ func (e *Engine) Manifest() store.Manifest { return e.st.Manifest() }
 // Close waits for background compaction and releases the index.
 func (e *Engine) Close() error {
 	e.closed.Store(true)
+	if e.precise != nil {
+		e.precise.close()
+	}
 	e.wg.Wait()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -477,6 +502,9 @@ func (e *Engine) build(ctx context.Context, sources []string, start time.Time, s
 	st.Publish += time.Since(t)
 	st.Generation = e.st.Manifest().Generation
 	st.Total = time.Since(start)
+	if e.precise != nil {
+		e.precise.note(nil, true)
+	}
 	return st, nil
 }
 
@@ -655,6 +683,13 @@ func (e *Engine) index(ctx context.Context, sn *store.Snapshot, candidates, dele
 	st.Generation = e.st.Manifest().Generation
 	st.Total = time.Since(start)
 	e.maybeCompact()
+	if e.precise != nil {
+		changed := make([]string, len(files))
+		for i, f := range files {
+			changed[i] = f.Path
+		}
+		e.precise.note(changed, false)
+	}
 	return st, nil
 }
 

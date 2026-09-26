@@ -206,7 +206,7 @@ func findCallersTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "find_callers",
 		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Find functions that call a given function or method, up to a bounded call-chain depth. Callers are grouped by callee and by how the call was resolved (import_resolved, type_hinted, name_matched, ambiguous; unresolved when the callee is not indexed), each as \"Caller (file:line)\". Ambiguous callers are not followed to the next depth.",
+		Description: "Find functions that call a given function or method, up to a bounded call-chain depth. Callers are grouped by callee and by how the call was resolved (type_checked, import_resolved, type_hinted, name_matched, ambiguous; unresolved when the callee is not indexed), each as \"Caller (file:line)\". Ambiguous callers are not followed to the next depth.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object",

@@ -1745,7 +1745,7 @@ func setupGraph(ctx context.Context, cfg *config.Config, dataDir string, agents 
 	}
 	scope, err := graph.NewIndexScope(ctx, graph.IndexScopeOptions{
 		Root: root, DataDir: dataDir, IndexOnStart: indexOnStart, Watch: indexOnStart,
-		Federation: federation,
+		Federation: federation, Precise: cfg.Workspace.Indexer.PreciseOrDefault(),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: open code index: %v\n", err)

@@ -41,6 +41,10 @@ type IndexScopeOptions struct {
 	// Federation lists other repositories whose indexes the graph tools
 	// also answer from (M9). Each keeps its own index.
 	Federation []FederatedRoot
+	// Precise enables the type-checked tier (M4) for every index: Go
+	// packages are type-checked in the background and calls resolve
+	// type_checked while their file is unchanged.
+	Precise bool
 }
 
 // FederatedRoot is one federated repository.
@@ -188,7 +192,7 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 		dir = filepath.Join(base, "chronos-code", "index", rootKey(root), "v1")
 	}
 	r := &indexRoot{root: root, cache: query.NewCache(), started: make(chan struct{})}
-	opts := indexer.Options{Root: root, Dir: dir, Logf: s.opts.Logf, Focus: focusDir(root)}
+	opts := indexer.Options{Root: root, Dir: dir, Logf: s.opts.Logf, Focus: focusDir(root), Precise: s.opts.Precise}
 	eng, err := indexer.Open(opts)
 	if errors.Is(err, store.ErrLocked) {
 		base := filepath.Join(filepath.Dir(dir), "sessions")
@@ -211,6 +215,7 @@ func (s *IndexScope) openRoot(root, dir string) (*indexRoot, error) {
 		return nil, fmt.Errorf("graph index: %w", err)
 	}
 	r.engine = eng
+	r.cache.SetPrecise(eng.Precise())
 	return r, nil
 }
 
@@ -521,6 +526,13 @@ func reportFrom(st indexer.Status) IndexReport {
 	r := IndexReport{
 		Mode: "syntactic", Generation: st.Generation, Files: st.Files, Pending: st.Pending,
 		Building: !st.Reconciled || !st.Complete, Partial: !st.Complete, Relations: query.NameMatched,
+	}
+	if st.Precise.State != indexer.PreciseOff {
+		r.Mode = "syntactic+type_checked"
+		r.Precise = st.Precise.State
+		if st.Precise.State == indexer.PreciseUnavailable && st.Precise.LastError != "" {
+			r.Precise += ": " + st.Precise.LastError
+		}
 	}
 	if st.LastError != nil {
 		r.Error = st.LastError.Error()

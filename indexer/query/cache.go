@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/precise"
 	"github.com/spawn08/chronos-code/indexer/segment"
 	"github.com/spawn08/chronos-code/indexer/store"
 )
@@ -21,6 +22,19 @@ type Cache struct {
 	segs  map[*segment.Segment]*segIndex // per segment: manifests, declared packages
 	proj  *projMemo                      // project model of the latest generation
 	docs  map[*segment.Segment]docStats  // per segment: document-section search stats
+
+	precise *precise.Store // the type-checked tier's facts, if on (M4)
+	valid   *validMemo     // precise directories current in the latest generation
+}
+
+// SetPrecise attaches the type-checked tier's facts (Engine.Precise); nil
+// detaches them. Views then resolve Go calls type_checked where the facts
+// are current.
+func (c *Cache) SetPrecise(p *precise.Store) *Cache {
+	c.mu.Lock()
+	c.precise, c.valid = p, nil
+	c.mu.Unlock()
+	return c
 }
 
 // docStats counts a segment's document sections and their search length.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -426,5 +427,40 @@ def test_create():
 	if store == nil || im["potential_breaking_change"] != true ||
 		!reflect.DeepEqual(store["callers"], []string{"create"}) || !reflect.DeepEqual(store["tests"], []string{"test_create"}) {
 		t.Fatalf("impact_analysis = %+v", im)
+	}
+}
+
+// With the type-checked tier on, calls resolve type_checked once the
+// background load has stored their facts, and the report says so.
+func TestIndexScopePrecise(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip(err)
+	}
+	root := canonicalTempDir(t)
+	writeTree(t, root, payFiles)
+	s, err := NewIndexScope(context.Background(), IndexScopeOptions{Root: root, DataDir: t.TempDir(), IndexOnStart: true, Precise: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	<-s.Engine().Ready()
+	if err := s.Engine().RunPrecise(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := call(t, ctx, toolFrom(t, s.Tools(), "find_callers"), map[string]any{"name": "record"})
+	levels, _ := got["callers_by_depth"].([]map[string]map[string][]string)
+	if len(levels) != 1 || !reflect.DeepEqual(levels[0]["record"]["type_checked"], []string{"Card.Pay (service.go:9)"}) {
+		t.Errorf("find_callers record = %+v", got)
+	}
+	idx, _ := got["index"].(map[string]any)
+	if idx["mode"] != "syntactic+type_checked" || idx["type_checked"] != "ready" {
+		t.Errorf("index report = %+v", idx)
+	}
+	// Interface dispatch resolves to the interface method.
+	got = call(t, ctx, toolFrom(t, s.Tools(), "find_callers"), map[string]any{"name": "Payer.Pay"})
+	levels, _ = got["callers_by_depth"].([]map[string]map[string][]string)
+	if len(levels) != 1 || !reflect.DeepEqual(levels[0]["Payer.Pay"]["type_checked"], []string{"Handle (handler.go:3)"}) {
+		t.Errorf("find_callers Payer.Pay = %+v", got)
 	}
 }

@@ -3,7 +3,7 @@
 Status: M5 complete (2026-09-25): agents' graph tools are served by the
 chronos indexer, `codebase_context` and per-turn prefetch use graph
 retrieval, and the store, reconcile and watcher are built for million-file
-repositories. M4 (precise tier) is still open. M6 complete (2026-09-26):
+repositories. M6 complete (2026-09-26):
 parser runtime decided and wrapped (`extract/treesitter`, `extract/packs`);
 facts v2 and segment format v4 done; query packs for all 17 languages are
 indexed (M6.3); the generic resolver, type uses and binding hints are in
@@ -17,6 +17,9 @@ against the corrected gold answer (M7.7, "M7 precision targets"). M8 complete (2
 documents. M9 complete (2026-09-26): the indexer is the public package
 `indexer/`, graph tools answer across federated repositories, and
 `chronos-code indexer mcp` serves them to external agents ("M9 results").
+M4 complete (2026-09-27): Go calls and type references resolve
+`type_checked` from a background go/packages tier, gated by file hashes
+("M4 results").
 Replaces the synchronous parts of `internal/graph` with an in-process
 indexer.
 
@@ -205,6 +208,9 @@ read-only and follows the manifest; it does not index.
   `stale_files` until the reconciliation publishes.
 
 ## Precise tier
+
+As built in M4 (see "M4 results"): facts per package directory, not
+segments, and method sets instead of `implements` edges.
 
 - After the dirty set has been quiet for 1 s, the existing loader logic
   (`loadGoPackagesWithTests`) is moved to `precise/` and run on the dirty
@@ -1513,6 +1519,130 @@ Not in M8:
 - The graph tools expose no document-link tool yet; `Mentions` and
   `MentionedBy` are used by retrieval.
 
+### M4 results (type-checked tier for Go, 2026-09-27)
+
+**Acceptance restated.** "Type-checked caller parity with the old graph"
+cannot be measured: M11 deleted the old graph. Its type-checked edges came
+from the same go/packages load, so parity now means: `type_checked` edges
+agree with scip-go (itself go/types) on the SCIP Go corpus.
+
+**Facts** (`indexer/precise`). `precise.Load` runs go/packages
+(`NeedTypesInfo`, tests included, one variant per package as
+`loadGoPackagesWithTests` chose it) on a module's directories and
+records per package directory:
+
+- per file, the xxh64 of the bytes go/packages parsed, every call site the
+  extractor records (keyed by the opening parenthesis, as `facts.Ref`)
+  with go/types' callee (file, name, receiver's base type; instantiated
+  generics mapped to their origin, promoted methods to the embedded
+  type's method, interface calls to the interface method), and every
+  identifier naming a declared type (keyed by its position). A callee or
+  type outside the root (standard library, dependencies), a builtin or a
+  function value is recorded with no file;
+- the package's non-generic named types declared in non-test files with
+  their method sets (`*T` for concrete types) as name plus parameter and
+  result types, and the hashes of the non-test files they came from.
+
+A package with any error is left out (`Failed`); its files keep syntactic
+answers. Facts are stored as one gob file per directory under
+`<index>/precise/` (`precise.Store`, versioned, written by rename, read
+lazily). They are not segments: they are keyed by directory, replaced
+whole on each load, and read by hash-gated lookups only, so the segment
+format and the store's publish path are untouched.
+
+**Runner** (`indexer/precise_runner.go`, `Options.Precise`). Every
+indexing pass notes the Go directories it changed; a full build or
+reconcile asks for a scan. After 1 s without indexing (`PreciseQuiet`),
+and never while a pass runs or the watcher has pending paths, one
+goroutine loads the pending directories, grouped by enclosing `go.mod`
+(more than 256 in a module load the whole module). A scan compares every
+indexed Go directory's file hashes with the store and loads only the
+missing or stale ones, and deletes facts of directories that are gone;
+a reopened index with current facts loads nothing. Directories go list
+does not return (only build-constrained files) and files a load skips
+(other platforms) get hash-only markers, so they are not reloaded
+forever. Loads run one at a time; edits are neither blocked nor
+cancelled by them: an edit made during a load leaves that file's new
+facts stale (hash mismatch) and its directory is queued again. No `go`
+on `PATH` makes the tier `unavailable`; a failing load keeps its work
+queued and reports the error. `Close` cancels a running load.
+`Engine.Status().Precise` reports the state (`waiting`, `loading`,
+`ready`, `unavailable`), directories loaded, failures and load time.
+
+**Resolution** (`query/precise.go`). A Go call or type reference whose
+file's indexed hash equals the recorded one resolves to go/types' target
+in the index, labelled `type_checked` (the top of the ladder), or to
+nothing, `type_checked`, when the target is not a workspace declaration.
+A site without facts, or whose target is no longer declared where
+recorded, falls through to the syntactic resolver. `Implementations` of
+a Go interface uses method sets (signatures compared) for every package
+whose non-test files are all unchanged since the load and none added,
+and method names for the rest. Nothing on the query path runs the go
+command (`TestIndexScopeNeverRunsGo` still passes; the tier is off
+there).
+
+**Integration.** `workspace.indexer.precise` (default true) turns the
+tier on for the primary index and federated ones, in the harness and
+`chronos-code indexer mcp`. The `index` report says
+`"mode": "syntactic+type_checked"` and `"type_checked": "<state>"`.
+`benchmark/edges -precise` scores with the tier.
+
+**Parity** (acceptance 1). scip-go on cobra (the Go repository of the
+SCIP baseline), against the corrected gold answer:
+
+| | Calls matched | top-1 | Types matched | top-1 |
+|---|---:|---:|---:|---:|
+| Syntactic (M7.7) | 2,495 | 1419 import_resolved, 910 type_hinted, 164 name_matched: 100% | 314 | 100% |
+| With the tier | 2,495, all `type_checked` | 100% | 314, all `type_checked` | 100% |
+
+Every gold call and type reference is `type_checked` and correct; recall
+100% (the two syntactic `unresolved` sites resolve). The syntactic
+resolver already matched scip-go on cobra, so the corpus shows the label
+upgrade, not a precision gain. On this repository (no SCIP gold), of the
+52,942 Go calls and instantiations the tier labels, go/types and the
+syntactic resolver's first target agree on 18,599 workspace targets and
+differ on 184 (161 of them syntactic `ambiguous`); on 742 sites the
+syntactic resolver returned a workspace declaration where go/types finds
+an external or builtin callee (512 `ambiguous`, 151 `name_matched`), and
+247 sites it did not resolve now are. 837 Go calls keep syntactic
+results (612 of them unresolved), in files the tier has no current facts
+for (not attributed further).
+
+Tests: `precise_test.go` (targets for interface, promoted, external,
+builtin, function-value and generic calls; tests and external test
+packages; method sets with a same-name, other-signature method; type
+errors), `precise_runner_test.go` (quiet period, only edited directories
+reload, a reopened index loads nothing, no toolchain, edits during a
+hanging load and `Close` stopping it), `query/precise_test.go`
+(`type_checked` calls and callers, stale facts ignored after an edit
+until the next load, implementations by signature, a new file making
+method sets stale), `TestIndexScopePrecise`.
+
+**Edits during loads** (acceptance 2; n = 200 × 3, same noisy machine).
+`IndexEditBody` 11.4–12.6 ms alone, 20.9–22.1 ms while a whole-module
+load runs on the same 10 cores (`IndexEditBodyDuringPrecise`), under
+50 ms. A load of this repository (61 packages with tests) takes 1.1 s
+(`PreciseLoad`, `./...`); the runner's first load in a separate run
+(66 directories as explicit patterns, plus the index comparison) took
+4.2 s.
+
+Queries (n = 3): `ScopeFindCallersDepth3` 2.3–2.4 ms syntactic, 1.3–1.4 ms
+with the tier; `ScopeFindImplementations` 126–130 → 37–38 µs;
+`ScopeCodebaseContext` 16.4–17.1 → 15.1–18.2 ms. Binary: release build
+51.9 MB (gate 56 MB); go/types and go/packages add about 2.4 MB to a
+minimal program (not measured on this binary).
+
+Not in M4:
+
+- Only calls and type references; field and variable uses, and method
+  values (`f := x.M` without a call), keep syntactic answers.
+- Cgo packages load only where cgo works; `go.work` workspaces load
+  module by module.
+- A load follows each module's own dependency resolution (`GOFLAGS`,
+  vendor, network access for missing modules as the go command decides);
+  `PreciseEnv` can pin it (tests use `-mod=mod`, `GOTOOLCHAIN=local`).
+- Other languages are M10.
+
 ### M9 results (federation, public package, MCP adapter, 2026-09-26)
 
 **Public package.** `internal/indexer` moved to `indexer/`
@@ -1943,7 +2073,7 @@ acceptance criteria met.
 | M1 | `scan`, `extract/golang`, `segment`, `store` (manifest, overlays, lock), worker/writer pipeline, watcher | Fresh build < 1.5 s and single edit < 50 ms on this repo; crash-before-publish test; corruption detection test |
 | M2 | `query/`; graph tools moved onto it; `RequestScope` and startup no longer block; `names` batching; labelled empty results | Tool contract tests pass unchanged; no `packages.Load` on any query path (fake-`go` test); a batched call returns the same per-name results as separate calls; empty results report confidence and freshness |
 | M3 (done) | `context/` backed by `graph/` (resolved-graph segments) and `retrieve/` (push-PPR expansion, packing at several zoom levels); per-turn prefetch; retrieval and turn-count eval for Go | `codebase_context` and prefetch < 15 ms uncached; budget never exceeded; `seen` and invalidation tests; eval baseline recorded in this doc |
-| M4 | `precise/` | Type-checked caller parity with the old graph; edits stay < 50 ms while precise loads run |
+| M4 (done) | `precise/` | Type-checked caller parity with the old graph (restated after M11 deleted it: `type_checked` edges agree with scip-go on the SCIP Go corpus); edits stay < 50 ms while precise loads run |
 | M5 (done) | Scale foundations: layered routing, streaming sharded base, compaction per shard, watcher backends, git-based reconcile, progressive build, portable segments | On a synthetic million-file corpus, every target in "Scale" is met; a test counts work on the edit path and shows none proportional to repository size; macOS watching uses no descriptor per file |
 | M6 (done) | Parser runtime spike (pure Go vs cgo: MB/s per language, memory, grammar load time); facts v2 with format version bump; query packs for every language in the table; generic resolver; binding hints | Runtime decision recorded with measurements; every listed language produces symbols, outlines and refs in release builds; parity with the old tree-sitter tier on its tests; baseline edge precision for each language against SCIP |
 | M7 (done) | Language resolvers and build graphs (Bazel/Buck, Gradle/Maven, workspaces, `compile_commands.json`) | `import_resolved` and `type_hinted` precision for each language meets the target set from the M6 baseline ("M7 precision targets"); no edit-latency regression |

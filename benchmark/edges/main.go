@@ -115,6 +115,7 @@ func run() error {
 		compdb  = flag.String("compdb", "", "compile_commands.json: check C/C++ calls against clang's AST")
 		clang   = flag.String("clang", "clang", "clang for -compdb")
 	)
+	flag.BoolVar(&usePrecise, "precise", false, "also run the type-checked tier (Go, needs the go command) before scoring")
 	flag.Parse()
 	if *name == "" || *repo == "" || *scip == "" {
 		return errors.New("-name, -repo and -scip are required")
@@ -144,6 +145,9 @@ func run() error {
 	res.Seconds = time.Since(start).Seconds()
 	return write(*out, res)
 }
+
+// usePrecise runs the type-checked tier (-precise) before scoring.
+var usePrecise bool
 
 // gold is a SCIP reference whose definition is in the repository.
 type gold struct {
@@ -282,7 +286,7 @@ func evaluate(root string, idx *scipIndex, verbose bool, corr *corrections) (Res
 		return Result{}, fmt.Errorf("temp index dir: %w", err)
 	}
 	defer os.RemoveAll(dir)
-	eng, err := indexer.Open(indexer.Options{Root: root, Dir: dir, ProgressiveFiles: -1})
+	eng, err := indexer.Open(indexer.Options{Root: root, Dir: dir, ProgressiveFiles: -1, Precise: usePrecise, PreciseQuiet: time.Hour})
 	if err != nil {
 		return Result{}, err
 	}
@@ -290,9 +294,14 @@ func evaluate(root string, idx *scipIndex, verbose bool, corr *corrections) (Res
 	if _, err := eng.Reconcile(context.Background()); err != nil {
 		return Result{}, fmt.Errorf("index %s: %w", root, err)
 	}
+	if usePrecise {
+		if err := eng.RunPrecise(context.Background()); err != nil {
+			return Result{}, fmt.Errorf("type-check %s: %w", root, err)
+		}
+	}
 	sn := eng.Snapshot()
 	defer sn.Release()
-	v := query.NewView(sn, query.NewCache())
+	v := query.NewView(sn, query.NewCache().SetPrecise(eng.Precise()))
 
 	hit := map[lineKey]map[int]bool{} // matched gold starts, both groups
 	measure := func(grp *Group, callable bool, kinds []uint8, corrected, verbose bool) {

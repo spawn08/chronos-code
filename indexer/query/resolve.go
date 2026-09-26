@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spawn08/chronos-code/indexer/facts"
+	"github.com/spawn08/chronos-code/indexer/precise"
 	"github.com/spawn08/chronos-code/indexer/segment"
 )
 
@@ -229,6 +230,9 @@ type fileCtx struct {
 	importsDone, hintsDone bool
 	importList             []facts.Import
 	hintList               []segment.HintRec
+
+	preciseDone bool
+	precise     *precise.File // current type-checked facts (M4), if any
 }
 
 func (fc *fileCtx) imports() []facts.Import {
@@ -265,6 +269,9 @@ func (v *View) fileCtx(i, f int) *fileCtx {
 // resolveRef resolves reference r of segment i. The steps, strongest
 // first, each setting the label:
 //
+//   - A Go call or type reference whose file has current type-checked
+//     facts (precise.go): go/types' target, type_checked; nothing when it
+//     is not a workspace declaration.
 //   - f(): the same file, the caller's own class (languages with implicit
 //     this), names the file imports, the same unit (languages where units
 //     share scope): import_resolved. Then any declaration of that name:
@@ -309,6 +316,14 @@ func (v *View) resolveRefUncached(i, r int) ([]Symbol, string) {
 		return v.resolveContract(rec.Qualifier, rec.Name)
 	case facts.RefMention:
 		return v.resolveMention(fc, rec)
+	case facts.RefCall:
+		if targets, ok := v.preciseCall(fc, rec); ok {
+			return targets, TypeChecked
+		}
+	case facts.RefInstantiate, facts.RefTypeUse, facts.RefExtends, facts.RefImplements:
+		if targets, ok := v.preciseTypeRef(fc, rec); ok {
+			return targets, TypeChecked
+		}
 	}
 	kinds := callableKinds
 	switch rec.Kind {

@@ -31,7 +31,10 @@ var wellKnown = map[string][]string{
 //     interface, including methods promoted from embedded fields declared
 //     in the same package. The match is by method name only (Resolution
 //     NameMatched): signatures are not compared. Interfaces without methods
-//     are skipped, since every type satisfies them.
+//     are skipped, since every type satisfies them. Where the type-checked
+//     tier has current method sets for the interface and a package
+//     (precise.go), that package's types are matched by go/types method
+//     sets instead, signatures included.
 //   - Other languages: types whose extends or implements clauses resolve
 //     to it (see Subtypes), transitively; interfaces, traits and protocols
 //     in the chain are followed but not listed.
@@ -46,12 +49,18 @@ func (v *View) Implementations(iface string) []string {
 		if it.Name != iface {
 			continue
 		}
+		// Type-checked method sets answer for the packages they are
+		// current in; the others are matched by method names.
+		exact, checked, _ := v.preciseImplementations(it)
+		for n := range exact {
+			found[n] = true
+		}
 		methods := v.interfaceMethods(it, map[uint64]bool{}, 0)
 		if len(methods) == 0 {
 			continue
 		}
 		for _, cand := range v.candidates(methods) {
-			if cand.name == iface && cand.pkg == it.Package {
+			if cand.name == iface && cand.pkg == it.Package || checked[cand.pkg] {
 				continue
 			}
 			if covers(v.methodSet(cand.pkg, cand.name, 0), methods) {

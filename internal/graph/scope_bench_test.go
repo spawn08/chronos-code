@@ -238,3 +238,54 @@ func BenchmarkScopeFederatedFindCallersDepth3(b *testing.B) {
 func BenchmarkScopeFederatedCodebaseSearch(b *testing.B) {
 	benchTool(b, benchFederatedScope(b).Tools(), "codebase_search", map[string]any{"query": "graph index store", "top_k": 10})
 }
+
+// Type-checked tier benchmarks (M4): this repository with its Go packages
+// type-checked once before timing.
+var preciseScope struct {
+	once  sync.Once
+	scope *IndexScope
+	err   error
+}
+
+func benchPreciseScope(b *testing.B) *IndexScope {
+	b.Helper()
+	preciseScope.once.Do(func() {
+		root, err := filepath.Abs("../..")
+		if err == nil {
+			root, err = filepath.EvalSymlinks(root)
+		}
+		if err != nil {
+			preciseScope.err = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "scope-bench-precise-*")
+		if err != nil {
+			preciseScope.err = err
+			return
+		}
+		scope, err := NewIndexScope(context.Background(), IndexScopeOptions{Root: root, DataDir: dir, IndexOnStart: true, Precise: true})
+		if err != nil {
+			preciseScope.err = err
+			return
+		}
+		<-scope.Engine().Ready()
+		preciseScope.err = scope.Engine().RunPrecise(context.Background())
+		preciseScope.scope = scope
+	})
+	if preciseScope.err != nil {
+		b.Skipf("precise scope: %v", preciseScope.err)
+	}
+	return preciseScope.scope
+}
+
+func BenchmarkScopePreciseFindCallersDepth3(b *testing.B) {
+	benchTool(b, benchPreciseScope(b).Tools(), "find_callers", map[string]any{"name": "Execute", "depth": 3})
+}
+
+func BenchmarkScopePreciseFindImplementations(b *testing.B) {
+	benchTool(b, benchPreciseScope(b).Tools(), "find_implementations", map[string]any{"name": "Backend"})
+}
+
+func BenchmarkScopePreciseCodebaseContext(b *testing.B) {
+	benchTool(b, benchPreciseScope(b).Tools(), "codebase_context", map[string]any{"query": "Reconcile", "max_tokens": 4096})
+}

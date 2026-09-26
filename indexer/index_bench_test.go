@@ -4,7 +4,9 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/spawn08/chronos-code/indexer/precise"
 	"github.com/spawn08/chronos-code/internal/indexbench"
 )
 
@@ -121,6 +123,51 @@ func BenchmarkIndexEditBody(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ib.probe.Write(i+1, false, true)
 		ib.update(b)
+	}
+}
+
+// BenchmarkIndexEditBodyDuringPrecise is BenchmarkIndexEditBody while
+// the type-checked tier loads the whole module again and again in the
+// background (M4: edits stay < 50 ms while precise loads run).
+func BenchmarkIndexEditBodyDuringPrecise(b *testing.B) {
+	if err := precise.Available(); err != nil {
+		b.Skip(err)
+	}
+	ib := newIndexBench(b, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	loads := make(chan int, 1)
+	go func() {
+		n := 0
+		defer func() { loads <- n }()
+		for ctx.Err() == nil {
+			n++
+			_, _ = precise.Load(ctx, ib.root, ".", nil, nil)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond) // let the first load get going
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ib.probe.Write(i+1, false, true)
+		ib.update(b)
+	}
+	b.StopTimer()
+	cancel()
+	b.ReportMetric(float64(<-loads), "loads_started")
+}
+
+// BenchmarkPreciseLoad is one type-checked load of this whole repository.
+func BenchmarkPreciseLoad(b *testing.B) {
+	if err := precise.Available(); err != nil {
+		b.Skip(err)
+	}
+	ib := newIndexBench(b, false)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := precise.Load(context.Background(), ib.root, ".", nil, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.ReportMetric(float64(len(res.Dirs)), "dirs")
 	}
 }
 

@@ -35,6 +35,9 @@ func labelResult(store Backend, out map[string]any, relation, empty bool, note s
 	if report.Error != "" {
 		index["error"] = report.Error
 	}
+	if report.Precise != "" {
+		index["type_checked"] = report.Precise
+	}
 	if len(report.Repos) > 0 {
 		repos := make([]map[string]any, 0, len(report.Repos))
 		for _, r := range report.Repos {

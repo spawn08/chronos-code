@@ -73,12 +73,13 @@ type View struct {
 	sn       *store.Snapshot
 	cache    *Cache
 	metas    map[fileKey]segment.FileMeta
-	visible  map[string]map[string]bool // package -> itself and its imports
-	syms     map[fileKey]Symbol         // decoded symbols by (segment, symbol index)
-	files    map[fileKey]*fileCtx       // resolution context by (segment, file)
-	resolved map[fileKey]resolution     // resolved references by (segment, ref)
-	byName   map[string][]Symbol        // live declarations by name
-	byKinds  map[namedKey][]Symbol      // byName filtered by a kind set
+	visible  map[string]map[string]bool     // package -> itself and its imports
+	syms     map[fileKey]Symbol             // decoded symbols by (segment, symbol index)
+	files    map[fileKey]*fileCtx           // resolution context by (segment, file)
+	resolved map[fileKey]resolution         // resolved references by (segment, ref)
+	byName   map[string][]Symbol            // live declarations by name
+	byKinds  map[namedKey][]Symbol          // byName filtered by a kind set
+	byFile   map[string]map[string][]Symbol // declarations of a file by name (precise targets)
 }
 
 type fileKey struct{ seg, file int }

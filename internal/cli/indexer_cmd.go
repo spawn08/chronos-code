@@ -47,6 +47,7 @@ func runIndexerCommand(ctx context.Context, cfg *config.Config, args []string, s
 	}
 	scope, err := graph.NewIndexScope(ctx, graph.IndexScopeOptions{
 		Root: paths.Root, DataDir: paths.Dir, IndexOnStart: true, Watch: true, Federation: federation,
+		Precise: cfg.Workspace.Indexer.PreciseOrDefault(),
 	})
 	if err != nil {
 		return fmt.Errorf("open code index: %w", err)
