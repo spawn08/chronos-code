@@ -160,7 +160,7 @@ func (e *ReadOnlyDeliveryExecutor) Execute(ctx context.Context, executionAttempt
 	if err != nil {
 		return deliveryWait("usage-reconciliation", fmt.Errorf("load delivery usage: %w", err))
 	}
-	if usage.OutstandingCalls > 0 {
+	if usage.OutstandingCalls > 0 || usage.UnknownCalls > 0 {
 		return deliveryWait("usage-reconciliation", execution.ErrUsageOutcomeUnknown)
 	}
 	if executionAttempt.Lease.Attempt > 1 && usage.ReconciledCalls > 0 && !strings.HasPrefix(delivery.PolicyReference, execution.ReadOnlyTeamPolicyPrefix) {

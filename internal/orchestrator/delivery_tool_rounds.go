@@ -75,4 +75,34 @@ func (j deliveryToolRoundJournal) CheckpointToolRound(ctx context.Context, agent
 	return nil
 }
 
+func (j deliveryToolRoundJournal) ResumeAgentReply(ctx context.Context, agentID, input, modelID string) (*model.ChatResponse, error) {
+	identity, ok := agent.RunIdentityFromContext(ctx)
+	if !ok || identity.RoleID != agentID {
+		return nil, execution.ErrInvalidDelivery
+	}
+	lease, ok := execution.OperationLeaseFromContext(ctx)
+	if !ok {
+		return nil, execution.ErrInvalidDelivery
+	}
+	return lease.Store.ResumeAgentReply(ctx, j.attempt.Lease, identity.RoleID, identity.NodeID, input, modelID)
+}
+
+func (j deliveryToolRoundJournal) CheckpointAgentReply(ctx context.Context, agentID, input, modelID string, response *model.ChatResponse) error {
+	identity, ok := agent.RunIdentityFromContext(ctx)
+	if !ok || identity.RoleID != agentID || identity.InvocationID == "" {
+		return execution.ErrInvalidDelivery
+	}
+	// A bare SDK agent has no authoritative provider accounting. Such calls
+	// retain the existing park-on-reclaim behavior.
+	if role := j.roles[agentID]; role == nil || !hasDurableBudgetHook(role) {
+		return nil
+	}
+	lease, ok := execution.OperationLeaseFromContext(ctx)
+	if !ok {
+		return execution.ErrInvalidDelivery
+	}
+	return lease.Store.CheckpointAgentReply(ctx, j.attempt.Lease, identity.InvocationID, identity.RoleID, identity.NodeID, input, modelID, response)
+}
+
 var _ agent.ToolRoundJournal = deliveryToolRoundJournal{}
+var _ agent.AgentReplyJournal = deliveryToolRoundJournal{}

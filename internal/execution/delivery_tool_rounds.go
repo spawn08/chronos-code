@@ -174,17 +174,25 @@ func (s *DeliveryStore) CoversOperation(ctx context.Context, lease Lease, op Ope
 	return false, nil
 }
 
-// CheckpointedCallCount is the number of prior model replies with complete
-// tool rounds. A billed reply without such a checkpoint cannot be replayed.
+// CheckpointedCallCount counts covered tool-call and terminal model replies.
+// A billed reply without either checkpoint cannot be replayed.
 func (s *DeliveryStore) CheckpointedCallCount(ctx context.Context, lease Lease) (int64, error) {
 	var count int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_tool_rounds WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt < ? AND goal_revision = ?`,
+	err := s.db.QueryRowContext(ctx, `SELECT
+      (SELECT COUNT(*) FROM delivery_tool_rounds WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt < ? AND goal_revision = ?) +
+      (SELECT COUNT(*) FROM delivery_agent_replies WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt < ? AND goal_revision = ?)`,
+		lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, lease.Attempt, lease.Delivery.CurrentGoalRevision,
 		lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, lease.Attempt, lease.Delivery.CurrentGoalRevision).Scan(&count)
 	return count, err
 }
 
 func (s *DeliveryStore) CheckpointedCallsByNode(ctx context.Context, lease Lease) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT node_id, COUNT(*) FROM delivery_tool_rounds WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt < ? AND goal_revision = ? GROUP BY node_id`,
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id, COUNT(*) FROM (
+      SELECT node_id FROM delivery_tool_rounds WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt < ? AND goal_revision = ?
+      UNION ALL
+      SELECT node_id FROM delivery_agent_replies WHERE tenant_id = ? AND repository_id = ? AND delivery_id = ? AND attempt < ? AND goal_revision = ?
+    ) GROUP BY node_id`,
+		lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, lease.Attempt, lease.Delivery.CurrentGoalRevision,
 		lease.Delivery.TenantID, lease.Delivery.RepositoryID, lease.Delivery.ID, lease.Attempt, lease.Delivery.CurrentGoalRevision)
 	if err != nil {
 		return nil, err

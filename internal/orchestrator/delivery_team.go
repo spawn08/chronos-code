@@ -77,7 +77,7 @@ func (o *Orchestrator) runDurableTeam(ctx context.Context, id, message string, a
 	if err != nil {
 		return "", err
 	}
-	if usage.OutstandingCalls > 0 {
+	if usage.OutstandingCalls > 0 || usage.UnknownCalls > 0 {
 		return "", execution.ErrUsageOutcomeUnknown
 	}
 	attempts, err := attempt.PriorAttempts(ctx)
@@ -185,7 +185,7 @@ func (o *Orchestrator) runDurableParallelTeam(ctx context.Context, t *team.Team,
 	if err != nil {
 		return "", err
 	}
-	if usage.OutstandingCalls > 0 {
+	if usage.OutstandingCalls > 0 || usage.UnknownCalls > 0 {
 		return "", execution.ErrUsageOutcomeUnknown
 	}
 	attempts, err := attempt.PriorAttempts(ctx)
