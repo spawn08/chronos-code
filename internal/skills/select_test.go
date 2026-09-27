@@ -5,60 +5,66 @@ import (
 	"testing"
 )
 
-func testCatalog() []*Skill {
-	return []*Skill{
-		{Name: "code-review", Description: "Review code for correctness bugs and security issues", Triggers: []string{"review", "pr", "quality"}, Body: "review body"},
-		{Name: "test-writer", Description: "Generate tests for existing code", Triggers: []string{"test", "pytest", "coverage"}, Body: "test-writer body"},
-		{Name: "git-workflow", Description: "Git operations: commits, branches, PRs", Triggers: []string{"git", "commit", "branch", "pr"}, Body: "git body"},
-		{Name: "document", Description: "Generate or improve code documentation", Triggers: []string{"docs", "documentation", "readme"}, Body: "document body"},
-	}
-}
-
-func TestSelectRanksMostRelevantSkillFirst(t *testing.T) {
-	selected := Select("please review this pull request for bugs", testCatalog(), 3, "gpt-4o")
-	if len(selected) == 0 {
-		t.Fatal("Select returned nothing, want at least code-review")
-	}
-	if selected[0].Name != "code-review" {
-		t.Errorf("selected[0].Name = %q, want code-review (best trigger/description match)", selected[0].Name)
-	}
-}
-
-func TestSelectRespectsTopK(t *testing.T) {
-	selected := Select("review the git commit and write tests, update docs too", testCatalog(), 2, "gpt-4o")
-	if len(selected) > 2 {
-		t.Fatalf("len(selected) = %d, want <= 2 (topK)", len(selected))
-	}
-}
-
-func TestSelectNoMatchReturnsNil(t *testing.T) {
-	selected := Select("xyzxyz nonsense query zzqx", testCatalog(), 3, "gpt-4o")
-	if len(selected) != 0 {
-		t.Fatalf("selected = %+v, want none (no term overlap)", selected)
-	}
-}
-
-func TestSelectEmptyMessageReturnsNil(t *testing.T) {
-	selected := Select("", testCatalog(), 3, "gpt-4o")
-	if len(selected) != 0 {
-		t.Fatalf("selected = %+v, want none for empty message", selected)
-	}
-}
-
-func TestSelectTrimsToFitTokenBudget(t *testing.T) {
-	huge := strings.Repeat("word ", 20000)
+func TestAvailableFiltersByCapabilityAndSortsByName(t *testing.T) {
 	catalog := []*Skill{
-		{Name: "a", Description: "review", Triggers: []string{"review"}, Body: huge},
-		{Name: "b", Description: "review", Triggers: []string{"review"}, Body: huge},
-		{Name: "c", Description: "review", Triggers: []string{"review"}, Body: huge},
+		{Name: "zeta", Description: "last"},
+		{Name: "missing-tool", Description: "x", ToolsRequired: []string{"shell"}},
+		{Name: "wrong-model", Description: "x", ModelHint: "opus"},
+		{Name: "Alpha", Description: "first", ToolsRequired: []string{"file_read"}, ModelHint: "sonnet"},
 	}
-	selected := Select("review this", catalog, 3, "gpt-4o")
-	rendered := Render(selected)
-	if len(selected) >= 3 {
-		t.Fatalf("len(selected) = %d, want fewer than topK once budget-trimmed", len(selected))
+	got := Available(catalog, CapabilityManifest{ModelID: "claude-sonnet-4", Tools: map[string]struct{}{"file_read": {}}})
+	if len(got) != 2 || got[0].Name != "Alpha" || got[1].Name != "zeta" {
+		t.Fatalf("Available = %+v, want [Alpha zeta]", got)
 	}
-	if rendered == "" && len(selected) > 0 {
-		t.Fatal("Render returned empty for a non-empty selection")
+}
+
+func TestFindIsCaseInsensitive(t *testing.T) {
+	catalog := []*Skill{{Name: "code-review"}}
+	if Find(catalog, " Code-Review ") != catalog[0] {
+		t.Fatal("Find did not match case-insensitively")
+	}
+	if Find(catalog, "missing") != nil {
+		t.Fatal("Find matched an unknown name")
+	}
+}
+
+func TestRenderCatalogListsNamesAndDescriptionsNotBodies(t *testing.T) {
+	out, listed := RenderCatalog([]*Skill{
+		{Name: "code-review", Description: "Review code\n  for bugs", Body: "BODY MUST NOT APPEAR"},
+		{Name: "git-workflow", Triggers: []string{"git", "commit"}},
+	}, "skill")
+	if listed != 2 {
+		t.Fatalf("listed = %d, want 2", listed)
+	}
+	for _, want := range []string{"<skill_catalog>", "call skill with that skill's name", "- code-review: Review code for bugs", "- git-workflow: use for git, commit", "</skill_catalog>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("catalog missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "BODY MUST NOT APPEAR") {
+		t.Fatalf("catalog leaked a skill body:\n%s", out)
+	}
+	if empty, n := RenderCatalog(nil, "skill"); empty != "" || n != 0 {
+		t.Fatalf("empty catalog = (%q, %d)", empty, n)
+	}
+}
+
+func TestRenderCatalogBoundsDescriptionsAndSize(t *testing.T) {
+	long := strings.Repeat("é", MaxCatalogDescription)
+	out, _ := RenderCatalog([]*Skill{{Name: "long", Description: long}}, "skill")
+	line := out[strings.Index(out, "- long: "):]
+	line = line[:strings.IndexByte(line, '\n')]
+	if len(line) > len("- long: ")+MaxCatalogDescription+len("…") || !strings.HasSuffix(line, "…") {
+		t.Fatalf("description not capped on a rune boundary: %q", line)
+	}
+
+	var many []*Skill
+	for i := 0; i < 200; i++ {
+		many = append(many, &Skill{Name: "skill-" + strings.Repeat("x", 10) + string(rune('a'+i%26)), Description: strings.Repeat("d", 200)})
+	}
+	out, listed := RenderCatalog(many, "skill")
+	if len(out) > MaxCatalogBytes || listed == 0 || listed == len(many) || !strings.HasSuffix(out, "</skill_catalog>") {
+		t.Fatalf("catalog bytes=%d listed=%d of %d", len(out), listed, len(many))
 	}
 }
 
@@ -78,28 +84,5 @@ func TestRenderFormatsSkillTags(t *testing.T) {
 func TestRenderEmptySelectionReturnsEmptyString(t *testing.T) {
 	if out := Render(nil); out != "" {
 		t.Errorf("Render(nil) = %q, want empty string", out)
-	}
-}
-
-func TestSelectWithCapabilitiesSeparatesRationaleFromContext(t *testing.T) {
-	catalog := []*Skill{
-		{Name: "accepted", Description: "review correctness", ToolsRequired: []string{"file_read"}, ModelHint: "sonnet", Body: "accepted body"},
-		{Name: "missing-tool", Description: "review correctness", ToolsRequired: []string{"shell"}, Body: "must not leak"},
-		{Name: "wrong-model", Description: "review correctness", ModelHint: "opus", Body: "must not leak either"},
-	}
-	result := SelectWithCapabilities("review correctness", catalog, 3, CapabilityManifest{
-		AgentID: "reviewer", ModelID: "claude-sonnet-4", Tools: map[string]struct{}{"file_read": {}},
-	})
-	if len(result.Selected) != 1 || result.Selected[0].Name != "accepted" {
-		t.Fatalf("selected = %+v", result.Selected)
-	}
-	if strings.Contains(result.Context, "missing required tools") || strings.Contains(result.Context, "does not satisfy") || strings.Contains(result.Context, "must not leak") {
-		t.Fatalf("selection rationale leaked into model context: %q", result.Context)
-	}
-	if len(result.Decisions) != 3 || result.Decisions[0].Score <= 0 {
-		t.Fatalf("decisions = %+v", result.Decisions)
-	}
-	if result.Decisions[1].Rejection == "" || result.Decisions[2].Rejection == "" {
-		t.Fatalf("rejection rationale missing: %+v", result.Decisions)
 	}
 }

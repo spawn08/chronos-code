@@ -45,6 +45,8 @@ func TestExtract(t *testing.T) {
   },
 }`, `manifest:tsconfig name=""; extends =tsconfig.base.json; root =app/src; alias @app/*=app/src/app/*; alias @lib=lib/index.ts; alias ~/*=app/src/*`},
 		{"tsconfig.json", `{"compilerOptions": {"paths": {"@/*": ["src/*"]}}}`, `manifest:tsconfig name=""; alias @/*=src/*`},
+		{"tsconfig.json", `{"compilerOptions": {"paths": {"@/*": ["./*"], "#/*": ["*"]}}}`, `manifest:tsconfig name=""; alias #/*=*; alias @/*=*`},
+		{"tsconfig.json", `{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["./*"]}}}`, `manifest:tsconfig name=""; root =.; alias @/*=*`},
 		{"crates/cli/Cargo.toml", `[package]
 name = "acme-cli" # the binary
 

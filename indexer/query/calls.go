@@ -118,7 +118,9 @@ func (v *View) IncomingEdges(targets []Symbol) []CallEdge {
 				}
 				for _, ti := range byName[name] {
 					t := targets[ti]
-					if kind == facts.RefInstantiate && t.Kind != facts.KindConstructor || !targetsInclude(resolved, t) ||
+					// An instantiation calls a constructor, or in JS/TS a function
+					// component (jsInstantiableKinds), not the type itself.
+					if kind == facts.RefInstantiate && t.Kind != facts.KindConstructor && isTypeKind(t.Kind) || !targetsInclude(resolved, t) ||
 						!ctors[ti].selects(t, seg.Ref(r)) {
 						continue
 					}

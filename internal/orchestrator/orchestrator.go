@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -1203,45 +1204,6 @@ func numericValue(value any) int {
 type messageKey struct{}
 type explicitSkillKey struct{}
 
-const maxRecentSkillTools = 5
-
-type skillToolHistory struct {
-	mu      sync.Mutex
-	agentID string
-	tools   map[string][]string
-}
-
-func newSkillToolHistory(agentID string) *skillToolHistory {
-	return &skillToolHistory{agentID: agentID, tools: make(map[string][]string)}
-}
-
-func (h *skillToolHistory) Before(context.Context, *hooks.Event) error { return nil }
-
-func (h *skillToolHistory) After(ctx context.Context, evt *hooks.Event) error {
-	if evt.Type != hooks.EventToolCallAfter || evt.Name == "" {
-		return nil
-	}
-	key := sessionOrAgentKey(ctx, h.agentID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	tools := append(h.tools[key], evt.Name)
-	if len(tools) > maxRecentSkillTools {
-		tools = tools[len(tools)-maxRecentSkillTools:]
-	}
-	h.tools[key] = tools
-	return nil
-}
-
-func (h *skillToolHistory) query(ctx context.Context, message string) string {
-	key := sessionOrAgentKey(ctx, h.agentID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.tools[key]) == 0 {
-		return message
-	}
-	return message + "\n" + strings.Join(h.tools[key], " ")
-}
-
 // setupMemory wires chronos-code's YAML-backed memory store (PRD P2-002)
 // into every agent via ContextPinsFn, which chronos's sdk/agent evaluates
 // fresh on every turn and injects as pinned (never-summarized) context.
@@ -1514,36 +1476,31 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 		return nil
 	}
 
+	// Progressive disclosure: every turn lists the skills the agent can run
+	// (name and description) and the model loads a body with the skill
+	// tool; a skill pinned with WithSkill is injected in full.
 	for _, a := range agents {
+		if a.Tools != nil {
+			a.Tools.Register(skillTool(a, catalog))
+		}
 		prev := a.ContextPinsFn
-		history := newSkillToolHistory(a.ID)
-		a.Hooks = append(a.Hooks, history)
 		a.ContextPinsFn = func(ctx context.Context) []model.Message {
 			var msgs []model.Message
 			if prev != nil {
 				msgs = append(msgs, prev(ctx)...)
 			}
-			msg, _ := ctx.Value(messageKey{}).(string)
-			if msg == "" {
-				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
-				return msgs
-			}
-			manifest := skillCapabilityManifest(a)
+			listing, listed := skills.RenderCatalog(skills.Available(catalog, skillCapabilityManifest(a)), skillToolName)
+			content := listing
 			if selected, _ := ctx.Value(explicitSkillKey{}).(*skills.Skill); selected != nil {
-				content := skills.Render([]*skills.Skill{selected})
-				contextSourceSelected(ctx, ContextSourceSkills, 1, len(content), false)
-				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: content})
+				content = strings.TrimSpace(skills.Render([]*skills.Skill{selected}) + "\n\n" + listing)
+				listed++
+			}
+			if content == "" {
+				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
 				return msgs
 			}
-			query := history.query(ctx, msg)
-			selection := skills.SelectWithCapabilities(query, catalog, skills.DefaultTopK, manifest)
-			if selection.Context != "" {
-				contextSourceSelected(ctx, ContextSourceSkills, len(selection.Selected), len(selection.Context), false)
-				msgs = append(msgs, model.Message{Role: model.RoleSystem, Content: selection.Context})
-			} else {
-				contextSourceOmitted(ctx, ContextSourceSkills, ContextOmittedNotSelected)
-			}
-			return msgs
+			contextSourceSelected(ctx, ContextSourceSkills, listed, len(content), false)
+			return append(msgs, model.Message{Role: model.RoleSystem, Content: content})
 		}
 	}
 	return catalog
@@ -3246,6 +3203,11 @@ func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config
 		base := toolcompress.DefaultThresholdTokens
 		if tracker != nil {
 			base = tracker.CompressionThreshold(sessionOrAgentKey(ctx, a.ID))
+		}
+		if name == skillToolName {
+			// Skill instructions are loaded to be followed; a preview stub
+			// would force a read_stored_result round trip.
+			return math.MaxInt32
 		}
 		weight := attention.Weight(attention.Classify(name, args))
 		if name == "codebase_search" || name == "codebase_map" || name == "codebase_context" {

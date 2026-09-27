@@ -63,7 +63,7 @@ var contextSourceDefinitions = []ContextSourceReport{
 	{Kind: ContextSourceMemory, ID: "memory", Title: "Memory intent and recall", BudgetBytes: 800},
 	{Kind: ContextSourceLearnedPattern, ID: "learned-pattern", Title: "Learned pattern", BudgetBytes: 1000},
 	{Kind: ContextSourceProjectDocs, ID: "project-docs", Title: "Project instructions", BudgetBytes: 64000},
-	{Kind: ContextSourceSkills, ID: "skills", Title: "Selected skills", BudgetBytes: 32000},
+	{Kind: ContextSourceSkills, ID: "skills", Title: "Skills", BudgetBytes: 32000},
 	{Kind: ContextSourceDiagnostics, ID: "diagnostics", Title: "LSP diagnostics"},
 	{Kind: ContextSourceGraphPrediction, ID: "graph-prediction", Title: "Graph prediction"},
 	{Kind: ContextSourceRepositoryContext, ID: "repository-context", Title: "Repository context", BudgetBytes: 6000},

@@ -335,9 +335,11 @@ func (x *extractor) tsconfig(src []byte) error {
 			}
 			p := path.Join(base, t)
 			if strings.HasSuffix(t, "/*") || t == "*" {
-				p = strings.TrimSuffix(path.Join(base, strings.TrimSuffix(t, "*")), "/") + "/*"
-				if t == "*" {
-					p = strings.TrimPrefix(path.Join(base, ".")+"/*", "./")
+				// A wildcard target stays root-relative: "./*" in a root
+				// tsconfig is "*", not "./*", which no indexed path matches.
+				p = "*"
+				if dir := path.Clean(path.Join(base, strings.TrimSuffix(t, "*"))); dir != "." {
+					p = dir + "/*"
 				}
 			}
 			if p == ".." || strings.HasPrefix(p, "../") {

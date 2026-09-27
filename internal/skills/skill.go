@@ -85,12 +85,6 @@ type Skill struct {
 	Source string
 }
 
-// text returns the combined triggers+description+name text Select scores
-// against a user message — the PRD's "BM25 over triggers + description."
-func (s *Skill) text() string {
-	return s.Name + " " + s.Description + " " + strings.Join(s.Triggers, " ")
-}
-
 // bundledYAML mirrors internal/defaults/skills/default-skills.yaml's shape:
 // a single file declaring multiple skills, with `tags` doubling as trigger
 // keywords and `manifest` as the body.

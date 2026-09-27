@@ -79,7 +79,7 @@ func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, a
 		"find_implementations", "impact_analysis", "test_map", "co_change",
 		"multi_resolution_view", "resolve_symbol",
 		"file_read", "file_list", "file_glob", "file_grep", "semantic_search",
-		"workspace_info", "update_plan":
+		"workspace_info", "update_plan", "skill":
 		return Auto
 	case "file_write", "shell":
 		if yolo {

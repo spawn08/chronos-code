@@ -234,3 +234,53 @@ func TestResolveBuildGraphRestriction(t *testing.T) {
 	expect(t, resolved(t, v, "go"), map[string]string{"process@2": "name_matched Widget.process"})
 	expect(t, resolved(t, v, "show"), map[string]string{"render@2": "name_matched View.render"})
 }
+
+// TestResolveJSXComponents: a JSX element renders a function, arrow or
+// class component; each resolves to its imported declaration, and the
+// renderer is a caller of the component.
+func TestResolveJSXComponents(t *testing.T) {
+	v := newFixture(t, map[string]string{
+		"components/Tabs.tsx":   "export default function Tabs() {\n  return <div />;\n}\n",
+		"components/Card.tsx":   "export const Card = () => <div />;\n",
+		"components/Legacy.tsx": "export class Legacy {\n  render() { return <div />; }\n}\n",
+		"decoy/Tabs.tsx":        "export default function Tabs() {\n  return <span />;\n}\nexport const Card = () => <span />;\nexport class Legacy {}\n",
+		"app/page.tsx": `import Tabs from "../components/Tabs";
+import { Card } from "../components/Card";
+import { Legacy } from "../components/Legacy";
+
+export function Page() {
+  return (
+    <main>
+      <Tabs />
+      <Card></Card>
+      <Legacy />
+    </main>
+  );
+}
+`,
+	}).view(t)
+	expectTargets(t, targetFiles(t, v, "Page"), map[string]string{
+		"Tabs@8":    "components/Tabs.tsx",
+		"Card@9":    "components/Card.tsx",
+		"Legacy@10": "components/Legacy.tsx",
+	})
+	callers := v.Callers([]string{"Tabs", "Card"})
+	for _, name := range []string{"Tabs", "Card"} {
+		if got := callers[name]; len(got) != 1 || got[0] != "Page" {
+			t.Errorf("callers of %s = %v, want [Page]", name, got)
+		}
+	}
+}
+
+// TestResolveRootTSConfigPathAlias: "@/*": ["./*"] in a tsconfig at the
+// workspace root maps @/x to the root-relative x.
+func TestResolveRootTSConfigPathAlias(t *testing.T) {
+	v := newFixture(t, map[string]string{
+		"tsconfig.json":        `{"compilerOptions": {"paths": {"@/*": ["./*"]}}}`,
+		"lib/util.ts":          "export function helper(): number { return 1; }\n",
+		"decoy/lib/util.ts":    "export function helper(): number { return 2; }\n",
+		"components/widget.ts": "import { helper } from \"@/lib/util\";\n\nexport function widget(): number {\n  return helper();\n}\n",
+	}).view(t)
+	expect(t, resolved(t, v, "widget"), map[string]string{"helper@4": "import_resolved helper"})
+	expectTargets(t, targetFiles(t, v, "widget"), map[string]string{"helper@4": "lib/util.ts"})
+}

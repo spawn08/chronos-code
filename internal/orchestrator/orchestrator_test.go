@@ -1128,8 +1128,11 @@ func TestSkillContextParityPreservesExistingPins(t *testing.T) {
 		t.Fatalf("blocking pins %q differ from streaming pins %q", blockingPins, streamingPins)
 	}
 	joined := strings.Join(blockingPins, "\n")
-	if !strings.Contains(joined, "existing pin") || !strings.Contains(joined, "parity skill body") {
-		t.Fatalf("pins = %q, want existing pin and selected current-message skill", joined)
+	if !strings.Contains(joined, "existing pin") || !strings.Contains(joined, "- parity-skill: test skill") {
+		t.Fatalf("pins = %q, want existing pin and the skill catalog", joined)
+	}
+	if strings.Contains(joined, "parity skill body") {
+		t.Fatalf("pins = %q, want skill bodies loaded on demand, not pinned", joined)
 	}
 }
 
@@ -1548,7 +1551,7 @@ func TestWithSkillPinsExactSkill(t *testing.T) {
 	}
 }
 
-func TestSkillInjectionRequiresAgentCapabilities(t *testing.T) {
+func TestSkillCatalogRequiresAgentCapabilities(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	dir := filepath.Join(root, ".chronos-code", "skills", "capability-skill")
@@ -1562,12 +1565,48 @@ func TestSkillInjectionRequiresAgentCapabilities(t *testing.T) {
 	a := &agent.Agent{ID: "coder", Model: &routingTestProvider{model: "claude-sonnet"}, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
 	setupSkills(&config.Config{}, root, map[string]*agent.Agent{"coder": a})
 	ctx := context.WithValue(context.Background(), messageKey{}, "capabilitytoken")
-	if got := strings.Join(systemContents(&model.ChatRequest{Messages: a.ContextPinsFn(ctx)}), "\n"); strings.Contains(got, "capability body") {
-		t.Fatalf("skill injected without required tool: %q", got)
+	load := func() (any, error) {
+		def, ok := a.Tools.Get(skillToolName)
+		if !ok {
+			t.Fatal("skill tool not registered")
+		}
+		return def.Handler(ctx, map[string]any{"name": "capability-skill"})
+	}
+	if got := strings.Join(systemContents(&model.ChatRequest{Messages: a.ContextPinsFn(ctx)}), "\n"); strings.Contains(got, "capability-skill") {
+		t.Fatalf("skill listed without required tool: %q", got)
+	}
+	if _, err := load(); err == nil {
+		t.Fatal("skill tool loaded a skill whose required tool is missing")
 	}
 	a.Tools.Register(&tool.Definition{Name: "file_read", Handler: func(context.Context, map[string]any) (any, error) { return nil, nil }})
-	if got := strings.Join(systemContents(&model.ChatRequest{Messages: a.ContextPinsFn(ctx)}), "\n"); !strings.Contains(got, "capability body") {
-		t.Fatalf("eligible skill was not injected: %q", got)
+	if got := strings.Join(systemContents(&model.ChatRequest{Messages: a.ContextPinsFn(ctx)}), "\n"); !strings.Contains(got, "- capability-skill: capabilitytoken") {
+		t.Fatalf("eligible skill was not listed: %q", got)
+	}
+	result, err := load()
+	if err != nil {
+		t.Fatalf("load eligible skill: %v", err)
+	}
+	got := result.(map[string]any)
+	if got["instructions"] != "capability body" || got["base_dir"] != dir {
+		t.Fatalf("skill tool result = %#v, want body and base_dir %q", got, dir)
+	}
+}
+
+func TestSkillToolResultIsNotCompressed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	body := strings.Repeat("Follow this long skill instruction carefully. ", 400)
+	writeTestSkill(t, root, "long-skill", "longtoken", body)
+	a := &agent.Agent{ID: "coder", Model: &routingTestProvider{model: "claude-sonnet"}, Storage: storagememory.New(), Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	setupSkills(&config.Config{}, root, map[string]*agent.Agent{"coder": a})
+	wrapToolPipeline(a, nil, config.HooksConfig{}, nil, nil)
+	def, _ := a.Tools.Get(skillToolName)
+	result, err := def.Handler(context.Background(), map[string]any{"name": "long-skill"})
+	if err != nil {
+		t.Fatalf("load skill: %v", err)
+	}
+	if got, _ := result.(map[string]any)["instructions"].(string); got != strings.TrimSpace(body) {
+		t.Fatalf("skill result was replaced (compressed=%v), want the full instructions", result.(map[string]any)["compressed"])
 	}
 }
 
@@ -1676,45 +1715,6 @@ func TestLSPDiagnosticContextBlockingStreamingParity(t *testing.T) {
 	streaming := strings.Join(systemContents(provider.request(1)), "\n")
 	if blocking != streaming || !strings.Contains(blocking, "main.go:2:3 [error] broken") {
 		t.Fatalf("blocking pins %q, streaming pins %q; want equivalent diagnostics", blocking, streaming)
-	}
-}
-
-func TestSkillToolHistoryIsBoundedAndSessionScoped(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", t.TempDir())
-	toolNames := []string{"toolalpha", "toolbravo", "toolcharlie", "tooldelta", "toolecho", "toolfoxtrot"}
-	for _, name := range toolNames {
-		writeTestSkill(t, root, name+"-skill", name, name+" body")
-	}
-
-	a := &agent.Agent{ID: "coder"}
-	setupSkills(&config.Config{}, root, map[string]*agent.Agent{"coder": a})
-	if len(a.Hooks) != 1 {
-		t.Fatalf("skill hooks = %d, want 1", len(a.Hooks))
-	}
-	sessionOne := storage.WithSession(context.Background(), "session-1")
-	for _, name := range toolNames {
-		if err := a.Hooks.After(sessionOne, &hooks.Event{Type: hooks.EventToolCallAfter, Name: name}); err != nil {
-			t.Fatalf("After(%q) error = %v", name, err)
-		}
-	}
-
-	pins := a.ContextPinsFn(context.WithValue(sessionOne, messageKey{}, "continue"))
-	rendered := strings.Join(messageContents(pins), "\n")
-	if strings.Contains(rendered, "toolalpha body") {
-		t.Fatalf("oldest tool influenced selection after history limit: %q", rendered)
-	}
-	if count := strings.Count(rendered, "<skill name="); count != 3 {
-		t.Fatalf("selected skill count = %d, want top-K limit 3; pins = %q", count, rendered)
-	}
-
-	sessionTwo := storage.WithSession(context.Background(), "session-2")
-	otherPins := a.ContextPinsFn(context.WithValue(sessionTwo, messageKey{}, "continue"))
-	otherRendered := strings.Join(messageContents(otherPins), "\n")
-	for _, name := range toolNames {
-		if strings.Contains(otherRendered, name+" body") {
-			t.Fatalf("session-1 tool %q leaked into session-2 pins: %q", name, otherRendered)
-		}
 	}
 }
 

@@ -1149,7 +1149,7 @@ func testContextReport() orchestrator.ContextReport {
 			{Kind: orchestrator.ContextSourceMemory, ID: "memory", Title: "Memory intent and recall", SelectedCount: 1, Bytes: 120, BudgetBytes: 800},
 			{Kind: orchestrator.ContextSourceLearnedPattern, ID: "learned-pattern", Title: "Learned pattern", BudgetBytes: 1000, OmissionReason: orchestrator.ContextOmittedNotSelected},
 			{Kind: orchestrator.ContextSourceProjectDocs, ID: "project-docs", Title: "Project instructions", BudgetBytes: 64000, OmissionReason: orchestrator.ContextOmittedNotConfigured},
-			{Kind: orchestrator.ContextSourceSkills, ID: "skills", Title: "Selected skills", BudgetBytes: 32000, OmissionReason: orchestrator.ContextOmittedNotSelected},
+			{Kind: orchestrator.ContextSourceSkills, ID: "skills", Title: "Skills", BudgetBytes: 32000, OmissionReason: orchestrator.ContextOmittedNotSelected},
 			{Kind: orchestrator.ContextSourceDiagnostics, ID: "diagnostics", Title: "LSP diagnostics", BudgetBytes: 400, OmissionReason: orchestrator.ContextOmittedNotSelected},
 			{Kind: orchestrator.ContextSourceGraphPrediction, ID: "graph-prediction", Title: "Graph prediction", OmissionReason: orchestrator.ContextOmittedDisabled},
 			{Kind: orchestrator.ContextSourceUserHook, ID: "user-hook", Title: "User prompt hooks", BudgetBytes: 1800, OmissionReason: orchestrator.ContextOmittedNotConfigured},

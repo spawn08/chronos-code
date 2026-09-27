@@ -195,7 +195,22 @@ var (
 		facts.KindClass: true, facts.KindStruct: true, facts.KindInterface: true, facts.KindTrait: true,
 		facts.KindProtocol: true, facts.KindEnum: true, facts.KindType: true, facts.KindTypeAlias: true,
 	}
+	// jsInstantiableKinds: in JavaScript and TypeScript an instantiation
+	// may also target a function or a function-valued constant: a JSX
+	// element renders a function or arrow component, and new accepts a
+	// constructor function.
+	jsInstantiableKinds = mergeKinds(callableKinds, typeKinds)
 )
+
+func mergeKinds(sets ...map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, set := range sets {
+		for k := range set {
+			out[k] = true
+		}
+	}
+	return out
+}
 
 func isTypeKind(k string) bool { return typeKinds[k] }
 
@@ -330,6 +345,9 @@ func (v *View) resolveRefUncached(i, r int) ([]Symbol, string) {
 	switch rec.Kind {
 	case facts.RefInstantiate, facts.RefTypeUse, facts.RefExtends, facts.RefImplements:
 		kinds = typeKinds
+		if rec.Kind == facts.RefInstantiate && (fc.meta.Lang == "javascript" || fc.meta.Lang == "typescript") {
+			kinds = jsInstantiableKinds
+		}
 	}
 	caller := rec.Enclosing
 	switch rec.QualKind {

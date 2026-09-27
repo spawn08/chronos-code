@@ -36,7 +36,7 @@ import (
 
 // ExtractorVersion changes whenever extracted facts change shape or meaning;
 // an index written by another version is discarded and rebuilt.
-const ExtractorVersion = "syntax-13"
+const ExtractorVersion = "syntax-14"
 
 // Tunables.
 const (
