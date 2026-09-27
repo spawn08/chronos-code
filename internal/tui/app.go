@@ -143,6 +143,7 @@ type turnItem struct {
 	duration      time.Duration
 	observedTime  bool
 	settled       bool
+	inputBytes    int
 }
 
 type activityKind uint8
@@ -1533,7 +1534,7 @@ func listenActivity(ctx context.Context, turnID uint64, ch <-chan chronosstream.
 					return activityDoneMsg{turnID: turnID}
 				}
 				switch event.Type {
-				case chronosstream.EventModelCall, chronosstream.EventToolCall, chronosstream.EventToolResult:
+				case chronosstream.EventModelCall, chronosstream.EventToolInput, chronosstream.EventToolCall, chronosstream.EventToolResult:
 					return activityMsg{turnID: turnID, ctx: ctx, event: event, ch: ch}
 				}
 			case <-ctx.Done():
@@ -1666,6 +1667,8 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	changed := true
 	switch msg.event.Type {
 	case chronosstream.EventModelCall:
+		// A new model round means this agent's earlier replies are over.
+		m.settleToolInputs(agentID)
 		m.turnModelCalls++
 		modelName, _ := data["model"].(string)
 		key := "model/" + agentID
@@ -1676,6 +1679,23 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 			m.appendActivity(activityModel, line)
 			m.activityIndex[key] = len(m.activeTurnItems) - 1
 		}
+	case chronosstream.EventToolInput:
+		if _, started := m.activityIndex[activityKey]; callID == "" || started {
+			changed = false
+			break
+		}
+		inputKey := toolInputKey(agentID, callID)
+		line := RenderToolInputActivity(label, toolName, intValue(data["bytes"]), false)
+		idx, ok := m.activityIndex[inputKey]
+		if ok && idx < len(m.activeTurnItems) {
+			m.activeTurnItems[idx].content = line
+		} else {
+			m.appendTurnActivity(line)
+			idx = len(m.activeTurnItems) - 1
+			m.activityIndex[inputKey] = idx
+		}
+		item := &m.activeTurnItems[idx]
+		item.toolName, item.agentID, item.callID, item.inputBytes = toolName, agentID, callID, intValue(data["bytes"])
 	case chronosstream.EventToolCall:
 		line := RenderToolActivity(label, toolName, data["args"], false, data["error"])
 		provisionalKey := "stream/" + callID
@@ -1684,8 +1704,16 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 			m.activityIndex[activityKey] = idx
 			delete(m.activityIndex, provisionalKey)
 		} else {
-			m.appendTurnActivity(line)
-			m.activityIndex[activityKey] = len(m.activeTurnItems) - 1
+			// The call's streamed-input line becomes its running line.
+			inputKey := toolInputKey(agentID, callID)
+			if idx, ok := m.activityIndex[inputKey]; callID != "" && ok && idx < len(m.activeTurnItems) {
+				m.activeTurnItems[idx].content = line
+				m.activityIndex[activityKey] = idx
+				delete(m.activityIndex, inputKey)
+			} else {
+				m.appendTurnActivity(line)
+				m.activityIndex[activityKey] = len(m.activeTurnItems) - 1
+			}
 			m.pendingToolCalls++
 			if toolName == "spawn_subagent" {
 				m.pendingSubagents++
@@ -1835,6 +1863,45 @@ func (m *appModel) appendTurnActivity(line string) {
 
 func (m *appModel) appendActivity(kind activityKind, line string) {
 	m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemActivity, activity: kind, content: line})
+}
+
+// toolInputKey indexes the line of a tool call whose arguments are streaming.
+func toolInputKey(agentID, callID string) string {
+	return "input/" + agentID + "/" + callID
+}
+
+// settleToolInputs marks streamed tool calls that never started: their reply
+// ended (output limit, error or interrupt) before the arguments were complete.
+// An empty agentID settles every agent's calls.
+func (m *appModel) settleToolInputs(agentID string) {
+	for key, idx := range m.activityIndex {
+		rest, ok := strings.CutPrefix(key, "input/")
+		if !ok || (agentID != "" && !strings.HasPrefix(rest, agentID+"/")) {
+			continue
+		}
+		delete(m.activityIndex, key)
+		if idx >= len(m.activeTurnItems) {
+			continue
+		}
+		item := &m.activeTurnItems[idx]
+		label := ""
+		if item.agentID != "" {
+			label = "@" + item.agentID + " "
+		}
+		item.content = RenderToolInputActivity(label, item.toolName, item.inputBytes, true)
+	}
+}
+
+func intValue(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }
 
 func (m *appModel) setLastToolMetadata(name, id, args string) {
@@ -3144,6 +3211,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	}
 	// Never replay activeRequest: earlier tool calls may already have mutated
 	// the workspace. Recoverable model-call retries belong to the SDK.
+	m.settleToolInputs("")
 	m.settleTurnActivities(err)
 	m.sending = false
 	for i := range m.activeTurnItems {

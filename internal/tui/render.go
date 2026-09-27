@@ -512,6 +512,23 @@ func RenderToolActivity(agent, name string, args any, done bool, eventErr any) s
 		styleBold.Render(name), styleDim.Render("· "+state), styleDim.Render(details))
 }
 
+// RenderToolInputActivity renders a tool call whose arguments the model is
+// still generating, so a long call such as a large file write does not look
+// like a stalled turn. unfinished marks a call whose reply ended before the
+// arguments were complete, so the call never ran.
+func RenderToolInputActivity(agent, name string, bytes int, unfinished bool) string {
+	marker, state := "✎", "· writing"
+	if unfinished {
+		marker, state = "✗", "· not run: reply ended mid-call"
+	}
+	size := ""
+	if bytes > 0 {
+		size = " · " + formatBytes(uint64(bytes))
+	}
+	return fmt.Sprintf("  %s %s%s %s%s", styleTool.Render(marker), agent,
+		styleBold.Render(name), styleDim.Render(state), styleDim.Render(size))
+}
+
 // RenderSubagentActivity keeps delegated work visible without exposing a raw
 // JSON argument blob. The task is intentionally concise so the activity line
 // remains readable on narrow terminals.
