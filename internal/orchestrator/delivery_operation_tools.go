@@ -66,7 +66,9 @@ func wrapDeliveryOperations(a *agent.Agent) {
 			operationID := identity.InvocationID + ":" + callID
 			descriptor := ""
 			observationPath, expectedFingerprint := "", ""
-			if wrapped.Name == "file_write" {
+			// An edit's resulting bytes are unknown until it runs, so only a
+			// whole-file write has a fingerprint to replay against.
+			if _, editing := args["old_content"]; wrapped.Name == "file_write" && !editing {
 				if safe, ok := safeObservationPath(root, path); ok {
 					if inspected, err := observeFileState(root, safe); err == nil {
 						class, observationPath, before = execution.ReplayFingerprintedWrite, safe, inspected

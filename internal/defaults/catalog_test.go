@@ -82,7 +82,9 @@ func TestRuntimeAgentPromptsDoNotRequireUnavailablePlanningTools(t *testing.T) {
 		if err := yaml.Unmarshal(data, &document); err != nil {
 			t.Fatalf("parse %q: %v", path, err)
 		}
-		for _, unavailable := range []string{"update_plan", "fs_write", "fs_read"} {
+		// update_plan is registered by the orchestrator for every agent with
+		// file_write (see orchestrator.installTaskPlan).
+		for _, unavailable := range []string{"fs_write", "fs_read"} {
 			if strings.Contains(document.SystemPrompt, unavailable) {
 				t.Errorf("runtime prompt %q requires unavailable tool %q", path, unavailable)
 			}

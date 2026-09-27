@@ -18,12 +18,20 @@ import (
 )
 
 func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessionID string, request ExecutionRequest, classification router.Classification, runtime *taskRuntime, response *model.ChatResponse) (*model.ChatResponse, verification.Decision, execution.StopReason, error) {
-	decision := assessRuntimeVerification(request, classification, runtime)
-	seen := make(map[string]struct{})
 	if response != nil && response.StopReason == model.StopReasonPaused {
 		// A no-progress pause awaits the user; repairing would resume it.
-		return response, decision, execution.StopNoProgress, nil
+		return response, assessRuntimeVerification(request, classification, runtime), execution.StopNoProgress, nil
 	}
+	gate := &completionGate{}
+	response, err := o.nudgeBlocking(ctx, a, sessionID, gate, runtime, response)
+	if err != nil {
+		return response, verification.Decision{}, execution.StopReasonForError(err), err
+	}
+	if response != nil && response.StopReason == model.StopReasonPaused {
+		return response, assessRuntimeVerification(request, classification, runtime), execution.StopNoProgress, nil
+	}
+	decision := assessRuntimeVerification(request, classification, runtime)
+	seen := make(map[string]struct{})
 	for decision.Disagreement {
 		fingerprint := verificationFailureFingerprint(decision)
 		if _, repeated := seen[fingerprint]; repeated {
@@ -46,14 +54,39 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 			return response, decision, execution.StopBudgetExhausted, err
 		}
 		repairPrompt := buildRepairPrompt(decision, runtime)
-		var err error
 		response, err = o.executeBlockingWithRecovery(ctx, a, sessionID, repairPrompt)
+		if err != nil {
+			return response, decision, execution.StopReasonForError(err), err
+		}
+		response, err = o.nudgeBlocking(ctx, a, sessionID, gate, runtime, response)
 		if err != nil {
 			return response, decision, execution.StopReasonForError(err), err
 		}
 		decision = assessRuntimeVerification(request, classification, runtime)
 	}
 	return response, decision, execution.StopSuccess, nil
+}
+
+// nudgeBlocking sends the model back to work while the completion gate finds
+// the turn unfinished, joining each reply to the visible response.
+func (o *Orchestrator) nudgeBlocking(ctx context.Context, a *agent.Agent, sessionID string, gate *completionGate, runtime *taskRuntime, response *model.ChatResponse) (*model.ChatResponse, error) {
+	for response != nil {
+		nudge := o.completionNudge(ctx, a, sessionID, gate, response.StopReason, response.Content, runtime.toolCallCount())
+		if nudge == "" {
+			return response, nil
+		}
+		next, err := o.executeBlockingWithRecovery(ctx, a, sessionID, nudge)
+		if err != nil {
+			return response, err
+		}
+		if next == nil {
+			return response, nil
+		}
+		joined := *next
+		joined.Content = strings.TrimSpace(response.Content + "\n\n" + next.Content)
+		response = &joined
+	}
+	return response, nil
 }
 
 func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) string {

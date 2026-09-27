@@ -238,7 +238,13 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 			runtime, _ := taskRuntimeFromContext(runCtx)
 			runCtx = agent.WithToolLoopController(runCtx, configured.ID, newWindowGovernor(longRunning, runtime, time.Now))
 		}
-		result, err = configured.Execute(runCtx, task)
+		// Durable delivery relies on the blocking path's reply journal; other
+		// providers keep their existing blocking behavior.
+		if _, durable := execution.OperationLeaseFromContext(runCtx); !durable && provider.Name() == "anthropic" {
+			result, err = executeSubagentStream(runCtx, configured, task)
+		} else {
+			result, err = configured.Execute(runCtx, task)
+		}
 	} else if r.fallback != nil {
 		if _, durable := execution.OperationLeaseFromContext(runCtx); durable {
 			return "", fmt.Errorf("dynamic delivery subagent has no durable usage hook: %w", execution.ErrUsageOutcomeUnknown)
@@ -342,4 +348,38 @@ func setupSubAgentsWithModels(agents map[string]*agent.Agent, models *roleModelR
 		})
 	}
 	return nil
+}
+
+// executeSubagentStream runs a child turn over the streaming path, which is
+// not bound by the unary request timeout and receives the raised output
+// allowance, so a child can write a large file without truncating mid tool
+// call. It returns the child's final message, as agent.Execute does.
+func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (string, error) {
+	stream, err := a.ChatStream(ctx, task)
+	if err != nil {
+		return "", err
+	}
+	var final strings.Builder
+	for chunk := range stream {
+		if chunk == nil {
+			continue
+		}
+		if chunk.Err != nil {
+			go func() {
+				for range stream {
+				}
+			}()
+			return "", chunk.Err
+		}
+		switch {
+		case len(chunk.ToolCalls) > 0:
+			final.Reset()
+		case chunk.Delta:
+			final.WriteString(chunk.Content)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return final.String(), nil
 }

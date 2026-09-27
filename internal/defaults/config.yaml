@@ -122,7 +122,9 @@ defaults:
   stream: true
   permission_mode: "prompt"
   reasoning:
-    strategy: "cot"
+    # "cot" appends "...then provide your final answer", which pushes tool-using
+    # agents (subagents run on that path) to end their turn early.
+    strategy: "none"
     native: false
     effort: "medium"
     summary: false

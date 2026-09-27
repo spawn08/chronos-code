@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -73,6 +74,8 @@ type Orchestrator struct {
 	sessionMgr *session.Manager
 	sessions   map[string]string // agentID -> current sessionID
 	sessionMu  sync.RWMutex
+	// taskPlans backs the update_plan tool and the end-of-turn completion gate.
+	taskPlans *taskPlanStore
 
 	router             *router.Router
 	routingConfig      *router.Config
@@ -378,6 +381,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	for _, a := range agents {
 		a.Broker = broker
 	}
+	orch.taskPlans = newTaskPlanStore()
+	installTaskPlan(agents, orch.taskPlans, broker)
 	roleModels := newRoleModelRegistry(agents)
 	if err := setupSubAgentsWithModels(agents, roleModels); err != nil {
 		return nil, fmt.Errorf("configure subagent delegation: %w", err)
@@ -931,10 +936,17 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 			if detectErr != nil {
 				return pins
 			}
-			return append(pins, model.Message{Role: model.RoleSystem, Content: selected.Banner()})
+			return append(pins, model.Message{Role: model.RoleSystem, Content: selected.Banner() + "\n" + environmentLine(selected.Root, time.Now())})
 		}
 	}
 	return info
+}
+
+// environmentLine gives the model facts it otherwise guesses: the date (for
+// versions and deadlines), the platform (for shell syntax) and whether git
+// commands such as `git diff` can work in the workspace.
+func environmentLine(root string, now time.Time) string {
+	return fmt.Sprintf("Environment: date=%s os=%s/%s git_repository=%t.", now.Format("2006-01-02"), goruntime.GOOS, goruntime.GOARCH, insideGitWorktree(root))
 }
 
 const maxPinnedLSPDiagnostics = 5
@@ -2246,6 +2258,11 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 		}
 		seen := make(map[string]struct{})
 		paused := false
+		gate := &completionGate{}
+		// finalText is the text after the last tool round: the message the
+		// model ends its turn with. stop is the last terminal stop reason.
+		var finalText strings.Builder
+		var stop model.StopReason
 		complete := func(decision verification.Decision, reason execution.StopReason, err error) {
 			result := ExecutionResult{Verification: decision, Budget: runtime.budget.Snapshot(), StopReason: reason}
 			populateRuntimeResult(&result, runtime)
@@ -2262,6 +2279,24 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 				return
 			case response, ok := <-stream:
 				if !ok {
+					if !paused {
+						if nudge := o.completionNudge(ctx, a, sessionID, gate, stop, finalText.String(), runtime.toolCallCount()); nudge != "" {
+							next, err := o.executeStreamWithRecovery(ctx, a, sessionID, nudge)
+							if err != nil {
+								assessed <- &model.ChatResponse{Err: err}
+								complete(verification.Decision{}, execution.StopReasonForError(err), err)
+								return
+							}
+							select {
+							case assessed <- &model.ChatResponse{Role: model.RoleAssistant, Content: "\n\n", Delta: true}:
+							case <-ctx.Done():
+							}
+							stream = next
+							finalText.Reset()
+							stop = ""
+							continue
+						}
+					}
 					decision := assessRuntimeVerification(request, classification, runtime)
 					if paused {
 						// The governor paused for lack of progress; a repair
@@ -2321,6 +2356,16 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 				}
 				if response != nil && !response.Delta && response.StopReason == model.StopReasonPaused {
 					paused = true
+				}
+				if response != nil {
+					switch {
+					case len(response.ToolCalls) > 0:
+						finalText.Reset()
+					case response.Delta:
+						finalText.WriteString(response.Content)
+					default:
+						stop = response.StopReason
+					}
 				}
 				select {
 				case assessed <- response:
@@ -2486,7 +2531,9 @@ func formatRoutingHint(agentID, intent, specialist string, matched bool, class r
 	if path.Hint == "" {
 		path = router.DefaultPath(class.Complexity)
 	}
-	parts := []string{fmt.Sprintf("Path: complexity=%s kind=%s suggested_graph=%s suggested_plan=%s estimated_tools=%d. Advisory only: reassess scope from evidence; complete all requested deliverables and verification within enforced runtime budgets. Suggested approach: %s.", class.Complexity, class.Kind, path.Graph, path.Plan, path.MaxToolCalls, path.Hint)}
+	// The tool-count estimate stays internal: shown to the model, it anchors
+	// effort and invites stopping when the count is reached.
+	parts := []string{fmt.Sprintf("Path: complexity=%s kind=%s suggested_graph=%s suggested_plan=%s. Advisory only: reassess scope from evidence and complete every requested deliverable with verification. Suggested approach: %s.", class.Complexity, class.Kind, path.Graph, path.Plan, path.Hint)}
 	if class.Complexity == "" {
 		parts = parts[:0]
 	}
