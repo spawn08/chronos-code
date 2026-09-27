@@ -1,84 +1,144 @@
+<div align="center">
+
 # Chronos Code
+
+**A YAML-native AI coding agent harness, shipped as a single Go binary.**
+
+Define agents, skills, guardrails, and routing in YAML. Run them from the terminal, a headless CLI, or an HTTP API,
+backed by a multi-language code graph, persistent memory, and a security floor that project config can't weaken.
 
 [![CI](https://github.com/spawn08/chronos-code/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/spawn08/chronos-code/actions/workflows/ci.yml)
 [![Release](https://github.com/spawn08/chronos-code/actions/workflows/release.yml/badge.svg)](https://github.com/spawn08/chronos-code/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/spawn08/chronos-code?sort=semver)](https://github.com/spawn08/chronos-code/releases/latest)
 [![Go version](https://img.shields.io/github/go-mod/go-version/spawn08/chronos-code)](go.mod)
+[![Docs](https://img.shields.io/badge/docs-spawn08.github.io-blue)](https://spawn08.github.io/chronos-code/)
 
-YAML-native AI coding agent harness built on the [Chronos](https://github.com/spawn08/chronos) agentic framework.
+[**Documentation**](https://spawn08.github.io/chronos-code/) ·
+[**Install**](#installation) ·
+[**Quick start**](#quick-start) ·
+[**Architecture**](#architecture) ·
+[**Releases**](https://github.com/spawn08/chronos-code/releases)
 
-Chronos Code is a single Go binary that loads YAML agents, skills, and policies, then runs them through Chronos. The product the user talks to is the `chronos-code` primary agent. Specialists are spawned on demand, or when the user `@mention`s them. Persistent memory, a Go code graph, MCP tools, guardrails, and a review-gated learning loop sit around that execution path.
+</div>
 
-📖 **[Full documentation](https://spawn08.github.io/chronos-code/)** — architecture, configuration, CLI reference, and rollback guides.
+---
 
-## Contents
+## Overview
 
-- [Documentation](#documentation)
-- [Features](#features)
-- [Architecture](#architecture)
-  - [Request path](#request-path)
-  - [Package layout](#package-layout)
-- [Quick start](#quick-start)
-  - [Install](#install)
-  - [Prerequisites](#prerequisites)
-  - [Build](#build)
-  - [Initialize a project](#initialize-a-project)
-  - [Run](#run)
-  - [Language server tools](#language-server-tools)
-- [Commands](#commands)
-- [Configuration](#configuration)
-  - [Directory layout](#directory-layout)
-  - [Precedence](#precedence)
-  - [Verification](#verification)
-  - [Native thinking](#native-thinking)
-  - [Rollback](#rollback)
-  - [Capability status](#capability-status)
-- [Default agents](#default-agents)
-- [Interactive TUI](#interactive-tui)
-- [MCP and safety](#mcp-and-safety)
-- [Development](#development)
-  - [Token efficiency eval](#token-efficiency-eval)
-  - [Delivery-strategy routing](#delivery-strategy-routing)
-- [Releases and versioning](#releases-and-versioning)
-- [License](#license)
+Chronos Code is an AI coding agent built on the [Chronos](https://github.com/spawn08/chronos) agentic framework. You talk to one primary agent, `chronos-code`. It spawns specialists (coder, reviewer, debugger, and others) when needed, or when you `@mention` one.
 
-## Documentation
+Everything you'd normally tune in code lives in YAML: agents, skills, guardrails, security policy, model routing, and MCP servers. It works on first run with embedded defaults. `chronos-code init` exports those defaults into your project so you can edit them.
 
-The full documentation site is published at **[spawn08.github.io/chronos-code](https://spawn08.github.io/chronos-code/)**, covering architecture, configuration, the CLI reference, and rollback procedures. Source lives under [`docs/`](docs/).
+## Highlights
 
-## Features
+| | |
+|---|---|
+| 🧩 **YAML-first** | Agents, skills, guardrails, security policy, routing, and MCP servers are declared in YAML, not Go. |
+| 🤝 **Primary agent + specialists** | `chronos-code` owns the conversation. Specialists run via `spawn_subagent` or `@agent_id`. |
+| 🕸️ **Code graph** | Go via `go/parser`, plus 17 languages through a pure-Go tree-sitter runtime, with cross-repo federation. Included in every build. |
+| 🪜 **Tiered routing** | Graph tools (T0) first, then cheap models (T1), then frontier models (T2). Complexity paths cap tool-call counts. |
+| 🧠 **Sessions & layered memory** | Resumable SQLite sessions with compaction checkpoints. Episodic, procedural, semantic, and org-scoped memory. |
+| 🛡️ **Security floor** | Injection detection, secret scanning, PII filtering, and cost caps. Project policy and `--yolo` can't weaken them. |
+| 🔌 **MCP, both ways** | Consumes stdio and HTTPS SSE servers from `.mcp.json`, and serves its own code graph to other MCP hosts. |
+| 📈 **Review-gated learning** | Turns session traces into YAML suggestions that you accept or reject. Nothing is applied automatically. |
+| 🖥️ **Three surfaces, one runtime** | Interactive TUI, headless `run`, and an HTTP API (`serve`) all share one orchestrator. |
 
-- **YAML-first configuration** — agents, skills, guardrails, security policies, routing, and MCP servers defined in YAML, not Go
-- **Primary agent plus specialists** — Chronos Code stays the conversation partner; coder, planner, delivery strategist, reviewer, debugger, researcher, architect, explainer, and tester run via `spawn_subagent` or `@agent_id`
-- **Code graph** — the chronos indexer parses Go with `go/parser` and 17 other languages with a pure-Go tree-sitter runtime, in every build (see [docs/chronos-indexer.md](docs/chronos-indexer.md))
-- **Tiered routing** — T0 graph tools before T1 cheap models before T2 frontier models; complexity paths bound tool-call counts
-- **Self-learning loop** — traces sessions into reviewable YAML suggestions (`learn accept` / `learn reject`); automatic distillation is off by default
-- **MCP** — stdio and HTTPS SSE servers from `.mcp.json`; tools are namespaced and require approval by default
-- **Guardrails and a security floor** — injection detection, secret scanning, PII filtering, cost caps; project policy and `--yolo` cannot weaken the embedded floor
-- **Two surfaces** — interactive TUI/CLI and `chronos-code serve` HTTP API; SQLite is the default store, PostgreSQL needs the `postgres` build tag
-- **Sessions and layered memory** — resumable SQLite sessions with durable compaction checkpoints; episodic outcomes, procedural steps, optional semantic facts, and explicitly scoped organizational knowledge; legacy project/user/feedback YAML stays readable
-- **Embedded defaults** — first run works without files; `chronos-code init` exports editable YAML into `.chronos-code/`
+## Installation
+
+Prebuilt binaries for **Linux, macOS, and Windows** (amd64 and arm64) come with every [tagged release](https://github.com/spawn08/chronos-code/releases).
+
+**macOS / Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.ps1 | iex
+```
+
+The installers detect your OS and architecture, download the matching archive, check it against the release's `SHA256SUMS`, and install `chronos-code` to `~/.local/bin`.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `VERSION` | Release tag to install, e.g. `v0.7.0` | latest |
+| `INSTALL_DIR` | Install location | `~/.local/bin` |
+
+On Windows, use `$env:VERSION` / `$env:INSTALL_DIR`. If the script warns that the install directory isn't on `PATH`, add it.
+
+<details>
+<summary><b>Build from source</b></summary>
+
+**Requirements:** Go 1.26+. No cgo needed; every build is pure Go. You also need a [Chronos](https://github.com/spawn08/chronos) checkout next to this repo (or edit the `replace` directive in `go.mod`).
+
+```bash
+git clone https://github.com/spawn08/chronos.git
+git clone https://github.com/spawn08/chronos-code.git
+cd chronos-code
+make build          # → bin/chronos-code
+make install        # → $GOPATH/bin
+```
+
+Every build, including release archives, ships the same parsers (Go plus 17 tree-sitter languages), SQLite sessions and FTS, memory, hooks, and the TUI. CI enforces a 56 MiB size limit on the binary.
+
+Optional build tags:
+
+| Tag | Adds |
+|---|---|
+| `lsp` | `lsp_diagnostics`, `lsp_hover`, `lsp_references`, `lsp_rename_preview`, backed by `gopls`, `typescript-language-server`, `pyright-langserver`, or `rust-analyzer`. Servers start lazily; a missing server doesn't stop anything else. |
+| `postgres` | PostgreSQL storage backend (SQLite is the default). |
+
+</details>
+
+## Quick start
+
+```bash
+chronos-code login           # configure a provider (Anthropic, OpenAI, Azure, …)
+chronos-code                 # launch the interactive TUI
+```
+
+A few more common starting points:
+
+```bash
+chronos-code run "add table-driven tests for internal/router"   # one-shot, then exit
+chronos-code run --json "summarize this repo"                    # machine-readable output
+chronos-code init                                                # export editable YAML to .chronos-code/
+chronos-code serve                                               # HTTP API on :8430
+```
+
+In the TUI, mention a specialist to skip the router:
+
+```text
+@reviewer check my last commit
+@debugger why is TestAuth failing
+@delivery-strategist propose the next evidence-driven frontier for this migration
+```
 
 ## Architecture
 
-`cmd/chronos-code` is a thin `main`. `internal/cli` dispatches commands. Interactive REPL, headless `run`, and `serve` all construct one **Orchestrator**. The orchestrator resolves YAML (CLI flags, env, project, user, embed), indexes the workspace graph, wires Chronos agents, and executes turns.
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="Chronos Code architecture" width="100%">
+</p>
 
-The TUI and HTTP server are surfaces, not a second runtime. They do not talk to Chronos directly.
+`cmd/chronos-code` is a thin `main`, and `internal/cli` dispatches commands. The REPL, headless `run`, and `serve` each build a single **Orchestrator**. The orchestrator resolves configuration, indexes the workspace graph, wires up Chronos agents, and executes turns. The TUI and HTTP server are front ends to that runtime; they never call Chronos directly.
 
-![Chronos Code architecture](docs/assets/architecture.svg)
+Chronos (`github.com/spawn08/chronos`) is used as a **library**: agent SDK, harness, tool runtime, streaming, and storage adapters. Chronos Code builds on its agent loop instead of reimplementing it.
 
-### Request path
+### Request lifecycle
 
-1. **CLI** starts a REPL, a one-shot `run`, or HTTP `serve`.
-2. **Orchestrator** loads config, agents, skills, security policy, routing, graph, session, and memory stores.
-3. **Router** classifies the user message with YAML regexes first (T0), optionally a cheap model (T1). It selects a model tier and an implementation path (`low` / `medium` / `high`). The conversation agent stays `chronos-code` unless the user `@mention`s a specialist or `ppd.mode: enabled` delegates qualifying work to `delivery-strategist`.
-4. **Chronos** runs the agent loop: graph tools (T0), ranged file reads (T1), shell and writes (T2). Guardrails and the security policy wrap tool calls. MCP servers that fail to start do not block healthy servers or chat.
-5. **After the turn**, sessions persist, explicit memory intents may write YAML, and learning may emit a pending suggestion for human review.
+1. **Surface.** The CLI starts a REPL, a one-shot `run`, or `serve`.
+2. **Orchestrator.** Loads config, agents, skills, security policy, routing, graph, session, and memory stores.
+3. **Router.** Classifies the message with YAML regexes (T0), optionally checked by a cheap model (T1). It picks a model tier and an implementation path (`low` / `medium` / `high`). `chronos-code` keeps the conversation unless you `@mention` a specialist.
+4. **Chronos agent loop.** Order of escalation: graph tools (T0), then ranged file reads (T1), then shell and writes (T2). Guardrails and the security policy wrap every tool call. If an MCP server fails, healthy servers and chat keep working.
+5. **Post-turn.** The session is persisted, explicit memory intents are written, and learning may emit a pending suggestion for review.
 
-### Package layout
+<details>
+<summary><b>Package layout</b></summary>
 
 | Layer | Package | Role |
-|-------|---------|------|
+|---|---|---|
 | Entry | `cmd/chronos-code` | Binary `main` |
 | Surfaces | `internal/cli` | Command dispatch (no Cobra) |
 | | `internal/tui` | Bubble Tea REPL: streaming, approvals, slash commands |
@@ -102,184 +162,88 @@ The TUI and HTTP server are surfaces, not a second runtime. They do not talk to 
 | | `internal/budget` | Token and USD caps |
 | | `internal/auth` | API keys, OAuth, keychain, SSO |
 | Integrations | `internal/mcpdiscover` | `.mcp.json` load, test, redact, runtime |
-| | `internal/learning` | Trace → suggestion YAML; apply only after review |
+| | `internal/learning` | Trace → suggestion YAML; applied only after review |
 | | `internal/teambuilder` | Multi-agent team definitions |
 | | `internal/eval` | Offline token-efficiency and PPD eval harness |
 
-Chronos itself (`github.com/spawn08/chronos`) is a **library**: agent SDK, harness, tool runtime, streaming, and storage adapters. Chronos Code does not reimplement that loop.
+</details>
 
-## Quick start
+## Agents
 
-### Install
+| Agent | Role | Typical tier |
+|---|---|---|
+| `chronos-code` | Primary conversation agent: orients, routes, synthesizes | Frontier |
+| `coder` | Implement, test, iterate | Frontier |
+| `planner` | Task decomposition | Frontier |
+| `delivery-strategist` | Read-only, evidence-driven proposal of the next bounded work frontier | Frontier |
+| `reviewer` | Bugs, security, style | Frontier |
+| `debugger` | Diagnose failures from errors and traces | Frontier |
+| `architect` | Design and structure | Frontier |
+| `researcher` | Read-only search | Cheap |
+| `explainer` | Explain code and concepts | Cheap |
 
-Prebuilt binaries are published on every [tagged release](https://github.com/spawn08/chronos-code/releases). Install the latest one:
-
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.sh | bash
-```
-
-```powershell
-# Windows
-irm https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.ps1 | iex
-```
-
-Both scripts detect OS/arch, download the matching archive and `checksums-sha256.txt` from the release, verify the checksum, and install `chronos-code` to `~/.local/bin` (override with `INSTALL_DIR`/`$env:INSTALL_DIR`). Pin a specific version with `VERSION=v1.2.3` (`$env:VERSION` on Windows). Add the install directory to `PATH` if the script warns it isn't there yet.
-
-To build from source instead, see [Prerequisites](#prerequisites) and [Build](#build) below.
-
-### Prerequisites
-
-- Go 1.26+
-- No cgo: every build is pure Go
-- [Chronos](https://github.com/spawn08/chronos) as a sibling checkout, or change the `go.mod` `replace` directive
-
-### Build
-
-```bash
-make build        # produces bin/chronos-code
-make build-core   # produces bin/chronos-code-core (same build, CGO_ENABLED=0 forced)
-make size-check size-check-core
-```
-
-Every build, including release archives, includes the same parsers (Go and 17
-tree-sitter languages), sessions, SQLite FTS, memory, hooks, and the TUI. The
-size gate is 56 MiB.
-
-### Initialize a project
-
-```bash
-chronos-code init
-```
-
-Writes `.chronos-code/` with agent YAML, skills, guardrails, routing, and security policy. Skip this to run on embedded defaults.
-
-### Run
-
-```bash
-chronos-code                 # interactive TUI
-chronos-code run "message"   # one shot
-chronos-code serve           # HTTP API, default :8430
-```
-
-### Language server tools
-
-Build with `go build -tags lsp ./...` to register `lsp_diagnostics`, `lsp_hover`, `lsp_references`, and `lsp_rename_preview`. Supported servers: `gopls`, `typescript-language-server --stdio`, `pyright-langserver --stdio`, `rust-analyzer`.
-
-Servers start lazily on first use. A missing server is non-fatal. Builds without the `lsp` tag keep the same fallback and register no LSP tools.
-
-## Commands
-
-```text
-chronos-code                         Start interactive REPL
-chronos-code run <message>           One task, then exit
-chronos-code init                    Export .chronos-code/ into the project
-chronos-code login / logout / whoami Provider credentials
-chronos-code providers               List resolvable providers
-chronos-code models [provider]       Query live models, with a labeled static fallback
-chronos-code agents list             List resolved agents
-chronos-code config show|validate    Resolved config
-chronos-code session list|delete|export
-chronos-code memory list|search|forget
-chronos-code mcp add|list|test|remove
-chronos-code indexer mcp [--repo DIR] Serve the code graph tools over MCP stdio
-chronos-code learn suggest|list|show|accept|reject
-chronos-code eval run|ppd
-chronos-code team list|run
-chronos-code plan … --db <path>      Durable plan database ops
-chronos-code skills list|show
-chronos-code serve                   HTTP server
-chronos-code version
-```
-
-Useful flags: `-c/--config`, `--provider <name>`, `--model <id>`, `--debug`, `--stream` / `--no-stream`, `--permission-mode`, `--yolo`, `--budget <usd>`, `--resume <session-id>`, `--json` (headless).
-
-`--provider` and `--model` override the selected primary agent for the current process. `CHRONOS_CODE_PROVIDER` and `CHRONOS_CODE_MODEL` provide the same selection when the corresponding CLI flag is absent; CLI flags take precedence. A provider-only switch reuses a model only when that provider has a model configured on a resolved agent, otherwise it fails with a request for `--model` instead of pairing the new provider with an incompatible model. `config show` reports the primary agent and the source of its selected provider and model. Live model discovery occurs only through `models` or the interactive `/model` surfaces.
-
-`--yolo` auto-approves policy-allowed tools. It never overrides deny rules or destructive confirmations.
+Each agent is a YAML file. Run `chronos-code init` and edit `.chronos-code/agents/*.yaml` to change them or add your own.
 
 ## Configuration
 
-### Directory layout
+### Project layout
 
 ```text
 .chronos-code/
-├── config.yaml          # model, storage, memory, learning, verification
-├── routing.yaml         # intent, models, complexity paths, PPD
-├── security.yaml        # path allowlists, shell restrictions, MCP trust
-├── agents/              # chronos-code.yaml, coder.yaml, …
+├── config.yaml      # model, storage, memory, learning, verification
+├── routing.yaml     # intents, models, complexity paths, PPD
+├── security.yaml    # path allowlists, shell restrictions, MCP trust
+├── agents/          # chronos-code.yaml, coder.yaml, …
 ├── skills/
 ├── guardrails/
-├── memory/              # project.yaml, user.yaml, feedback.yaml
-└── learned/             # pending learning suggestions
+├── memory/          # project.yaml, user.yaml, feedback.yaml
+└── learned/         # pending learning suggestions
+.mcp.json            # project MCP servers (repo root)
 ```
 
-Project MCP servers live in `.mcp.json` (not under `.chronos-code/`).
-
-Runtime databases now default to `~/.chronos-code/projects/<name>-<id>/`.
-`CHRONOS_CODE_DATA_HOME` overrides the user data root. Existing default project
-databases are imported with verified SQLite snapshots; originals are retained.
-Explicit database paths remain supported. A shared, partitioned
-`~/.chronos-code/memory.db` enables user/organization recall across projects.
-
-See **[Harness reliability, layered memory, and hooks](docs/harness-memory.md)**
-for migration behavior, memory configuration, tool examples, and inspection UI.
+Runtime databases live under `~/.chronos-code/projects/<name>-<id>/` (override the root with `CHRONOS_CODE_DATA_HOME`). Existing project databases are imported from verified SQLite snapshots, and the originals are kept. A shared, partitioned `~/.chronos-code/memory.db` provides user and organization recall across projects. See [Harness reliability, layered memory, and hooks](docs/harness-memory.md).
 
 ### Precedence
 
 Highest to lowest:
 
 1. CLI flags
-2. Supported provider/server environment variables
+2. Provider and server environment variables (`CHRONOS_CODE_PROVIDER`, `CHRONOS_CODE_MODEL`, …)
 3. `.chronos-code/config.yaml` (project)
 4. `~/.chronos-code/config.yaml` (user)
 5. Embedded defaults
 
-### Verification
-
-CLI, TUI, and HTTP share the same switch:
+### Common settings
 
 ```yaml
 verification:
-  mode: report # report or enforce
-```
+  mode: report          # report | enforce: enforce refuses "done" without current evidence
 
-`enforce` refuses a successful completion when the runtime has verification obligations without current evidence. It does not invent checks.
-
-### Native thinking
-
-Off by default. Enable in YAML or with `/think` in the TUI:
-
-```yaml
 defaults:
   reasoning:
     strategy: cot
-    native: true          # Anthropic extended thinking, OpenAI reasoning effort
-    effort: medium        # low, medium, or high
+    native: true        # Anthropic extended thinking / OpenAI reasoning effort (off by default)
+    effort: medium      # low | medium | high
     budget_tokens: 4096
-    summary: true         # stream thinking summaries in the TUI
+    summary: true       # stream thinking summaries in the TUI
 ```
 
-`/model` lists models. Tab after `/model ` autocompletes authorized provider/model IDs.
+<details>
+<summary><b>Model and provider selection</b></summary>
 
-`chronos-code models [provider]` fetches live Anthropic, OpenAI, or Azure
-models when authorized, and labels static fallback results. In the TUI, the
-model picker refreshes authorized providers in the background. A key alone
-does not identify a preferred model: use `--provider <name> --model <id>` or
-`/model <provider> <id>` to choose one. At startup, if the configured primary
-provider has no credential and exactly one other provider is authorized,
-Chronos Code selects that provider with its configured model (or a known
-provider default). When multiple providers are authorized, the YAML selection
-is preserved; `chronos-code config show` reports the effective choice and its
-source. Flag and `CHRONOS_CODE_*` selections always take precedence over YAML
-and request-time model routing. Azure deployments require an endpoint and an
-actual deployment name (`AZURE_OPENAI_DEPLOYMENT` or `--model`).
-Azure's data-plane model catalog does not enumerate deployment names; use the
-configured deployment or query Azure's management-plane deployments API.
+- `--provider` and `--model` override the primary agent for the current process. `CHRONOS_CODE_PROVIDER` / `CHRONOS_CODE_MODEL` do the same when the flag is absent. Flags always win over YAML and request-time routing.
+- If you switch provider without a model, a model is reused only when that provider already has one configured on a resolved agent. Otherwise the command fails and asks for `--model`, so a provider is never paired with a model it can't run.
+- At startup, if the configured provider has no credential and exactly one other provider is authorized, Chronos Code switches to that provider. With several authorized providers, the YAML choice is kept.
+- `chronos-code models [provider]` lists live Anthropic, OpenAI, or Azure models when you're authorized, and labels static fallback results. In the TUI, `/model` lists models and Tab completes `/model <provider> <id>`.
+- Azure needs an endpoint and a real deployment name (`AZURE_OPENAI_DEPLOYMENT` or `--model`).
+- `chronos-code config show` prints the effective primary agent, provider, and model, and where each value came from.
 
-### Rollback
+</details>
 
-Independent YAML switches. Sessions, memories, learned patterns, and `.mcp.json` stay on disk:
+<details>
+<summary><b>Rollback switches</b></summary>
+
+Each switch works on its own. Sessions, memories, learned patterns, and `.mcp.json` stay on disk:
 
 ```yaml
 session:
@@ -291,123 +255,116 @@ mcp:
   discovery_enabled: false
 ```
 
-Restart after changing these. `memory.enabled: false` stops persist and recall. The embedded security floor stays on. Restore `.mcp.json` from its same-directory atomic-write backup if a mutation must be reversed.
+Restart after changing these. `memory.enabled: false` stops both persistence and recall. The embedded security floor stays on regardless. If you need to reverse a `.mcp.json` change, restore it from the atomic-write backup in the same directory. See the [rollback guide](https://spawn08.github.io/chronos-code/).
+
+</details>
 
 ### Capability status
 
 | Capability | Status |
 |---|---|
-| Code graph (Go and 17 tree-sitter languages), SQLite sessions, deterministic YAML memory | Default |
-| PostgreSQL storage | Optional `postgres` build |
-| LSP tools | Optional `lsp` build |
-| Delivery-strategy policy | Embedded `ppd` compatibility key defaults to `shadow`; it observes without invoking `delivery-strategist`; `disabled` skips it |
-| Verification | `report` by default; `enforce` is opt-in |
-| Learning suggestions | On, human review required; `auto_distill: false` |
-| Vector recall and branchable sessions | Roadmap |
-
-## Default agents
-
-| Agent | Role | Typical tier |
-|-------|------|----------------|
-| `chronos-code` | Primary conversation agent; orients, routes, synthesizes | Frontier |
-| `coder` | Implement, test, iterate | Frontier |
-| `planner` | Task decomposition | Frontier |
-| `delivery-strategist` | Read-only, evidence-driven proposal of the next bounded work frontier | Frontier |
-| `reviewer` | Bugs, security, style | Frontier |
-| `debugger` | Failures from errors and traces | Frontier |
-| `researcher` | Read-only search | Cheap |
-| `architect` | Design and structure | Frontier |
-| `explainer` | Explain code and concepts | Cheap |
-
-Bypass the router:
-
-```text
-@reviewer check my last commit
-@debugger why is TestAuth failing
-@delivery-strategist propose the next evidence-driven frontier for this migration
-```
+| Code graph (Go + 17 tree-sitter languages), SQLite sessions, deterministic YAML memory | ✅ Default |
+| Verification | ✅ `report` by default · `enforce` opt-in |
+| Learning suggestions | ✅ On, human review required (`auto_distill: false`) |
+| PostgreSQL storage | 🔧 Optional `postgres` build |
+| LSP tools | 🔧 Optional `lsp` build |
+| Delivery-strategy policy | 👀 `ppd.mode: shadow` observes only · `enabled` delegates one turn · `disabled` skips |
+| Vector recall, branchable sessions | 🗺️ Roadmap |
 
 ## Interactive TUI
 
-Mouse wheel scrolls the transcript by default. Shift-drag to select, then copy with the terminal shortcut (`Cmd+C` on macOS). `/mouse` switches to unshifted drag-select instead of wheel capture.
-
-`/copy`, `Ctrl+Y`, and `Ctrl+Shift+C` copy the last assistant reply as UTF-8. With no last reply they copy the visible transcript. `/copy visible` / `/copy all` copy the pane or the full conversation. `/copy code` and `Ctrl+Shift+X` copy the last fenced block (`/copy code 1` copies the first). `Ctrl+V` uses the same clipboard adapter. A failed clipboard write is never reported as success.
-
-Tool calls in a turn collapse to a count plus the latest (or still-running / failed) line. `Ctrl+O` expands them.
-
-While scrolled away from the live tail, streaming does not repaint the pane, so a selection stays stable until `Ctrl+End`.
-
 | Command | Effect |
-|---------|--------|
-| `/login` or `Ctrl+L` | Claude Code / enterprise reuse, Codex/ChatGPT, API keys, OAuth |
-| `/whoami` | Effective credential source |
-| `/context` | Source names, counts, budgets, omission reasons (never memory bodies or secrets) |
-| `/resume` | Continue the latest session (`--resume <id>` from CLI) |
+|---|---|
+| `/login` · `Ctrl+L` | Claude Code / enterprise reuse, Codex/ChatGPT, API keys, OAuth |
+| `/whoami` | Show the effective credential source |
+| `/model` | Pick a model (Tab to autocomplete) |
+| `/think` | Toggle native thinking |
+| `/context` | Context sources, counts, budgets, and omission reasons (never memory bodies or secrets) |
+| `/resume` | Continue the latest session (`--resume <id>` from the CLI) |
 | `/compact` | Summarize history |
 | `/rewind` | Undo the last `file_write` |
-| `/plan on` / `/plan off` | Block writes and shell until plan mode is off |
-| `/learn` | Review-gated suggestions |
+| `/plan on` · `/plan off` | Block writes and shell until plan mode is turned off |
+| `/learn` | Review pending learning suggestions |
+| `/copy` · `Ctrl+Y` · `Ctrl+Shift+C` | Copy the last reply (`/copy visible`, `/copy all`, `/copy code [n]`) |
+| `Ctrl+O` | Expand collapsed tool calls |
+| `/mouse` | Toggle between wheel scrolling and unshifted drag-select |
 
-Status bar shows verification mode and the last route. `chronos-code run --json` prints one JSON object.
+**Scrolling and selection:** The mouse wheel scrolls the transcript by default. Shift-drag selects text, which you copy with your terminal's shortcut. Streaming doesn't repaint the pane while you're scrolled away from the live tail, so your selection stays put until `Ctrl+End`.
 
-Explicit memory intents: `remember <category>: <fact>`, `forget: <mem_ID>`, `recall-past: <query>`. Casual uses of “remember”, “always”, or “never” do not persist.
+**Memory intents:** Only explicit forms persist: `remember <category>: <fact>`, `forget: <mem_ID>`, `recall-past: <query>`. Casual use of "remember", "always", or "never" does not.
 
-## MCP and safety
+## Security & MCP
 
-Manage `.mcp.json` with `chronos-code mcp add`, `list`, `test`, and `remove`. Only stdio and HTTPS SSE are accepted. Credential-like arguments and query values must be `${ENV_VAR}` references; list and test output redacts them.
+- **Security floor.** The embedded floor can't be weakened by project policy or `--yolo`. `--yolo` auto-approves tools that policy already allows; it never overrides deny rules or destructive-action confirmations.
+- **Cost caps.** `--budget <usd>` sets a USD cap. If pricing for the model is unknown, a positive cap fails closed before any provider call.
+- **Consuming MCP.** Manage `.mcp.json` with `chronos-code mcp add | list | test | remove`. Only stdio and HTTPS SSE transports are accepted. Arguments or query values that look like credentials must be `${ENV_VAR}` references, and they are redacted in output. MCP tools are namespaced, require approval by default, and are closed on cleanup. Servers that are denied, untrusted, malformed, or unavailable don't block anything else.
+- **Serving MCP.** `chronos-code indexer mcp` exposes the read-only code graph tools to other MCP hosts over stdio. Repositories listed in `workspace.indexer.federation` (or passed via `--repo [name=]dir`) are indexed separately. Symbol lookup, search, and callers follow imports and API contracts across them. See [docs/chronos-indexer.md](docs/chronos-indexer.md).
 
-`chronos-code indexer mcp` goes the other way: it serves the read-only code graph tools (the same ones agents call in process) to other MCP hosts over stdio. Other repositories listed in `workspace.indexer.federation` (or passed with `--repo [name=]dir`) are indexed separately, and symbol lookup, search and callers follow imports and API contracts across them, in and out of process. See `docs/chronos-indexer.md`, "M9 results".
+## Command reference
 
-At startup, denied, untrusted, malformed, or unavailable servers do not block healthy servers or chat. MCP tools are namespaced, require approval by default, and close during cleanup.
+```text
+chronos-code                           Start the interactive REPL
+chronos-code run <message>             Run one task, then exit
+chronos-code init                      Export .chronos-code/ into the project
+chronos-code login | logout | whoami   Manage provider credentials
+chronos-code providers                 List resolvable providers
+chronos-code models [provider]         Query live models (labeled static fallback)
+chronos-code agents list               List resolved agents
+chronos-code config show | validate    Inspect resolved config
+chronos-code session list | delete | export
+chronos-code memory list | search | forget
+chronos-code mcp add | list | test | remove
+chronos-code indexer mcp [--repo DIR]  Serve code graph tools over MCP stdio
+chronos-code learn suggest | list | show | accept | reject
+chronos-code skills list | show
+chronos-code team list | run
+chronos-code plan … --db <path>        Durable plan database operations
+chronos-code eval run | ppd
+chronos-code serve                     Start the HTTP API server
+chronos-code version
+```
 
-The embedded security floor cannot be weakened by project policy or `--yolo`. Unknown models run only without a USD cap; a positive cap fails closed before a provider call when pricing is unavailable.
+**Global flags:** `-c/--config`, `--provider <name>`, `--model <id>`, `--debug`, `--stream` / `--no-stream`, `--permission-mode`, `--yolo`, `--budget <usd>`, `--resume <session-id>`, `--json` (headless).
 
 ## Development
 
 ```bash
 make build        # bin/chronos-code
 make test         # go test -race
-make eval         # token-efficiency eval vs baseline.json
-make fmt
-make vet
-make tidy
-make clean
-make install      # $GOPATH/bin
+make lint
+make eval         # token-efficiency eval against benchmark/eval/baseline.json
+make size-check   # release binary size gate (56 MiB)
+make fmt vet tidy
 ```
 
-### Token efficiency eval
+Every push and pull request to `main` runs [CI](.github/workflows/ci.yml): build, lint, `go test -race`, the release-binary size gate, and the token-efficiency eval.
 
-`make eval` replays offline fixtures and compares paired totals with `benchmark/eval/baseline.json`. The gate fails on contract errors, stale baseline totals, or an optimized-token regression greater than 10%.
+<details>
+<summary><b>Benchmarks and evaluation</b></summary>
 
-`benchmark/eval/report.md` is a synthetic fixture-replay result, not a comparison against Chronos Code or an external tool. A performance claim needs paired model runs on the same tasks, model, corpus revision, and success gate.
+- `make eval` replays offline fixtures and compares paired totals with `benchmark/eval/baseline.json`. It fails on contract errors, stale baseline totals, or a regression of more than 10% in optimized tokens.
+- `benchmark/eval/report.md` comes from synthetic fixture replay. It is not a comparison with any external tool, so it can't support a performance claim on its own; that requires paired model runs on the same tasks, model, corpus revision, and success gate.
+- `benchmark/ppd/results.json` is marked `invalid` because no real model was invoked. It supports no PPD quality or efficiency claim, and `chronos-code eval ppd --report` fails closed on it. `--validate-only` checks registration, not efficacy.
+- The `ppd` config key remains for compatibility. Embedded routing sets `ppd.mode: shadow`, so qualifying decisions are observed without invoking `delivery-strategist`. Production rolling replanning is not implemented.
 
-`benchmark/ppd/results.json` is `invalid`: no real model was invoked. It must not support a PPD quality or efficiency claim. Invalid runs are excluded from successful-task denominators.
+</details>
 
-### Delivery-strategy routing
+## Releases
 
-The public `ppd` key is retained for configuration compatibility. Embedded `routing.yaml` sets `ppd.mode: shadow`, so qualifying decisions are observed without invoking `delivery-strategist`; `disabled` skips the policy. `enabled` delegates one turn to the read-only strategist, but production rolling replanning is not implemented.
+Chronos Code follows [semantic versioning](https://semver.org/). Pushing a `v*` tag triggers the [release workflow](.github/workflows/release.yml), which:
 
-```bash
-chronos-code eval ppd --validate-only   # registration only, not efficacy
-chronos-code eval ppd --report          # requires completed real-model evidence
-```
+1. Runs the test suite against the pinned Chronos revision (`release/chronos.version`)
+2. Builds `linux`, `darwin`, and `windows` binaries for `amd64` and `arm64`
+3. Generates an SPDX SBOM for each binary
+4. Writes a `SHA256SUMS` manifest, attests build provenance, and signs the manifest with Sigstore cosign (keyless)
+5. Publishes everything to a [GitHub Release](https://github.com/spawn08/chronos-code/releases)
 
-`--report` fails closed on the checked-in invalid placeholder.
+Local builds get their version from `git describe`; untagged commits report a dev version with a commit suffix. Check yours with `chronos-code version`.
 
-## Releases and versioning
+## Documentation
 
-Chronos Code follows [semantic versioning](https://semver.org/) (`vMAJOR.MINOR.PATCH`).
-
-`make build` and `make build-release` stamp the binary from `git describe`. An untagged commit reports a `-dirty` / commit-suffixed dev version (`internal/cli.Version`):
-
-```bash
-chronos-code version
-```
-
-A `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): tests, then linux/darwin/windows amd64 and arm64 archives with `sha256sum` manifests on a [GitHub Release](https://github.com/spawn08/chronos-code/releases). [`scripts/install.sh`](scripts/install.sh) / [`scripts/install.ps1`](scripts/install.ps1) fetch, verify, and install those archives (see [Install](#install)).
-
-Every push and PR to `main` runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml): build, lint, `go test -race`, release-binary size gate, and the token-efficiency eval.
+Full documentation, covering architecture, configuration, CLI reference, deployment, security, and rollback, is at **[spawn08.github.io/chronos-code](https://spawn08.github.io/chronos-code/)**. The source is in [`docs/`](docs/).
 
 ## License
 
-Same license as [Chronos](https://github.com/spawn08/chronos).
+Released under the same license as [Chronos](https://github.com/spawn08/chronos).
