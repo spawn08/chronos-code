@@ -92,8 +92,9 @@ Commands:
 
 Keys:
   Inspection         up/down/pgup/pgdown scroll; left/right select; ctrl+shift+c copy
-  enter              Send; while running, interrupt and replace
-  alt+enter          Queue a follow-up while running
+  enter              Send; while running, add to the running task (commands queue)
+  alt+enter          Queue a follow-up to run after the current turn
+  ctrl+c             Stop the running turn (queued input still runs); quit when idle
   ctrl+j             Insert newline
   up / down          Select completion, otherwise recall message history
   ctrl+r             Search message history

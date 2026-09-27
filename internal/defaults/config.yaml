@@ -2,7 +2,12 @@ workspace:
   index_on_start: true
 
 tools:
-  compression_threshold_tokens: 500
+  # Base size above which a tool result is replaced by a preview the model
+  # must fetch with read_stored_result (scaled per tool by attention weight:
+  # ~3.4k tokens for shell, ~6.2k for file_read). At 500, most results over
+  # ~1 KB were compressed and about 60% were fetched back, each fetch an
+  # extra model call that also kept the preview in context.
+  compression_threshold_tokens: 8000
 
 memory:
   enabled: true

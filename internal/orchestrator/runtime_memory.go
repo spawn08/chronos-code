@@ -205,7 +205,7 @@ func setupRuntimeMemory(ctx context.Context, cfg *config.Config, paths config.Pr
 				pins = previous(ctx)
 			}
 			if pin := r.recallPin(ctx, userID); pin != "" {
-				pins = append(pins, model.Message{Role: model.RoleSystem, Content: pin})
+				pins = append(pins, model.Message{Role: model.RoleSystem, Content: pin, TurnScoped: true})
 			}
 			return pins
 		}

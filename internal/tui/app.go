@@ -116,12 +116,21 @@ type activityMsg struct {
 
 type activityDoneMsg struct{ turnID uint64 }
 
+// steeringDeliveredMsg reports that the running turn picked up steering input.
+type steeringDeliveredMsg struct {
+	turnID uint64
+	ctx    context.Context
+	inbox  *orchestrator.SteeringInbox
+}
+
 type turnItemKind uint8
 
 const (
 	turnItemText turnItemKind = iota
 	turnItemActivity
 	turnItemReceipt
+	// turnItemSteer is user input the running task picked up mid-turn.
+	turnItemSteer
 )
 
 type turnItem struct {
@@ -416,8 +425,13 @@ type appModel struct {
 	inspection *inspectionOverlay
 
 	queuedMessages []string
-	pastedInputs   map[string]string
-	pasteID        uint64
+	// steering collects plain prompts submitted while an agent turn runs; the
+	// agent picks them up between tool rounds. Nil when the turn cannot take
+	// input (direct subagent runs, maintenance, idle).
+	steering     *orchestrator.SteeringInbox
+	shellPending int
+	pastedInputs map[string]string
+	pasteID      uint64
 
 	searching     bool
 	searchQuery   string
@@ -624,6 +638,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case activityDoneMsg:
 		return m, nil
 
+	case steeringDeliveredMsg:
+		if msg.turnID != m.turnID || !m.sending || msg.inbox != m.steering {
+			return m, nil
+		}
+		m.showDeliveredSteering()
+		m.statusMsg = "running │ agent picked up your added input"
+		m.refreshViewport()
+		return m, listenSteering(msg.ctx, msg.turnID, msg.inbox)
+
 	case streamDoneMsg:
 		if msg.turnID != m.turnID || !m.sending {
 			return m, nil
@@ -720,12 +743,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendSystem(msg.text)
 		}
 		m.refreshViewport()
-		if len(m.queuedMessages) > 0 {
-			line := m.queuedMessages[0]
-			m.queuedMessages = m.queuedMessages[1:]
-			return m.handleSubmit(line)
-		}
-		return m, nil
+		return m, m.dispatchQueued()
 
 	case subagentDoneMsg:
 		if msg.turnID != m.turnID {
@@ -750,9 +768,12 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 		}
+		if m.shellPending > 0 {
+			m.shellPending--
+		}
 		m.statusMsg = ""
 		m.refreshViewport()
-		return m, nil
+		return m, m.dispatchQueued()
 
 	case modelPickerLiveMsg:
 		if m.picker != nil && m.picker.isModelPicker {
@@ -934,9 +955,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.handleSubmit(line)
 		}
 		if m.sending {
-			m.queuedMessages = append([]string{line}, m.queuedMessages...)
-			m.interruptTurn()
-			return m, nil
+			return m.submitWhileBusy(line)
 		}
 		return m.handleSubmit(line)
 	case msg.String() == "alt+enter" && m.sending:
@@ -998,6 +1017,69 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	m.resizeViewport()
 	return m, cmd
+}
+
+// submitWhileBusy handles Enter while a turn runs. A plain prompt joins the
+// running task: the agent picks it up after its current tool round. Commands
+// that refuse to run mid-turn report that now; other commands, shell escapes,
+// @agent prompts and prompts for turns that cannot take input are queued to
+// run after the turn. Nothing interrupts the turn; Ctrl+C does that.
+func (m *appModel) submitWhileBusy(line string) (tea.Model, tea.Cmd) {
+	fields := strings.Fields(line)
+	switch {
+	case fields[0] == "/clear" || fields[0] == "/resume" || fields[0] == "/compact" ||
+		(fields[0] == "/mcp" && len(fields) > 1 && fields[1] == "connect"):
+		// These handlers refuse while a response is in progress.
+		return m.handleSubmit(line)
+	case strings.HasPrefix(line, "/") || strings.HasPrefix(line, "!") || m.steering == nil ||
+		(strings.HasPrefix(line, "@") && len(fields) > 1 && knownAgent(strings.TrimPrefix(fields[0], "@"), m.orch.ListAgents())):
+		m.queuedMessages = append(m.queuedMessages, line)
+		m.statusMsg = fmt.Sprintf("queued for after this turn │ %d queued", len(m.queuedMessages))
+	case m.steering.Push(line):
+		m.history.Add(line)
+		m.statusMsg = "added to running task │ picked up after the current step"
+	default:
+		m.queuedMessages = append(m.queuedMessages, line)
+		m.statusMsg = fmt.Sprintf("queued for after this turn │ %d queued", len(m.queuedMessages))
+	}
+	m.refreshViewport()
+	return m, nil
+}
+
+// showDeliveredSteering moves input the agent picked up into the active turn,
+// at the point where the agent received it.
+func (m *appModel) showDeliveredSteering() {
+	if m.steering == nil {
+		return
+	}
+	for _, text := range m.steering.TakeDelivered() {
+		m.activeTurnItems = append(m.activeTurnItems, turnItem{kind: turnItemSteer, content: text, settled: true})
+	}
+}
+
+func listenSteering(ctx context.Context, turnID uint64, inbox *orchestrator.SteeringInbox) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case <-inbox.Delivered():
+			return steeringDeliveredMsg{turnID: turnID, ctx: ctx, inbox: inbox}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+// dispatchQueued sends queued input once nothing is running. Entries that do
+// not start a turn (most slash commands) are followed by the next one, so the
+// queue never stalls; a running shell escape holds the queue until it ends.
+func (m *appModel) dispatchQueued() tea.Cmd {
+	var cmds []tea.Cmd
+	for !m.sending && m.shellPending == 0 && len(m.queuedMessages) > 0 {
+		line := m.queuedMessages[0]
+		m.queuedMessages = m.queuedMessages[1:]
+		_, cmd := m.handleSubmit(line)
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *appModel) interruptTurn() {
@@ -1221,8 +1303,9 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 		m.stopActivity = stop
 		activityCmd = listenActivity(turnCtx, turnID, ch)
 	}
+	m.steering = orchestrator.NewSteeringInbox()
 	m.refreshViewport()
-	return m, tea.Batch(m.sendCmd(turnCtx, turnID, line), m.spin.Tick, activityCmd)
+	return m, tea.Batch(m.sendCmd(turnCtx, turnID, line), m.spin.Tick, activityCmd, listenSteering(turnCtx, turnID, m.steering))
 }
 
 func (m *appModel) parseSkillInvocation(line string) (name, task string, ok bool) {
@@ -1320,6 +1403,7 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) tea.Cmd {
 	orch := m.orch
 	stream := m.stream
+	steering := m.steering
 	root := m.workspaceRoot()
 	agents := append([]string(nil), orch.ListAgents()...)
 	// One byte per token is deliberately conservative. Spend at most a quarter
@@ -1348,21 +1432,21 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 		if err := ctx.Err(); err != nil {
 			return chatDoneMsg{turnID: turnID, attachments: input.Receipt, err: err}
 		}
+		request := orchestrator.ExecutionRequest{
+			Message: input.Message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
+		}
+		if steering != nil {
+			request.PendingInput = steering
+		}
 		if stream {
-			result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
-				Message:          input.Message,
-				Mode:             orchestrator.ExecutionStreaming,
-				SessionID:        orch.CurrentSessionID(),
-				VerificationMode: orch.VerificationMode(),
-			})
+			request.Mode = orchestrator.ExecutionStreaming
+			result, err := StartExecution(ctx, orch, request)
 			if err != nil {
 				return chatDoneMsg{turnID: turnID, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, result: result, err: err}
 			}
 			return streamStartedMsg{turnID: turnID, ctx: ctx, ch: result.Stream, completion: result.Completion, execution: result, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt}
 		}
-		result, err := StartExecution(ctx, orch, orchestrator.ExecutionRequest{
-			Message: input.Message, SessionID: orch.CurrentSessionID(), VerificationMode: orch.VerificationMode(),
-		})
+		result, err := StartExecution(ctx, orch, request)
 		return chatDoneMsg{turnID: turnID, resp: result.Response, contextReport: result.ContextReport, memoryIntent: result.MemoryIntent, attachments: input.Receipt, result: result, err: err}
 	}
 }
@@ -1988,6 +2072,7 @@ func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
 	m.history.Add("!" + cmdStr)
 	m.appendSystem("$ " + cmdStr)
 	m.statusMsg = "running shell"
+	m.shellPending++
 	m.refreshViewport()
 	orch := m.orch
 	dir := m.workspaceRoot()
@@ -2849,9 +2934,9 @@ func (m *appModel) usageSummary() string {
 	if contextTokens == 0 {
 		contextTokens = input + cacheRead + cacheWrite + output
 	}
-	summary := fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ context %d │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ output %d │ cost %s",
-		input, cacheRead, cacheWrite, output, contextTokens, formatCost(m.lastTurnCost.SpentMicrodollars, m.lastTurnCost.UnpricedCalls), m.lastModelCalls, m.lastSubagents,
-		session.InputTokens, session.CacheReadTokens, session.OutputTokens,
+	summary := fmt.Sprintf("last turn: input %d │ cache read %d │ cache write %d │ output %d │ context %d │ cache hit %s │ cost %s\nexecution: %d model calls │ %d subagents\nsession: input %d │ cache read %d │ cache write %d │ output %d │ cache hit %s │ cost %s",
+		input, cacheRead, cacheWrite, output, contextTokens, cacheHitRate(input, cacheRead, cacheWrite), formatCost(m.lastTurnCost.SpentMicrodollars, m.lastTurnCost.UnpricedCalls), m.lastModelCalls, m.lastSubagents,
+		session.InputTokens, session.CacheReadTokens, session.CacheCreationTokens, session.OutputTokens, cacheHitRate(session.InputTokens, session.CacheReadTokens, session.CacheCreationTokens),
 		formatCost(session.SpentMicrodollars, session.UnpricedCalls))
 	if session.UnpricedCalls > 0 {
 		summary += fmt.Sprintf("\nunpriced: %d model calls this session have no price entry; add the model to .chronos-code/pricing.yaml", session.UnpricedCalls)
@@ -2889,6 +2974,18 @@ func (m *appModel) turnUsageCounts() (input, output, cacheRead, cacheWrite int64
 		cacheWrite = int64(m.lastKnownUsage.CacheCreationTokens)
 	}
 	return input, output, cacheRead, cacheWrite
+}
+
+// cacheHitRate is the share of prompt tokens served from the provider's
+// prompt cache (billed at a fraction of input); cache writes cost more than
+// plain input, so a low rate with many writes means the prompt prefix keeps
+// changing.
+func cacheHitRate(input, cacheRead, cacheWrite int64) string {
+	total := input + cacheRead + cacheWrite
+	if total <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d%%", cacheRead*100/total)
 }
 
 // formatCost renders spend from the calls that actually ran. Unpriced calls
@@ -3209,6 +3306,17 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	if interrupted {
 		err = nil
 	}
+	// Close steering before settling: input the agent picked up is shown in
+	// this turn, and input it never saw becomes the next prompt, ahead of
+	// anything queued for after the turn.
+	if m.steering != nil {
+		leftover := m.steering.Close()
+		m.showDeliveredSteering()
+		m.steering = nil
+		if len(leftover) > 0 {
+			m.queuedMessages = append([]string{strings.Join(leftover, "\n\n")}, m.queuedMessages...)
+		}
+	}
 	// Never replay activeRequest: earlier tool calls may already have mutated
 	// the workspace. Recoverable model-call retries belong to the SDK.
 	m.settleToolInputs("")
@@ -3291,13 +3399,10 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.viewport.GotoBottom()
 	}
 
-	if budgetExhausted || len(m.queuedMessages) == 0 {
+	if budgetExhausted {
 		return nil
 	}
-	queued := m.queuedMessages[0]
-	m.queuedMessages = m.queuedMessages[1:]
-	_, cmd := m.handleSubmit(queued)
-	return cmd
+	return m.dispatchQueued()
 }
 
 func (m *appModel) settleTurnActivities(err error) {
@@ -3323,6 +3428,11 @@ func (m *appModel) renderTranscript() string {
 	body := styleDim.Render(m.spin.View() + " thinking...")
 	if len(m.activeTurnItems) > 0 {
 		body = m.renderTurnItems()
+	}
+	if m.steering != nil {
+		for _, text := range m.steering.Pending() {
+			body += "\n\n" + renderSteeringNote("you · waiting for the current step", boundedTextTail(text, maxItemRenderBytes, maxViewportLines), m.viewport.Width())
+		}
 	}
 	active := RenderTurnHeader("✦", m.displayAgentName(), styleAgentName, m.viewport.Width()) + "\n" + body
 	return boundedTranscriptJoin([]string{finalized, active})
@@ -3451,6 +3561,12 @@ func activityNeedsPeek(content string) bool {
 		strings.Contains(content, "· failed")
 }
 
+// renderSteeringNote renders user input added to a running task.
+func renderSteeringNote(label, text string, width int) string {
+	header := "  " + styleUserPrefix.Render("❯") + " " + styleDim.Render(label)
+	return truncateToWidth(header, width) + "\n" + wrapText(text, width)
+}
+
 func (m *appModel) renderTurnItems() string {
 	return m.renderItemList(m.activeTurnItems)
 }
@@ -3560,6 +3676,9 @@ func (m *appModel) renderOneItem(item *turnItem) string {
 	content := boundedTextTail(item.content, maxItemRenderBytes, maxViewportLines)
 	if item.kind == turnItemReceipt {
 		return styleDim.Render(wrapText(content, m.viewport.Width()))
+	}
+	if item.kind == turnItemSteer {
+		return renderSteeringNote("you · added to task", content, m.viewport.Width())
 	}
 	if item.kind == turnItemActivity {
 		line := truncateToWidth(content, m.viewport.Width())
@@ -3976,6 +4095,13 @@ func (m *appModel) renderStatusBar() string {
 	if ctxSeg := m.contextUsageSegment(); ctxSeg != "" {
 		leftText += " │ " + ctxSeg
 	}
+	steeringPending := 0
+	if m.steering != nil {
+		steeringPending = len(m.steering.Pending())
+	}
+	if steeringPending > 0 {
+		leftText += fmt.Sprintf(" │ adding %d", steeringPending)
+	}
 	if len(m.queuedMessages) > 0 {
 		leftText += fmt.Sprintf(" │ queued %d", len(m.queuedMessages))
 	}
@@ -3984,6 +4110,9 @@ func (m *appModel) renderStatusBar() string {
 		leftText = " ● " + runLabel
 		if m.orch.PlanMode() {
 			leftText += " │ plan"
+		}
+		if steeringPending > 0 {
+			leftText += fmt.Sprintf(" ~%d", steeringPending)
 		}
 		if len(m.queuedMessages) > 0 {
 			leftText += fmt.Sprintf(" +%d", len(m.queuedMessages))

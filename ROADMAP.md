@@ -562,7 +562,7 @@ bash:
 ```
 
 **Input handling:**
-- `Enter` steers current run (interrupts remaining tool calls, delivers message).
+- `Enter` steers current run (delivered after the current tool round finishes, as added context for the running task; undelivered input becomes the next turn). `Ctrl+C` interrupts.
 - `Alt+Enter` queues follow-up (delivered after current turn completes).
 - Multiline via `Shift+Enter`.
 - Slash commands with fuzzy autocomplete: `/agent`, `/model`, `/skill`, `/mcp`, `/cost`, `/reset`, `/compact`, `/plan`, `/permissions`, `/session`.

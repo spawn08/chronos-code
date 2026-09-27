@@ -52,8 +52,9 @@ func TestTaskPlanHookPinsCurrentPlanOnce(t *testing.T) {
 	if len(got) != 1 || !strings.Contains(got[0], "[x] 1. write css") {
 		t.Fatalf("plan pins = %q, want one current pin", got)
 	}
-	if req.Messages[1].Content != got[0] || req.Messages[2].Role != model.RoleUser {
-		t.Fatalf("pin not placed after the system prefix: %+v", req.Messages)
+	last := req.Messages[len(req.Messages)-1]
+	if last.Content != got[0] || !last.Uncached || req.Messages[0].Content != "system prompt" || req.Messages[1].Role != model.RoleUser {
+		t.Fatalf("pin not placed as the uncached trailing message after an unchanged prefix: %+v", req.Messages)
 	}
 	if err := store.Save(ctx, &builtins.Plan{}); err != nil {
 		t.Fatal(err)

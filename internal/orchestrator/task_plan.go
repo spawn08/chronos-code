@@ -100,12 +100,9 @@ func (h taskPlanHook) Before(ctx context.Context, evt *hooks.Event) error {
 		messages = append(messages, message)
 	}
 	if len(plan.Tasks) > 0 {
-		prefix := 0
-		for prefix < len(messages) && messages[prefix].Role == model.RoleSystem {
-			prefix++
-		}
-		pin := model.Message{Role: model.RoleSystem, Content: taskPlanHeader + plan.Summary()}
-		messages = append(messages[:prefix], append([]model.Message{pin}, messages[prefix:]...)...)
+		// The plan changes during a turn; as an uncached trailing message it
+		// never invalidates the provider's cached prompt and conversation.
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: taskPlanHeader + plan.Summary(), Uncached: true})
 	}
 	req.Messages = messages
 	return nil

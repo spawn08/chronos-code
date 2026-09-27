@@ -167,6 +167,9 @@ type ExecutionRequest struct {
 	VerificationEvents      []execution.Event
 	// BoundedContext prevents ambient prompt augmentation for durable plan nodes.
 	BoundedContext bool
+	// PendingInput, when set, lets the caller add user input to the running
+	// task; the selected agent's tool loop drains it between tool rounds.
+	PendingInput agent.PendingInput
 }
 
 // ExecutionResult carries the common identity and either a blocking response
@@ -937,10 +940,21 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 			if detectErr != nil {
 				return pins
 			}
-			return append(pins, model.Message{Role: model.RoleSystem, Content: selected.Banner() + "\n" + environmentLine(selected.Root, time.Now())})
+			content := selected.Banner() + "\n" + environmentLine(selected.Root, time.Now()) + modelLine(requestModelProvider(ctx, a))
+			return append(pins, model.Message{Role: model.RoleSystem, Content: content})
 		}
 	}
 	return info
+}
+
+// modelLine tells the model which model serves this request (routing and
+// /model can change it per turn), which it cannot otherwise know. A model
+// change starts a new provider cache anyway, so this costs no cache reuse.
+func modelLine(provider model.Provider) string {
+	if provider == nil || provider.Model() == "" {
+		return ""
+	}
+	return fmt.Sprintf("\nModel: this request is served by %s (provider %s); state this when asked which model you are.", provider.Model(), provider.Name())
 }
 
 // environmentLine gives the model facts it otherwise guesses: the date (for
@@ -988,7 +1002,7 @@ func setupSessionSummaries(manager *session.Manager, agents map[string]*agent.Ag
 			}
 			content := b.String()
 			contextSourceSelected(ctx, ContextSourceSessionSummaries, len(summaries), len(content), truncated)
-			return append(messages, model.Message{Role: model.RoleSystem, Content: content})
+			return append(messages, model.Message{Role: model.RoleSystem, Content: content, TurnScoped: true})
 		}
 	}
 }
@@ -1013,18 +1027,15 @@ func setupConversationPins(store storage.Storage, agents map[string]*agent.Agent
 			if err != nil {
 				return pins
 			}
+			// Pins are built before the SDK persists the current message (it
+			// carries its turn context), so every stored user message is prior.
 			var recent []string
-			skipCurrent := true
 			for i := len(events) - 1; i >= 0 && len(recent) < 4; i-- {
 				if events[i].Type != "chat_message" {
 					continue
 				}
 				payload, ok := events[i].Payload.(map[string]any)
 				if !ok || payload["role"] != model.RoleUser {
-					continue
-				}
-				if skipCurrent {
-					skipCurrent = false
 					continue
 				}
 				text, _ := payload["content"].(string)
@@ -1040,7 +1051,7 @@ func setupConversationPins(store storage.Storage, agents map[string]*agent.Agent
 			for i := len(recent) - 1; i >= 0; i-- {
 				fmt.Fprintf(&content, "\n- %s", recent[i])
 			}
-			return append(pins, model.Message{Role: model.RoleSystem, Content: content.String()})
+			return append(pins, model.Message{Role: model.RoleSystem, Content: content.String(), TurnScoped: true})
 		}
 	}
 }
@@ -1093,7 +1104,7 @@ func installLSPTools(root string, files []string, agents map[string]*agent.Agent
 			pin, count, reason, truncated := lspDiagnosticPin(ctx, root, files, message, diagnostics)
 			if pin != "" {
 				contextSourceSelected(ctx, ContextSourceDiagnostics, count, len(pin), truncated)
-				messages = append(messages, model.Message{Role: model.RoleSystem, Content: pin})
+				messages = append(messages, model.Message{Role: model.RoleSystem, Content: pin, TurnScoped: true})
 			} else {
 				contextSourceOmitted(ctx, ContextSourceDiagnostics, reason)
 			}
@@ -1242,7 +1253,7 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 						truncated = truncated || len(item.Record.Content) > 120
 					}
 					contextSourceSelected(ctx, ContextSourceMemory, len(scored), len(content), truncated)
-					return append(messages, model.Message{Role: model.RoleSystem, Content: content})
+					return append(messages, model.Message{Role: model.RoleSystem, Content: content, TurnScoped: true})
 				}
 			}
 			block, err := tenantStore.ContextBlock(5)
@@ -1255,7 +1266,7 @@ func setupMemory(cfg *config.Config, agents map[string]*agent.Agent) *memory.Sto
 				return messages
 			}
 			contextSourceSelected(ctx, ContextSourceMemory, strings.Count(block, "\n- "), len(block), len(block) >= 800)
-			return append(messages, model.Message{Role: model.RoleSystem, Content: block})
+			return append(messages, model.Message{Role: model.RoleSystem, Content: block, TurnScoped: true})
 		}
 	}
 	return store
@@ -1312,7 +1323,7 @@ func setupLearnedPatternPins(store *learning.Store, repoPath, sourceRevision str
 			}
 			content := learning.RenderPattern(pattern)
 			contextSourceSelected(ctx, ContextSourceLearnedPattern, 1, len(content), len(content) >= 1000)
-			return append(messages, model.Message{Role: model.RoleSystem, Content: content})
+			return append(messages, model.Message{Role: model.RoleSystem, Content: content, TurnScoped: true})
 		}
 	}
 }
@@ -1872,6 +1883,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		}
 	}
 	ctx = withTaskRuntime(ctx, taskRuntime)
+	ctx = agent.WithPendingInput(ctx, agentID, request.PendingInput)
 	if request.PolicyContext != nil {
 		ctx = context.WithValue(ctx, executionPolicyContextKey{}, request.PolicyContext)
 	}

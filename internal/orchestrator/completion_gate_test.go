@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos/engine/model"
+	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/storage"
@@ -155,5 +156,24 @@ func TestEnvironmentLineReportsGitRepository(t *testing.T) {
 	}
 	if line := environmentLine(root, now); !strings.Contains(line, "git_repository=true") {
 		t.Fatalf("environmentLine = %q", line)
+	}
+}
+
+func TestWorkspacePinNamesTheRequestModel(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/x\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &agent.Agent{ID: "chronos-code", Model: &routingTestProvider{provider: "anthropic", model: "claude-sonnet-5"}, Tools: tool.NewRegistry()}
+	if setupWorkspace(root, map[string]*agent.Agent{a.ID: a}) == nil {
+		t.Fatal("workspace not detected")
+	}
+	pins := func(ctx context.Context) string { return strings.Join(messageContents(a.ContextPinsFn(ctx)), "\n") }
+	if got := pins(context.Background()); !strings.Contains(got, "served by claude-sonnet-5 (provider anthropic)") {
+		t.Fatalf("pins without a routed model = %q, want the agent's model", got)
+	}
+	routed := agent.WithModelProvider(context.Background(), &routingTestProvider{provider: "anthropic", model: "claude-opus-5-5"})
+	if got := pins(routed); !strings.Contains(got, "served by claude-opus-5-5 (provider anthropic)") || strings.Contains(got, "claude-sonnet-5") {
+		t.Fatalf("pins with a routed model = %q, want the routed model only", got)
 	}
 }

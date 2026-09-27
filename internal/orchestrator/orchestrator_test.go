@@ -1069,7 +1069,7 @@ func TestConversationPinsKeepFollowupInCurrentSession(t *testing.T) {
 		{"current", model.RoleUser, "fix Azure gpt-6-sol reasoning and tools"},
 		{"current", model.RoleAssistant, "investigating"},
 		{"current", model.RoleUser, "I already shared the error above"},
-		{"current", model.RoleUser, "yes, fix it"},
+		// The current message ("yes, fix it") is persisted after pins are built.
 	} {
 		if err := store.AppendEvent(ctx, &storage.Event{ID: fmt.Sprintf("event-%d", i), SessionID: entry.session, SeqNum: int64(i + 1), Type: "chat_message", Payload: map[string]any{"role": entry.role, "content": entry.content}}); err != nil {
 			t.Fatal(err)
@@ -1082,7 +1082,7 @@ func TestConversationPinsKeepFollowupInCurrentSession(t *testing.T) {
 	ctx = storage.WithSession(ctx, "current")
 	ctx = context.WithValue(ctx, messageKey{}, "yes, fix it")
 	pins := a.ContextPinsFn(ctx)
-	if len(pins) != 2 || !strings.Contains(pins[1].Content, "fix Azure gpt-6-sol") || !strings.Contains(pins[1].Content, "already shared") || strings.Contains(pins[1].Content, "AB-47") {
+	if len(pins) != 2 || !strings.Contains(pins[1].Content, "fix Azure gpt-6-sol") || !strings.Contains(pins[1].Content, "already shared") || strings.Contains(pins[1].Content, "AB-47") || !pins[1].TurnScoped {
 		t.Fatalf("follow-up pins = %#v", pins)
 	}
 	if pins := a.ContextPinsFn(context.WithValue(ctx, messageKey{}, "start a new task")); len(pins) != 1 {
@@ -1176,16 +1176,32 @@ func TestSessionSummaryContextBlockingStreamingParity(t *testing.T) {
 	if blocking != streaming {
 		t.Fatalf("blocking pins %q differ from streaming pins %q", blocking, streaming)
 	}
-	if !strings.Contains(blocking, "existing pin") || !strings.Contains(blocking, "session=prior") || !strings.Contains(blocking, "fix the parser carefully") {
-		t.Fatalf("summary pins = %q, want existing and prior-session pins", blocking)
+	if !strings.Contains(blocking, "existing pin") || strings.Contains(blocking, "session=prior") {
+		t.Fatalf("system pins = %q, want the existing pin and no per-message summaries", blocking)
+	}
+	// Prior-session summaries depend on the message, so they travel in the
+	// turn's user message and the system prefix stays cacheable.
+	turnContext := func(req *model.ChatRequest) string {
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == model.RoleUser {
+				content := req.Messages[i].Content
+				if end := strings.Index(content, "</turn_context>"); strings.HasPrefix(content, "<turn_context>") && end > 0 {
+					return content[:end]
+				}
+				return ""
+			}
+		}
+		return ""
+	}
+	blockingTurn, streamingTurn := turnContext(provider.request(0)), turnContext(provider.request(1))
+	if blockingTurn != streamingTurn || !strings.Contains(blockingTurn, "session=prior") || !strings.Contains(blockingTurn, "fix the parser carefully") {
+		t.Fatalf("turn context = %q (streaming %q), want equivalent prior-session summaries", blockingTurn, streamingTurn)
+	}
+	if strings.Contains(blockingTurn, "active session secret") {
+		t.Fatalf("prior-session summaries contain the active session: %q", blockingTurn)
 	}
 	if got, want := contextSource(blockingResult.ContextReport, ContextSourceSessionSummaries), contextSource(streamed.ContextReport, ContextSourceSessionSummaries); got != want || got.SelectedCount != 1 || got.Bytes == 0 {
 		t.Fatalf("summary reports = (%#v, %#v), want equivalent selected metadata", got, want)
-	}
-	for _, message := range provider.request(0).Messages {
-		if strings.HasPrefix(message.Content, "Relevant context from prior sessions:") && strings.Contains(message.Content, "active session secret") {
-			t.Fatalf("prior-session pin contains active session: %q", message.Content)
-		}
 	}
 }
 

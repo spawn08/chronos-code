@@ -1829,23 +1829,149 @@ func TestFinalizeTurn_BudgetErrorDoesNotReplayCompletedActions(t *testing.T) {
 	}
 }
 
-func TestEnterWhileSendingInterruptsBeforeReplacement(t *testing.T) {
+func TestEnterWhileSendingAddsPromptToRunningTask(t *testing.T) {
 	m := newTestAppModel(t)
 	canceled := false
 	m.sending = true
 	m.turnCancel = func() { canceled = true }
-	m.input.SetValue("replacement prompt")
+	m.steering = orchestrator.NewSteeringInbox()
+	m.input.SetValue("also handle the nil case")
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	if cmd != nil {
-		t.Fatal("replacement started before interrupted turn settled")
+	if cmd != nil || canceled || m.turnInterrupted {
+		t.Fatalf("Enter interrupted the running task: cmd=%v canceled=%v", cmd != nil, canceled)
 	}
-	if !canceled || !m.turnInterrupted {
-		t.Fatal("active turn was not interrupted")
+	if got := m.steering.Pending(); len(got) != 1 || got[0] != "also handle the nil case" {
+		t.Fatalf("pending steering = %q", got)
 	}
-	if got := m.queuedMessages; len(got) != 1 || got[0] != "replacement prompt" {
-		t.Fatalf("queued replacement = %q", got)
+	if len(m.queuedMessages) != 0 || m.input.Value() != "" {
+		t.Fatalf("queued = %q, input = %q", m.queuedMessages, m.input.Value())
+	}
+	if got := m.renderTranscript(); !strings.Contains(got, "waiting for the current step") || !strings.Contains(got, "also handle the nil case") {
+		t.Fatalf("pending input not visible in the active turn: %q", got)
+	}
+	if got, ok := m.history.Prev(""); !ok || got != "also handle the nil case" {
+		t.Fatalf("history.Prev() = %q, %v", got, ok)
+	}
+}
+
+func TestEnterWhileSendingQueuesCommandsAndInputForUnsteerableTurns(t *testing.T) {
+	m := newTestAppModel(t)
+	canceled := false
+	m.sending = true
+	m.turnCancel = func() { canceled = true }
+	m.steering = orchestrator.NewSteeringInbox()
+	for _, line := range []string{"/usage", "!go test ./..."} {
+		m.input.SetValue(line)
+		_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	}
+	m.steering = nil // e.g. a direct /subagent run or maintenance
+	m.input.SetValue("plain prompt")
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if got := strings.Join(m.queuedMessages, "|"); got != "/usage|!go test ./...|plain prompt" || canceled {
+		t.Fatalf("queued = %q, canceled = %v", got, canceled)
+	}
+}
+
+func TestEnterWhileSendingRefusesCommandsThatNeedAnIdleSession(t *testing.T) {
+	m := newTestAppModel(t)
+	canceled := false
+	m.sending = true
+	m.turnCancel = func() { canceled = true }
+	m.steering = orchestrator.NewSteeringInbox()
+	m.input.SetValue("/clear")
+
+	_, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+	if canceled || len(m.queuedMessages) != 0 || len(m.steering.Pending()) != 0 {
+		t.Fatalf("canceled = %v, queued = %q, pending = %q", canceled, m.queuedMessages, m.steering.Pending())
+	}
+	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "cannot clear context while a response is in progress") {
+		t.Fatalf("refusal not shown: %q", got)
+	}
+}
+
+func TestSteeringShowsWhenPickedUpAndLeftoverRunsNext(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.turnID = 4
+	inbox := orchestrator.NewSteeringInbox()
+	m.steering = inbox
+	m.appendTurnText("working on it")
+	inbox.Push("use the v2 endpoint")
+	if drained := inbox.DrainPendingInput(context.Background()); len(drained) != 1 {
+		t.Fatalf("drained = %q", drained)
+	}
+	inbox.Push("and update the changelog") // arrives after the last tool round
+
+	_, cmd := m.Update(steeringDeliveredMsg{turnID: 4, ctx: context.Background(), inbox: inbox})
+	if cmd == nil {
+		t.Fatal("delivery listener was not re-armed")
+	}
+	last := m.activeTurnItems[len(m.activeTurnItems)-1]
+	if last.kind != turnItemSteer || last.content != "use the v2 endpoint" {
+		t.Fatalf("last active item = %+v, want the picked-up input", last)
+	}
+
+	m.queuedMessages = []string{"queued after"}
+	if cmd := m.finalizeTurn(nil); cmd == nil || !m.sending {
+		t.Fatal("undelivered input was not sent as the next prompt")
+	}
+	if got, ok := m.history.Prev(""); !ok || got != "and update the changelog" {
+		t.Fatalf("next prompt = %q, %v", got, ok)
+	}
+	if got := strings.Join(m.queuedMessages, "|"); got != "queued after" {
+		t.Fatalf("queue = %q, want Alt+Enter follow-ups after the leftover", got)
+	}
+	if got := strings.Join(m.blocks, "\n"); !strings.Contains(got, "added to task") || !strings.Contains(got, "use the v2 endpoint") {
+		t.Fatalf("finished turn does not show the picked-up input: %q", got)
+	}
+	if inbox.Push("too late") {
+		t.Fatal("the finished turn's inbox still accepts input")
+	}
+}
+
+func TestStaleSteeringDeliveryIsIgnored(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.turnID = 2
+	m.steering = orchestrator.NewSteeringInbox()
+	old := orchestrator.NewSteeringInbox()
+
+	if _, cmd := m.Update(steeringDeliveredMsg{turnID: 1, ctx: context.Background(), inbox: old}); cmd != nil || len(m.activeTurnItems) != 0 {
+		t.Fatal("stale delivery changed the active turn")
+	}
+}
+
+func TestQueueDoesNotStallOnEntriesThatStartNoTurn(t *testing.T) {
+	m := newTestAppModel(t)
+	m.sending = true
+	m.queuedMessages = []string{"/help", "next prompt"}
+
+	if cmd := m.finalizeTurn(nil); cmd == nil {
+		t.Fatal("no queued command dispatched")
+	}
+	if !m.sending || len(m.queuedMessages) != 0 {
+		t.Fatalf("sending = %v, queue = %q; the prompt after /help must start", m.sending, m.queuedMessages)
+	}
+	if got, ok := m.history.Prev(""); !ok || got != "next prompt" {
+		t.Fatalf("history.Prev() = %q, %v", got, ok)
+	}
+}
+
+func TestShellEscapeHoldsQueueUntilItFinishes(t *testing.T) {
+	m := newTestAppModel(t)
+	m.shellPending = 1
+	m.queuedMessages = []string{"fix the failures"}
+
+	if cmd := m.dispatchQueued(); cmd != nil || m.sending {
+		t.Fatal("queued prompt started while a shell escape was running")
+	}
+	_, _ = m.Update(shellDoneMsg{output: "FAIL"})
+	if m.shellPending != 0 || !m.sending || len(m.queuedMessages) != 0 {
+		t.Fatalf("shellPending = %d, sending = %v, queue = %q", m.shellPending, m.sending, m.queuedMessages)
 	}
 }
 
@@ -2006,7 +2132,7 @@ func TestUsageSummaryShowsCacheHits(t *testing.T) {
 	m.lastModelCalls = 3
 
 	summary := m.usageSummary()
-	for _, want := range []string{"cache read 12000", "cache write 80", "input 400", "output 20", "context 12500"} {
+	for _, want := range []string{"cache read 12000", "cache write 80", "input 400", "output 20", "context 12500", "cache hit 96%", "session: input 0 │ cache read 0 │ cache write 0 │ output 0 │ cache hit n/a"} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("usageSummary() = %q, want substring %q", summary, want)
 		}
