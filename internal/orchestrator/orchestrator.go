@@ -96,6 +96,7 @@ type Orchestrator struct {
 	skillCatalog       []*skills.Skill
 	permissionChecker  *security.PermissionChecker
 	permissionYolo     atomic.Bool
+	permissionSkip     atomic.Bool
 	hookRunner         *security.HookRunner
 	hookActivity       *hookActivityTracker
 	learningStore      *learning.SQLStore
@@ -105,6 +106,10 @@ type Orchestrator struct {
 	planController     *plan.Controller
 	worktreeManager    *worktree.Manager
 	planMode           atomic.Bool
+	planApprovalMu     sync.Mutex
+	planApproval       PlanApprovalFunc
+	approvedPlan       string
+	hasApprovedPlan    bool
 	editsMu            sync.Mutex
 	edits              []fileCheckpoint
 	lastExecMu         sync.Mutex
@@ -387,6 +392,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	}
 	orch.taskPlans = newTaskPlanStore()
 	installTaskPlan(agents, orch.taskPlans, broker)
+	installExitPlanMode(agents, orch)
 	roleModels := newRoleModelRegistry(agents)
 	if err := setupSubAgentsWithModels(agents, roleModels); err != nil {
 		return nil, fmt.Errorf("configure subagent delegation: %w", err)
@@ -1866,6 +1872,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	ctx = builtins.WithWorkspaceRoot(ctx, workspaceRoot)
 	ctx = executionEffectContext(ctx, o.PlanMode())
+	ctx = o.withRetryEvents(ctx, agentID, sessionID)
 	taskRuntime, err := o.openTaskRuntime(taskID, request.TaskID != "", workspaceRoot)
 	if err != nil {
 		return ExecutionResult{}, err
@@ -2600,6 +2607,9 @@ func (o *Orchestrator) SetApprovalHandler(handler tool.ApprovalFunc) {
 				o.auditPermissionDenial(ctx, toolName, args)
 				return false, nil
 			case security.Confirm:
+				if o.permissionSkip.Load() {
+					return true, nil
+				}
 				if handler == nil {
 					return false, nil
 				}
@@ -2665,6 +2675,17 @@ func (o *Orchestrator) SetPermissionMode(mode string) error {
 		}
 	}
 	return nil
+}
+
+// PermissionModeSkip labels a session started with
+// --dangerously-skip-permissions.
+const PermissionModeSkip = "skip_permissions"
+
+// SetSkipPermissions approves every tool call that would otherwise ask for
+// confirmation. Policy denials (never-allow commands, paths outside the
+// workspace) and plan mode still apply.
+func (o *Orchestrator) SetSkipPermissions(enabled bool) {
+	o.permissionSkip.Store(enabled)
 }
 
 func (o *Orchestrator) SwitchAgent(id string) error {
@@ -3180,7 +3201,7 @@ func wrapLateTools(a *agent.Agent, before map[string]struct{}, o *Orchestrator) 
 	}
 	// A temporary registry limits installation to new definitions. Re-wrapping
 	// the existing registry would execute hooks twice and re-compress references.
-	partial := &agent.Agent{ID: a.ID, Model: a.Model, Storage: a.Storage, Tools: tool.NewRegistry()}
+	partial := &agent.Agent{ID: a.ID, Model: a.Model, Storage: a.Storage, Broker: a.Broker, Tools: tool.NewRegistry()}
 	for _, def := range a.Tools.List() {
 		if _, existed := before[def.Name]; existed || def.Handler == nil {
 			continue
@@ -3211,6 +3232,7 @@ func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config
 	wrapUserToolHooks(a, configured, runner, activity)
 	wrapVerificationEvidence(a)
 	wrapDeliveryOperations(a)
+	wrapToolOutputEvents(a)
 	toolcompress.WrapDynamicForTool(a, func(ctx context.Context, name string, args map[string]any) int {
 		base := toolcompress.DefaultThresholdTokens
 		if tracker != nil {
@@ -3266,7 +3288,7 @@ func (o *Orchestrator) mcpToolTransform(a *agent.Agent) mcpdiscover.ToolTransfor
 		if a == nil || len(definitions) == 0 {
 			return definitions
 		}
-		partial := &agent.Agent{ID: a.ID, Model: a.Model, Storage: a.Storage, Tools: tool.NewRegistry()}
+		partial := &agent.Agent{ID: a.ID, Model: a.Model, Storage: a.Storage, Broker: a.Broker, Tools: tool.NewRegistry()}
 		for _, definition := range definitions {
 			partial.Tools.Register(definition)
 		}
@@ -3276,6 +3298,7 @@ func (o *Orchestrator) mcpToolTransform(a *agent.Agent) mcpdiscover.ToolTransfor
 		}
 		wrapUserToolHooks(partial, configured, o.hookRunner, o.hookActivity)
 		wrapVerificationEvidence(partial)
+		wrapToolOutputEvents(partial)
 		toolcompress.WrapDynamicForTool(partial, func(ctx context.Context, name string, args map[string]any) int {
 			threshold := toolcompress.DefaultThresholdTokens
 			if o.budget != nil {

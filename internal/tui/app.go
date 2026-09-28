@@ -145,6 +145,8 @@ type turnItem struct {
 	agentID       string
 	args          string
 	result        string
+	preview       []string // short readable output excerpt under the tool line
+	plan          string   // exit_plan_mode: the proposed plan, shown in full
 	failure       string
 	editPreview   string
 	editApplied   bool
@@ -366,6 +368,7 @@ type appModel struct {
 	activeTurnItems     []turnItem
 	activityIndex       map[string]int
 	activityArgs        map[string]any
+	activityOutputs     map[string]any // tool results before compression, by activity key
 	activityDetailBytes int
 	pendingToolCalls    int
 	pendingSubagents    int
@@ -505,7 +508,9 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	}
 
 	p := tea.NewProgram(m)
-	installApprovalHandlers(orch, NewApprovalHandler(p))
+	approvals := newApprovalBridge(p)
+	installApprovalHandlers(orch, approvals.toolApproval)
+	orch.SetPlanApprovalHandler(approvals.planApproval)
 
 	_, err = p.Run()
 	return err
@@ -1264,6 +1269,12 @@ func (m *appModel) handleSubmit(line string) (tea.Model, tea.Cmd) {
 		m.picker = nil
 	}
 	m.history.Add(displayLine)
+	return m.beginTurn(displayLine, line, explicitSkill)
+}
+
+// beginTurn starts an agent turn for line, showing displayLine as the user
+// message.
+func (m *appModel) beginTurn(displayLine, line, explicitSkill string) (tea.Model, tea.Cmd) {
 	m.followOutput = true
 	m.appendUserTurn(displayLine)
 	m.refreshPrompt()
@@ -1618,7 +1629,7 @@ func listenActivity(ctx context.Context, turnID uint64, ch <-chan chronosstream.
 					return activityDoneMsg{turnID: turnID}
 				}
 				switch event.Type {
-				case chronosstream.EventModelCall, chronosstream.EventToolInput, chronosstream.EventToolCall, chronosstream.EventToolResult:
+				case chronosstream.EventModelCall, chronosstream.EventToolInput, chronosstream.EventToolCall, orchestrator.EventToolOutput, chronosstream.EventToolResult, chronosstream.EventCustom:
 					return activityMsg{turnID: turnID, ctx: ctx, event: event, ch: ch}
 				}
 			case <-ctx.Done():
@@ -1807,15 +1818,32 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		m.activityArgs[activityKey] = activitySummaryArgs(data["args"])
 		item := &m.activeTurnItems[m.activityIndex[activityKey]]
 		item.toolName, item.agentID, item.callID = toolName, agentID, callID
-		item.args = m.captureActivityValue(data["args"])
-		if toolName == "file_write" {
-			if args, ok := data["args"].(map[string]any); ok {
+		item.args = m.captureActivityText(formatToolArgs(toolName, data["args"]))
+		if args, ok := data["args"].(map[string]any); ok {
+			switch toolName {
+			case "file_write":
 				item.editPreview = editDiffPreview(args)
+			case orchestrator.ExitPlanModeToolName:
+				plan, _ := args["plan"].(string)
+				item.plan = m.captureActivityText(strings.TrimSpace(plan))
 			}
 		}
 		item.started = time.Now()
+	case orchestrator.EventToolOutput:
+		// Arrives just before tool_result, which carries the compressed form.
+		if m.activityOutputs == nil {
+			m.activityOutputs = make(map[string]any)
+		}
+		m.activityOutputs[activityKey] = data["output"]
+		changed = false
 	case chronosstream.EventToolResult:
-		line := RenderToolActivity(label, toolName, m.activityArgs[activityKey], true, data["error"])
+		result := data["result"]
+		if output, ok := m.activityOutputs[activityKey]; ok {
+			result = output
+			delete(m.activityOutputs, activityKey)
+		}
+		output := formatToolOutput(toolName, result, m.workspaceRoot())
+		line := RenderToolResultActivity(label, toolName, m.activityArgs[activityKey], data["error"], output)
 		if idx, ok := m.activityIndex[activityKey]; ok && idx < len(m.activeTurnItems) {
 			m.activeTurnItems[idx].content = line
 		} else {
@@ -1824,7 +1852,10 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		}
 		item := &m.activeTurnItems[m.activityIndex[activityKey]]
 		item.toolName, item.agentID, item.callID = toolName, agentID, callID
-		item.result, item.failure = m.captureActivityValue(data["result"]), m.captureActivityValue(data["error"])
+		item.result, item.failure = m.captureActivityText(output.text), m.captureActivityValue(data["error"])
+		if data["error"] == nil {
+			item.preview = output.preview
+		}
 		if data["error"] != nil {
 			item.editPreview = ""
 		} else {
@@ -1994,7 +2025,16 @@ func (m *appModel) setLastToolMetadata(name, id, args string) {
 }
 
 func (m *appModel) captureActivityValue(value any) string {
-	text := inspectionValue(value)
+	return m.budgetActivityDetail(inspectionValue(value))
+}
+
+// captureActivityText stores already-rendered detail text under the same
+// per-turn budget as captureActivityValue.
+func (m *appModel) captureActivityText(text string) string {
+	return m.budgetActivityDetail(limitInspection(text))
+}
+
+func (m *appModel) budgetActivityDetail(text string) string {
 	if m.activityDetailBytes+len(text) > maxTranscriptBytes {
 		return "[detail capture budget exhausted (4 MiB/turn); retrieve original source/artifact paths]"
 	}
@@ -2471,13 +2511,13 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		switch strings.ToLower(arg) {
 		case "", "status":
 			if m.orch.PlanMode() {
-				m.appendSystem("plan mode on · mutating tools blocked · /plan off to execute")
+				m.appendSystem("plan mode on · mutating tools blocked until you approve a plan · /plan off to execute")
 			} else {
-				m.appendSystem("plan mode off · /plan on to plan without edits")
+				m.appendSystem("plan mode off · /plan on to plan, approve, then implement")
 			}
 		case "on", "true", "1":
 			m.orch.SetPlanMode(true)
-			m.appendSystem("plan mode on · agent may not write files or run shell")
+			m.appendSystem("plan mode on · agent plans read-only, then asks you to approve before implementing")
 		case "off", "false", "0":
 			m.orch.SetPlanMode(false)
 			m.appendSystem("plan mode off · edits allowed under the usual permission prompt")
@@ -3346,7 +3386,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	source := &transcriptSource{items: cloneTurnItems(m.lastTurnItems), name: m.displayAgentName(),
 		interrupted: interrupted, err: err, width: m.viewport.Width()}
 	for _, item := range source.items {
-		source.bytes += len(item.content) + len(item.args) + len(item.result) + len(item.failure) + len(item.editPreview)
+		source.bytes += len(item.content) + len(item.args) + len(item.result) + len(item.failure) + len(item.editPreview) + len(item.plan)
 	}
 	m.setBlockSource(source)
 	m.hasLastTurn = true
@@ -3388,6 +3428,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 	m.activityDetailBytes = 0
 	m.activityIndex = nil
 	m.activityArgs = nil
+	m.activityOutputs = nil
 	m.pendingToolCalls = 0
 	m.pendingSubagents = 0
 	m.lastChunk = ""
@@ -3399,6 +3440,16 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.viewport.GotoBottom()
 	}
 
+	if plan, approved := m.orch.TakeApprovedPlan(); approved {
+		// The planning turn's effect grant is fixed, so edits need a new turn.
+		if err == nil && !interrupted {
+			m.appendSystem("plan approved · plan mode off · implementing")
+			_, cmd := m.beginTurn("implement the approved plan", orchestrator.ImplementApprovedPlanMessage(plan), "")
+			return cmd
+		}
+		m.appendSystem("plan approved · plan mode off · send a message to implement it")
+		m.setViewportContent(m.renderTranscript())
+	}
 	if budgetExhausted {
 		return nil
 	}
@@ -3685,12 +3736,18 @@ func (m *appModel) renderOneItem(item *turnItem) string {
 		if item.editApplied && item.editPreview != "" {
 			line += "\n" + m.renderToolExcerpt("edit diff (captured replacement):", item.editPreview)
 		}
+		if item.plan != "" {
+			line += "\n" + indentLines(RenderMarkdownLite(item.plan, m.viewport.Width()-4), "    ")
+		}
+		if !m.toolsExpanded && len(item.preview) > 0 {
+			line += "\n" + m.renderToolPreview(item.preview)
+		}
 		if m.toolsExpanded && item.activity == activityTool {
 			if item.args != "" && (!item.editApplied || item.editPreview == "") {
-				line += "\n" + m.renderToolExcerpt("arguments:", item.args)
+				line += "\n" + m.renderToolExcerptLimit("arguments:", item.args, expandedExcerptBytes, expandedExcerptLines, false)
 			}
 			if item.result != "" {
-				line += "\n" + m.renderToolExcerpt("result:", item.result)
+				line += "\n" + m.renderToolExcerptLimit("result:", item.result, expandedExcerptBytes, expandedExcerptLines, false)
 			}
 			if item.failure != "" {
 				line += "\n" + m.renderToolExcerpt("error:", item.failure)
@@ -3952,6 +4009,9 @@ func (m *appModel) displayAgentName() string {
 }
 
 func (m *appModel) renderApprovalModal() string {
+	if m.approval.toolName == orchestrator.ExitPlanModeToolName {
+		return m.renderPlanApprovalModal()
+	}
 	var b strings.Builder
 	b.WriteString(styleHeader.Render("Permission Required"))
 	b.WriteByte('\n')
@@ -3976,6 +4036,28 @@ func (m *appModel) renderApprovalModal() string {
 	b.WriteString(styleError.Render("n") + styleDim.Render(" deny") + "  ")
 	b.WriteString(styleUserPrefix.Render("a") + styleDim.Render(" always tool") + "  ")
 	b.WriteString(styleUserPrefix.Render("A") + styleDim.Render(" all session"))
+	width := m.width - inputBoxBorderWidth
+	if width < 1 {
+		width = 1
+	}
+	return styleApprovalModal.Width(width).Render(b.String())
+}
+
+// The full plan is already in the transcript (exit_plan_mode call preview),
+// so the modal shows a bounded excerpt and the decision keys.
+func (m *appModel) renderPlanApprovalModal() string {
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("Plan ready for review"))
+	b.WriteByte('\n')
+	plan, _ := m.approval.args["plan"].(string)
+	if plan = strings.TrimSpace(plan); plan != "" {
+		b.WriteString(truncateApprovalDetails(RenderMarkdownLite(plan, m.width-inputBoxBorderWidth-inputBoxPaddingWidth), m.approvalDetailBudget()))
+		b.WriteByte('\n')
+	}
+	b.WriteString("\n")
+	b.WriteString(styleAgentName.Render("y") + styleDim.Render(" approve & implement") + "  ")
+	b.WriteString(styleUserPrefix.Render("a") + styleDim.Render(" approve, auto-accept edits") + "  ")
+	b.WriteString(styleError.Render("n") + styleDim.Render(" keep planning"))
 	width := m.width - inputBoxBorderWidth
 	if width < 1 {
 		width = 1

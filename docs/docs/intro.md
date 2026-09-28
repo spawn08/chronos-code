@@ -2,81 +2,51 @@
 slug: /
 sidebar_position: 1
 title: Introduction
-description: Chronos Code — YAML-native AI coding agent harness built on the Chronos framework
+description: Chronos Code is an AI coding agent for your terminal, configured with plain files you can commit.
 ---
 
 # Chronos Code
 
 [![CI](https://github.com/spawn08/chronos-code/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/spawn08/chronos-code/actions/workflows/ci.yml)
-[![Release](https://github.com/spawn08/chronos-code/actions/workflows/release.yml/badge.svg)](https://github.com/spawn08/chronos-code/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/spawn08/chronos-code?sort=semver)](https://github.com/spawn08/chronos-code/releases/latest)
 
-**Chronos Code** is a YAML-native AI coding agent harness — a single Go binary that loads your agents, skills, and guardrails from plain files and runs them through the [Chronos](https://github.com/spawn08/chronos) framework. It routes different kinds of work to specialist agents, looks at your code structure before burning API calls on raw file reads, and keeps every configuration decision in files you can read, edit, and version-control.
+**Chronos Code** is an AI coding agent that runs in your terminal. You describe what you want: fix a bug, add a feature, explain some code, review a change. It reads your project, proposes or makes the changes, runs your tests, and reports back. You approve anything risky before it happens.
 
-If you're evaluating whether it's right for your workflow, start here:
+It ships as a single binary. Everything about how it behaves lives in plain YAML files that you can read, edit, and commit with your code.
 
-- [Why Chronos Code](./why-chronos-code) — the problem it solves and the philosophy behind it
-- [How It Compares](./comparison) — side-by-side with Claude Code, Cursor, Aider, and Copilot Workspace
-- [Use Cases](./use-cases) — concrete scenarios where it makes a real difference
+## What you can do with it
 
-## Key Features
+- **Build and fix things.** Ask for a change in plain language. Chronos Code finds the relevant code, edits it, and runs your build and tests to check the result.
+- **Plan before you change anything.** Turn on [plan mode](./using-chronos-code#plan-mode) to get a reviewed plan first. Once you approve it, Chronos Code implements it.
+- **Call in a specialist.** Mention `@reviewer`, `@debugger`, `@planner`, `@architect`, `@explainer`, `@researcher`, or `@tester` when you know what kind of help you need.
+- **Automate.** Run one-off tasks from scripts and CI with `chronos-code run`, and get a structured JSON result.
+- **Keep your team on the same page.** Commit your agents, skills, instructions, and safety rules to the repository so everyone gets the same setup.
 
-| Feature | Description |
-|---------|-------------|
-| **YAML-first configuration** | Agents, skills, guardrails, security policies, routing, and MCP servers defined in YAML |
-| **Primary agent + specialists** | `chronos-code` stays the conversation partner; coder, planner, reviewer, debugger, researcher, architect, and explainer run via `spawn_subagent` or `@agent_id` |
-| **Code graph** | The chronos indexer parses Go with `go/parser` and 17 other languages with a pure-Go tree-sitter runtime, in every build |
-| **Tiered routing** | T0 graph tools → T1 cheap models → T2 frontier models |
-| **Self-learning loop** | Traces sessions into reviewable YAML suggestions; auto-distillation off by default |
-| **MCP** | stdio and HTTPS SSE servers from `.mcp.json`; tools namespaced and approval-gated |
-| **Guardrails** | Injection detection, secret scanning, PII filtering, cost caps |
-| **Two surfaces** | Interactive TUI/CLI and `chronos-code serve` HTTP API |
-| **Sessions and memory** | Resumable SQLite sessions; project/user/feedback memory as git-diffable YAML |
-| **Embedded defaults** | First run works without any config files |
+## Where to go next
 
-## Quick Install
+| If you want to… | Read |
+|---|---|
+| Install it and run your first task | [Getting Started](./getting-started) |
+| Learn the day-to-day workflow | [Using Chronos Code](./using-chronos-code) |
+| Run it from scripts or CI | [Headless and Automation](./headless) |
+| Change models, limits, and behavior | [Configuration](./configuration) |
+| Add your own agents, skills, and project instructions | [Agents, Skills and Instructions](./agents-and-skills) |
+| Control what it may do without asking | [Permissions and Safety](./security) |
+| Connect external tools | [MCP Servers](./mcp) |
+| Get better results | [Best Practices](./best-practices) |
 
-### Prebuilt binary (recommended)
+## Built-in agents
 
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.sh | bash
-```
+You always talk to the main **Chronos Code** agent. It hands focused work to specialists when that helps, and you can also call a specialist directly with `@name`.
 
-```powershell
-# Windows
-irm https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.ps1 | iex
-```
-
-### Build from source
-
-```bash
-git clone https://github.com/spawn08/chronos-code
-cd chronos-code
-make build        # produces bin/chronos-code
-```
-
-## Default Agents
-
-| Agent | Role | Tier |
-|-------|------|------|
-| `chronos-code` | Primary conversation agent; orients, routes, synthesizes | Frontier |
-| `coder` | Implement, test, iterate | Frontier |
-| `planner` | Task decomposition | Frontier |
-| `delivery-strategist` | Read-only proposal of the next evidence-driven work frontier | Frontier |
-| `reviewer` | Bugs, security, style | Frontier |
-| `debugger` | Failures from errors and traces | Frontier |
-| `researcher` | Read-only search | Cheap |
-| `architect` | Design and structure | Frontier |
-| `explainer` | Explain code and concepts | Cheap |
-
-## Next Steps
-
-- [Why Chronos Code](./why-chronos-code) — origin story and philosophy
-- [How It Compares](./comparison) — vs. Claude Code, Cursor, Aider, Copilot Workspace
-- [Use Cases](./use-cases) — concrete scenarios
-- [Best Practices](./best-practices) — tips for getting the most out of it
-- [Getting Started](./getting-started) — build, initialize, and run your first session
-- [Configuration](./configuration) — YAML config reference
-- [Architecture Overview](./architecture) — how the subsystems connect
-- [Diagrams](./diagrams/architecture-overview) — visual system diagrams
+| Agent | Best for |
+|---|---|
+| `chronos-code` | Your main partner. It understands the request, does the work or delegates it, and sums up the result. |
+| `coder` | Implementing changes and iterating until tests pass |
+| `planner` | Breaking a large task into steps (read-only) |
+| `architect` | Design and structure decisions (read-only) |
+| `reviewer` | Finding bugs, security issues, and style problems in a change |
+| `debugger` | Tracking down the cause of a failure from errors and logs |
+| `tester` | Writing and running tests |
+| `researcher` | Fast, read-only searches through the codebase |
+| `explainer` | Explaining code and concepts in plain language |

@@ -132,7 +132,9 @@ func (o *Orchestrator) setOperationalPlan(identity PlanRuntimeIdentity) {
 // git status and are intentionally distinct from the edit checkpoint journal.
 func (o *Orchestrator) OperationalState(ctx context.Context) OperationalSnapshot {
 	snapshot := OperationalSnapshot{CapturedAt: time.Now().UTC(), PlanOnly: o.PlanMode(), VerificationMode: o.VerificationMode()}
-	if o.permissionYolo.Load() {
+	if o.permissionSkip.Load() {
+		snapshot.PermissionMode = PermissionModeSkip
+	} else if o.permissionYolo.Load() {
 		snapshot.PermissionMode = string(tool.PermissionModeAutoApprove)
 	} else {
 		snapshot.PermissionMode = string(tool.PermissionModePrompt)

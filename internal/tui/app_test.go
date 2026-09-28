@@ -37,6 +37,13 @@ func (s *approvalInstallerStub) SetApprovalHandler(handler tool.ApprovalFunc) {
 
 func newTestAppModel(t *testing.T) *appModel {
 	t.Helper()
+	return newTestAppModelWith(t, nil)
+}
+
+// newTestAppModelWith lets a test adjust the config before the orchestrator
+// is built.
+func newTestAppModelWith(t *testing.T, configure func(*config.Config)) *appModel {
+	t.Helper()
 	root := t.TempDir()
 	// auth.NewStore() and the provider-env precedence chain (see
 	// internal/auth/resolve.go) read $HOME and real provider env vars, not
@@ -79,6 +86,9 @@ func newTestAppModel(t *testing.T) *appModel {
 			}},
 		},
 		Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart},
+	}
+	if configure != nil {
+		configure(cfg)
 	}
 	orch, err := orchestrator.New(context.Background(), cfg, "")
 	if err != nil {

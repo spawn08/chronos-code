@@ -189,7 +189,7 @@ func TestPermissionChecker_ClassifiesBuiltins(t *testing.T) {
 		{"test_map", Auto}, {"co_change", Auto}, {"multi_resolution_view", Auto},
 		{"resolve_symbol", Auto}, {"file_read", Auto}, {"file_list", Auto},
 		{"file_glob", Auto}, {"file_grep", Auto}, {"semantic_search", Auto},
-		{"workspace_info", Auto}, {"update_plan", Auto}, {"skill", Auto}, {"file_write", Confirm},
+		{"workspace_info", Auto}, {"update_plan", Auto}, {"exit_plan_mode", Auto}, {"skill", Auto}, {"file_write", Confirm},
 		{"shell", Confirm}, {"shell_auto", Auto}, {"external_tool", Confirm},
 	}
 	for _, tc := range cases {

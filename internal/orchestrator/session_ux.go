@@ -20,7 +20,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/security"
 )
 
-const planModePrompt = "PLAN MODE is on. Propose a numbered plan only. Do not call file_write, shell, or any mutating tool. Wait for the user to run /plan off before editing."
+const planModePrompt = "PLAN MODE is on. Investigate with read-only tools, then write a concise numbered implementation plan. Do not call file_write, shell, or any mutating tool. When the plan is ready, call exit_plan_mode with the full plan to request approval; once approved, implementation starts automatically in the next turn. If the request is only a question, answer it without calling exit_plan_mode."
 
 type fileCheckpoint struct {
 	Path      string

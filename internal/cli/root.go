@@ -50,6 +50,8 @@ var (
 	usdBudgetSet        bool
 	resumeSessionID     string
 	jsonMode            bool
+	planModeFlag        bool
+	skipPermissions     bool
 	providerOverride    string
 	modelOverride       string
 	providerOverrideSet bool
@@ -233,6 +235,14 @@ func stripGlobalFlags() error {
 			jsonMode = true
 			i++
 			continue
+		case arg == "--plan-mode":
+			planModeFlag = true
+			i++
+			continue
+		case arg == "--dangerously-skip-permissions":
+			skipPermissions = true
+			i++
+			continue
 		}
 		cleaned = append(cleaned, arg)
 		i++
@@ -240,6 +250,9 @@ func stripGlobalFlags() error {
 	os.Args = cleaned
 	if yoloMode && permissionMode == "deny" {
 		return fmt.Errorf("--yolo conflicts with --permission-mode deny")
+	}
+	if skipPermissions && permissionMode == "deny" {
+		return fmt.Errorf("--dangerously-skip-permissions conflicts with --permission-mode deny")
 	}
 	return nil
 }
@@ -377,6 +390,10 @@ Global flags:
   --budget <usd>                  Per-session USD cap (up to 6 decimal places; omitted means unlimited)
   --resume <session-id>           Resume a specific prior session
   --json                          Headless run: print one JSON object and exit
+  --dangerously-skip-permissions  Run every tool call without asking, including shell commands outside the
+                                  allowlist and MCP tools; policy blocks still apply. Use only in sandboxes/CI
+  --plan-mode                     Start in plan mode: plan first, then implement once the plan is approved
+                                  (the TUI asks for approval; headless runs auto-approve)
 `)
 	return nil
 }
@@ -417,6 +434,13 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 	if err := orch.SetPermissionMode(effectivePermissionMode()); err != nil {
 		_ = orch.Close()
 		return nil, nil, fmt.Errorf("apply --permission-mode: %w", err)
+	}
+	if planModeFlag {
+		orch.SetPlanMode(true)
+	}
+	if skipPermissions {
+		orch.SetSkipPermissions(true)
+		fmt.Fprintln(os.Stderr, "warning: --dangerously-skip-permissions: every tool call runs without asking (policy blocks and paths outside the workspace are still refused)")
 	}
 	return orch, cfg, nil
 }
@@ -633,9 +657,15 @@ func (e *ExitError) Unwrap() error { return e.Err }
 func (e *ExitError) ExitCode() int { return e.Code }
 
 // RunJSONExecution emits exactly one ExecutionEnvelope document.
+// A plan approved during a plan-mode run (headless runs auto-approve) is
+// implemented in a second execution; the envelope reports that execution.
 func RunJSONExecution(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, stdout io.Writer) error {
 	request.Mode = orchestrator.ExecutionBlocking
 	result, err := orch.Execute(ctx, request)
+	if plan, approved := orch.TakeApprovedPlan(); approved && err == nil {
+		request.Message = orchestrator.ImplementApprovedPlanMessage(plan)
+		result, err = orch.Execute(ctx, request)
+	}
 	envelope := orchestrator.ExecutionEnvelope(result, err, orchestrator.EnvelopeMetadata{})
 	return writeJSONResult(stdout, envelope, err)
 }
@@ -684,8 +714,20 @@ func ExitCodeForStatus(status execution.Status) int {
 
 // RunExecution executes and renders one headless CLI request. It is kept
 // separate from argument/config handling so the adapter can be exercised with
-// a deterministic orchestrator.
+// a deterministic orchestrator. A plan approved during a plan-mode run
+// (headless runs auto-approve) is implemented in a follow-up execution.
 func RunExecution(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, stdout, stderr io.Writer) (orchestrator.ExecutionResult, error) {
+	result, err := runExecutionOnce(ctx, orch, request, stdout, stderr)
+	plan, approved := orch.TakeApprovedPlan()
+	if err != nil || !approved {
+		return result, err
+	}
+	fmt.Fprintln(stderr, "plan approved · plan mode off · implementing")
+	request.Message = orchestrator.ImplementApprovedPlanMessage(plan)
+	return runExecutionOnce(ctx, orch, request, stdout, stderr)
+}
+
+func runExecutionOnce(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, stdout, stderr io.Writer) (orchestrator.ExecutionResult, error) {
 	result, err := orch.Execute(ctx, request)
 	if err != nil {
 		return result, err

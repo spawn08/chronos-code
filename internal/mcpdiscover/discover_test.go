@@ -327,7 +327,7 @@ func TestDocumentedMCPFixtureParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "docs", "subsystems", "mcp.md"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "docs", "mcp.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

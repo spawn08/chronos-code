@@ -283,7 +283,7 @@ Restart after changing these. `memory.enabled: false` stops both persistence and
 | `/resume` | Continue the latest session (`--resume <id>` from the CLI) |
 | `/compact` | Summarize history |
 | `/rewind` | Undo the last `file_write` |
-| `/plan on` · `/plan off` | Block writes and shell until plan mode is turned off |
+| `/plan on` · `/plan off` | Plan read-only; approve the plan (`y`, or `a` to auto-accept edits) and implementation starts automatically. `--plan-mode` starts in plan mode; headless runs auto-approve |
 | `/learn` | Review pending learning suggestions |
 | `/copy` · `Ctrl+Y` · `Ctrl+Shift+C` | Copy the last reply (`/copy visible`, `/copy all`, `/copy code [n]`) |
 | `Ctrl+O` | Expand collapsed tool calls |
@@ -324,7 +324,7 @@ chronos-code serve                     Start the HTTP API server
 chronos-code version
 ```
 
-**Global flags:** `-c/--config`, `--provider <name>`, `--model <id>`, `--debug`, `--stream` / `--no-stream`, `--permission-mode`, `--yolo`, `--budget <usd>`, `--resume <session-id>`, `--json` (headless).
+**Global flags:** `-c/--config`, `--provider <name>`, `--model <id>`, `--debug`, `--stream` / `--no-stream`, `--permission-mode`, `--yolo`, `--dangerously-skip-permissions` (approve everything that would ask; policy blocks still apply — sandboxes/CI only), `--plan-mode`, `--budget <usd>`, `--resume <session-id>`, `--json` (headless).
 
 ## Development
 
@@ -363,7 +363,7 @@ Local builds get their version from `git describe`; untagged commits report a de
 
 ## Documentation
 
-Full documentation, covering architecture, configuration, CLI reference, deployment, security, and rollback, is at **[spawn08.github.io/chronos-code](https://spawn08.github.io/chronos-code/)**. The source is in [`docs/`](docs/).
+Full user documentation, covering getting started, everyday use, plan mode, headless automation, configuration, agents and skills, permissions, and best practices, is at **[spawn08.github.io/chronos-code](https://spawn08.github.io/chronos-code/)**. The source is in [`docs/`](docs/).
 
 ## License
 

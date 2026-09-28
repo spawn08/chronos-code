@@ -1,13 +1,13 @@
 {
   "mcpServers": {
-    "local-files": {
+    "github": {
       "transport": "stdio",
-      "command": "mcp-files",
-      "args": ["--token", "${MCP_FILES_TOKEN}"]
+      "command": "github-mcp-server",
+      "args": ["stdio", "--token", "${GITHUB_TOKEN}"]
     },
-    "remote-search": {
+    "docs": {
       "transport": "sse",
-      "url": "https://mcp.example.com/events?token=${MCP_SEARCH_TOKEN}"
+      "url": "https://mcp.example.com/sse?key=${DOCS_API_KEY}"
     }
   }
 }

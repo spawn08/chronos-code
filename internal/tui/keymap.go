@@ -61,7 +61,7 @@ Commands:
   /resume [id]       Resume the latest (or given) session
   /compact           Summarize session history and reset the token budget
   /rewind            Undo the last file_write (alias: /undo)
-  /plan [on|off]     Plan-only mode: block writes and shell
+  /plan [on|off]     Plan mode: plan read-only, approve, then implement
   /learn             List pending learning suggestions
   /learn accept <id> Apply a pending suggestion (next start)
   /learn reject <id> Discard a pending suggestion

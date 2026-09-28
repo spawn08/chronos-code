@@ -1,71 +1,66 @@
 ---
-sidebar_position: 6
-title: Deployment and Fleet Operations
+sidebar_position: 11
+title: Running as a Server
+description: Run Chronos Code as an HTTP service for your team or your own tooling.
 ---
 
-# Deployment and Fleet Operations
+# Running as a Server
 
-Chronos Code is a stateful coding agent. Choose a deployment pattern based on who owns the workspace and session, not on an assumed throughput figure. Prompt text, tool arguments, and tool results are intentionally excluded from logs and metrics.
+`chronos-code serve` runs Chronos Code as an HTTP service. Use it when you want a shared instance for a team, or want to call it from your own tools, bots or internal platforms.
 
-## Probes and telemetry
+## Start the server
 
-| Endpoint | Meaning | Authentication |
-|---|---|---|
-| `GET /live` (`/health` alias) | The process and HTTP loop are alive. It remains successful while draining. | Exempt for platform probes |
-| `GET /ready` | The node accepts work and its storage responds. It fails while draining. | Exempt for platform probes |
-| `GET /draining` | Reports `accepting` or `draining` independently of liveness. | Exempt for platform probes |
-| `GET /metrics` | Prometheus text metrics. | Uses normal server authentication |
+```bash
+export CHRONOS_CODE_API_KEY="choose-a-long-random-secret"
+chronos-code serve --listen :8430 --auth api_key
+```
 
-Structured logs are JSON on stderr. Request and terminal-task records correlate `correlation_id`, `task_id`, `session_id`, `tenant_id`, and `agent_id`; they contain status, duration, budget counters, and no prompt/tool payloads. Treat identifiers as operational metadata and apply the log retention policy appropriate to your environment.
+Run it from the folder of the repository it should work on. That repository's `.chronos-code/` settings, `AGENTS.md` and safety policy apply as usual.
 
-Metrics cover active and queued executions, provider request latency and retries reported by the provider hook, tool failures, task budget consumption/exhaustion, verification outcomes, MCP health, cleanup outcomes, and managed disk use. They are process-local; scrape every instance and aggregate in the monitoring backend. A zero-valued series means no event has been observed by that process, not a service-level claim.
+## Send a task
 
-## Single host
+```bash
+curl -s http://localhost:8430/v1/chat \
+  -H "Authorization: Bearer $CHRONOS_CODE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "summarize what changed in the last 5 commits"}'
+```
 
-Run one `serve` process with local SQLite and a workspace mounted read/write. Keep `max_concurrent: 1` unless the repository workflow is explicitly safe for overlapping tasks. Use API-key or OIDC authentication; bind to loopback when a trusted reverse proxy is the only client.
+The response has the same shape as the [headless JSON result](./headless#json-output-for-pipelines). Pass back the returned `session_id` to continue the conversation, and use `"agent_id": "reviewer"` to address a specialist. `POST /v1/chat/stream` streams the reply instead.
 
-Use the default `prompt` permission mode for interactive use. Do not use `auto_approve` on an untrusted repository. Enable periodic cleanup only after reviewing `cleanup status` and the configured scope limits.
+Other useful endpoints: `GET /v1/agents`, `GET /v1/sessions`, and `POST /v1/teams/{id}/run`.
 
-## CI
+## Settings
 
-Use an ephemeral checkout, one task per process, a hard job timeout, and a non-interactive permission profile that allows only the commands and paths required by the job. Prefer read-only tools for review jobs. For mutation jobs, allow writes only inside the disposable checkout and keep network/MCP access denied unless explicitly required.
+Set these in `.chronos-code/config.yaml` or pass them as flags to `serve`:
 
-CI should consume the versioned JSON result and stable exit code rather than parse prose. Archive the result, patch, verification output, and correlation ID; never archive provider credentials or unrestricted agent logs.
+```yaml
+server:
+  listen: ":8430"
+  auth_type: api_key          # or OIDC for single sign-on
+  max_concurrent: 1           # tasks running at the same time
+  request_timeout_sec: 300
+  rate_limit_per_min: 60
+```
 
-## Backend orchestrated
+Keep the API key in the `CHRONOS_CODE_API_KEY` environment variable, never in a committed file.
 
-An external scheduler should allocate one isolated checkout per task, pass a stable task/session/correlation identity, enforce its own deadline, and retry only typed retryable outcomes. Do not replay a task after side effects merely because the HTTP connection was interrupted. Use an `Idempotency-Key` for each submitted execution and retain the returned session ID for continuation.
+## Recommendations
 
-The backend owns admission control and workspace lifecycle. Chronos Code still enforces its local concurrency and task budgets as a second boundary.
+- **One task at a time per checkout.** Leave `max_concurrent: 1` unless you're sure overlapping tasks won't step on each other's files.
+- **No one is there to approve.** As with [headless runs](./headless#permissions-when-nobody-is-watching), anything that would ask for approval is refused. Choose the tasks and permissions accordingly, and don't auto-approve on repositories you don't trust.
+- **Protect the endpoint.** Always enable authentication. Listen only on localhost when a reverse proxy sits in front.
+- **Health checks.** `GET /live` reports that the process is up, and `GET /ready` that it can take work. Use them for your load balancer or container platform. `GET /metrics` provides Prometheus metrics.
+- **Privacy.** Logs and metrics never contain your prompts, code or tool output.
 
-## Multi-instance
+## Several instances
 
-Chronos Code supports explicit deterministic session affinity, not distributed locking. Every node must be configured with the identical `fleet_instances` set and its own `instance_id`, for example:
+You can run several servers behind a load balancer. Each conversation belongs to exactly one instance. Give every instance the same member list and its own name:
 
 ```yaml
 server:
   instance_id: node-a
   fleet_instances: [node-a, node-b, node-c]
-  max_concurrent: 2
 ```
 
-The equivalent environment variables are `CHRONOS_CODE_INSTANCE_ID=node-a` and `CHRONOS_CODE_FLEET_INSTANCES=node-a,node-b,node-c`. A request sent to the wrong node is rejected with HTTP 409 and `X-Chronos-Session-Owner`; the proxy or orchestrator must route it to that exact node. New sessions generated by a node are selected for that node. Instance IDs are normalized and sorted before hashing. Changing membership remaps sessions, so drain the fleet before changing the membership set and update all nodes together.
-
-Affinity prevents conforming nodes from concurrently processing one session but is not a durable lease. Do not run nodes with inconsistent fleet configuration, bypass the routing response, or let two processes use the same `instance_id`. Shared PostgreSQL storage alone does not provide execution ownership.
-
-## Safe permission profiles
-
-| Mode | Recommended permissions |
-|---|---|
-| Interactive single host | `prompt`; read tools allowed; writes, shell, and MCP tools require approval |
-| CI review | deny writes and shell mutation; allow repository reads and configured verification commands only |
-| CI mutation | isolated checkout; allow scoped writes and an allowlisted shell; deny ambient MCP/network access |
-| Backend/fleet | `prompt` with an external approval service, or a narrowly allowlisted non-interactive policy; never blanket auto-approve |
-
-Keep MCP server trust separate from MCP tool approval. Store credentials in environment-backed secret stores and reference them by variable; do not place secret values in YAML.
-
-## Release provenance
-
-`.github/workflows/release.yml` builds from two clean checkouts. `release/chronos.version` is the exact Chronos commit used for the sibling workspace. The workflow emits the binary, an SPDX JSON SBOM, SHA-256 checksums, a GitHub build-provenance attestation, and a Sigstore keyless signature bundle, then verifies that bundle. OIDC signing runs only for non-PR events and needs no repository signing secret; PR builds perform the checkout, build, SBOM, and checksum path only.
-
-Current blocker: `release/chronos.version` contains the sentinel `UNPUBLISHED_COMPATIBLE_REVISION`, so release CI intentionally fails before dependency checkout. Local Chronos HEAD `62817f39b00bc8ee860ec8a0dbd37e5d6065dcfd` is not reachable from `spawn08/chronos` as of 2026-09-18 and has required uncommitted changes on top. The older reachable revision `13d62dfed676ffab94414f399049857e7c44d465` lacks the request-scoped provider, session serialization, workspace-root, and atomic tool-registry APIs used here and is therefore not a valid pin. Replace the sentinel only after a compatible commit is published; changing it to an incompatible reachable commit is not an acceptable workaround.
+When a request reaches the wrong instance, it is rejected with HTTP 409, and the `X-Chronos-Session-Owner` header names the right one, so your proxy can route it there. Change the member list only when all instances are drained, and update every instance at the same time.

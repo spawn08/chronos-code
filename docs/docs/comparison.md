@@ -22,7 +22,7 @@ This isn't a feature checklist — it's a breakdown of what actually matters whe
 
 | Tool | How spend is managed | What that means for you |
 |------|---------------------|-------------------------|
-| **Chronos Code** | Code graph answers cheap questions for free; cheap models handle research and explanation; frontier models are reserved for tasks that need them; hard USD cap fails closed | Long sessions stay predictable; you're not paying frontier prices for a file-content lookup |
+| **Chronos Code** | A code index answers structural questions cheaply; small models handle lookups and explanations; strong models are reserved for tasks that need them; `--budget` sets a hard dollar cap | Long sessions stay predictable; you're not paying frontier prices for a file-content lookup |
 | **Claude Code** | One primary model; tiered tool costs | Transparent per-turn, but no automatic routing to cheaper models based on task complexity |
 | **Cursor** | Subscription with a request allowance | Predictable monthly cost, but no task-aware routing within that allowance |
 | **Aider** | Direct API calls, model is your choice | Full control, but all routing decisions are manual |
@@ -42,7 +42,7 @@ This isn't a feature checklist — it's a breakdown of what actually matters whe
 
 | Tool | Built-in safeguards | What that means for you |
 |------|---------------------|-------------------------|
-| **Chronos Code** | Injection detection, secret scanning, PII filtering always active; MCP tool calls approval-gated; self-learning requires human sign-off before anything changes | Works on sensitive codebases with confidence that credentials and private data won't leak into prompts or logs |
+| **Chronos Code** | Approval prompts for edits, commands and external tools; plan mode; a project safety policy that can only tighten the defaults; secret scanning of command output; self-learning requires human sign-off | Suitable for sensitive codebases: you decide what may run, and a cloned repository can't loosen the rules |
 | **Claude Code** | Hardcoded safeguards in the model; tool-use approval prompts | Strong model-level safety; project-level guardrail policies aren't user-configurable |
 | **Cursor** | Editor-level safety; model safety | Good for general use; no custom secret-scanning rules you configure per project |
 | **Aider** | Minimal guardrails; depends on the model | You control everything, including whether safeguards apply |
@@ -52,7 +52,7 @@ This isn't a feature checklist — it's a breakdown of what actually matters whe
 
 | Tool | Runtime | What that means for you |
 |------|---------|-------------------------|
-| **Chronos Code** | Single static binary (~20 MB), terminal-based | Works in SSH sessions, CI pipelines, and headless environments; no browser or Electron required |
+| **Chronos Code** | Single binary, terminal-based | Works in SSH sessions, CI pipelines, and headless environments; no browser or Electron required |
 | **Claude Code** | Node.js CLI | Fast to install; requires Node; runs in terminal |
 | **Cursor** | Electron desktop app | Full IDE experience; not usable headless or over SSH without workarounds |
 | **Aider** | Python CLI | Lightweight; requires Python; runs anywhere a terminal does |

@@ -7,6 +7,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/storage"
+
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 // approvalRequestMsg asks the running Program to show a permission modal for
@@ -63,34 +65,67 @@ func (c *approvalCache) remember(sessionID, toolName string, decision approvalDe
 // while Update (on the main event-loop goroutine) resolves resp once the user
 // presses y/n/a.
 func NewApprovalHandler(p *tea.Program) tool.ApprovalFunc {
-	cache := newApprovalCache()
-	var promptMu sync.Mutex
+	return newApprovalBridge(p).toolApproval
+}
 
-	return func(ctx context.Context, toolName string, args map[string]any) (bool, error) {
-		sessionID := storage.SessionFromContext(ctx)
-		if cache.allowed(sessionID, toolName) {
-			return true, nil
-		}
-		// Concurrent subagents may request tools simultaneously. Serialize human
-		// prompts so one modal cannot overwrite another, then re-check the cache
-		// because an earlier "all session" decision may have approved this call.
-		promptMu.Lock()
-		defer promptMu.Unlock()
-		if cache.allowed(sessionID, toolName) {
-			return true, nil
-		}
+// approvalBridge serves tool and plan approvals through one modal queue and
+// one decision cache, so approving a plan with auto-accepted edits also
+// approves later file_write calls in that session.
+type approvalBridge struct {
+	p        *tea.Program
+	cache    *approvalCache
+	promptMu sync.Mutex
+}
 
-		resp := make(chan approvalDecision, 1)
-		p.Send(approvalRequestMsg{toolName: toolName, args: args, resp: resp})
+func newApprovalBridge(p *tea.Program) *approvalBridge {
+	return &approvalBridge{p: p, cache: newApprovalCache()}
+}
 
-		select {
-		case dec := <-resp:
-			if dec.allow {
-				cache.remember(sessionID, toolName, dec)
-			}
-			return dec.allow, nil
-		case <-ctx.Done():
-			return false, ctx.Err()
-		}
+func (b *approvalBridge) toolApproval(ctx context.Context, toolName string, args map[string]any) (bool, error) {
+	sessionID := storage.SessionFromContext(ctx)
+	if b.cache.allowed(sessionID, toolName) {
+		return true, nil
+	}
+	// Concurrent subagents may request tools simultaneously. Serialize human
+	// prompts so one modal cannot overwrite another, then re-check the cache
+	// because an earlier "all session" decision may have approved this call.
+	b.promptMu.Lock()
+	defer b.promptMu.Unlock()
+	if b.cache.allowed(sessionID, toolName) {
+		return true, nil
+	}
+	dec, err := b.ask(ctx, toolName, args)
+	if err != nil {
+		return false, err
+	}
+	if dec.allow {
+		b.cache.remember(sessionID, toolName, dec)
+	}
+	return dec.allow, nil
+}
+
+// planApproval shows the plan review modal: y approves, a approves and
+// auto-accepts edits for the session, n keeps planning.
+func (b *approvalBridge) planApproval(ctx context.Context, plan string) (bool, error) {
+	b.promptMu.Lock()
+	defer b.promptMu.Unlock()
+	dec, err := b.ask(ctx, orchestrator.ExitPlanModeToolName, map[string]any{"plan": plan})
+	if err != nil {
+		return false, err
+	}
+	if dec.allow && (dec.always || dec.all) {
+		b.cache.remember(storage.SessionFromContext(ctx), "file_write", approvalDecision{allow: true, always: true})
+	}
+	return dec.allow, nil
+}
+
+func (b *approvalBridge) ask(ctx context.Context, toolName string, args map[string]any) (approvalDecision, error) {
+	resp := make(chan approvalDecision, 1)
+	b.p.Send(approvalRequestMsg{toolName: toolName, args: args, resp: resp})
+	select {
+	case dec := <-resp:
+		return dec, nil
+	case <-ctx.Done():
+		return approvalDecision{}, ctx.Err()
 	}
 }

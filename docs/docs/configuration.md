@@ -1,359 +1,295 @@
 ---
-sidebar_position: 3
+sidebar_position: 5
 title: Configuration
-description: Complete YAML configuration reference for Chronos Code
+description: Where Chronos Code settings live, and the settings you are most likely to change.
 ---
 
 # Configuration
 
-Chronos Code is YAML-first: all user-facing configuration lives in YAML files, not Go code. An embedded default set ships inside the binary so the first run works without any files.
+Chronos Code works without any configuration. When you want to change something, you edit plain YAML files. This page explains where they live and covers the settings most people change.
 
-## Config Discovery & Precedence
+## Where settings live
 
-Settings are merged from highest to lowest priority:
+| Location | Use it for | Commit it? |
+|---|---|---|
+| `~/.chronos-code/config.yaml` | Your personal defaults for every project (preferred model, thinking level) | No, it's yours |
+| `<project>/.chronos-code/config.yaml` | Settings for one repository that the whole team should share | Yes |
+| `-c path/to/file.yaml` | A one-off overlay for a single run (for example a CI profile) | Up to you |
+| Command-line flags and environment variables | Temporary overrides (`--model`, `--budget`, `CHRONOS_CODE_MODEL`) | — |
 
-1. **CLI flags** — `--budget`, `--debug`, `--yolo`, etc.
-2. **Environment variables** — provider and server variables (e.g., `ANTHROPIC_API_KEY`)
-3. **`.chronos-code/config.yaml`** — project-level config (in the repo root)
-4. **`~/.chronos-code/config.yaml`** — user-global config
-5. **Embedded defaults** — shipped inside the binary (`internal/defaults/`)
+Later layers win: built-in defaults, then your user file, then the project file, then `-c`, then flags. You only need to write the settings you want to change. Everything else keeps its default.
 
-Run `chronos-code config show` to see the fully resolved config. Run `chronos-code config validate` to check for errors.
+Run `chronos-code init` in a project to get an editable copy of all default files in `.chronos-code/`. Besides `config.yaml`, that folder can contain:
 
-## Directory Layout
+| File or folder | Purpose | Details |
+|---|---|---|
+| `agents/*.yaml` | Custom agents and changes to built-in agents | [Agents, Skills and Instructions](./agents-and-skills) |
+| `skills/<name>/SKILL.md` | Reusable how-to guides the agent can load | [Skills](./agents-and-skills#skills) |
+| `security.yaml` | Which paths and commands are allowed | [Permissions and Safety](./security) |
+| `routing.yaml` | Which model handles which kind of request | [Automatic model selection](#automatic-model-selection) |
+| `guardrails/default.yaml` | Input/output size limits and the session token cap | [Cost limits](#cost-limits) |
+| `pricing.yaml` | Prices for models that aren't in the public catalog | [Prices](#prices) |
+| `memory/` | What Chronos Code has been asked to remember | [Using Chronos Code](./using-chronos-code#memory) |
 
-```text
-.chronos-code/
-├── config.yaml          # model, storage, memory, learning, verification
-├── routing.yaml         # intent patterns, model tiers, complexity paths, PPD
-├── security.yaml        # path allowlists, shell restrictions, MCP trust
-├── agents/
-│   ├── chronos-code.yaml
-│   ├── coder.yaml
-│   └── …
-├── skills/
-├── guardrails/
-├── memory/
-│   ├── project.yaml     # project-scoped facts
-│   ├── user.yaml        # user-scoped facts
-│   └── feedback.yaml    # feedback memory
-└── learned/             # pending learning suggestions (human review required)
-```
+External tool servers are configured separately in `.mcp.json`. See [MCP Servers](./mcp).
 
-MCP servers live in **`.mcp.json`** in the project root — not under `.chronos-code/`.
+:::tip Check your settings
+`chronos-code config show` prints the combined result of all layers. `chronos-code config validate` checks that the files load. Misspelled keys are silently ignored, so if a setting has no effect, check its spelling against this page.
+:::
 
-## Core Config Keys (`config.yaml`)
+## Choosing models
 
-### Model and Storage
+Out of the box, every agent uses Anthropic models: `claude-sonnet-4-6`, with `claude-haiku-4-5` for the researcher and explainer.
 
-```yaml
-defaults:
-  model: claude-3-5-sonnet-20241022   # default model ID
-  provider: anthropic                  # anthropic | openai | gemini | …
+**Change the main agent's model.** This is the agent you talk to, so it's usually all you need:
 
-storage:
-  driver: sqlite                       # sqlite | postgres
-  path: .chronos-code/sessions.db     # SQLite path (sqlite only)
-  # dsn: postgres://...               # PostgreSQL DSN (postgres build tag)
-```
+| How | Lasts for |
+|---|---|
+| `/model` in the app (or `Ctrl+M`) | This session |
+| `--provider openai --model gpt-4o` | This run |
+| `export CHRONOS_CODE_PROVIDER=openai` and `CHRONOS_CODE_MODEL=gpt-4o` | Your shell |
 
-### Memory
+`chronos-code models` lists the models available to you. `chronos-code models openai` lists them for one provider.
+
+**Change a specialist's model, or make it permanent.** Each agent has its own `model:` block. Run `chronos-code init`, open `.chronos-code/agents/<agent>.yaml`, and edit it:
 
 ```yaml
-memory:
-  enabled: true              # false stops persist and recall entirely
-  project_file: .chronos-code/memory/project.yaml
-  user_file: ~/.chronos-code/memory/user.yaml
-  feedback_file: .chronos-code/memory/feedback.yaml
+# .chronos-code/agents/coder.yaml
+model:
+  provider: openai     # anthropic, openai, azure, gemini, mistral, groq, deepseek,
+  model: gpt-4o        # openrouter, together, fireworks, perplexity, ollama, ...
 ```
 
-### Learning
+Put the file in `~/.chronos-code/agents/` instead to apply it to all your projects.
+
+:::note Using a provider other than Anthropic
+The specialists keep their Anthropic models unless you change them. If you only have credentials for another provider, update the `model:` block in each agent file you use. Otherwise delegated work to that specialist will fail to authenticate.
+:::
+
+`defaults.model` in `config.yaml` only applies to agents that don't set a model of their own, such as custom agents you write without a `model:` block.
+
+### Automatic model selection
+
+By default, Chronos Code picks a model for each request based on how complex it looks. Simple lookups go to a small, fast model and hard debugging or design work goes to a stronger one. It only switches to a provider you have credentials for. The choices are defined in `routing.yaml` under `model_routing`.
+
+If you'd rather always use exactly the model you configured:
+
+- Pin it for the session with `--model`, `CHRONOS_CODE_MODEL`, or `/model`. A pinned model is never switched.
+- Or turn automatic selection off completely:
+
+  ```yaml
+  router:
+    enabled: false
+  ```
+
+### Gateways, proxies and self-hosted models
+
+Send all calls for a provider through a gateway:
 
 ```yaml
-learning:
-  enabled: true              # emit pending suggestions
-  auto_distill: false        # NEVER auto-apply; human review required
-  pattern_injection: true    # inject approved patterns into context
-  suggestions_dir: .chronos-code/learned/
+providers:
+  anthropic:
+    base_url: https://llm-gateway.example.com/anthropic
 ```
 
-### Session
+Point an agent at a local or OpenAI-compatible server by editing its `model:` block:
 
 ```yaml
-session:
-  recall_prior_summaries: true    # include prior session summaries in context
-  context_report: true            # expose /context source breakdown
+# .chronos-code/agents/explainer.yaml
+model:
+  provider: ollama
+  model: qwen2.5-coder:14b
+  base_url: http://localhost:11434
 ```
 
-### Verification
+For **Azure OpenAI**, set `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT` (plus `AZURE_OPENAI_API_VERSION` if needed), and use `provider: azure`.
 
-```yaml
-verification:
-  mode: report   # report — log issues | enforce — refuse completion on unmet obligations
-```
+## Credentials
 
-`enforce` refuses a successful completion when the runtime has verification obligations without current evidence. It does not invent checks.
+Keep keys out of committed files. In order of preference:
 
-### Runtime Capabilities
+1. **Environment variables**, such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `AZURE_OPENAI_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, or `OPENROUTER_API_KEY`.
+2. **The system keychain**, with `chronos-code login <provider> --api-key <key>`, or `/login` in the app. `/login` can also reuse an existing Claude Code or Codex login.
+3. **A reference in YAML**, when a config file must name the key: `api_key: "${MY_KEY_VARIABLE}"`.
 
-Agent tools declared under `agents[].tools` must resolve to callable runtime tools. Startup fails before a model call if a configured tool is unavailable. Additional service requirements can be declared explicitly:
+`chronos-code whoami` shows which credential is being used. `chronos-code logout <provider>` removes a stored one.
 
-```yaml
-runtime_capabilities:
-  capabilities:
-    - name: graph:code
-    - name: tool:file_write
-      agent: coder
-    - name: lsp:tools
-      optional: true
-```
+## Thinking
 
-Supported capability namespaces are `tool:<name>`, `graph:code`, `lsp:tools`, `mcp:<server>`, `planning:plan-mode`, `write:files`, and `write:shell`. Tool, MCP, and write requirements should specify an `agent`. Missing required capabilities stop startup; missing optional capabilities produce a warning.
-
-Export-only examples such as `tools.yaml` and `mcp-servers.yaml` do not count as runtime capability evidence.
-
-### Bounded Repair
-
-Verification-driven repair continues in the same task and session. Limits are cumulative across the original attempt, output continuation, and repair attempts. A value of `0` disables that limit.
-
-```yaml
-repair:
-  max_attempts: 1
-  max_model_calls: 12
-  max_tool_calls: 100
-  wall_time_sec: 1800
-  max_tokens: 500000
-  max_cost_microdollars: 0       # opt in only when every model has known pricing
-```
-
-Repair prompts contain only unmet obligations, affected paths, and remaining limits. Repeated identical verification failures stop without another model call.
-
-Provider model-list APIs expose model or deployment identifiers, not authoritative prices. This is especially important for Azure deployment aliases and negotiated enterprise pricing. Consequently, the default USD repair limit is disabled while model-call, tool-call, wall-time, token, and repair-attempt limits remain enforced. Configuring a positive USD limit continues to fail closed if any selected model has no known price.
-
-With the default `long_running.mode: renew` (below), interactive runs treat the model-call, tool-call, wall-time and token limits above as renewable work windows instead, and repairs continue while each one changes the set of unmet checks. A positive `max_cost_microdollars` stays a hard limit. In `report` verification mode, an exhausted repair allowance completes the turn with the unverified checks listed instead of failing it.
-
-### Long-Running Work
-
-Interactive TUI, CLI and HTTP runs are not stopped by routine work limits. Work runs in windows. When any window dimension fills, the run checks whether that window made progress: new file content, a new verification result, or mostly new tool calls. If it did, the run continues in a new window. After `no_progress_windows` windows in a row with no progress, the run pauses with a message and the `no_progress` stop reason (offered for resume) and waits for your guidance. The guardrail session token budget also renews at progress windows and at each new user turn.
-
-```yaml
-long_running:
-  mode: renew                 # "bounded" restores terminal repair.* limits
-  window:
-    tool_rounds: 60           # 0 disables a dimension
-    tool_calls: 100
-    seconds: 900
-    tokens: 250000
-  no_progress_windows: 2
-  subagent_timeout_sec: 0     # 0 = no wall-clock limit for a delegated subagent
-  persist_tool_rounds: true   # keep tool rounds in the session; compact within long turns
-```
-
-Nothing caps total spend in renew mode unless you set `repair.max_cost_microdollars` (requires known model pricing). Delivery-worker executions keep their own bounded accounting.
-
-### Retention And Cleanup
-
-Retention policies independently enforce age, count, and estimated byte limits. A value of `0` disables only that dimension; an all-zero policy is disabled. Cleanup is bounded to `batch_size` candidates per scope and periodic server cleanup is opt-in.
-
-```yaml
-retention:
-  enabled: true
-  batch_size: 100
-  periodic_interval_minutes: 0
-  policies:
-    sessions: {max_age_days: 90, max_count: 500, max_bytes: 0}
-    input_artifacts: {max_age_days: 7, max_count: 500, max_bytes: 268435456}
-```
-
-Use `chronos-code cleanup status`, `chronos-code cleanup run --dry-run`, or `chronos-code cleanup prune <scope>`. Plan records have no retention timestamps, so plan cleanup is intentionally explicit and tenant/repository scoped: `chronos-code cleanup prune plan_db --tenant <id> --repository <id> --dry-run`.
-
-### Server and Fleet Affinity
-
-```yaml
-server:
-  listen: ":8430"
-  auth_type: api_key
-  tenant_id: team-a
-  max_concurrent: 1
-  request_timeout_sec: 300
-  instance_id: node-a
-  fleet_instances: [node-a, node-b]
-```
-
-Set the API key through `CHRONOS_CODE_API_KEY`, not in committed YAML. For a multi-instance deployment, every node must use the same `fleet_instances` values and a distinct `instance_id`. `CHRONOS_CODE_INSTANCE_ID` and comma-separated `CHRONOS_CODE_FLEET_INSTANCES` override the YAML values. See [Deployment and Fleet Operations](./deployment.md) for probe, affinity, metrics, and permission semantics.
-
-### Native Thinking
-
-Off by default. Enable in YAML or with `/think` in the TUI:
+Let supported models (Claude, OpenAI reasoning models) think before answering. This helps on hard problems, but uses more tokens:
 
 ```yaml
 defaults:
   reasoning:
-    strategy: cot
-    native: true           # Anthropic extended thinking / OpenAI reasoning effort
-    effort: medium         # low | medium | high
-    budget_tokens: 4096
-    summary: true          # stream thinking summaries in the TUI
+    native: true
+    effort: medium       # low | medium | high
+    summary: true        # show a short summary of the model's thinking in the app
 ```
 
-### Durable Evidence Ledger
+You can also change it any time with `/think low|medium|high|off`.
 
-Long-horizon work spans many turns, restarts, and resumes. With `ledger.persist` enabled, executions that carry an explicit task ID (durable plan nodes, resumed tasks) replay and extend one append-only evidence ledger instead of starting empty. Verification evidence from an earlier turn therefore still satisfies completion obligations later, as long as it is current.
+## Long conversations
+
+Chronos Code summarizes older parts of a conversation automatically when it gets close to the model's limit:
 
 ```yaml
-ledger:
-  persist: false   # opt in; generated one-off task IDs are never persisted
+defaults:
+  context:
+    max_tokens: 128000          # upper bound on how much context is used
+    summarize_threshold: 0.8    # summarize when 80% full
+    preserve_recent_turns: 6    # always keep the latest turns word for word
 ```
 
-- Storage: `<project data dir>/ledgers/<sha256(task id)>.jsonl`, one fsynced JSON record per event. Events are persisted before they are committed in memory.
-- A record cut off by a crash mid-append is truncated when the ledger reopens. Any other malformed or out-of-order history fails closed and is not replayed.
-- When the ledger reopens, each file the task wrote is hashed again. If a file changed outside the agent, the runtime records a synthetic write, so evidence that overlaps that file is no longer current.
+Run `/compact` to summarize on demand.
 
-### Self-Invalidating Claims
+## Long-running tasks
 
-With `claims.enabled`, every ranged `file_read` (one with `start_line`/`end_line`) is recorded as a claim anchored to the content hash of the lines read. The runtime re-checks those anchors so the model is told when something it read earlier no longer matches the workspace.
+Large tasks keep going for as long as they make progress. Chronos Code checks in at regular intervals, and pauses to ask you how to continue only when a stretch of work produced nothing new:
 
 ```yaml
-claims:
-  enabled: false   # opt in
+long_running:
+  mode: renew                  # "bounded" makes the limits below hard stops instead
+  window:
+    tool_calls: 100
+    seconds: 900
+  no_progress_windows: 2       # pause after this many unproductive stretches in a row
 ```
 
-- Claim states: `live` (the lines still match; a span that only moved is relocated), `stale` (the lines changed or were removed), and `doubted` (the lines match but a claim it was derived from is no longer live).
-- Re-checks run after `file_write` (the written file), after mutating or unclassified shell commands (all claims), and when an execution continues a task with the same explicit task ID (all claims, catching edits made outside the agent).
-- A mutating shell command whose effects invalidate claims returns a `claims_invalidated` list in its tool result.
-- When a task is continued, a `[Working claims]` block is added to the turn: outdated spans first (re-read before relying on them), then spans to re-check, then spans that are still current.
-- Every status change is appended to the evidence ledger as a `claim` event (audit only; it does not affect verification). Claim stores are kept in memory, with at most 256 claims per task and 64 continued tasks.
+## Checking its own work
 
-### Model Catalog and Pricing
-
-Model prices, context windows, and `/model` picker entries come from the [models.dev](https://models.dev) catalog (the open database opencode also uses), cached at `~/.chronos-code/cache/models.json`.
+Chronos Code tracks what it should verify (for example, that changed code still builds and passes tests):
 
 ```yaml
-models_catalog:
-  auto_refresh: true            # refresh a cache older than 24h in the background
-  url: "https://models.dev"     # catalog is fetched from <url>/api.json
+verification:
+  mode: report     # report: list anything unverified in the summary (default)
+                   # enforce: don't report success until the checks have passed
 ```
 
-- Startup applies the cached catalog before the first model call and never waits on the network. A missing or stale cache is refreshed in the background and used from the next start (or immediately for later calls in a long session).
-- `chronos-code models refresh` fetches the catalog on demand; it ignores `auto_refresh` and `CHRONOS_CODE_DISABLE_MODELS_FETCH`, which only stop automatic fetches.
-- Only providers chronos-code can build are cached (anthropic, openai, google → `gemini`, mistral, deepseek, groq, together, fireworks, perplexity, openrouter). When a model ID appears under several providers, the first-party provider's price and window win. Picker entries exclude deprecated and non-tool-calling models.
-- Context windows use the model's usable input limit when models.dev publishes one smaller than the full window (for example gpt-5: 272K of 400K). `defaults.context.max_tokens` (128000 by default) still caps compaction and the context guard.
+## Cost limits
 
-Prices resolve in this order, later layers winning per model ID:
+- **Per session, in dollars:** start with `--budget 5`. Calls stop before the budget would be exceeded, including when a model's price is unknown.
+- **Per session, in tokens:** set `cost.max_tokens_per_session` in `guardrails/default.yaml` (default 500,000; you're warned at 80%).
+- **Per task, in dollars:** `repair.max_cost_microdollars: 2000000` caps a single task at $2. This only works when every model involved has a known price.
 
-1. Bundled `pricing.yaml` (the offline fallback)
-2. The models.dev catalog
-3. `~/.chronos-code/pricing.yaml` (user)
-4. `<project>/.chronos-code/pricing.yaml` (project)
+Check spending any time with `/usage` and `/budget`.
+
+### Prices
+
+Model prices come from the public [models.dev](https://models.dev) catalog, which is refreshed automatically in the background. For private deployments or negotiated rates, add a `pricing.yaml` (USD per million tokens) to `~/.chronos-code/` or `.chronos-code/`:
 
 ```yaml
-# pricing.yaml: USD per 1M tokens
 models:
-  my-model: { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75, cache_write_1h: 6 }
-  long-context-model:
-    input: 5
-    output: 30
-    tiers:
-      - { above: 272000, input: 10, output: 45 }   # whole call billed at these rates past 272K prompt tokens
+  my-deployment: { input: 3, output: 15, cache_read: 0.3 }
 ```
 
-Omitted `cache_read`/`cache_write` default to `input`, and `cache_write_1h` defaults to `cache_write`. models.dev does not publish Anthropic's 1-hour cache-write rate, so catalog Anthropic models use 2× input. A model with no price in any layer is reported as `unpriced` (or `≥$…` when only some calls were priced), never as $0.
+Set `models_catalog.auto_refresh: false` (or `CHRONOS_CODE_DISABLE_MODELS_FETCH=1`) to stop automatic catalog downloads. `chronos-code models refresh` updates the catalog on demand.
 
-## Routing Config (`routing.yaml`)
+## Sessions and memory
 
 ```yaml
-router:
-  intent_patterns: []      # YAML regex rules for T0 routing (no model call)
-  default_tier: t1         # t0 | t1 | t2
+session:
+  auto_resume: false        # true: reopen your last conversation on start
 
-  complexity_paths:
-    low:    { model: claude-haiku-... }
-    medium: { model: claude-sonnet-... }
-    high:   { model: claude-opus-... }
-
-ppd:
-  mode: shadow             # enabled | shadow | disabled
-  # enabled  — delegate one proposal turn to delivery-strategist
-  # shadow   — observe routing decisions without invoking delivery-strategist
-  # disabled — skip PPD policy entirely
+memory:
+  enabled: true             # false: don't save or recall memories
+  auto_extract: true        # allow "remember: ..." messages in chat
 ```
 
-`ppd` is retained as the public compatibility key. Shadow remains the default because a production rolling-replanning loop is not implemented.
+Sessions are stored per project under `~/.chronos-code/projects/`. Manage them with `chronos-code session list | delete <id> | export <id> <file>`.
 
-## Security Config (`security.yaml`)
+## Hooks
+
+Run your own commands automatically, for example a formatter after every edit or a check before any shell command:
 
 ```yaml
-security:
-  path_allowlist:
-    - "."                  # relative to project root
-  shell_restrictions: []   # blocked shell commands / prefixes
-  mcp_trust:
-    require_approval: true
-    namespace_prefix: mcp_ # tool namespace prefix
+hooks:
+  post_tool_call:
+    - name: format
+      command: "make fmt"
+      timeout_ms: 30000
+  pre_tool_call:
+    - name: audit
+      command: "echo {{tool_name}} >> .chronos-code/audit.log"
+      timeout_ms: 2000
+  user_prompt_submit:
+    - name: branch-context
+      command: "git branch --show-current"
+      timeout_ms: 2000
 ```
 
-## MCP Configuration (`.mcp.json`)
+| Hook | Runs | If it fails |
+|---|---|---|
+| `pre_tool_call` | Before each tool call | The tool call is blocked |
+| `post_tool_call` | After each tool call | Recorded, the task continues |
+| `user_prompt_submit` | When you send a message; its output is added to your message | The turn stops |
 
-MCP servers are defined in `.mcp.json` in the project root. Use `${ENV_VAR}` references for credentials — never hardcode secrets:
+Available placeholders: `{{tool_name}}`, `{{tool_args}}`, `{{tool_output}}`, `{{session_id}}`, `{{agent_id}}`, and `{{user_message}}`. Values are quoted safely for you.
 
-```json
-{
-  "mcpServers": {
-    "local-files": {
-      "transport": "stdio",
-      "command": "mcp-files",
-      "args": ["--token", "${MCP_FILES_TOKEN}"]
-    },
-    "remote-search": {
-      "transport": "sse",
-      "url": "https://mcp.example.com/events?token=${MCP_SEARCH_TOKEN}"
-    }
-  }
-}
+Hooks in a **project** file run only after you trust them, so a cloned repository can't run commands on your machine without your consent. On first start, Chronos Code stops and prints a digest. Add it to your personal `~/.chronos-code/security.yaml`:
+
+```yaml
+hooks:
+  trusted_digests: ["<digest printed at startup>"]
 ```
 
-This example is validated by `internal/mcpdiscover/testdata/mcp.json`.
+## Learning from your sessions
 
-Discovery parses `.mcp.json`, Cursor, VS Code, Claude, `package.json`, and the user config independently. A malformed source is reported without suppressing healthy siblings. During file watching, only the malformed source falls back to its last-known-good entries.
+Chronos Code can suggest improvements (a new skill, a refined agent, a project pattern) based on your past sessions. Suggestions are never applied automatically. Review them with `/learn` or `chronos-code learn list | show | accept | reject`.
 
-:::warning Credential requirement
-All credential-like arguments and header values **must** use `${ENV_VAR}` references. Hardcoded credentials are rejected. `mcp list` and `mcp test` output redacts credential values.
-:::
-
-Manage MCP servers with:
-
-```bash
-chronos-code mcp add     # add a server to .mcp.json
-chronos-code mcp list    # list configured servers
-chronos-code mcp test    # test a server's connectivity
-chronos-code mcp remove  # remove a server
+```yaml
+learning:
+  enabled: true      # false: stop creating new suggestions
 ```
 
-## Credential Injection
+## Housekeeping
 
-Provider API keys are read from environment variables and merged as credentials — never stored in config files:
+Old sessions, logs and temporary files are cleaned up according to retention rules (by default, sessions older than 90 days). Run `chronos-code cleanup status` to see what's stored, and `chronos-code cleanup run --dry-run` to preview a cleanup.
 
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, … | Provider credentials |
+| `CHRONOS_CODE_PROVIDER`, `CHRONOS_CODE_MODEL` | Override the main agent's model |
+| `CHRONOS_CODE_DISABLE_MODELS_FETCH` | Stop automatic model catalog downloads |
+| `CHRONOS_CODE_DATA_HOME` | Store sessions and runtime data somewhere other than `~/.chronos-code` |
+
+## Global flags
+
+| Flag | Purpose |
+|---|---|
+| `-c`, `--config <file>` | Add a config file on top of the others |
+| `--provider <name>`, `--model <id>` | Choose the main agent's model |
+| `--plan-mode` | Start in plan mode |
+| `--budget <usd>` | Spending cap for the session |
+| `--resume <session-id>` | Continue a previous session |
+| `--yolo` | Allow file edits and allowlisted commands without asking |
+| `--dangerously-skip-permissions` | Allow everything that would ask (sandboxes and CI only) |
+| `--no-stream` | Show replies when complete instead of streaming |
+| `--json` | Headless: print one JSON result |
+| `--debug` | Verbose logging |
+
+## A complete example
+
+```yaml
+# .chronos-code/config.yaml, shared with the team
+defaults:
+  reasoning:
+    native: true
+    effort: medium
+
+verification:
+  mode: enforce
+
+hooks:
+  post_tool_call:
+    - name: format
+      command: "make fmt"
+      timeout_ms: 30000
 ```
 
-Use `chronos-code login` for OAuth and enterprise credential flows. `chronos-code whoami` shows the effective credential source.
-
-## Capability Status
-
-| Capability | Status |
-|-----------|--------|
-| Code graph (Go and 17 tree-sitter languages), SQLite sessions, deterministic YAML memory | **Default** |
-| PostgreSQL storage | Optional `postgres` build tag |
-| LSP tools | Optional `lsp` build tag |
-| PPD policy | `shadow` by default; `enabled` is rejected until closed-loop durable execution is available |
-| Verification | `report` by default; `enforce` is opt-in |
-| Learning suggestions | On, human review required; `auto_distill: false` |
-| Vector recall and branchable sessions | Roadmap |
-
-## See Also
-
-- [Rollback Controls](./rollback) — per-switch disable controls
-- [Security Architecture](./architecture/security) — guardrail stack details
-- [MCP Architecture](./architecture/mcp) — MCP discovery and runtime
+```yaml
+# ~/.chronos-code/config.yaml, personal
+session:
+  auto_resume: true
+```

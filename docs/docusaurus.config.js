@@ -130,21 +130,18 @@ const config = {
           {
             title: 'Docs',
             items: [
-              { label: 'Introduction',    to: '/' },
-              { label: 'Getting Started', to: '/getting-started' },
-              { label: 'Configuration',   to: '/configuration' },
-              { label: 'Security Policy', to: '/security' },
+              { label: 'Getting Started',    to: '/getting-started' },
+              { label: 'Using Chronos Code', to: '/using-chronos-code' },
+              { label: 'Headless and Automation', to: '/headless' },
             ],
           },
           {
-            title: 'Architecture',
+            title: 'Configure',
             items: [
-              { label: 'Overview',      to: '/architecture' },
-              { label: 'Orchestrator',  to: '/architecture/orchestrator' },
-              { label: 'MCP',           to: '/architecture/mcp' },
-              { label: 'Memory',        to: '/architecture/memory' },
-              { label: 'Planning',      to: '/architecture/planning' },
-              { label: 'CLI',           to: '/architecture/cli' },
+              { label: 'Configuration',          to: '/configuration' },
+              { label: 'Agents and Skills',      to: '/agents-and-skills' },
+              { label: 'Permissions and Safety', to: '/security' },
+              { label: 'Best Practices',         to: '/best-practices' },
             ],
           },
           {

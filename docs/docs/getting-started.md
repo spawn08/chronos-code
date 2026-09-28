@@ -1,152 +1,124 @@
 ---
 sidebar_position: 2
 title: Getting Started
-description: Build, configure, and run Chronos Code for the first time
+description: Install Chronos Code, connect a model provider, and run your first task.
 ---
 
 # Getting Started
 
-## Prerequisites
+This page takes you from nothing to a working session in a few minutes.
 
-- **Go 1.26+**
-- **CGO enabled** — required for SQLite (`modernc.org/sqlite`)
-- [Chronos](https://github.com/spawn08/chronos) as a sibling checkout, or update the `go.mod` `replace` directive to point to your local copy
+## 1. Install
 
-## Build
-
-Clone the repository and build:
+**macOS / Linux**
 
 ```bash
-git clone https://github.com/spawn08/chronos-code
-cd chronos-code
-make build        # produces bin/chronos-code
+curl -fsSL https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.sh | bash
 ```
 
-Available make targets:
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/spawn08/chronos-code/main/scripts/install.ps1 | iex
+```
+
+The installer puts `chronos-code` in `~/.local/bin`. If it warns that this folder isn't on your `PATH`, add it. To install a specific release, set `VERSION` (for example `VERSION=v0.7.0`). To install somewhere else, set `INSTALL_DIR`.
+
+Check that it works:
 
 ```bash
-make build        # bin/chronos-code
-make test         # go test -race
-make eval         # token-efficiency eval vs baseline.json
-make fmt          # gofmt -s -w .
-make vet          # go vet ./...
-make tidy         # go mod tidy
-make clean        # remove bin/
-make install      # $GOPATH/bin
+chronos-code version
 ```
 
-### Optional build tags
+## 2. Connect a model provider
 
-| Tag | What it adds |
-|-----|-------------|
-| `postgres` | PostgreSQL storage adapter |
-| `lsp` | LSP tools: diagnostics, hover, references, rename preview |
+Chronos Code uses Anthropic (Claude) models by default. Pick **one** of these ways to give it access:
 
-Example with LSP:
+**Use an environment variable** (simplest):
 
 ```bash
-go build -tags lsp ./...
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-## Initialize a Project
+**Store a key** in your system keychain, so you don't have to export it every time:
+
+```bash
+chronos-code login anthropic --api-key sk-ant-...
+```
+
+**Reuse an existing login.** If you already use Claude Code or the Codex CLI, open the app and run `/login`. It offers to reuse that login.
+
+Other providers work the same way: OpenAI, Azure OpenAI, Google Gemini, Mistral, Groq, DeepSeek, OpenRouter, Together, Fireworks, Perplexity, and local Ollama. For example:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+chronos-code --provider openai
+```
+
+If you have credentials for exactly one provider, Chronos Code picks it automatically. Run `chronos-code whoami` to see which credential is in use. See [Choosing models](./configuration#choosing-models) to make your choice permanent.
+
+## 3. Start a session
+
+Open a terminal in your project folder and run:
+
+```bash
+chronos-code
+```
+
+Then type what you want, for example:
+
+```text
+Add input validation to the signup handler and a test for it
+```
+
+Chronos Code explores the code, explains what it plans to do, and asks before editing files or running commands:
+
+| Key | Meaning |
+|---|---|
+| `y` / `Enter` | Allow this once |
+| `a` | Always allow this tool for the rest of the session |
+| `A` | Allow everything for the rest of the session |
+| `n` / `Esc` | Deny |
+
+Press `Ctrl+C` to stop the current task. Press it again when idle, or type `/quit`, to exit.
+
+## 4. Try a few things
+
+```text
+@explainer how does authentication work in this project?
+@reviewer review my uncommitted changes
+/plan on
+Refactor the config loader to support environment overrides
+```
+
+The last two lines use **plan mode**: Chronos Code investigates, shows you a plan, and starts implementing only after you approve it. See [Using Chronos Code](./using-chronos-code) for the full workflow.
+
+## 5. (Optional) Add project settings
+
+Chronos Code works without any setup. When you want to customize it for a project, run:
 
 ```bash
 chronos-code init
 ```
 
-This writes `.chronos-code/` into the current directory with agent YAML, skills, guardrails, routing, and security policy. Skip this step to run on embedded defaults — first run works without any config files.
+This creates a `.chronos-code/` folder with editable copies of the default settings, agents, and safety policy. It trims the shell command allowlist to the tools your project uses. Commit the folder to share the setup with your team. See [Configuration](./configuration).
 
-```text
-.chronos-code/
-├── config.yaml          # model, storage, memory, learning, verification
-├── routing.yaml         # intent, models, complexity paths, PPD
-├── security.yaml        # path allowlists, shell restrictions, MCP trust
-├── agents/              # chronos-code.yaml, coder.yaml, …
-├── skills/
-├── guardrails/
-├── memory/              # project.yaml, user.yaml, feedback.yaml
-└── learned/             # pending learning suggestions
-```
+It also helps to add an `AGENTS.md` (or `CLAUDE.md`) file at the root of your repository that describes your conventions: how to build, how to test, coding style. Chronos Code reads it automatically at the start of every task. See [Project instructions](./agents-and-skills#project-instructions).
 
-## Run
+## Run a single task and exit
 
 ```bash
-chronos-code                      # interactive TUI (REPL)
-chronos-code run "your message"   # one-shot, then exit
-chronos-code serve                # HTTP API on :8430
+chronos-code run "update the README with the new install steps"
 ```
 
-### Useful CLI flags
+See [Headless and Automation](./headless) for scripting and CI use.
 
-| Flag | Description |
-|------|-------------|
-| `-c` / `--config` | Path to a specific config file |
-| `--debug` | Enable debug logging |
-| `--stream` / `--no-stream` | Control streaming output |
-| `--permission-mode` | Permission enforcement level |
-| `--yolo` | Auto-approve policy-allowed tools (never overrides deny rules) |
-| `--budget <usd>` | Hard USD spending cap |
-| `--resume <session-id>` | Resume a prior session |
-| `--json` | Machine-readable output (headless mode) |
+## Troubleshooting
 
-## Interactive TUI
-
-Once in the REPL, these slash commands and shortcuts are available:
-
-| Command | Effect |
-|---------|--------|
-| `/login` or `Ctrl+L` | Authenticate with a provider |
-| `/whoami` | Show effective credential source |
-| `/context` | Show context sources, counts, and budgets |
-| `/resume` | Continue the latest session |
-| `/compact` | Summarize and compress history |
-| `/rewind` | Undo the last `file_write` |
-| `/plan on` / `/plan off` | Block writes and shell until plan mode exits |
-| `/learn` | Review pending learning suggestions |
-| `/model` | List models; Tab to autocomplete |
-| `/mouse` | Toggle mouse capture mode |
-| `/copy` | Copy last assistant reply to clipboard |
-| `/think` | Enable native thinking mode for this turn |
-| `!<command>` | Run a local shell command in the workspace; output stays in the chat |
-
-**Clipboard shortcuts:** `Ctrl+Y` / `Ctrl+Shift+C` copy the last reply. `/copy code` and `Ctrl+Shift+X` copy the last fenced code block.
-
-**Mouse:** Wheel scroll is on by default. Shift-drag to select text; then copy with your terminal shortcut (`Cmd+C` on macOS).
-
-## Commands Reference
-
-```text
-chronos-code                          Start interactive REPL
-chronos-code run <message>            One task, then exit
-chronos-code init                     Export .chronos-code/ into the project
-chronos-code login / logout / whoami  Provider credentials
-chronos-code providers                List resolvable providers
-chronos-code agents list              List resolved agents
-chronos-code config show|validate     Show or validate resolved config
-chronos-code session list|delete|export
-chronos-code memory list|search|forget
-chronos-code mcp add|list|test|remove
-chronos-code learn suggest|list|show|accept|reject
-chronos-code eval run|ppd
-chronos-code team list|run
-chronos-code plan … --db <path>       Durable plan database ops
-chronos-code skills list|show
-chronos-code serve                    HTTP server
-chronos-code version
-```
-
-## Language Server Tools (Optional)
-
-Build with `-tags lsp` to register `lsp_diagnostics`, `lsp_hover`, `lsp_references`, and `lsp_rename_preview`. Supported servers:
-
-- `gopls` (Go)
-- `typescript-language-server --stdio`
-- `pyright-langserver --stdio`
-- `rust-analyzer`
-
-Servers start lazily on first use. A missing server is non-fatal.
-
-## Next Steps
-
-- [Configuration](./configuration) — full YAML config reference
-- [Architecture Overview](./architecture/intro) — how subsystems connect
+| Problem | What to do |
+|---|---|
+| "no credential" or authentication errors | Run `chronos-code whoami`, then set an API key or use `/login` |
+| A command keeps asking for approval | Press `a` to allow it for the session, or see [Permissions and Safety](./security) |
+| Startup fails with a `security.yaml` error | Your project policy tries to allow more than the built-in policy. See [What you can and can't change](./security#what-you-can-and-cant-change) |
+| The model is wrong or unavailable | Run `/model` in the app, or see [Choosing models](./configuration#choosing-models) |
+| Sessions get slow or expensive | Run `/compact`. See [Best Practices](./best-practices#keep-long-sessions-healthy) |

@@ -678,6 +678,9 @@ func summarizeToolArgs(name string, value any) string {
 	case "shell", "shell_auto":
 		command, _ := args["command"].(string)
 		return SummarizeArgs(command)
+	case orchestrator.ExitPlanModeToolName:
+		plan, _ := args["plan"].(string)
+		return planSummary(plan)
 	default:
 		return SummarizeArgs(FormatArgs(args))
 	}
@@ -736,6 +739,14 @@ func RenderFileWriteDiff(args map[string]any) string {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s\n", styleDim.Render("Path:"), path)
+	// A whole-file write sends content; old/new_content select an edit.
+	if content, ok := args["content"].(string); ok && oldContent == "" {
+		b.WriteString(styleDiffAdded.Render("+++ whole file") + "\n")
+		for _, line := range truncatedLines(content, 40) {
+			b.WriteString(styleDiffAdded.Render("+ "+line) + "\n")
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
 	if create || oldContent == "" {
 		b.WriteString(styleDiffAdded.Render("+++ new file") + "\n")
 		for _, line := range truncatedLines(newContent, 40) {
@@ -757,7 +768,8 @@ func RenderFileWriteDiff(args map[string]any) string {
 func editDiffPreview(args map[string]any) string {
 	oldContent, _ := args["old_content"].(string)
 	create, _ := args["create"].(bool)
-	if !create && oldContent == "" {
+	_, wholeFile := args["content"].(string)
+	if !create && !wholeFile && oldContent == "" {
 		return ""
 	}
 	bounded := make(map[string]any, len(args))
@@ -765,7 +777,7 @@ func editDiffPreview(args map[string]any) string {
 		bounded[k] = v
 	}
 	cut := false
-	for _, key := range []string{"old_content", "new_content"} {
+	for _, key := range []string{"old_content", "new_content", "content"} {
 		text, _ := bounded[key].(string)
 		if len(text) > 4096 {
 			text = text[:4096]
@@ -786,7 +798,16 @@ func editDiffPreview(args map[string]any) string {
 // Inline details are intentionally short; /inspect keeps the captured full
 // fields available with independent scrolling and copying.
 func (m *appModel) renderToolExcerpt(label, text string) string {
-	const maxBytes = 1400
+	return m.renderToolExcerptLimit(label, text, 1400, 10, true)
+}
+
+// Expanded (ctrl+o) tool details show more of the readable output.
+const (
+	expandedExcerptBytes = 8 << 10
+	expandedExcerptLines = 40
+)
+
+func (m *appModel) renderToolExcerptLimit(label, text string, maxBytes, maxLines int, diffColors bool) string {
 	cut := len(text) > maxBytes
 	if cut {
 		text = text[:maxBytes]
@@ -795,8 +816,8 @@ func (m *appModel) renderToolExcerpt(label, text string) string {
 		}
 	}
 	lines := strings.Split(ansi.Strip(text), "\n")
-	if len(lines) > 10 {
-		lines = lines[:10]
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
 		cut = true
 	}
 	var b strings.Builder
@@ -804,9 +825,9 @@ func (m *appModel) renderToolExcerpt(label, text string) string {
 	for _, line := range lines {
 		b.WriteByte('\n')
 		style := styleDim
-		if strings.HasPrefix(line, "+") {
+		if diffColors && strings.HasPrefix(line, "+") {
 			style = styleDiffAdded
-		} else if strings.HasPrefix(line, "-") {
+		} else if diffColors && strings.HasPrefix(line, "-") {
 			style = styleDiffRemoved
 		}
 		b.WriteString(truncateToWidth(style.Render("    "+line), m.viewport.Width()))

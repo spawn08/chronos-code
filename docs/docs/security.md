@@ -1,197 +1,108 @@
 ---
-sidebar_position: 6
-title: Security Policy
-description: Credential-reference policy, ValidateManagedServer validation, and operator security reference
+sidebar_position: 7
+title: Permissions and Safety
+description: Control what Chronos Code may do without asking, and how your project and credentials stay protected.
 ---
 
-# Security Policy
+# Permissions and Safety
 
-This page is the **operator-facing security reference** for Chronos Code. It covers what the
-security system enforces, what cannot be overridden, and how to configure restrictions.
+Chronos Code can read your code freely, but it asks before it changes things. This page explains what it asks about, how to reduce the prompts when you trust it, and which protections always stay on.
 
-For the implementation internals, see [Security Subsystem](./subsystems/security).
+## What needs your approval
 
-## What Cannot Be Overridden
+| Action | Default |
+|---|---|
+| Reading, listing and searching files in your project | Allowed |
+| Plans, notes, loading skills | Allowed |
+| Editing or creating files | Asks |
+| Running shell commands | Asks, except a few safe ones such as `go test` |
+| Tools from external (MCP) servers | Asks |
+| Dangerous commands (`sudo`, `rm -rf /`, piping downloads into a shell) | Always refused |
+| Secrets and sensitive files (`.env`, `*.pem`, `*.key`, `credentials*`, `secrets/`) | Always refused |
+| Files outside your project | Refused |
 
-The **embedded security floor** is baked into the binary. No project config file, `--yolo` flag,
-or runtime switch can weaken it:
+## Fewer prompts when you trust the task
 
-| Protection | Detail |
-|------------|--------|
-| Credential-reference enforcement | Hardcoded secrets in config or MCP are rejected at load |
-| Path traversal prevention | Access outside `path_allowlist` is denied before tool execution |
-| Guardrail deny rules | Inject/PII/secret-scan denials are always active |
-| USD fail-closed | Unknown model + USD cap → provider call blocked |
+| Option | Scope | What stops asking |
+|---|---|---|
+| Press `a` at a prompt | Rest of the session | That one tool (for example all shell commands) |
+| Press `A` at a prompt | Rest of the session | Everything |
+| Approve a plan with `a` in [plan mode](./using-chronos-code#plan-mode) | Rest of the session | File edits |
+| `--yolo` | This run | File edits and simple commands from the allowlist |
+| `--dangerously-skip-permissions` | This run | Everything that would ask |
 
-## Credential-Reference Policy
+With `--yolo`, combined commands (with `;`, `|`, `&&` or redirects), commands that aren't on the allowlist, and commands on the always-confirm list (such as `git push`) still ask. `--dangerously-skip-permissions` approves those too. It is meant for disposable environments such as containers and CI runners. See [Headless and Automation](./headless#permissions-when-nobody-is-watching).
 
-All credential-like values in any Chronos Code config file or `.mcp.json` **must** use
-`${ENV_VAR}` reference syntax:
+No option can override the "always refused" rows in the table above.
 
-```yaml
-# .chronos-code/config.yaml — correct
-providers:
-  anthropic:
-    api_key: "${ANTHROPIC_API_KEY}"
-```
+## Plan mode as a safety net
 
-```json
-// .mcp.json — correct
-{
-  "servers": [
-    {
-      "name": "my-server",
-      "transport": "stdio",
-      "command": "my-server-binary",
-      "args": ["--token", "${MY_SERVER_TOKEN}"]
-    }
-  ]
-}
-```
+For risky changes, [plan mode](./using-chronos-code#plan-mode) is the simplest protection. Chronos Code can't edit anything or run commands until you've read and approved its plan.
 
-Hardcoded values matching credential patterns are rejected by `validateSecretReferences` during
-config load and MCP discovery. The rejected server or config field is marked **denied** and
-excluded — other config fields and servers continue loading normally.
+## Undo
 
-### Why `${ENV_VAR}` Is Required
+- `/rewind` undoes the last file edit Chronos Code made.
+- `/diff` shows everything that changed in your working tree.
+- For anything bigger, use git. Commit, or at least stash, before a large task so you can compare and roll back easily.
 
-1. **Prevents accidental commit** of secrets to source control
-2. **Enables rotation** without modifying config files
-3. **Enables audit** — the config file shows which env vars are used, not their values
-4. **Allows redaction** — CLI commands like `mcp list` and `mcp test` can safely display configs
+## Project safety policy (`security.yaml`)
 
-## ValidateManagedServer {#validate-managed-server}
-
-`ValidateManagedServer` is the structural validation gate run during MCP discovery on every
-candidate server entry.
-
-Source: `internal/mcpdiscover/config.go`
-
-It enforces:
-
-| Check | Detail |
-|-------|--------|
-| Name non-empty | Server must have a name |
-| Transport valid | Only `stdio` or `sse` are accepted |
-| stdio requires Command | `command` must be set for stdio transport |
-| sse requires HTTPS URL | `url` must start with `https://` |
-| No credential literals | All credential-like values must be `${ENV_VAR}` references |
-
-A server failing any check is assigned `StateInvalid` or `StateDenied` and excluded from the
-Load phase. Other servers continue loading normally (failure isolation).
-
-```bash
-# Test validation without connecting
-chronos-code mcp test
-```
-
-## MCP Credential Validation Gates
-
-There are two sequential gates for MCP credential checking:
-
-```
-.mcp.json
-    │
-    ▼ Gate 1: validateSecretReferences (Discover phase)
-    │  Checks: credential format (${ENV_VAR} required)
-    │  On fail: server → StateDenied, excluded
-    │
-    ▼ Gate 2: validateRuntimeConfig (Load phase)
-    │  Checks: env vars are actually set in the environment
-    │  On fail: server → StateInvalid, excluded
-    │
-    ▼ Runtime (connect + tool registration)
-```
-
-**Recommendation:** always set all referenced environment variables before starting Chronos Code
-so that both gates can fully validate MCP server credentials at startup.
-
-## Security Configuration Reference
-
-### `security.yaml`
+The safety policy decides which paths and commands are allowed. A built-in policy always applies. You can add restrictions for a project in `.chronos-code/security.yaml`, or for yourself in `~/.chronos-code/security.yaml`:
 
 ```yaml
-# .chronos-code/security.yaml
-security:
-  # Files and directories accessible to tool calls
-  path_allowlist:
-    - "."                      # project root (recommended minimum)
-    - "/tmp/chronos-*"         # scratch space
-
-  # Shell tool restrictions
-  shell_restrictions:
-    blocked_commands:
-      - "curl"
-      - "wget"
-    blocked_prefixes:
-      - "sudo"
-      - "su "
-
-  # MCP server trust policy
-  mcp_trust:
-    require_approval: true     # users must approve each MCP tool call
-    max_connections: 10        # maximum simultaneous MCP connections
-    namespace_prefix: "mcp_"
+version: "v1"
+filesystem:
+  writable_paths: ["src", "tests"]        # only allow edits here
+  denied_paths: ["migrations/**", "**/*.sql"]
+shell:
+  allowed_commands: [go, git, make]       # only these programs may run (after approval)
+  confirm: ['^make\s+deploy']             # always ask for these, even with --yolo
+  never_allow: ['^git\s+push\s+.*--force'] # always refuse these
+  max_execution_time_sec: 120
 ```
 
-### `config.yaml` — Budget and Permission Mode
+| Setting | What it does |
+|---|---|
+| `filesystem.writable_paths` / `readable_paths` | Where Chronos Code may write / read |
+| `filesystem.denied_paths` | Files and folders it must never touch |
+| `shell.allowed_commands` | Programs it may run (matched on the first word, such as `go` or `npm`) |
+| `shell.confirm` | Commands that always need approval |
+| `shell.never_allow` / `denied_patterns` | Commands that are always refused |
+| `shell.max_execution_time_sec` | Time limit per command |
+| `secrets.patterns` | Extra secret formats to redact from command output |
+| `mcp.denied_servers` | External tool servers that may never be used |
 
-```yaml
-# .chronos-code/config.yaml
-budget:
-  usd: 5.00                    # hard stop at $5.00 per session (fails closed)
-  tokens: 100000               # optional token cap
+### What you can and can't change
 
-permission_mode: default       # default | auto | strict
-```
+Your `security.yaml` can only make the policy **stricter**. You can:
 
-| Permission Mode | Behavior |
-|----------------|----------|
-| `default` | Interactive approval for risky operations |
-| `auto` | Auto-approve policy-allowed tools (`--yolo` equivalent) |
-| `strict` | Deny all shell and write operations outside explicit allowlist |
+- narrow the readable and writable paths
+- remove programs from `allowed_commands`
+- add denied paths, confirm rules, never-allow rules and secret patterns
+- lower time and connection limits
 
-## Guardrail Configuration
+You **can't** add programs that aren't in the built-in allowlist, widen paths, or turn off secret scanning. If a file tries to, Chronos Code refuses to start and tells you which line is the problem. This way, a repository you clone can never quietly give the agent more power than the defaults.
 
-Built-in guardrails are in `internal/defaults/` (embedded YAML). To customize:
+To run a program that isn't on the allowlist, approve it when asked. Press `a` to stop being asked about shell commands for the rest of the session, or use `--dangerously-skip-permissions` in a sandbox.
 
-```yaml
-# .chronos-code/guardrails/custom.yaml
-rules:
-  - name: block-gh-token
-    scope: tool_result
-    pattern: "ghp_[A-Za-z0-9]+"
-    action: deny
-    message: "GitHub PAT detected in tool result — blocking to prevent credential leakage"
-```
+The built-in allowlist is: `go`, `git`, `make`, `npm`, `node`, `python`, `python3`, `pip`, `pip3`, `pytest`, `ruff`, `mypy`, `cargo`, `rustc`, `ls`, `cat`, `grep`, `rg`, `find`, `wc`, `diff`, `jq`.
 
-Place custom guardrail files in `.chronos-code/guardrails/`. They are merged with embedded
-defaults; conflicting rule names in project files take precedence.
+## Credentials and secrets
 
-## Disable Controls
+- Keep API keys in environment variables or the system keychain (`chronos-code login`). Never put them in committed files.
+- When a config file needs to refer to a secret, use a reference such as `"${MY_TOKEN}"`. For external tool servers in `.mcp.json`, anything that looks like a credential **must** be written this way, or the server is refused.
+- Command output is scanned for common secret formats (cloud keys, tokens, private keys) before it reaches the model.
 
-All security features can be **tightened** but not **removed**. The following toggles reduce
-functionality:
+## Hooks from cloned repositories
 
-```yaml
-# Disable MCP entirely
-mcp:
-  discovery_enabled: false
+[Hooks](./configuration#hooks) defined in a project's `config.yaml` never run until you explicitly trust them in your personal `~/.chronos-code/security.yaml`. Opening an unfamiliar repository can't make Chronos Code run its commands behind your back.
 
-# Disable memory recall (reduces context injection attack surface)
-memory:
-  enabled: false
+## Recommended setups
 
-# Disable learning suggestions
-learning:
-  enabled: false
-```
-
-See [Rollback Controls](./rollback) for the full per-subsystem disable reference.
-
-## See Also
-
-- [Rollback Controls](./rollback)
-- [Configuration](./configuration)
-- [Security Subsystem Internals](./subsystems/security)
-- [MCP Subsystem](./subsystems/mcp)
+| Situation | Suggested setup |
+|---|---|
+| Everyday interactive work | Defaults. Press `a` for tools you trust during a session. |
+| Unfamiliar or untrusted repository | Defaults plus plan mode. Don't use `--yolo`. |
+| Sensitive codebase | Add a `security.yaml` that narrows `writable_paths` and adds `denied_paths`, and set a `--budget` |
+| CI review job | No permission flags (read-only) |
+| CI job that changes code | Disposable checkout, `--dangerously-skip-permissions`, `--budget`, and no production credentials in the environment |

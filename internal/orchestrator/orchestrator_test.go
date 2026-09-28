@@ -2217,6 +2217,34 @@ func TestNormalizeAllowShellAppliesConfirmAndNeverAllowPolicy(t *testing.T) {
 	}
 }
 
+func TestSkipPermissionsApprovesConfirmationsButKeepsPolicyDenials(t *testing.T) {
+	orch := newPermissionTestOrchestrator(t, nil)
+	a := orch.agents["coder"]
+	executions := 0
+	registerPermissionTool(a.Tools, "shell", tool.PermAllow, &executions)
+	registerPermissionTool(a.Tools, "mcp_unknown", tool.PermAllow, &executions)
+	normalizeToolPermissions(orch.agents)
+	orch.SetApprovalHandler(nil) // headless: nobody to ask
+	if _, err := a.Tools.Execute(context.Background(), "shell", map[string]any{"command": "git push origin main"}); err == nil {
+		t.Fatal("headless confirmation must be refused without skip")
+	}
+	orch.SetSkipPermissions(true)
+	for name, args := range map[string]map[string]any{"shell": {"command": "git push origin main"}, "mcp_unknown": nil} {
+		if _, err := a.Tools.Execute(context.Background(), name, args); err != nil {
+			t.Fatalf("%s refused with skip permissions: %v", name, err)
+		}
+	}
+	if executions != 2 {
+		t.Fatalf("executions = %d, want 2", executions)
+	}
+	if _, err := a.Tools.Execute(context.Background(), "shell", map[string]any{"command": "rm dangerous"}); err == nil || executions != 2 {
+		t.Fatal("skip permissions must not override never_allow policy")
+	}
+	if got := orch.OperationalState(context.Background()).PermissionMode; got != PermissionModeSkip {
+		t.Fatalf("permission mode label = %q", got)
+	}
+}
+
 func TestNormalizeAllowUnknownToolRequiresConfirmation(t *testing.T) {
 	orch := newPermissionTestOrchestrator(t, nil)
 	a := orch.agents["coder"]

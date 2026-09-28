@@ -1,55 +1,77 @@
 ---
-sidebar_position: 8
+sidebar_position: 10
 title: Best Practices
-description: Practical tips for getting the most out of Chronos Code
+description: Practical habits for getting better results from Chronos Code, with less cost and less risk.
 ---
 
 # Best Practices
 
-## Keep custom instructions short and focused
+## Set up your project once
 
-It's tempting to dump every project convention into a single instructions file. Resist that. Long, unfocused instructions dilute what matters — the tool has to read them all, and the parts that are relevant to any given task get lost in the noise.
+**Write an `AGENTS.md`.** This is the most valuable ten minutes you can spend. Tell Chronos Code how to build, how to run the tests (including a single test), where things live, and what to avoid. Keep it short and factual. It's read on every task, so every line should earn its place. See [Project instructions](./agents-and-skills#project-instructions).
 
-Instead, write short, specific instructions for specific concerns: one for error-handling conventions, one for the review checklist, one for testing patterns. When you call in a reviewer, it reads the review-relevant instructions; when you call in a coder, it reads the coding-relevant ones. Focused instructions produce better results than a wall of text.
+**Make checking easy.** Chronos Code verifies its work by running your build and tests. If your project has a single `make test` (or `npm test`) command that runs quickly, it will use it and catch its own mistakes. Mention it in `AGENTS.md`.
 
----
+**Commit the shared setup.** Commit `.chronos-code/` (agents, skills, safety policy) and `AGENTS.md` so the whole team gets the same behavior. Keep personal preferences in `~/.chronos-code/`.
 
-## Call a specialist by name when you know what you need
+## Ask well
 
-The default agent is a generalist — good for orientation, routing, and multi-step tasks you haven't fully defined yet. But when you know exactly what kind of help you want, name the specialist:
+**Describe the outcome and how to check it.** "Fix the flaky checkout test and run it 10 times to confirm" works much better than "look at the tests".
 
-- `@reviewer` when you want a bug and security review of a diff
-- `@debugger` when you have an error trace and need to find the root cause
-- `@planner` when you need a multi-step task broken down before anything changes
-- `@researcher` when you want read-only exploration without any writes
-- `@explainer` when you need a clear explanation of how something works
+**Give it the context you already have.** Paste the error message, mention the file with `@path/to/file`, or say which approach you prefer. Anything you know saves the agent a search.
 
-Named specialists are focused on their job and use the right model for it. A `@researcher` or `@explainer` will use a cheap model and won't try to make changes. A `@reviewer` won't try to implement the fix while reviewing — it'll give you the findings and let you decide.
+**One goal per request.** Big, multi-part requests work, but a sequence of focused requests is easier to review and cheaper to correct.
 
----
+**Say what's off-limits.** "Don't change the public API" or "only touch the `billing` package" prevents well-meaning but unwanted changes.
 
-## Match your safety-scanning strictness to the project
+## Use plan mode for anything risky
 
-The default guardrails are a sensible baseline, but different projects have different sensitivity levels. A personal side project and a production service handling user data are not the same.
+Turn on `/plan on` before refactors, migrations, changes across many files, and anything you'd want a colleague to review first. Read the plan properly. It's much cheaper to fix a wrong step in a plan than in code. Press `n` and write what to change, then approve when it's right.
 
-For sensitive projects: tighten the path allowlist so the tool can only read and write in the directories that make sense; lower the budget cap to catch runaway sessions early; require explicit approval for MCP tool calls.
+In automation, use `--plan-mode` for larger tasks. The extra planning round usually pays for itself.
 
-For internal tools or experimental projects: you might relax approval prompts for faster iteration.
+## Stay in control without micromanaging
 
-Your `security.yaml` and `config.yaml` files are the right place for this — not flags you retype every time. Put project-appropriate settings in the `.chronos-code/` directory and commit them so they're always in effect.
+- Press `a` at a prompt to stop being asked about a tool you trust for the rest of the session, instead of approving each call.
+- Keep `--yolo` and `--dangerously-skip-permissions` for trusted repositories and sandboxes.
+- **Commit before big tasks.** A clean working tree makes it trivial to review everything with `git diff`, or to throw it away.
+- Check what happened: `Ctrl+O` shows the full output of every command. `/inspect changes` lists every edit.
+- Changed your mind? `/rewind` undoes the last edit.
 
----
+## Pick the right helper
 
-## Save durable facts about your project, not session chatter
+| You want to… | Use |
+|---|---|
+| Get something built end to end | Just ask. The main agent plans, delegates and checks. |
+| Review a change for bugs and security | `@reviewer` |
+| Find the cause of a failure | `@debugger`, with the error or failing test |
+| Understand unfamiliar code | `@explainer` (fast and inexpensive) |
+| Find where something is used or defined | `@researcher` (read-only and fast) |
+| Decide on a design before coding | `@architect` or `@planner` |
 
-Memory works best when it stores things that will still be true next week: architectural decisions, approved patterns, the reason a non-obvious choice was made. It works poorly as a dump of every question you asked during an exploration session.
+Remember that a specialist stays active after you mention it. Switch back with `@chronos-code`.
 
-When you discover something worth remembering — "we use X library for Y because of Z" or "don't use pattern A in this codebase, use B instead" — explicitly ask the tool to remember it as a project fact. That surfaces it in future sessions when it's relevant. General session history isn't durable and doesn't carry forward.
+## Keep long sessions healthy
 
----
+- **Start a new session for a new topic** (`/clear`). Old, unrelated history costs tokens and can distract the model.
+- **Compact when a session gets long** (`/compact`). It keeps the important facts and drops the noise.
+- **Watch the cost** with `/usage`. Set a cap with `--budget` whenever you run unattended.
+- **Save lasting knowledge** with `remember project: …`. Good memories are facts that will still be true next month, such as "we use X for Y because Z". Session chatter makes bad memories.
+- **Resume instead of re-explaining.** `/resume` brings back the previous conversation, including what was already tried.
 
-## Check what a long session is spending its budget on
+## Grow your setup gradually
 
-If a session is running longer than expected or costing more than anticipated, ask for a context summary. You'll see which sources are contributing to the context, how many tokens each is consuming, and whether the session has accumulated a lot of exploration that's no longer useful.
+1. Start with the defaults and an `AGENTS.md`.
+2. When you explain the same procedure a second time, turn it into a [skill](./agents-and-skills#skills).
+3. When a project needs tighter rules, add a [`security.yaml`](./security#project-safety-policy-securityyaml).
+4. Automate formatting or checks with [hooks](./configuration#hooks).
+5. Every so often, run `/learn` to review the improvements Chronos Code suggests from your sessions. Accept the useful ones and reject the rest.
 
-Use `/compact` to summarize and compress the session history when it's grown large. This keeps later turns in the session cheaper without losing the key facts. Set a hard USD cap in `config.yaml` so that no session can silently exceed a limit you're comfortable with — the tool fails closed rather than running up a bill.
+## Automation checklist
+
+- [ ] Fresh checkout per job, with a job timeout
+- [ ] `--json` output, and decisions based on the exit code
+- [ ] `--budget` set
+- [ ] The narrowest permission flag that works: none, then `--yolo`, then `--dangerously-skip-permissions` in a sandbox
+- [ ] API keys from the CI secret store, and no production credentials in the job
+- [ ] `mcp.discovery_enabled: false` unless the job needs external tools

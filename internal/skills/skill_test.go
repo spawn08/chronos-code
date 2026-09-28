@@ -163,14 +163,14 @@ func TestLoadDirIsolatesMalformedAndOversizedSkills(t *testing.T) {
 
 func TestDocumentedSkillFixtureParses(t *testing.T) {
 	result, err := LoadDirReport("testdata")
-	if err != nil || len(result.Diagnostics) != 0 || len(result.Skills) != 1 || result.Skills[0].Name != "focused-review" {
+	if err != nil || len(result.Diagnostics) != 0 || len(result.Skills) != 1 || result.Skills[0].Name != "add-migration" {
 		t.Fatalf("fixture discovery = %+v, %v", result, err)
 	}
-	fixture, err := os.ReadFile(filepath.Join("testdata", "review", "SKILL.md"))
+	fixture, err := os.ReadFile(filepath.Join("testdata", "add-migration", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "docs", "subsystems", "skills.md"))
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "docs", "agents-and-skills.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

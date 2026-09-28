@@ -102,7 +102,24 @@ func customizeForProject(dir string, projType ProjectType) error {
 		return err
 	}
 	if shell, ok := security["shell"].(map[string]any); ok {
-		shell["allowed_commands"] = shellCommands
+		// A project policy may only narrow the embedded allowlist, so keep the
+		// project-relevant commands it already contains; anything else would
+		// make startup fail.
+		embedded := make(map[string]bool)
+		if current, ok := shell["allowed_commands"].([]any); ok {
+			for _, command := range current {
+				if name, ok := command.(string); ok {
+					embedded[name] = true
+				}
+			}
+		}
+		allowed := make([]string, 0, len(shellCommands))
+		for _, command := range shellCommands {
+			if embedded[command] {
+				allowed = append(allowed, command)
+			}
+		}
+		shell["allowed_commands"] = allowed
 	}
 	out, err := yaml.Marshal(security)
 	if err != nil {

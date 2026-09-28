@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/spawn08/chronos/engine/model"
+
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 func StreamResponse(ch <-chan *model.ChatResponse, w io.Writer) (model.Usage, error) {
@@ -22,8 +25,7 @@ func StreamResponse(ch <-chan *model.ChatResponse, w io.Writer) (model.Usage, er
 		}
 
 		for _, tc := range resp.ToolCalls {
-			argSummary := summarizeArgs(tc.Arguments)
-			fmt.Fprintf(w, "\n  \033[36m> %s(%s)\033[0m\n", tc.Name, argSummary)
+			writeToolCallLine(w, tc)
 		}
 
 		if resp.Content != "" {
@@ -39,8 +41,7 @@ func PrintResponse(resp *model.ChatResponse, w io.Writer) {
 		return
 	}
 	for _, tc := range resp.ToolCalls {
-		argSummary := summarizeArgs(tc.Arguments)
-		fmt.Fprintf(w, "\n  \033[36m> %s(%s)\033[0m\n", tc.Name, argSummary)
+		writeToolCallLine(w, tc)
 	}
 	if resp.Content != "" {
 		fmt.Fprintln(w, resp.Content)
@@ -54,11 +55,24 @@ func PrintUsage(usage model.Usage, w io.Writer) {
 	}
 }
 
-func summarizeArgs(args string) string {
-	args = strings.TrimSpace(args)
-	if len(args) > 80 {
-		args = args[:77] + "..."
+// writeToolCallLine prints a tool call as "> name  summary" (the command,
+// path or pattern) instead of its raw JSON arguments. A plan presented for
+// approval is printed in full, since headless runs approve it unseen.
+func writeToolCallLine(w io.Writer, tc model.ToolCall) {
+	var args map[string]any
+	summary := ""
+	if err := json.Unmarshal([]byte(tc.Arguments), &args); err == nil {
+		summary = summarizeToolArgs(tc.Name, args)
+	} else {
+		summary = SummarizeArgs(tc.Arguments)
 	}
-	args = strings.ReplaceAll(args, "\n", " ")
-	return args
+	if summary != "" {
+		summary = "  " + summary
+	}
+	fmt.Fprintf(w, "\n  \033[36m> %s\033[0m\033[2m%s\033[0m\n", tc.Name, summary)
+	if tc.Name == orchestrator.ExitPlanModeToolName {
+		if plan, _ := args["plan"].(string); strings.TrimSpace(plan) != "" {
+			fmt.Fprintf(w, "%s\n", strings.TrimSpace(plan))
+		}
+	}
 }
