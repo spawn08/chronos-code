@@ -75,7 +75,7 @@ func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, a
 	}
 
 	switch toolName {
-	case "codebase_map", "codebase_search", "graph_query", "find_callers",
+	case "codebase_map", "codebase_search", "codebase_context", "graph_query", "find_callers",
 		"find_implementations", "impact_analysis", "test_map", "co_change",
 		"multi_resolution_view", "resolve_symbol",
 		"file_read", "file_list", "file_glob", "file_grep", "semantic_search",

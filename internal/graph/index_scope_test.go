@@ -328,6 +328,44 @@ func TestIndexScopeLockedIndexFallsBackToPrivate(t *testing.T) {
 	}
 }
 
+// A failed first build is retried by later calls, and a successful retry
+// starts the watcher, instead of leaving the root unavailable for good.
+func TestIndexScopeRetriesFailedFirstBuild(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	old := startRetryInterval
+	startRetryInterval = 0
+	t.Cleanup(func() { startRetryInterval = old })
+	root := canonicalTempDir(t)
+	writeTree(t, root, payFiles)
+	if err := os.Chmod(root, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	scope := newTestScope(t, root, true)
+	query := toolFrom(t, scope.Tools(), "graph_query")
+	ctx := context.Background()
+	if r := call(t, ctx, query, map[string]any{"name": "Card"}); r["available"] != false {
+		t.Fatalf("unreadable root must be unavailable: %+v", r)
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if r := call(t, ctx, query, map[string]any{"name": "Card"}); r["found"] != true {
+		t.Fatalf("retry after failure: %+v", r)
+	}
+	writeTree(t, root, map[string]string{"refund.go": "package pay\n\nfunc Refund() {}\n"})
+	for start := time.Now(); ; time.Sleep(5 * time.Millisecond) {
+		if r := call(t, ctx, query, map[string]any{"name": "Refund"}); r["found"] == true {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("watcher not started after a successful retry")
+		}
+	}
+}
+
 // Without index_on_start the first call builds the index and waits for it.
 func TestIndexScopeLazyFirstBuild(t *testing.T) {
 	root := canonicalTempDir(t)

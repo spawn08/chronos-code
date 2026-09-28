@@ -6,11 +6,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,10 +70,16 @@ type Listing struct {
 	Git     bool     // ignore rules came from git
 }
 
-// List enumerates tracked and untracked, non-ignored files with git, falling
-// back to a directory walk outside a repository.
+// List enumerates tracked and untracked, non-ignored files with git. Outside
+// a repository it still applies .gitignore files through a detached git run,
+// and falls back to a plain directory walk only when git is unusable.
 func List(ctx context.Context, root string) (Listing, error) {
-	if out, err := git(ctx, root, nil, "ls-files", "-z", "--cached", "--others", "--exclude-standard"); err == nil {
+	args := []string{"ls-files", "-z", "--cached", "--others", "--exclude-standard"}
+	out, err := git(ctx, root, nil, args...)
+	if notRepo(err) {
+		out, err = detachedGit(ctx, root, nil, args...)
+	}
+	if err == nil {
 		l := Listing{Git: true}
 		for _, rel := range bytes.Split(out, []byte{0}) {
 			l.add(string(rel))
@@ -78,7 +87,7 @@ func List(ctx context.Context, root string) (Listing, error) {
 		return l, nil
 	}
 	var l Listing
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if p == root {
 				return err
@@ -114,7 +123,8 @@ func (l *Listing) add(rel string) {
 }
 
 // Ignored returns the subset of rels that git ignores. Outside a repository
-// nothing is ignored.
+// the root's .gitignore files still apply; if git is unusable nothing is
+// ignored.
 func Ignored(ctx context.Context, root string, rels []string) map[string]bool {
 	out := map[string]bool{}
 	if len(rels) == 0 {
@@ -125,7 +135,11 @@ func Ignored(ctx context.Context, root string, rels []string) map[string]bool {
 		in.WriteString(r)
 		in.WriteByte(0)
 	}
+	stdin := bytes.NewBuffer(slices.Clone(in.Bytes()))
 	res, err := git(ctx, root, &in, "check-ignore", "-z", "--stdin")
+	if notRepo(err) {
+		res, err = detachedGit(ctx, root, stdin, "check-ignore", "-z", "--stdin")
+	}
 	if err != nil && len(res) == 0 {
 		return out // exit status 1 means "none ignored"; other failures: treat as not ignored
 	}
@@ -145,6 +159,28 @@ func git(ctx context.Context, root string, stdin *bytes.Buffer, args ...string) 
 		cmd.Stdin = stdin
 	}
 	return cmd.Output()
+}
+
+// notRepo reports a git failure with exit status 128, which is how git
+// reports "not a git repository" (and other fatal setup errors).
+func notRepo(err error) bool {
+	var exit *exec.ExitError
+	return errors.As(err, &exit) && exit.ExitCode() == 128
+}
+
+// detachedGit runs git with root as the work tree of a throwaway empty
+// repository, so ignore rules (.gitignore files, core.excludesFile) apply to
+// a workspace that is not itself a repository.
+func detachedGit(ctx context.Context, root string, stdin *bytes.Buffer, args ...string) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "chronos-scan-*")
+	if err != nil {
+		return nil, fmt.Errorf("scan: create detached git dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	if _, err := git(ctx, dir, nil, "init", "-q", "--bare"); err != nil {
+		return nil, fmt.Errorf("scan: init detached git dir: %w", err)
+	}
+	return git(ctx, root, stdin, append([]string{"--git-dir=" + dir, "--work-tree=" + root}, args...)...)
 }
 
 // ModulePath reads the module path declared in a go.mod file.

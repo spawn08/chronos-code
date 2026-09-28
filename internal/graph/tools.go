@@ -120,7 +120,7 @@ func codebaseSearchTool(store Backend) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_search",
 		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Search indexed symbols by exact name and full-text relevance.",
+		Description: "Find functions, methods, types, classes, and fields in any indexed language by exact name, or by words from their names, signatures, and docs; returns file:line, signature, and doc for each match. Use it to locate code by symbol or concept; use file_grep for literal text such as strings, config keys, or log messages.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object",

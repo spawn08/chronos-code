@@ -108,7 +108,7 @@ func codebaseContextTool(store Backend, root string) *tool.Definition {
 	return &tool.Definition{
 		Name:        "codebase_context",
 		Effects:     []tool.Effect{tool.EffectRead},
-		Description: "Read-only, one-turn graph evidence: definitions, bounded source excerpts, direct callers and graph-reachable tests (depth 3). Exact/explicit matches precede ranked matches; ties use source location. max_tokens bounds the complete compact JSON result using the SDK tokenizer plus overhead. Omissions and source freshness are explicit; relationships remain name-based.",
+		Description: "Gather a symbol's code in one call instead of search, read, and caller lookups: definitions, bounded source excerpts, direct callers and graph-reachable tests (depth 3), for a query, a batch of symbols, or file line ranges. Read-only. Exact/explicit matches precede ranked matches; ties use source location. max_tokens bounds the complete compact JSON result using the SDK tokenizer plus overhead. Omissions and source freshness are explicit; relationships remain name-based.",
 		Permission:  tool.PermAllow,
 		Parameters: map[string]any{
 			"type": "object", "additionalProperties": false,

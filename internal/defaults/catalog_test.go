@@ -236,6 +236,26 @@ func TestSpecialistPromptsAvoidUnsupportedBehaviorClaims(t *testing.T) {
 	}
 }
 
+// The code-index tools are registered at runtime, not in agent YAML, so the
+// prompts are the only place that routes symbol lookups to them.
+func TestPromptsRouteSymbolLookupsToCodeIndex(t *testing.T) {
+	for _, id := range []string{"chronos-code", "coder", "researcher"} {
+		data, err := ReadFile("agents/" + id + ".yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var definition bundledAgentDefinition
+		if err := yaml.Unmarshal(data, &definition); err != nil {
+			t.Fatalf("parse %s: %v", id, err)
+		}
+		for _, required := range []string{"codebase_search", "codebase_context", "literal text"} {
+			if !strings.Contains(definition.SystemPrompt, required) {
+				t.Errorf("%s prompt missing %q", id, required)
+			}
+		}
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

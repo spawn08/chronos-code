@@ -184,7 +184,7 @@ func TestPermissionChecker_ClassifiesBuiltins(t *testing.T) {
 		name string
 		want Decision
 	}{
-		{"codebase_map", Auto}, {"codebase_search", Auto}, {"graph_query", Auto},
+		{"codebase_map", Auto}, {"codebase_search", Auto}, {"codebase_context", Auto}, {"graph_query", Auto},
 		{"find_callers", Auto}, {"find_implementations", Auto}, {"impact_analysis", Auto},
 		{"test_map", Auto}, {"co_change", Auto}, {"multi_resolution_view", Auto},
 		{"resolve_symbol", Auto}, {"file_read", Auto}, {"file_list", Auto},

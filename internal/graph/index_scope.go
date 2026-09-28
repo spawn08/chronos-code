@@ -92,8 +92,10 @@ type indexRoot struct {
 
 	startOnce sync.Once
 	started   chan struct{}
-	startErr  error
-	launched  bool // guarded by IndexScope.mu
+	startErr  error         // guarded by IndexScope.mu; set by start or a retry
+	failedAt  time.Time     // guarded by IndexScope.mu; last failed reconcile
+	retry     chan struct{} // guarded by IndexScope.mu; closed when a retry ends
+	launched  bool          // guarded by IndexScope.mu
 	watcher   *indexer.Watcher
 	refs      int
 	pinned    bool // a federated repository: never evicted
@@ -270,29 +272,86 @@ func (s *IndexScope) start(r *indexRoot) {
 		began := time.Now()
 		st, err := r.engine.Reconcile(s.ctx)
 		if err != nil {
-			r.startErr = err
+			s.mu.Lock()
+			r.startErr, r.failedAt = err, time.Now()
+			s.mu.Unlock()
 			if s.ctx.Err() == nil {
 				s.opts.Logf("code graph: index %s: %v", r.root, err)
 			}
 			return
 		}
 		s.opts.Logf("code graph: indexed %s (generation %d, %d files parsed) in %s", r.root, st.Generation, st.Parsed, time.Since(began).Round(time.Millisecond))
-		if s.opts.Watch && s.ctx.Err() == nil {
-			w, err := r.engine.Watch(s.ctx, nil)
-			if err != nil {
-				s.opts.Logf("code graph: watch %s: %v", r.root, err)
-				return
-			}
-			s.mu.Lock()
-			if s.closed {
-				s.mu.Unlock()
-				_ = w.Close()
-				return
-			}
-			r.watcher = w
-			s.mu.Unlock()
-		}
+		s.watch(r)
 	})
+}
+
+// watch starts the root's watcher when the scope watches.
+func (s *IndexScope) watch(r *indexRoot) {
+	if !s.opts.Watch || s.ctx.Err() != nil {
+		return
+	}
+	w, err := r.engine.Watch(s.ctx, nil)
+	if err != nil {
+		s.opts.Logf("code graph: watch %s: %v", r.root, err)
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = w.Close()
+		return
+	}
+	r.watcher = w
+	s.mu.Unlock()
+}
+
+// startRetryInterval is the minimum time between attempts to redo a failed
+// first reconcile. A variable so tests can shorten it.
+var startRetryInterval = 30 * time.Second
+
+// failedStart reports the root's first-reconcile failure, if any. Once
+// startRetryInterval has passed since the last failure it launches a single
+// background retry; it returns the channel of the retry in flight, if any.
+func (s *IndexScope) failedStart(r *indexRoot) (<-chan struct{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r.startErr == nil {
+		return nil, nil
+	}
+	if r.retry == nil && !s.closed && time.Since(r.failedAt) >= startRetryInterval {
+		done := make(chan struct{})
+		r.retry = done
+		r.refs++ // not evicted while retrying
+		s.wg.Add(1)
+		go s.retryStart(r, done)
+	}
+	return r.retry, r.startErr
+}
+
+// retryStart redoes a failed first reconcile and, on success, starts the
+// watcher that the failed start never did.
+func (s *IndexScope) retryStart(r *indexRoot, done chan struct{}) {
+	defer s.wg.Done()
+	defer close(done)
+	began := time.Now()
+	st, err := r.engine.Reconcile(s.ctx)
+	s.mu.Lock()
+	r.retry = nil
+	r.refs--
+	if err != nil {
+		r.startErr, r.failedAt = err, time.Now()
+	} else {
+		r.startErr = nil
+	}
+	s.mu.Unlock()
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.opts.Logf("code graph: retry index %s: %v", r.root, err)
+		}
+		return
+	}
+	s.opts.Logf("code graph: indexed %s after retry (generation %d, %d files parsed) in %s", r.root, st.Generation, st.Parsed, time.Since(began).Round(time.Millisecond))
+	s.watch(r)
 }
 
 // acquire returns the open index for root, opening an extra root on first
@@ -486,14 +545,12 @@ func (s *IndexScope) canonical(root string) (string, error) {
 
 // ready makes sure the root has been reconciled at least once in this
 // process, or at least has a stored index to answer from. Without either it
-// waits for the first build (bounded by ctx).
+// waits for the first build (bounded by ctx). A failed first build is
+// retried (see failedStart) rather than disabling the root for good.
 func (s *IndexScope) ready(ctx context.Context, r *indexRoot) error {
 	select {
 	case <-r.started:
-		if r.startErr != nil && r.engine.Status().Generation == 0 {
-			return fmt.Errorf("index unavailable: %w", r.startErr)
-		}
-		return nil
+		return s.readyAfterStart(ctx, r)
 	default:
 	}
 	s.startInBackground(r)
@@ -502,13 +559,34 @@ func (s *IndexScope) ready(ctx context.Context, r *indexRoot) error {
 	}
 	select {
 	case <-r.started:
-		if r.startErr != nil {
-			return fmt.Errorf("index unavailable: %w", r.startErr)
-		}
-		return nil
+		return s.readyAfterStart(ctx, r)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// readyAfterStart applies ready's rules once the first reconcile has ended.
+// A stored index answers while a retry runs; without one the caller waits
+// for the retry in flight (bounded by ctx).
+func (s *IndexScope) readyAfterStart(ctx context.Context, r *indexRoot) error {
+	retry, err := s.failedStart(r)
+	if err == nil || r.engine.Status().Generation > 0 {
+		return nil
+	}
+	if retry != nil {
+		select {
+		case <-retry:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		s.mu.Lock()
+		err = r.startErr
+		s.mu.Unlock()
+		if err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("index unavailable: %w", err)
 }
 
 // seenFor returns the delivered-source record of one session in one root.

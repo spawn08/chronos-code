@@ -378,6 +378,12 @@ query path: the watcher sends changed paths, and a restart serves the stored
 snapshot at once. A listing cache keyed by directory mtimes is a follow-up if
 periodic reconciles turn out to matter.
 
+Since these measurements, a workspace without `.git` is listed with
+`git ls-files` run against a throwaway empty repository (`--git-dir` pointing
+at a temporary directory, `--work-tree` at the workspace), so its `.gitignore`
+files still apply; the plain directory walk remains only for when git itself
+is unusable.
+
 As built, M1 differs from the design above in these ways:
 
 - The `refs`, `terms` and `trigrams` sections are deferred to M2 with the

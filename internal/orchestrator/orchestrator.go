@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -1773,6 +1774,8 @@ func setupGraph(ctx context.Context, cfg *config.Config, dataDir, projectDir, us
 		Root: root, DataDir: dataDir, IndexOnStart: indexOnStart, Watch: indexOnStart,
 		Federation: federation, Precise: cfg.Workspace.Indexer.PreciseOrDefault(),
 		SCIP: cfg.Workspace.Indexer.SCIPOrDefault(), SCIPSources: scipSources,
+		// The standard logger goes to tui.log under the TUI, stderr otherwise.
+		Logf: log.Printf,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: open code index: %v\n", err)

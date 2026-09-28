@@ -61,6 +61,7 @@ func Classify(toolName string, args map[string]any) Category {
 		}
 		return CatOther
 	case strings.HasPrefix(toolName, "graph_") ||
+		strings.HasPrefix(toolName, "codebase_") ||
 		toolName == "find_callers" ||
 		toolName == "find_implementations" ||
 		toolName == "resolve_symbol" ||

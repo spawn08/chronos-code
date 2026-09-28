@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spawn08/chronos-code/indexer/extract/packs"
 	"github.com/spawn08/chronos-code/indexer/retrieve"
 )
 
@@ -199,7 +200,7 @@ func (s *IndexScope) Prefetch(ctx context.Context, message string, maxTokens int
 				return "", err
 			}
 			if deliverable(src) && src.Text != "" {
-				fmt.Fprintf(&line, "  ```go\n%s  ```\n", indentBlock(src.Text))
+				fmt.Fprintf(&line, "  ```%s\n%s  ```\n", fenceLang(sym.File), indentBlock(src.Text))
 				delivered = append(delivered, evidenceItem{File: sym.File, Source: src})
 			}
 		}
@@ -232,6 +233,19 @@ func (s *IndexScope) Prefetch(ctx context.Context, message string, maxTokens int
 // was verified, or (for a partial read) the file's mtime matches the index.
 func deliverable(src *evidenceSource) bool {
 	return src.Freshness == "verified" || src.Freshness == "unverified"
+}
+
+// fenceLang returns the markdown fence language for an indexed file: "go"
+// for Go, the language pack's language otherwise, or "" when no pack
+// handles the file (documents, manifests).
+func fenceLang(file string) string {
+	if strings.HasSuffix(file, ".go") {
+		return "go"
+	}
+	if p := packs.Default().ForPath(file); p != nil {
+		return p.Language
+	}
+	return ""
 }
 
 func indentBlock(text string) string {

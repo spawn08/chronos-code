@@ -118,4 +118,28 @@ func TestPrefetch(t *testing.T) {
 	if r.Omitted["already_seen"] == 0 {
 		t.Fatalf("prefetched source repeated: %v", r.Omitted)
 	}
+	if !strings.Contains(text, "```go\n") {
+		t.Fatalf("Go excerpt not fenced as go:\n%s", text)
+	}
+}
+
+// Prefetched excerpts are fenced with the file's language, not always Go.
+func TestPrefetchFencesFileLanguage(t *testing.T) {
+	root := canonicalTempDir(t)
+	writeTree(t, root, map[string]string{
+		"billing.py": "def charge_card(amount):\n    \"\"\"Charge the card.\"\"\"\n    return record_charge(amount)\n\n\ndef record_charge(amount):\n    return amount\n",
+	})
+	s := newTestScope(t, root, false)
+	text, err := s.Prefetch(storage.WithSession(context.Background(), "sess-py"), "charge_card drops the amount in record_charge", 1500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "```python\n") || strings.Contains(text, "```go\n") {
+		t.Fatalf("python excerpt fence:\n%s", text)
+	}
+	for file, want := range map[string]string{"a.go": "go", "b.rs": "rust", "c.tsx": "typescript", "README.md": ""} {
+		if got := fenceLang(file); got != want {
+			t.Errorf("fenceLang(%q) = %q, want %q", file, got, want)
+		}
+	}
 }
