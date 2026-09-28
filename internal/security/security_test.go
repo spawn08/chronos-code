@@ -354,6 +354,32 @@ func TestGuard_FileRead_DeniedPemGlob(t *testing.T) {
 	}
 }
 
+func TestGuard_FileRead_HomeRelativeReadablePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	artifact := filepath.Join(home, ".chronos-code", "projects", "p", "artifacts", "request-1.txt")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte("request"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGuard(defaultTestPolicy(), t.TempDir(), nil)
+	read := func(path string) error {
+		return g.Before(context.Background(), &hooks.Event{
+			Type:  hooks.EventToolCallBefore,
+			Name:  "file_read",
+			Input: map[string]any{"path": path},
+		})
+	}
+	if err := read(artifact); err != nil {
+		t.Fatalf("file_read of stored request artifact under ~/.chronos-code must be allowed, got: %v", err)
+	}
+	if err := read(filepath.Join(home, ".ssh", "id_ed25519")); err == nil {
+		t.Fatal("file_read elsewhere under home must stay outside readable_paths")
+	}
+}
+
 func TestGuard_FileGlob_DeniedPatternEnv(t *testing.T) {
 	g := NewGuard(defaultTestPolicy(), "/workspace", nil)
 	evt := &hooks.Event{

@@ -128,10 +128,18 @@ func resolvePolicyPath(configuredRoot, requestRoot, path string) (string, error)
 }
 
 // isUnderAnyRoot reports whether resolved falls under at least one of the
-// writable-path roots (each resolved relative to workspace root if relative).
+// writable-path roots (each resolved relative to workspace root if relative,
+// or to the user's home directory if it starts with "~/").
 func isUnderAnyRoot(root string, writablePaths []string, resolved string) bool {
 	for _, wp := range writablePaths {
 		wpResolved := wp
+		if wpResolved == "~" || strings.HasPrefix(wpResolved, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil || home == "" {
+				continue
+			}
+			wpResolved = filepath.Join(home, strings.TrimPrefix(wpResolved, "~"))
+		}
 		if !filepath.IsAbs(wpResolved) {
 			wpResolved = filepath.Join(root, wpResolved)
 		}
