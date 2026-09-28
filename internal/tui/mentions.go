@@ -19,6 +19,9 @@ const (
 	maxAttachedFiles = 8
 	maxAttachBytes   = 1 << 10
 	maxInputBytes    = 8 << 10
+	// maxInputCeiling bounds the context-derived initial input budget so a
+	// very large window cannot admit an unbounded inline request.
+	maxInputCeiling = 128 << 10
 )
 
 type attachmentReceipt struct {
@@ -106,7 +109,7 @@ func attachReferencedFiles(root, message string, agents []string) string {
 // there is no reliable instruction/data boundary: preserve the ENTIRE request
 // in an artifact rather than guessing which paragraphs can be thrown away.
 func prepareInput(ctx context.Context, root, message string, agents []string, limit int) (preparedInput, error) {
-	limit = min(maxInputBytes, max(0, limit))
+	limit = min(maxInputCeiling, max(0, limit))
 	if err := ctx.Err(); err != nil {
 		return preparedInput{}, err
 	}

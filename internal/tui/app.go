@@ -1420,6 +1420,8 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 	// One byte per token is deliberately conservative. Spend at most a quarter
 	// of the configured/live context window on the ENTIRE initial input; the
 	// orchestrator still accounts for actual system/history/schema/output costs.
+	// maxInputBytes is only the fallback when no window is known; a known
+	// window sets the budget directly, bounded by maxInputCeiling.
 	limit := maxInputBytes
 	if a := orch.ActiveAgent(); a != nil {
 		window := a.ContextCfg.MaxContextTokens
@@ -1432,7 +1434,7 @@ func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) t
 			}
 		}
 		if window > 0 {
-			limit = min(limit, window/4)
+			limit = min(maxInputCeiling, window/4)
 		}
 	}
 	return func() tea.Msg {

@@ -192,6 +192,40 @@ func TestSendCmdUsesConfiguredContextBudget(t *testing.T) {
 	}
 }
 
+func TestSendCmdLargeWindowKeepsMidSizedRequestInline(t *testing.T) {
+	m := newTestAppModel(t)
+	p := &attachmentProvider{requests: make(chan *model.ChatRequest, 1), modelID: "custom-deployment"}
+	m.orch.ActiveAgent().Model = p
+	m.orch.ActiveAgent().ContextCfg.MaxContextTokens = 200000
+	message := strings.Repeat("preserve this instruction. ", 200) // ~5.4 KB, above the 8 KiB fallback's offload threshold.
+	msg := m.sendCmd(context.Background(), 1, message)().(chatDoneMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if strings.Contains(msg.attachments, "Full user request stored losslessly:") {
+		t.Fatalf("mid-sized request was offloaded despite a 200K window: %s", msg.attachments)
+	}
+	req := <-p.requests
+	for _, item := range req.Messages {
+		if item.Role == model.RoleUser && strings.Contains(item.Content, message) {
+			return
+		}
+	}
+	t.Fatal("request did not reach the model inline")
+}
+
+func TestPrepareInputClampsToCeiling(t *testing.T) {
+	t.Setenv("CHRONOS_CODE_DATA_HOME", t.TempDir())
+	message := strings.Repeat("x", maxInputCeiling/2+1)
+	input, err := prepareInput(context.Background(), t.TempDir(), message, nil, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(input.Receipt, "Full user request stored losslessly:") || len(input.Message) > maxInputCeiling {
+		t.Fatalf("budget above ceiling was not clamped: %d bytes", len(input.Message))
+	}
+}
+
 func TestSubmitEchoesOnlyOriginalInput(t *testing.T) {
 	m := newTestAppModel(t)
 	if err := os.WriteFile(filepath.Join(m.workspaceRoot(), "source"), []byte("private attachment body"), 0o600); err != nil {
