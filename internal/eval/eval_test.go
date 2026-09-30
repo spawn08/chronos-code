@@ -3,7 +3,10 @@ package eval
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -248,6 +251,44 @@ func TestRunTaskEvidencePipelineAndDeterminism(t *testing.T) {
 	b, err := RunTask(context.Background(), task, rt, tiers)
 	if err != nil || !reflect.DeepEqual(a, b) {
 		t.Fatalf("different temp workspace changed results: %+v vs %+v, err=%v", a, b, err)
+	}
+}
+
+// TestRunTaskIgnoresSymlinkedTempDir: tools report symlink-resolved paths,
+// so a symlinked temp dir (macOS's /var/folders) must not change token
+// totals; otherwise a baseline taken locally disagrees with CI's.
+func TestRunTaskIgnoresSymlinkedTempDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs extra privileges on Windows")
+	}
+	rt, tiers, err := buildRouter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "tmp-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	task := Task{ID: "symlinked-tmp", Difficulty: DifficultyEasy,
+		Files: map[string]string{"pkg/source.go": genGoFile("fixture", 25, "Operation")},
+		Steps: []Step{
+			{Tool: "file_read", Args: map[string]any{"path": "pkg/source.go", "start_line": 1, "end_line": 5}},
+			{Tool: "file_list", Args: map[string]any{"path": "pkg"}},
+			{Tool: "file_grep", Args: map[string]any{"path": "pkg/source.go", "pattern": "Operation"}},
+		}}
+	t.Setenv("TMPDIR", real)
+	a, err := RunTask(context.Background(), task, rt, tiers)
+	if err != nil || !a.Success() {
+		t.Fatalf("real temp dir: %+v, %v", a, err)
+	}
+	t.Setenv("TMPDIR", link)
+	b, err := RunTask(context.Background(), task, rt, tiers)
+	if err != nil || !reflect.DeepEqual(a, b) {
+		t.Fatalf("symlinked temp dir changed results: %+v vs %+v, err=%v", a, b, err)
 	}
 }
 

@@ -217,6 +217,12 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 		return TaskResult{}, fmt.Errorf("eval: task %s: create workspace: %w", t.ID, err)
 	}
 	defer os.RemoveAll(dir)
+	// Tools report symlink-resolved paths (macOS's /var/folders is really
+	// /private/var/folders); canonicalize so jsonTokens' placeholder
+	// replacement matches them and totals don't depend on the temp dir.
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
 
 	for relPath, content := range t.Files {
 		full := filepath.Join(dir, relPath)
