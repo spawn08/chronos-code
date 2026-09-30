@@ -1064,4 +1064,16 @@ func TestExecutePrefetchesRepositoryContext(t *testing.T) {
 	if prompt := userContent(provider.request(1)); contains(prompt, "[Repository context]") {
 		t.Fatalf("prefetch_tokens: 0 must disable prefetch: %q", prompt)
 	}
+
+	orch.cfg = &config.Config{}
+	if err := scope.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err = orch.Execute(context.Background(), ExecutionRequest{Message: "fix BuildAgent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src := contextSource(result.ContextReport, ContextSourceRepositoryContext); src.OmissionReason != ContextOmittedSourceError {
+		t.Fatalf("failed prefetch must report source_error: %#v", src)
+	}
 }

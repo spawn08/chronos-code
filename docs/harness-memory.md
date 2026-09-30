@@ -119,6 +119,16 @@ automatic organization publication, embedding generation, or retention pruning.
   A partially emitted stream is not replayed. `/compact` remains an explicit
   action; terminal failures never claim recovery is already underway.
 
+Index/graph tools and their navigation guidance are installed together at runtime,
+including for agents with custom or previously exported prompts. The guidance is
+pinned system context; existing prompts and pins are preserved. Normal blocking
+and streaming turns also prefetch task-ranked repository context (default 1,500
+tokens; `workspace.indexer.prefetch_tokens: 0` disables it). Prefetch failures are
+reported as `source_error` in the context composition report, rather than as an
+empty relevance selection. This guidance does not force a model to call a tool;
+when indexed coverage is unavailable or irrelevant, direct source reads remain
+supported.
+
 `codebase_context` performs a composite graph retrieval in one call:
 
 ```json

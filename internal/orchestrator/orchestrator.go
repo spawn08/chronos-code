@@ -1789,6 +1789,9 @@ func setupGraph(ctx context.Context, cfg *config.Config, dataDir, projectDir, us
 			a.Tools.Register(def)
 		}
 	}
+	if err := installIndexGuidance(agents); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: configure code index guidance: %v\n", err)
+	}
 	return scope.Live(), scope
 }
 
@@ -1951,9 +1954,11 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	if tokens := prefetchTokens; !request.BoundedContext && o.graphScope != nil && tokens > 0 {
 		prefetchCtx, cancel := context.WithTimeout(ctx, repositoryContextTimeout)
-		preloaded, _ := o.graphScope.Prefetch(prefetchCtx, request.Message, tokens)
+		preloaded, prefetchErr := o.graphScope.Prefetch(prefetchCtx, request.Message, tokens)
 		cancel()
-		if preloaded != "" {
+		if prefetchErr != nil {
+			contextSourceOmitted(ctx, ContextSourceRepositoryContext, ContextOmittedSourceError)
+		} else if preloaded != "" {
 			contextSourceSelected(ctx, ContextSourceRepositoryContext, strings.Count(preloaded, "\n"), len(preloaded), false)
 			message += "\n\n" + preloaded
 		} else {

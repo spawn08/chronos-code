@@ -26,6 +26,7 @@ type Artifact struct {
 }
 
 var catalog = map[string]Artifact{
+	"context-engineering.yaml":        {Path: "context-engineering.yaml", Activation: RuntimeActive, Rationale: "pins index-first navigation guidance when code index tools are registered"},
 	"config.yaml":                     {Path: "config.yaml", Activation: RuntimeActive, Rationale: "loaded as the zero-config base"},
 	"security.yaml":                   {Path: "security.yaml", Activation: RuntimeActive, Rationale: "loaded into every agent security hook"},
 	"routing.yaml":                    {Path: "routing.yaml", Activation: RuntimeActive, Rationale: "loaded by the message router"},
