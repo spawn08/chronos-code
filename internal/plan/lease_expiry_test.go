@@ -81,14 +81,16 @@ func TestControllerRenewsLeaseDuringLongNodeExecution(t *testing.T) {
 	if err := store.Create(ctx, p); err != nil {
 		t.Fatal(err)
 	}
+	// The node outlives its lease 2.5x over, so only heartbeats keep it; the
+	// lease leaves ~2/3 s for a heartbeat write to stall under -race on CI.
 	controller := NewController(store, nodeExecutorFunc(func(ctx context.Context, request NodeExecutionRequest) (NodeExecutionResult, error) {
 		select {
 		case <-ctx.Done():
 			return NodeExecutionResult{}, ctx.Err()
-		case <-time.After(300 * time.Millisecond):
+		case <-time.After(2500 * time.Millisecond):
 		}
 		return NodeExecutionResult{NodeID: request.Node.ID, AttemptID: request.Attempt, Status: NodeCompleted, Verification: VerificationPassed}, nil
-	}), nil, nil, ControllerConfig{Scheduler: SchedulerConfig{LeaseDuration: 150 * time.Millisecond}})
+	}), nil, nil, ControllerConfig{Scheduler: SchedulerConfig{LeaseDuration: time.Second}})
 	result, err := controller.Run(ctx, p)
 	if err != nil || result.State != PlanCompleted {
 		t.Fatalf("long node after heartbeat = %+v, error = %v", result, err)
