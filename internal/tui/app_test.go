@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/spawn08/chronos/engine/model"
 	chronosstream "github.com/spawn08/chronos/engine/stream"
 	"github.com/spawn08/chronos/engine/tool"
@@ -308,6 +309,27 @@ func TestAppendBlockBoundsTranscriptMemory(t *testing.T) {
 	}
 	if got := m.renderTranscript(); !strings.Contains(got, "older transcript blocks omitted") {
 		t.Errorf("trimmed transcript has no omission marker: %q", got)
+	}
+}
+
+// TestComposer_ShiftEnterInsertsNewlineWithoutRepeatingPrompt covers
+// Shift+Enter as a newline key and verifies only the first composer line
+// carries the "❯" prompt.
+func TestComposer_ShiftEnterInsertsNewlineWithoutRepeatingPrompt(t *testing.T) {
+	m := &appModel{input: newComposer()}
+	m.input.Focus()
+	m.input.SetWidth(40)
+	m.input.SetValue("first")
+
+	_, _ = m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+	m.input.InsertString("second")
+
+	if got := m.input.Value(); got != "first\nsecond" {
+		t.Fatalf("input.Value() = %q, want newline inserted by shift+enter", got)
+	}
+	view := ansi.Strip(m.input.View())
+	if n := strings.Count(view, "❯"); n != 1 {
+		t.Errorf("prompt appears %d times, want 1 (first line only):\n%s", n, view)
 	}
 }
 

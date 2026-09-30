@@ -183,7 +183,7 @@ To cap spending for a session, start with `chronos-code --budget 5` (US dollars)
 | Key | Action |
 |---|---|
 | `Enter` | Send (while busy: add to the running task) |
-| `Alt+Enter` · `Ctrl+J` | New line (while busy, `Alt+Enter` queues a follow-up) |
+| `Shift+Enter` · `Alt+Enter` · `Ctrl+J` | New line (`Shift+Enter` needs a terminal with the kitty keyboard protocol, e.g. Ghostty, kitty, WezTerm; while busy, `Alt+Enter` queues a follow-up) |
 | `Ctrl+C` | Stop the task, or exit when idle |
 | `↑` / `↓` | Message history |
 | `Ctrl+R` | Search history |

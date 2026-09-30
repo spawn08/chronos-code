@@ -519,15 +519,32 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 func newComposer() textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = "Message chronos-code..."
-	ta.Prompt = "❯ "
+	setComposerPrompt(&ta, "❯ ")
 	ta.ShowLineNumbers = false
 	ta.DynamicHeight = true
 	ta.MinHeight = minInputRows
 	ta.MaxHeight = maxInputRows
 	ta.MaxContentHeight = 500
 	ta.SetHeight(minInputRows)
-	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	// shift+enter is reported by terminals that support keyboard
+	// disambiguation (kitty protocol, e.g. Ghostty, kitty, WezTerm, iTerm2
+	// with CSI u); elsewhere it arrives as plain enter, so alt+enter and
+	// ctrl+j remain the portable fallbacks.
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
 	return ta
+}
+
+// setComposerPrompt shows prompt only on the composer's first display line;
+// continuation lines get blank padding of the same width instead of a
+// repeated "❯". Prompt is kept in sync for readers of the field.
+func setComposerPrompt(ta *textarea.Model, prompt string) {
+	ta.Prompt = prompt
+	ta.SetPromptFunc(ansi.StringWidth(prompt), func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return prompt
+		}
+		return ""
+	})
 }
 
 type approvalHandlerInstaller interface {
@@ -3147,9 +3164,9 @@ func (m *appModel) pendingSubagentSegment() string {
 // Prompt so its internal wrap-width cache stays correct.
 func (m *appModel) refreshPrompt() {
 	if m.orch.ActiveID() == m.orch.PrimaryID() {
-		m.input.Prompt = "❯ "
+		setComposerPrompt(&m.input, "❯ ")
 	} else {
-		m.input.Prompt = styleAgentName.Render(m.orch.ActiveID()) + " ❯ "
+		setComposerPrompt(&m.input, styleAgentName.Render(m.orch.ActiveID())+" ❯ ")
 	}
 	switch {
 	case m.signedIn():

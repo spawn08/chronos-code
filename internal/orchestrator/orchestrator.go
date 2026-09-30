@@ -295,6 +295,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		buildConfig.Defaults = &defaultsCopy
 	}
 	applyStoredCredentials(ctx, &buildConfig)
+	applyPrimaryProviderToUncredentialedAgents(&buildConfig)
 
 	agents, err := agent.BuildAllWithOptions(ctx, &buildConfig.FileConfig, agent.BuildAllOptions{DefaultStorage: store})
 	if err != nil {
@@ -587,6 +588,45 @@ func applyStoredCredentials(ctx context.Context, cfg *config.Config) {
 		mc := cfg.Agents[i].Model
 		cfg.Agents[i].Model = resolveModelConfig(ctx, cfg, store, cfg.Agents[i].ID, mc.Provider, mc.Model)
 	}
+}
+
+// applyPrimaryProviderToUncredentialedAgents gives every non-primary agent
+// whose hosted provider (anthropic, openai, azure) resolved no credential
+// the primary agent's fully resolved model config. Bundled specialist agents
+// default to Anthropic, so an Azure- or OpenAI-only user (whether selected in
+// YAML, --provider, or CHRONOS_CODE_PROVIDER) would otherwise spawn
+// subagents against Anthropic with an empty key. The whole config is copied
+// because Azure needs the primary's endpoint, deployment, and API version,
+// not just its key. Agents with their own credential and keyless/local
+// providers are left untouched, as is everything when the primary itself has
+// no credential.
+func applyPrimaryProviderToUncredentialedAgents(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	primaryID, primaryModel, _, _ := cfg.PrimaryAgentModel()
+	if primaryID == "" || primaryModel.APIKey == "" {
+		return
+	}
+	primaryProvider := auth.CanonicalProvider(primaryModel.Provider)
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		provider := auth.CanonicalProvider(a.Model.Provider)
+		if a.ID == primaryID || a.Model.APIKey != "" || provider == primaryProvider || !credentialedProvider(provider) {
+			continue
+		}
+		a.Model = primaryModel
+	}
+}
+
+// credentialedProvider reports whether provider always needs a resolved
+// credential to make calls.
+func credentialedProvider(provider string) bool {
+	switch provider {
+	case "anthropic", "openai", "azure":
+		return true
+	}
+	return false
 }
 
 func resolveModelConfig(ctx context.Context, cfg *config.Config, store *auth.Store, agentID, provider, modelID string) agent.ModelConfig {
