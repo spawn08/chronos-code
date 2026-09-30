@@ -46,8 +46,12 @@ func (c *PermissionChecker) Check(toolName string, args map[string]any, yolo boo
 func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, args map[string]any, yolo bool) Decision {
 	switch toolName {
 	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
-		if c.guard.checkFileArgsAtRoot(toolName, args, builtins.WorkspaceRoot(ctx, c.guard.root)) != nil {
-			return Deny
+		if err := c.guard.checkFileArgsAtRoot(toolName, args, builtins.WorkspaceRoot(ctx, c.guard.root)); err != nil {
+			// Paths outside the roots are not a hard denial when a human can
+			// grant the directory: the Guard hook asks at execution time.
+			if _, outside := isOutsideRoots(err); !outside || c.policy.directoryApproval() == nil {
+				return Deny
+			}
 		}
 	case "shell", "shell_auto":
 		if c.guard.checkShellArgs(args, toolName == "shell_auto") != nil {

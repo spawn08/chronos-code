@@ -366,7 +366,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if err != nil {
 		return nil, fmt.Errorf("configure security: %w", err)
 	}
-	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second)
+	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second, policy)
 	if cfg.Server.DeliveryHTTP.RequestURL != "" || cfg.Server.DeliveryHTTP.ObservationURL != "" {
 		observedHTTP, err := newDeliveryHTTPTool(cfg.Server.DeliveryHTTP)
 		if err != nil {
@@ -541,7 +541,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	return orch, nil
 }
 
-func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout time.Duration) {
+func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout time.Duration, policy *security.Policy) {
 	for _, a := range agents {
 		if a == nil || a.Tools == nil {
 			continue
@@ -551,7 +551,7 @@ func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout
 			if !ok {
 				continue
 			}
-			replacement := security.NewWorkspaceShellTool(root, timeout)
+			replacement := security.NewWorkspaceShellToolWithPolicy(root, timeout, policy)
 			replacement.Name = name
 			replacement.Permission = current.Permission
 			replacement.RequiresConfirmation = current.RequiresConfirmation
@@ -2634,6 +2634,33 @@ func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message 
 	return context.WithValue(ctx, requestRoutingKey{}, requestRouting{
 		AgentID: agentID, Classification: classification, Provider: selected.Name(), Model: selected.Model(),
 	})
+}
+
+// SetDirectoryApprovalHandler installs the interactive handler asked when a
+// tool call touches a directory outside the configured policy roots. Grants
+// last for this process only; nil keeps such calls denied. Yolo mode does not
+// bypass this prompt.
+func (o *Orchestrator) SetDirectoryApprovalHandler(handler security.DirectoryApprovalFunc) {
+	if o.policy != nil {
+		o.policy.SetDirectoryApproval(handler)
+	}
+}
+
+// AddSessionDirectory grants dir for the rest of this session (user-initiated,
+// e.g. /add-dir). Denied paths still apply.
+func (o *Orchestrator) AddSessionDirectory(dir string, access security.DirectoryAccess) (string, error) {
+	if o.policy == nil {
+		return "", fmt.Errorf("security policy is not configured")
+	}
+	return o.policy.AddSessionDirectory(dir, access)
+}
+
+// SessionDirectories lists directories granted for this session.
+func (o *Orchestrator) SessionDirectories() []string {
+	if o.policy == nil {
+		return nil
+	}
+	return o.policy.SessionDirectories()
 }
 
 // SetApprovalHandler installs handler behind the policy checker on every agent

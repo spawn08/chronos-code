@@ -172,11 +172,21 @@ To cap spending for a session, start with `chronos-code --budget 5` (US dollars)
 | `/rewind` | Undo the last file edit |
 | `/diff` · `/inspect` | Review changes and tool details |
 | `/context` · `/usage` · `/budget` · `/status` · `/workspace` | Inspect cost, context and state |
+| `/add-dir [path] [read]` | Allow a directory outside the workspace for this session (read/write by default); with no path, list approved directories |
 | `/memory` · `/skills` · `/mcp` | Memory, skills and external tool servers |
 | `/learn` | Review suggestions Chronos Code has learned from your sessions |
 | `/<skill-name> <task>` | Run a task with a specific [skill](./agents-and-skills#skills) |
 | `/copy` · `/mouse` · `/stream` | Copy, toggle mouse scrolling, toggle streaming |
 | `/quit` | Exit |
+
+### Working with directories outside the workspace
+
+By default, tools can only read and write inside the workspace (see `readable_paths` and `writable_paths` in `security.yaml`). In the TUI, if a file tool or a shell `working_dir` targets a path outside those roots, Chronos Code shows an **Access outside the workspace** prompt. The prompt names the directory it will grant: the enclosing git repository, or the nearest existing directory. Press `y` to allow it for the rest of the session or `n` to deny it.
+
+- A read grant covers reading, listing and searching. Writes and shell commands ask again for read/write access.
+- `denied_paths` still apply. The filesystem root and your home directory are never granted.
+- Grants last only until Chronos Code exits and are never written to config. `--yolo` does not skip this prompt.
+- Headless runs have no prompt, so these paths stay denied.
 
 ## Keyboard shortcuts
 

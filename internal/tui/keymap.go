@@ -77,6 +77,9 @@ Commands:
   /subagent {JSON}   Run a dynamic subagent (task, system_prompt, tools)
   /budget            Show token budget status
   /workspace         Show detected workspace info
+  /add-dir [path] [read]
+                     Allow a directory outside the workspace for this session
+                     (read/write by default); no path lists approved ones
   /copy              Copy the last assistant response
   /copy visible      Copy the currently visible transcript
   /copy all          Copy the full conversation transcript

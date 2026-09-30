@@ -36,6 +36,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
+	"github.com/spawn08/chronos-code/internal/security"
 )
 
 // Layout constants for the fixed chrome around the scrollback viewport: the
@@ -511,6 +512,8 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	approvals := newApprovalBridge(p)
 	installApprovalHandlers(orch, approvals.toolApproval)
 	orch.SetPlanApprovalHandler(approvals.planApproval)
+	orch.SetDirectoryApprovalHandler(approvals.directoryApproval)
+	defer orch.SetDirectoryApprovalHandler(nil)
 
 	_, err = p.Run()
 	return err
@@ -1180,6 +1183,19 @@ func (m *appModel) renderBottom() (string, bool) {
 
 func (m *appModel) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	a := m.approval
+	if a.toolName == directoryAccessToolName {
+		switch msg.String() {
+		case "y", "enter":
+			a.resp <- approvalDecision{allow: true}
+		case "n", "esc":
+			a.resp <- approvalDecision{allow: false}
+		default:
+			return m, nil
+		}
+		m.approval = nil
+		m.resizeViewport()
+		return m, nil
+	}
 	switch msg.String() {
 	case "y", "enter":
 		a.resp <- approvalDecision{allow: true}
@@ -2433,6 +2449,28 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.setViewportContent(m.renderTranscript())
 		m.viewport.GotoBottom()
 		return m, copyCmd
+	case "/add-dir":
+		if arg == "" {
+			dirs := m.orch.SessionDirectories()
+			if len(dirs) == 0 {
+				m.appendSystem("no extra directories approved this session\nusage: /add-dir <path> [read]")
+			} else {
+				m.appendSystem("approved directories this session:\n  " + strings.Join(dirs, "\n  "))
+			}
+			break
+		}
+		access := security.DirectoryWrite
+		path := arg
+		if fields := strings.Fields(arg); len(fields) > 1 && fields[len(fields)-1] == "read" {
+			access = security.DirectoryRead
+			path = strings.TrimSpace(strings.TrimSuffix(arg, "read"))
+		}
+		granted, err := m.orch.AddSessionDirectory(path, access)
+		if err != nil {
+			m.statusMsg = err.Error()
+			break
+		}
+		m.appendSystem(fmt.Sprintf("added %s (%s) for this session", granted, access))
 	case "/perf":
 		var stats runtime.MemStats
 		runtime.ReadMemStats(&stats)
@@ -4031,6 +4069,9 @@ func (m *appModel) renderApprovalModal() string {
 	if m.approval.toolName == orchestrator.ExitPlanModeToolName {
 		return m.renderPlanApprovalModal()
 	}
+	if m.approval.toolName == directoryAccessToolName {
+		return m.renderDirectoryApprovalModal()
+	}
 	var b strings.Builder
 	b.WriteString(styleHeader.Render("Permission Required"))
 	b.WriteByte('\n')
@@ -4055,6 +4096,34 @@ func (m *appModel) renderApprovalModal() string {
 	b.WriteString(styleError.Render("n") + styleDim.Render(" deny") + "  ")
 	b.WriteString(styleUserPrefix.Render("a") + styleDim.Render(" always tool") + "  ")
 	b.WriteString(styleUserPrefix.Render("A") + styleDim.Render(" all session"))
+	width := m.width - inputBoxBorderWidth
+	if width < 1 {
+		width = 1
+	}
+	return styleApprovalModal.Width(width).Render(b.String())
+}
+
+// renderDirectoryApprovalModal asks whether the session may access a
+// directory outside the workspace. Approval lasts until chronos-code exits.
+func (m *appModel) renderDirectoryApprovalModal() string {
+	dir, _ := m.approval.args["directory"].(string)
+	target, _ := m.approval.args["path"].(string)
+	access, _ := m.approval.args["access"].(string)
+	level := "read"
+	if access == string(security.DirectoryWrite) {
+		level = "read and write (including shell commands)"
+	}
+	var b strings.Builder
+	b.WriteString(styleHeader.Render("Access outside the workspace"))
+	b.WriteByte('\n')
+	fmt.Fprintf(&b, "%s %s\n", styleDim.Render("Directory:"), styleBold.Render(dir))
+	if target != "" && target != dir {
+		fmt.Fprintf(&b, "%s %s\n", styleDim.Render("Requested:"), target)
+	}
+	fmt.Fprintf(&b, "%s %s %s\n", styleDim.Render("Access:"), level, styleDim.Render("for this session"))
+	b.WriteString("\n")
+	b.WriteString(styleAgentName.Render("y") + styleDim.Render(" allow for session") + "  ")
+	b.WriteString(styleError.Render("n") + styleDim.Render(" deny"))
 	width := m.width - inputBoxBorderWidth
 	if width < 1 {
 		width = 1

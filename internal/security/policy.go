@@ -99,6 +99,9 @@ type Policy struct {
 	mcpMu                  sync.RWMutex
 	trustedMCPIdentities   map[[sha256.Size]byte]struct{}
 	sessionMCPIdentities   map[[sha256.Size]byte]struct{}
+	dirMu                  sync.RWMutex
+	sessionDirs            []directoryGrant
+	dirApproval            DirectoryApprovalFunc
 }
 
 type policyYAML struct {

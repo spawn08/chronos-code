@@ -9,6 +9,7 @@ import (
 	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/orchestrator"
+	"github.com/spawn08/chronos-code/internal/security"
 )
 
 // approvalRequestMsg asks the running Program to show a permission modal for
@@ -115,6 +116,28 @@ func (b *approvalBridge) planApproval(ctx context.Context, plan string) (bool, e
 	}
 	if dec.allow && (dec.always || dec.all) {
 		b.cache.remember(storage.SessionFromContext(ctx), "file_write", approvalDecision{allow: true, always: true})
+	}
+	return dec.allow, nil
+}
+
+// directoryAccessToolName labels directory-access requests in the approval
+// modal; it is not a real tool.
+const directoryAccessToolName = "directory_access"
+
+// directoryApproval asks the user whether the session may access dir, which
+// lies outside the workspace policy roots. It is never cached here: the
+// security policy records the grant, so the same directory is not asked
+// about again.
+func (b *approvalBridge) directoryApproval(ctx context.Context, dir, target string, access security.DirectoryAccess) (bool, error) {
+	b.promptMu.Lock()
+	defer b.promptMu.Unlock()
+	dec, err := b.ask(ctx, directoryAccessToolName, map[string]any{
+		"directory": dir,
+		"path":      target,
+		"access":    string(access),
+	})
+	if err != nil {
+		return false, err
 	}
 	return dec.allow, nil
 }

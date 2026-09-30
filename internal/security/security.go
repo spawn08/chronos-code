@@ -48,11 +48,20 @@ func (g *Guard) Before(ctx context.Context, evt *hooks.Event) error {
 	var blockErr error
 	switch evt.Name {
 	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
-		blockErr = g.checkFileArgsAtRoot(evt.Name, args, builtins.WorkspaceRoot(ctx, g.root))
-	case "shell":
-		blockErr = g.checkShellArgs(args, false)
-	case "shell_auto":
-		blockErr = g.checkShellArgs(args, true)
+		root := builtins.WorkspaceRoot(ctx, g.root)
+		blockErr = g.checkFileArgsAtRoot(evt.Name, args, root)
+		if outside, ok := isOutsideRoots(blockErr); ok {
+			if allowed, err := g.policy.requestDirectory(ctx, root, outside); err != nil {
+				blockErr = fmt.Errorf("%s: %w", outside.msg, err)
+			} else if allowed {
+				blockErr = g.checkFileArgsAtRoot(evt.Name, args, root)
+			}
+		}
+	case "shell", "shell_auto":
+		blockErr = g.checkShellArgs(args, evt.Name == "shell_auto")
+		if blockErr == nil {
+			blockErr = g.checkShellWorkingDir(ctx, args)
+		}
 	default:
 		return nil
 	}
@@ -98,13 +107,15 @@ func (g *Guard) checkFileArgsAtRoot(toolName string, args map[string]any, root s
 	}
 
 	if toolName == "file_write" && g.policy.writablePathsConfigured() {
-		if !isUnderAnyRoot(root, g.policy.WritablePaths, resolved) {
-			return fmt.Errorf("security: write to %q is denied (outside all writable_paths)", path)
+		if !isUnderAnyRoot(root, g.policy.WritablePaths, resolved) && !g.policy.sessionDirectoryAllows(resolved, DirectoryWrite) {
+			return &outsideRootsError{path: path, resolved: resolved, access: DirectoryWrite,
+				msg: fmt.Sprintf("security: write to %q is denied (outside all writable_paths and approved directories)", path)}
 		}
 	}
 	if toolName != "file_write" && g.policy.readablePathsConfigured() {
-		if !isUnderAnyRoot(root, g.policy.ReadablePaths, resolved) {
-			return fmt.Errorf("security: read from %q is denied (outside all readable_paths)", path)
+		if !isUnderAnyRoot(root, g.policy.ReadablePaths, resolved) && !g.policy.sessionDirectoryAllows(resolved, DirectoryRead) {
+			return &outsideRootsError{path: path, resolved: resolved, access: DirectoryRead,
+				msg: fmt.Sprintf("security: read from %q is denied (outside all readable_paths and approved directories)", path)}
 		}
 	}
 
@@ -193,6 +204,40 @@ func evalPolicySymlinksAllowMissing(path string) (string, error) {
 		return "", parentErr
 	}
 	return filepath.Join(canonicalParent, filepath.Base(path)), nil
+}
+
+// checkShellWorkingDir asks for session access when a shell call targets a
+// working directory outside the workspace, and blocks it when no grant or
+// interactive approval allows it.
+func (g *Guard) checkShellWorkingDir(ctx context.Context, args map[string]any) error {
+	requested, _ := args["working_dir"].(string)
+	if requested == "" {
+		return nil
+	}
+	root := builtins.WorkspaceRoot(ctx, g.root)
+	if _, err := workspaceDirectory(root, requested); err == nil {
+		return nil
+	}
+	resolved, err := resolveShellDir(root, requested)
+	if err != nil {
+		return nil // the shell tool reports the resolution error
+	}
+	if matchesAnyGlob(g.policy.DeniedPaths, resolved) {
+		return fmt.Errorf("security: working directory %q is denied by policy (matches a denied path pattern)", requested)
+	}
+	if g.policy.sessionDirectoryAllows(resolved, DirectoryWrite) {
+		return nil
+	}
+	outside := &outsideRootsError{path: requested, resolved: resolved, access: DirectoryWrite,
+		msg: fmt.Sprintf("security: shell working directory %q is outside the workspace and approved directories", requested)}
+	allowed, err := g.policy.requestDirectory(ctx, root, outside)
+	if err != nil {
+		return fmt.Errorf("%s: %w", outside.msg, err)
+	}
+	if !allowed {
+		return outside
+	}
+	return nil
 }
 
 // checkShellArgs enforces the denied-pattern, never_allow, and

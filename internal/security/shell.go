@@ -16,6 +16,12 @@ import (
 // NewWorkspaceShellTool executes through a shell rooted in workspace and
 // terminates the complete process group when the context or timeout expires.
 func NewWorkspaceShellTool(workspace string, timeout time.Duration) *tool.Definition {
+	return NewWorkspaceShellToolWithPolicy(workspace, timeout, nil)
+}
+
+// NewWorkspaceShellToolWithPolicy is NewWorkspaceShellTool that also accepts
+// working directories the user approved for this session on policy.
+func NewWorkspaceShellToolWithPolicy(workspace string, timeout time.Duration, policy *Policy) *tool.Definition {
 	if timeout <= 0 {
 		timeout = defaultSandboxTimeout
 	}
@@ -40,11 +46,14 @@ func NewWorkspaceShellTool(workspace string, timeout time.Duration) *tool.Defini
 			if command == "" {
 				return nil, fmt.Errorf("shell: 'command' argument is required")
 			}
-			dir, err := workspaceDirectory(builtins.WorkspaceRoot(ctx, workspace), args["working_dir"])
+			dir, err := workspaceDirectoryWithPolicy(builtins.WorkspaceRoot(ctx, workspace), args["working_dir"], policy)
 			if err != nil {
 				return nil, err
 			}
 			if policy, mandatory := mandatorySandbox(ctx); mandatory {
+				if _, err := workspaceDirectory(builtins.WorkspaceRoot(ctx, workspace), dir); err != nil {
+					return nil, fmt.Errorf("shell: mandatory sandbox only mounts the workspace: %w", err)
+				}
 				sandbox, err := NewContainerShellSandbox(ctx, builtins.WorkspaceRoot(ctx, workspace), policy)
 				if err != nil {
 					return nil, fmt.Errorf("shell: mandatory sandbox: %w", err)
@@ -84,6 +93,40 @@ func NewWorkspaceShellTool(workspace string, timeout time.Duration) *tool.Defini
 			return map[string]any{"stdout": stdout.String(), "stderr": stderr.String(), "exit_code": exitCode(waitErr)}, nil
 		},
 	}
+}
+
+// workspaceDirectoryWithPolicy resolves requested like workspaceDirectory but
+// also accepts directories granted read/write for the session on policy.
+func workspaceDirectoryWithPolicy(workspace string, requested any, policy *Policy) (string, error) {
+	dir, err := workspaceDirectory(workspace, requested)
+	if err == nil || policy == nil {
+		return dir, err
+	}
+	resolved, resolveErr := resolveShellDir(workspace, requested)
+	if resolveErr != nil {
+		return "", err
+	}
+	if policy.sessionDirectoryAllows(resolved, DirectoryWrite) {
+		return resolved, nil
+	}
+	return "", err
+}
+
+// resolveShellDir returns the canonical absolute working directory requested
+// relative to workspace, without enforcing any boundary.
+func resolveShellDir(workspace string, requested any) (string, error) {
+	dir := workspace
+	if value, ok := requested.(string); ok && value != "" {
+		dir = value
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(workspace, dir)
+		}
+	}
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(dir)
 }
 
 func workspaceDirectory(workspace string, requested any) (string, error) {

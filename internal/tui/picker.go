@@ -210,7 +210,7 @@ func mergeLiveModelPickerItems(items []wizardItem, provider string, live []model
 // same order, for Ctrl+/'s fuzzy-filtered palette.
 var paletteCommands = []string{
 	"/agents", "/agent", "/model", "/think", "/login", "/logout", "/whoami",
-	"/context", "/usage", "/status", "/task", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace",
+	"/context", "/usage", "/status", "/task", "/stream", "/session", "/resume", "/compact", "/rewind", "/plan", "/learn", "/sandbox", "/memory", "/budget", "/workspace", "/add-dir",
 	"/skills", "/mcp", "/subagent", "/copy", "/mouse", "/clear", "/perf", "/help", "/quit",
 	"/session list", "/inspect", "/diff",
 }
