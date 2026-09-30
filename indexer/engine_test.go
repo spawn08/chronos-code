@@ -303,7 +303,16 @@ func TestStatusReadyAndSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	writeFile(t, root, "a/fresh.go", "package a\n\nfunc Fresh() {}\n")
+	// Stage the file outside the watched tree and rename it in, so the
+	// change arrives as one event. A plain write is CREATE then WRITE on
+	// inotify; the WRITE could land after Sync and re-raise Pending.
+	staged := filepath.Join(filepath.Dir(root), "fresh.go")
+	if err := os.WriteFile(staged, []byte("package a\n\nfunc Fresh() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staged, filepath.Join(root, "a", "fresh.go")); err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(5 * time.Second)
 	for e.Status().Pending == 0 {
 		if time.Now().After(deadline) {
