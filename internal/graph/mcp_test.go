@@ -9,7 +9,27 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
+
+// waitStarted blocks until every root of s has finished its first reconcile.
+func waitStarted(t *testing.T, s *IndexScope) {
+	t.Helper()
+	s.mu.Lock()
+	roots := make([]*indexRoot, 0, len(s.roots))
+	for _, r := range s.roots {
+		roots = append(roots, r)
+	}
+	s.mu.Unlock()
+	timeout := time.After(30 * time.Second)
+	for _, r := range roots {
+		select {
+		case <-r.started:
+		case <-timeout:
+			t.Fatalf("first reconcile of %s did not finish", r.root)
+		}
+	}
+}
 
 // TestMCPMatchesInProcessTools is the M9 acceptance for the MCP adapter:
 // over stdio, an external agent lists the same tools and gets the same
@@ -19,6 +39,11 @@ func TestMCPMatchesInProcessTools(t *testing.T) {
 	// Separate scopes, so session state (codebase_context's delivered
 	// source) cannot leak between the two sides.
 	local, remote := openFederated(t, parent), openFederated(t, parent)
+	// Each scope builds its roots in the background, and a root with a
+	// stored generation answers before its first reconcile ends (reporting
+	// up_to_date false). Let both settle, so the comparison is not a race.
+	waitStarted(t, local)
+	waitStarted(t, remote)
 	ctx := context.Background()
 
 	calls := []struct{ name, args string }{
