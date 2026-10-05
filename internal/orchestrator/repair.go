@@ -20,7 +20,7 @@ import (
 func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessionID string, request ExecutionRequest, classification router.Classification, runtime *taskRuntime, response *model.ChatResponse) (*model.ChatResponse, verification.Decision, execution.StopReason, error) {
 	if response != nil && response.StopReason == model.StopReasonPaused {
 		// A no-progress pause awaits the user; repairing would resume it.
-		return response, assessRuntimeVerification(request, classification, runtime), execution.StopNoProgress, nil
+		return response, assessRuntimeVerification(request, classification, runtime), pausedStopReason(ctx), nil
 	}
 	gate := &completionGate{}
 	response, err := o.nudgeBlocking(ctx, a, sessionID, gate, runtime, response)
@@ -28,7 +28,7 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 		return response, verification.Decision{}, execution.StopReasonForError(err), err
 	}
 	if response != nil && response.StopReason == model.StopReasonPaused {
-		return response, assessRuntimeVerification(request, classification, runtime), execution.StopNoProgress, nil
+		return response, assessRuntimeVerification(request, classification, runtime), pausedStopReason(ctx), nil
 	}
 	decision := assessRuntimeVerification(request, classification, runtime)
 	seen := make(map[string]struct{})

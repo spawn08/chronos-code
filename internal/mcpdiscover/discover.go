@@ -151,6 +151,8 @@ type serverEntry struct {
 	Type      string   `json:"type"`
 	Transport string   `json:"transport"`
 	URL       string   `json:"url"`
+
+	Headers map[string]string `json:"headers"`
 }
 
 // DiscoverFromFile parses a single config file and returns the MCP servers
@@ -195,6 +197,9 @@ func toServerConfig(name string, e serverEntry) mcp.ServerConfig {
 	if transport == "" {
 		transport = mcp.Transport(e.Type)
 	}
+	if transport == "http" {
+		transport = mcp.TransportStreamableHTTP
+	}
 	if transport == "" {
 		if e.URL != "" {
 			transport = mcp.TransportSSE
@@ -208,6 +213,7 @@ func toServerConfig(name string, e serverEntry) mcp.ServerConfig {
 		Command:    e.Command,
 		Args:       e.Args,
 		URL:        e.URL,
+		Headers:    e.Headers,
 		Permission: "require_approval",
 	}
 }

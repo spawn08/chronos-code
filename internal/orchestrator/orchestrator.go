@@ -176,6 +176,10 @@ type ExecutionRequest struct {
 	// PendingInput, when set, lets the caller add user input to the running
 	// task; the selected agent's tool loop drains it between tool rounds.
 	PendingInput agent.PendingInput
+	// MaxTurns, when positive, is a hard cap on model turns (tool-loop
+	// rounds) for the primary agent; reaching it ends the run with
+	// execution.StopMaxTurns.
+	MaxTurns int
 }
 
 // ExecutionResult carries the common identity and either a blocking response
@@ -329,9 +333,11 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if root == "" {
 		root = config.WorkspaceRoot()
 	}
-	learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents, paths)
-	if err != nil {
-		return nil, fmt.Errorf("configure learning telemetry: %w", err)
+	if !cfg.Ephemeral {
+		learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents, paths)
+		if err != nil {
+			return nil, fmt.Errorf("configure learning telemetry: %w", err)
+		}
 	}
 	orch.learningStore = learningStore
 	for _, a := range agents {
@@ -347,11 +353,13 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		setupSessionSummaries(sessionMgr, agents)
 	}
 	memStore := setupMemory(cfg, agents)
-	orch.runtimeMemory, err = setupRuntimeMemory(ctx, cfg, paths, agents)
-	if err != nil {
-		return nil, fmt.Errorf("configure layered memory: %w", err)
+	if !cfg.Ephemeral {
+		orch.runtimeMemory, err = setupRuntimeMemory(ctx, cfg, paths, agents)
+		if err != nil {
+			return nil, fmt.Errorf("configure layered memory: %w", err)
+		}
 	}
-	if cfg.Learning.PatternInjectionEnabled() {
+	if cfg.Learning.PatternInjectionEnabled() && !cfg.Ephemeral {
 		setupLearnedPatterns(ctx, cfg, root, agents)
 	}
 
@@ -411,14 +419,18 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		}
 	}
 	var discovered mcpdiscover.Snapshot
-	if cfg.MCP.DiscoveryEnabled() {
+	callerServers, err := loadCallerMCPServers(cfg.MCP.CallerConfigs, policy)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.MCP.DiscoveryEnabled() && !cfg.MCP.Strict {
 		discovered = mcpdiscover.Load(root)
 		if discovered.Err != nil {
 			fmt.Fprintln(os.Stderr, "warning: one or more MCP discovery sources failed; healthy sources remain available")
 		}
 	}
 	mcpPool := mcpdiscover.NewSharedClientFactory(nil)
-	mcpRuntimes = setupMCPRuntimes(ctx, agents, discovered.Servers, policy, mcpdiscover.DefaultConnectTimeout, mcpPool.NewClient)
+	mcpRuntimes = setupMCPRuntimesWithCaller(ctx, agents, callerServers, discovered.Servers, policy, mcpdiscover.DefaultConnectTimeout, mcpPool.NewClient)
 	orch.mcpRuntimes = mcpRuntimes
 	for _, a := range agents {
 		// Finish logical implementations before adding cross-cutting wrappers:
@@ -532,7 +544,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// If the second reservation fails before the provider call, undo the first.
 		a.Hooks = append(a.Hooks, deliveryBudgetHook{session: budgetHook{tracker: tracker, orchestrator: orch, agentID: a.ID}})
 	}
-	if cfg.MCP.DiscoveryEnabled() {
+	if cfg.MCP.DiscoveryEnabled() && !cfg.MCP.Strict {
 		orch.mcpWatcher, err = mcpdiscover.Watch(ctx, root, orch.reloadMCPDiscovery)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: watch MCP discovery sources: %v\n", err)
@@ -1924,17 +1936,19 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		return ExecutionResult{}, err
 	}
 	longRunning, renewing := o.longRunningPolicy(ctx)
+	var loopController agent.ToolLoopController
 	if renewing {
 		// Model/tool/time/token limits become renewable work windows owned by
 		// the governor; only repair attempts and a cost ceiling stay terminal.
 		taskRuntime.budget = execution.NewTaskBudget(renewableTaskLimits(taskLimits(o.cfg)), time.Now())
 		ctx = withLongRunningPolicy(ctx, longRunning)
-		ctx = agent.WithToolLoopController(ctx, agentID, newWindowGovernor(longRunning, taskRuntime, time.Now))
+		loopController = newWindowGovernor(longRunning, taskRuntime, time.Now)
 		// A new user turn authorizes another session budget window.
 		if o.budget != nil && o.budget.Ratio(sessionID) >= 1 {
 			o.budget.ResetSession(sessionID)
 		}
 	}
+	ctx = withMaxTurns(ctx, agentID, request.MaxTurns, loopController)
 	ctx = withTaskRuntime(ctx, taskRuntime)
 	ctx = agent.WithPendingInput(ctx, agentID, request.PendingInput)
 	if request.PolicyContext != nil {
@@ -2325,7 +2339,7 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 					if paused {
 						// The governor paused for lack of progress; a repair
 						// prompt would resume the loop the user must steer.
-						complete(decision, execution.StopNoProgress, nil)
+						complete(decision, pausedStopReason(ctx), nil)
 						return
 					}
 					if !decision.Disagreement {
@@ -3659,6 +3673,37 @@ func setupTeams(cfg *config.Config, agents map[string]*agent.Agent) map[string]*
 }
 
 func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, discovered []mcp.ServerConfig, policy *security.Policy, timeout time.Duration, factory mcpdiscover.ClientFactory) []*mcpdiscover.Runtime {
+	return setupMCPRuntimesWithCaller(ctx, agents, nil, discovered, policy, timeout, factory)
+}
+
+// loadCallerMCPServers reads the --mcp-config files and trusts each exact
+// server identity. A name defined twice across files is an error rather than a
+// silent override.
+func loadCallerMCPServers(paths []string, policy *security.Policy) ([]mcp.ServerConfig, error) {
+	var out []mcp.ServerConfig
+	seen := make(map[string]string)
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("--mcp-config %s: %w", path, err)
+		}
+		servers, err := mcpdiscover.DiscoverFromFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("--mcp-config: %w", err)
+		}
+		for _, server := range servers {
+			if prior, dup := seen[server.Name]; dup {
+				return nil, fmt.Errorf("--mcp-config: server %q defined in both %s and %s", server.Name, prior, path)
+			}
+			seen[server.Name] = path
+			server.Permission = "allow"
+			policy.TrustCallerMCPServer(mcpdiscover.CallerIdentity(server))
+			out = append(out, server)
+		}
+	}
+	return out, nil
+}
+
+func setupMCPRuntimesWithCaller(ctx context.Context, agents map[string]*agent.Agent, caller, discovered []mcp.ServerConfig, policy *security.Policy, timeout time.Duration, factory mcpdiscover.ClientFactory) []*mcpdiscover.Runtime {
 	if factory == nil {
 		factory = mcpdiscover.NewSharedClientFactory(nil).NewClient
 	}
@@ -3668,6 +3713,7 @@ func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, disco
 	}
 	sort.Strings(agentIDs)
 	runtimes := make([]*mcpdiscover.Runtime, 0, len(agentIDs))
+	awaiting := make(map[string]bool)
 	for _, id := range agentIDs {
 		a := agents[id]
 		configured := make([]mcp.ServerConfig, 0, len(a.MCPClients))
@@ -3678,14 +3724,28 @@ func setupMCPRuntimes(ctx context.Context, agents map[string]*agent.Agent, disco
 			_ = client.Close()
 		}
 		a.MCPClients = nil
+		configured = append(configured, caller...)
 		runtime := mcpdiscover.Start(ctx, configured, discovered, a.Tools, policy, timeout, factory)
 		runtime.SetAgent(id)
 		runtimes = append(runtimes, runtime)
 		for _, status := range runtime.Statuses() {
-			if status.State != mcpdiscover.StateConnected {
-				fmt.Fprintf(os.Stderr, "warning: MCP server for %s: %s\n", a.ID, status.State)
+			switch status.State {
+			case mcpdiscover.StateConnected:
+			case mcpdiscover.StateApprovalRequired:
+				// Every agent reports the same servers; warn once per server.
+				awaiting[status.Name] = true
+			default:
+				fmt.Fprintf(os.Stderr, "warning: MCP server %s for %s: %s\n", status.Name, a.ID, status.State)
 			}
 		}
+	}
+	if len(awaiting) > 0 {
+		names := make([]string, 0, len(awaiting))
+		for name := range awaiting {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(os.Stderr, "warning: MCP server(s) awaiting approval, not connected: %s (interactive: /mcp connect <name>; run: --mcp-connect <name>)\n", strings.Join(names, ", "))
 	}
 	return runtimes
 }

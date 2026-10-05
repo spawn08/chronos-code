@@ -74,34 +74,38 @@ func (i MCPServerIdentity) Digest() [sha256.Size]byte {
 
 // Policy is the effective in-memory security policy.
 type Policy struct {
-	WritablePaths          []string
-	ReadablePaths          []string
-	DeniedPaths            []string
-	AllowedCommands        []string
-	DeniedPatterns         []string
-	MaxExecSeconds         int
-	SecretPatterns         []string
-	ScanOutput             bool
-	DeniedMCPServers       []string
-	TrustedMCPServers      []string
-	MCPDefaultPermission   MCPPermission
-	MaxMCPConnections      int
-	TrustedHookDigests     []string
-	autoAllowPatterns      []string
-	confirmPatterns        []string
-	neverAllowPatterns     []string
-	autoAllow              []*regexp.Regexp
-	confirm                []*regexp.Regexp
-	neverAllow             []*regexp.Regexp
-	writablePathsSpecified bool
-	readablePathsSpecified bool
-	allowedCommandsSet     bool
-	mcpMu                  sync.RWMutex
-	trustedMCPIdentities   map[[sha256.Size]byte]struct{}
-	sessionMCPIdentities   map[[sha256.Size]byte]struct{}
-	dirMu                  sync.RWMutex
-	sessionDirs            []directoryGrant
-	dirApproval            DirectoryApprovalFunc
+	WritablePaths     []string
+	ReadablePaths     []string
+	DeniedPaths       []string
+	AllowedCommands   []string
+	DeniedPatterns    []string
+	MaxExecSeconds    int
+	SecretPatterns    []string
+	ScanOutput        bool
+	DeniedMCPServers  []string
+	TrustedMCPServers []string
+	// AllowedInsecureMCPHosts lists extra hosts that may use plain http://
+	// for MCP. Loopback and *.cluster.local are always allowed by the MCP
+	// config validator. Overlays can only narrow this list.
+	AllowedInsecureMCPHosts []string
+	MCPDefaultPermission    MCPPermission
+	MaxMCPConnections       int
+	TrustedHookDigests      []string
+	autoAllowPatterns       []string
+	confirmPatterns         []string
+	neverAllowPatterns      []string
+	autoAllow               []*regexp.Regexp
+	confirm                 []*regexp.Regexp
+	neverAllow              []*regexp.Regexp
+	writablePathsSpecified  bool
+	readablePathsSpecified  bool
+	allowedCommandsSet      bool
+	mcpMu                   sync.RWMutex
+	trustedMCPIdentities    map[[sha256.Size]byte]struct{}
+	sessionMCPIdentities    map[[sha256.Size]byte]struct{}
+	dirMu                   sync.RWMutex
+	sessionDirs             []directoryGrant
+	dirApproval             DirectoryApprovalFunc
 }
 
 type policyYAML struct {
@@ -126,6 +130,7 @@ type policyYAML struct {
 	MCP struct {
 		DeniedServers     []string       `yaml:"denied_servers"`
 		TrustedServers    []string       `yaml:"trusted_servers"`
+		InsecureHosts     []string       `yaml:"allowed_insecure_hosts"`
 		DefaultPermission *MCPPermission `yaml:"default_permission"`
 		MaxConnections    *int           `yaml:"max_connections"`
 	} `yaml:"mcp"`
@@ -228,21 +233,22 @@ func parsePolicy(data []byte) (*policyYAML, error) {
 
 func policyFromRaw(raw *policyYAML) *Policy {
 	p := &Policy{
-		WritablePaths:          cloneStrings(raw.Filesystem.WritablePaths),
-		ReadablePaths:          cloneStrings(raw.Filesystem.ReadablePaths),
-		DeniedPaths:            cloneStrings(raw.Filesystem.DeniedPaths),
-		AllowedCommands:        cloneStrings(raw.Shell.AllowedCommands),
-		DeniedPatterns:         cloneStrings(raw.Shell.DeniedPatterns),
-		SecretPatterns:         cloneStrings(raw.Secrets.Patterns),
-		DeniedMCPServers:       cloneStrings(raw.MCP.DeniedServers),
-		TrustedMCPServers:      cloneStrings(raw.MCP.TrustedServers),
-		TrustedHookDigests:     cloneStrings(raw.Hooks.TrustedDigests),
-		autoAllowPatterns:      cloneStrings(raw.Shell.AutoAllow),
-		confirmPatterns:        cloneStrings(raw.Shell.Confirm),
-		neverAllowPatterns:     cloneStrings(raw.Shell.NeverAllow),
-		writablePathsSpecified: raw.Filesystem.WritablePaths != nil,
-		readablePathsSpecified: raw.Filesystem.ReadablePaths != nil,
-		allowedCommandsSet:     raw.Shell.AllowedCommands != nil,
+		WritablePaths:           cloneStrings(raw.Filesystem.WritablePaths),
+		ReadablePaths:           cloneStrings(raw.Filesystem.ReadablePaths),
+		DeniedPaths:             cloneStrings(raw.Filesystem.DeniedPaths),
+		AllowedCommands:         cloneStrings(raw.Shell.AllowedCommands),
+		DeniedPatterns:          cloneStrings(raw.Shell.DeniedPatterns),
+		SecretPatterns:          cloneStrings(raw.Secrets.Patterns),
+		DeniedMCPServers:        cloneStrings(raw.MCP.DeniedServers),
+		TrustedMCPServers:       cloneStrings(raw.MCP.TrustedServers),
+		AllowedInsecureMCPHosts: cloneStrings(raw.MCP.InsecureHosts),
+		TrustedHookDigests:      cloneStrings(raw.Hooks.TrustedDigests),
+		autoAllowPatterns:       cloneStrings(raw.Shell.AutoAllow),
+		confirmPatterns:         cloneStrings(raw.Shell.Confirm),
+		neverAllowPatterns:      cloneStrings(raw.Shell.NeverAllow),
+		writablePathsSpecified:  raw.Filesystem.WritablePaths != nil,
+		readablePathsSpecified:  raw.Filesystem.ReadablePaths != nil,
+		allowedCommandsSet:      raw.Shell.AllowedCommands != nil,
 	}
 	if raw.Shell.MaxExecutionSecs == nil || *raw.Shell.MaxExecutionSecs <= 0 {
 		p.MaxExecSeconds = defaultMaxExecSeconds
@@ -320,6 +326,12 @@ func applyOverlay(effective *Policy, raw *policyYAML) error {
 		effective.TrustedMCPServers = cloneStrings(raw.MCP.TrustedServers)
 	}
 	effective.TrustedMCPServers = difference(effective.TrustedMCPServers, effective.DeniedMCPServers)
+	if raw.MCP.InsecureHosts != nil {
+		if extra := firstNotIn(raw.MCP.InsecureHosts, effective.AllowedInsecureMCPHosts); extra >= 0 {
+			return fmt.Errorf("mcp.allowed_insecure_hosts[%d] broadens the embedded/current list", extra)
+		}
+		effective.AllowedInsecureMCPHosts = cloneStrings(raw.MCP.InsecureHosts)
+	}
 	if raw.MCP.DefaultPermission != nil {
 		if !validMCPPermission(*raw.MCP.DefaultPermission) {
 			return fmt.Errorf("mcp.default_permission must be allow, require_approval, or deny")
@@ -351,6 +363,25 @@ func (p *Policy) TrustConfiguredMCPServer(identity MCPServerIdentity) {
 	p.mcpMu.Lock()
 	defer p.mcpMu.Unlock()
 	if contains(p.DeniedMCPServers, identity.Name) || !contains(p.TrustedMCPServers, identity.Name) {
+		return
+	}
+	if p.trustedMCPIdentities == nil {
+		p.trustedMCPIdentities = make(map[[sha256.Size]byte]struct{})
+	}
+	p.trustedMCPIdentities[identity.Digest()] = struct{}{}
+}
+
+// TrustCallerMCPServer trusts an exact launch identity supplied by the
+// process owner (for example `run --mcp-config`). Unlike
+// TrustConfiguredMCPServer it does not require a trusted_servers entry, but a
+// policy denial still wins.
+func (p *Policy) TrustCallerMCPServer(identity MCPServerIdentity) {
+	if p == nil {
+		return
+	}
+	p.mcpMu.Lock()
+	defer p.mcpMu.Unlock()
+	if contains(p.DeniedMCPServers, identity.Name) {
 		return
 	}
 	if p.trustedMCPIdentities == nil {

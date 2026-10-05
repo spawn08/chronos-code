@@ -15,6 +15,7 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/learning"
+	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/projectdocs"
 	"github.com/spawn08/chronos-code/internal/router"
 	"github.com/spawn08/chronos-code/internal/security"
@@ -210,6 +211,15 @@ func (o *Orchestrator) StartupHints(ctx context.Context) string {
 		if latest, err := o.latestPriorSession(ctx, o.active); err == nil && latest != nil {
 			parts = append(parts, "/resume continues "+shortSessionID(latest.ID))
 		}
+	}
+	waiting := map[string]bool{}
+	for _, status := range o.MCPStatuses() {
+		if status.State == mcpdiscover.StateApprovalRequired {
+			waiting[status.Name] = true
+		}
+	}
+	if len(waiting) > 0 {
+		parts = append(parts, fmt.Sprintf("%d MCP server(s) need approval · /mcp", len(waiting)))
 	}
 	if store := o.suggestionStore(); store != nil {
 		if pending, err := store.List(); err == nil && len(pending) > 0 {

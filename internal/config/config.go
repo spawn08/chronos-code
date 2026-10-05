@@ -25,6 +25,17 @@ import (
 type Config struct {
 	agent.FileConfig `yaml:",inline"`
 
+	// Ephemeral is a per-process setting (run --ephemeral or
+	// CHRONOS_CODE_EPHEMERAL=1), never read from YAML. It turns off
+	// cross-project memory, learning and telemetry writes; session
+	// persistence stays on so --resume works.
+	Ephemeral bool `yaml:"-"`
+
+	// SessionsDBOverride points session storage at an existing SQLite file
+	// (run --resume found the session in another project of the same data
+	// home). Per-process only, never read from YAML.
+	SessionsDBOverride string `yaml:"-"`
+
 	Router       RouterConfig                `yaml:"router,omitempty"`
 	Security     SecurityConfig              `yaml:"security,omitempty"`
 	Memory       MemoryConfig                `yaml:"memory,omitempty"`
@@ -658,6 +669,13 @@ func (c ModelsCatalogConfig) SourceURL() string {
 
 type MCPConfig struct {
 	Discovery *bool `yaml:"discovery_enabled,omitempty"`
+
+	// CallerConfigs and Strict are per-process settings from the run command
+	// (--mcp-config, --strict-mcp-config); they are never read from YAML.
+	// CallerConfigs servers are trusted without approval because the caller
+	// supplied them. Strict skips project and user-scope MCP discovery.
+	CallerConfigs []string `yaml:"-"`
+	Strict        bool     `yaml:"-"`
 }
 
 // DiscoveryEnabled keeps project MCP discovery enabled unless an operator

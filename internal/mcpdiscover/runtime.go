@@ -282,7 +282,7 @@ func (r *Runtime) connectLocked(ctx context.Context, cfg mcp.ServerConfig, regis
 		status.State = StateLimitReached
 		return r.setStatusLocked(status)
 	}
-	if validateRuntimeConfig(cfg) != nil {
+	if validateRuntimeConfig(cfg, policy) != nil {
 		status.State = StateInvalid
 		return r.setStatusLocked(status)
 	}
@@ -377,7 +377,7 @@ func (r *Runtime) ReloadDiscovery(ctx context.Context, snapshot Snapshot) []Serv
 func (r *Runtime) reloadServerLocked(ctx context.Context, cfg mcp.ServerConfig) ServerStatus {
 	old := r.active[cfg.Name]
 	status := ServerStatus{Name: cfg.Name, Agent: r.agent, Source: r.sources[cfg.Name], State: StateReloadFailed, Retained: old != nil}
-	if r.policy == nil || r.policy.DecideMCPServerIdentity(r.serverIdentityLocked(cfg)).Permission != security.MCPAllow || validateRuntimeConfig(cfg) != nil {
+	if r.policy == nil || r.policy.DecideMCPServerIdentity(r.serverIdentityLocked(cfg)).Permission != security.MCPAllow || validateRuntimeConfig(cfg, r.policy) != nil {
 		return r.setStatusLocked(status)
 	}
 	if old == nil && r.policy.MaxMCPConnections > 0 && r.connected >= r.policy.MaxMCPConnections {
@@ -430,6 +430,12 @@ func (r *Runtime) serverIdentityLocked(cfg mcp.ServerConfig) security.MCPServerI
 		origin = "discovered"
 	}
 	return serverIdentity(cfg, origin)
+}
+
+// CallerIdentity is the trust identity of a server supplied by the process
+// owner. Such servers are registered as agent configuration.
+func CallerIdentity(cfg mcp.ServerConfig) security.MCPServerIdentity {
+	return serverIdentity(cfg, "agent-config")
 }
 
 func serverIdentity(cfg mcp.ServerConfig, origin string) security.MCPServerIdentity {
@@ -561,14 +567,25 @@ func mergeServerConfigs(configured, discovered []mcp.ServerConfig) []mcp.ServerC
 
 func cloneServerConfig(cfg mcp.ServerConfig) mcp.ServerConfig {
 	cfg.Args = append([]string(nil), cfg.Args...)
+	if cfg.Headers != nil {
+		headers := make(map[string]string, len(cfg.Headers))
+		for name, value := range cfg.Headers {
+			headers[name] = value
+		}
+		cfg.Headers = headers
+	}
 	return cfg
 }
 
-func validateRuntimeConfig(cfg mcp.ServerConfig) error {
-	return ValidateManagedServer(ManagedServer{
+func validateRuntimeConfig(cfg mcp.ServerConfig, policy *security.Policy) error {
+	var hosts []string
+	if policy != nil {
+		hosts = policy.AllowedInsecureMCPHosts
+	}
+	return ValidateManagedServerWithHosts(ManagedServer{
 		Name: cfg.Name, Transport: cfg.Transport, Command: cfg.Command,
-		Args: cfg.Args, URL: cfg.URL, Permission: cfg.Permission,
-	})
+		Args: cfg.Args, URL: cfg.URL, Headers: cfg.Headers, Permission: cfg.Permission,
+	}, hosts)
 }
 
 func toolDefinitions(server string, client RuntimeClient, tools []mcp.ToolInfo) ([]*tool.Definition, []string, bool) {

@@ -33,6 +33,8 @@ const (
 	ErrorVerificationFailed ErrorCode = "verification_failed"
 	ErrorAuthentication     ErrorCode = "authentication_failed"
 	ErrorCancelled          ErrorCode = "cancelled"
+	ErrorMaxTurns           ErrorCode = "max_turns"
+	ErrorSessionNotFound    ErrorCode = "session_not_found"
 	ErrorInternal           ErrorCode = "internal_error"
 )
 
@@ -47,6 +49,7 @@ const (
 	ErrorCategoryVerification   ErrorCategory = "verification"
 	ErrorCategoryAuthentication ErrorCategory = "authentication"
 	ErrorCategoryCancellation   ErrorCategory = "cancellation"
+	ErrorCategoryLimit          ErrorCategory = "limit"
 	ErrorCategoryInternal       ErrorCategory = "internal"
 )
 
@@ -88,16 +91,19 @@ type Error struct {
 
 // ExecutionEnvelope is the transport-neutral terminal result contract.
 type ExecutionEnvelope struct {
-	SchemaVersion    string               `json:"schema_version"`
-	TaskID           string               `json:"task_id"`
-	SessionID        string               `json:"session_id"`
-	TenantID         string               `json:"tenant_id"`
-	AgentID          string               `json:"agent_id"`
-	CorrelationID    string               `json:"correlation_id"`
-	Status           Status               `json:"status"`
-	StopReason       StopReason           `json:"stop_reason"`
-	Content          string               `json:"content"`
-	Usage            Usage                `json:"usage"`
+	SchemaVersion string     `json:"schema_version"`
+	TaskID        string     `json:"task_id"`
+	SessionID     string     `json:"session_id"`
+	TenantID      string     `json:"tenant_id"`
+	AgentID       string     `json:"agent_id"`
+	CorrelationID string     `json:"correlation_id"`
+	Status        Status     `json:"status"`
+	StopReason    StopReason `json:"stop_reason"`
+	Content       string     `json:"content"`
+	Usage         Usage      `json:"usage"`
+	// UsageByModel splits Usage by the model that served each request; a run
+	// can route across tiers. Omitted when no per-model usage was observed.
+	UsageByModel     map[string]Usage     `json:"usage_by_model,omitempty"`
 	CostMicrodollars int64                `json:"cost_microdollars"`
 	ChangedPaths     []string             `json:"changed_paths"`
 	Verification     EnvelopeVerification `json:"verification"`
@@ -107,7 +113,10 @@ type ExecutionEnvelope struct {
 type EnvelopeEventType string
 
 const (
+	EventSession            EnvelopeEventType = "session"
 	EventContent            EnvelopeEventType = "content"
+	EventThinking           EnvelopeEventType = "thinking"
+	EventToolResult         EnvelopeEventType = "tool_result"
 	EventTool               EnvelopeEventType = "tool"
 	EventSubagent           EnvelopeEventType = "subagent"
 	EventRetry              EnvelopeEventType = "retry"
@@ -137,6 +146,33 @@ type ToolPayload struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+	// Input is Arguments as a JSON object, for consumers that should not
+	// parse a string. Omitted when the arguments are not a JSON object.
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+// SessionPayload is the first event of a stream, sent before any provider call.
+type SessionPayload struct {
+	SessionID string `json:"session_id"`
+	TaskID    string `json:"task_id,omitempty"`
+	Model     string `json:"model"`
+	Provider  string `json:"provider"`
+	Cwd       string `json:"cwd"`
+}
+
+// ToolResultPayload reports one finished tool call.
+type ToolResultPayload struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Output  any    `json:"output"`
+	IsError bool   `json:"is_error"`
+}
+
+// RequestUsagePayload is the usage of one model request.
+type RequestUsagePayload struct {
+	RequestID string `json:"request_id"`
+	Model     string `json:"model"`
+	Usage
 }
 
 type SubagentPayload struct {

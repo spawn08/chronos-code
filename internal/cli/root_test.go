@@ -736,7 +736,9 @@ func resetGlobalFlags(t *testing.T, args []string) {
 	originalModelOverride := modelOverride
 	originalProviderOverrideSet := providerOverrideSet
 	originalModelOverrideSet := modelOverrideSet
+	originalMCPConnectNames := mcpConnectNames
 
+	mcpConnectNames = nil
 	os.Args = append([]string(nil), args...)
 	configPath = ""
 	debugMode = false
@@ -767,5 +769,26 @@ func resetGlobalFlags(t *testing.T, args []string) {
 		modelOverride = originalModelOverride
 		providerOverrideSet = originalProviderOverrideSet
 		modelOverrideSet = originalModelOverrideSet
+		mcpConnectNames = originalMCPConnectNames
 	})
+}
+
+func TestStripGlobalFlagsMCPConnect(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "run", "--mcp-connect", "arxiv,docs", "--mcp-connect=github", "task"})
+	if err := stripGlobalFlags(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(mcpConnectNames, ","); got != "arxiv,docs,github" {
+		t.Fatalf("mcpConnectNames = %q", got)
+	}
+	if got := strings.Join(os.Args, " "); got != "chronos-code run task" {
+		t.Fatalf("args after strip = %q", got)
+	}
+}
+
+func TestStripGlobalFlagsMCPConnectRequiresName(t *testing.T) {
+	resetGlobalFlags(t, []string{"chronos-code", "run", "--mcp-connect"})
+	if err := stripGlobalFlags(); err == nil || !strings.Contains(err.Error(), "requires a server name") {
+		t.Fatalf("stripGlobalFlags() error = %v, want missing-name error", err)
+	}
 }

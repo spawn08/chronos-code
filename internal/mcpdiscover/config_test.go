@@ -117,7 +117,7 @@ func TestManagedConfigFailuresDoNotChangeOriginalBytes(t *testing.T) {
 		},
 		{
 			name:    "invalid source shape",
-			initial: `{"mcpServers":{"bad":{"transport":"http","url":"https://example.test"}}}`,
+			initial: `{"mcpServers":{"bad":{"transport":"websocket","url":"https://example.test"}}}`,
 			mutate: func(path string) error {
 				return AddManaged(path, ManagedServer{Name: "new", Transport: mcp.TransportStdio, Command: "cmd"}, false)
 			},
@@ -152,7 +152,8 @@ func TestValidateManagedServerRejectsInvalidShapeTransportURLAndSecrets(t *testi
 		server ManagedServer
 		want   string
 	}{
-		{name: "HTTP transport", server: ManagedServer{Name: "x", Transport: "http", URL: "https://example.test"}, want: "HTTP is not supported"},
+		{name: "unknown transport", server: ManagedServer{Name: "x", Transport: "websocket", URL: "https://example.test"}, want: "unsupported transport"},
+		{name: "plain http streamable", server: ManagedServer{Name: "x", Transport: mcp.TransportStreamableHTTP, URL: "http://example.test"}, want: "allowed_insecure_hosts"},
 		{name: "insecure SSE", server: ManagedServer{Name: "x", Transport: mcp.TransportSSE, URL: "http://example.test"}, want: "absolute HTTPS"},
 		{name: "SSE command", server: ManagedServer{Name: "x", Transport: mcp.TransportSSE, URL: "https://example.test", Command: "bad"}, want: "cannot include command"},
 		{name: "stdio URL", server: ManagedServer{Name: "x", Transport: mcp.TransportStdio, Command: "cmd", URL: "https://example.test"}, want: "cannot include url"},
@@ -223,5 +224,33 @@ func TestRedactedEndpoint(t *testing.T) {
 	got = RedactedEndpoint(sse)
 	if strings.Contains(got, "very-secret") || !strings.Contains(got, "region=west") || !strings.Contains(got, "%3Credacted%3E") {
 		t.Fatalf("SSE redaction = %q", got)
+	}
+}
+
+func TestStreamableHTTPValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		url     string
+		hosts   []string
+		headers map[string]string
+		wantErr bool
+	}{
+		{"https any host", "https://mcp.example.com/mcp", nil, nil, false},
+		{"loopback http", "http://127.0.0.1:8080/mcp", nil, nil, false},
+		{"cluster http", "http://state.ns.svc.cluster.local/mcp", nil, nil, false},
+		{"other http refused", "http://mcp.example.com/mcp", nil, nil, true},
+		{"other http allowed by policy", "http://mcp.example.com/mcp", []string{"mcp.example.com"}, nil, false},
+		{"userinfo refused", "https://u:p@mcp.example.com/mcp", nil, nil, true},
+		{"bearer env reference", "https://mcp.example.com/mcp", nil, map[string]string{"Authorization": "Bearer ${TOKEN}"}, false},
+		{"token env reference", "https://mcp.example.com/mcp", nil, map[string]string{"Authorization": "${TOKEN}"}, false},
+		{"literal credential refused", "https://mcp.example.com/mcp", nil, map[string]string{"Authorization": "Bearer abc"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateManagedServerWithHosts(ManagedServer{Name: "s", Transport: mcp.TransportStreamableHTTP, URL: tc.url, Headers: tc.headers}, tc.hosts)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
 	}
 }

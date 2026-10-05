@@ -119,15 +119,22 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             zip "${ARCHIVE_NAME}.zip" chronos-code.exe README.md
             echo "ASSET=${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
+            cp chronos-code.exe "${ARCHIVE_NAME}.exe"
+            echo "PLAIN_ASSET=${ARCHIVE_NAME}.exe" >> "$GITHUB_ENV"
           else
             tar czf "${ARCHIVE_NAME}.tar.gz" chronos-code README.md
             echo "ASSET=${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
+            # Plain binary beside the archive: some build environments cannot
+            # download or unpack archives, only fetch an asset by URL.
+            cp chronos-code "${ARCHIVE_NAME}"
+            echo "PLAIN_ASSET=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
           fi
       - uses: actions/upload-artifact@v4
         with:
           name: chronos-code-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             chronos-code/${{ env.ASSET }}
+            chronos-code/${{ env.PLAIN_ASSET }}
             chronos-code/chronos-code-${{ matrix.goos }}-${{ matrix.goarch }}.spdx.json
           if-no-files-found: error
 

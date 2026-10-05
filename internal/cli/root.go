@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,6 +57,10 @@ var (
 	modelOverride       string
 	providerOverrideSet bool
 	modelOverrideSet    bool
+	mcpConnectNames     []string
+	mcpConfigFiles      []string
+	strictMCPConfig     bool
+	ephemeralRun        bool
 )
 
 // Specialists retain the lean PRD P1-005 ceiling. The primary agent also owns
@@ -235,6 +240,17 @@ func stripGlobalFlags() error {
 			jsonMode = true
 			i++
 			continue
+		case arg == "--mcp-connect":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--mcp-connect requires a server name")
+			}
+			mcpConnectNames = append(mcpConnectNames, splitNonEmpty(args[i+1])...)
+			i += 2
+			continue
+		case strings.HasPrefix(arg, "--mcp-connect="):
+			mcpConnectNames = append(mcpConnectNames, splitNonEmpty(strings.TrimPrefix(arg, "--mcp-connect="))...)
+			i++
+			continue
 		case arg == "--plan-mode":
 			planModeFlag = true
 			i++
@@ -306,7 +322,36 @@ func parseUSDBudget(value string) (budget.Microdollars, error) {
 	return budget.Microdollars(microdollars), nil
 }
 
+// runtimeCapabilities lists the headless features this build supports, so an
+// embedding daemon can refuse a binary that is too old. Add a name only when
+// the feature works end to end.
+var runtimeCapabilities = []string{
+	"stream-json", "mcp-http", "mcp-config", "prompt-stdin",
+	"system-prompt", "max-turns", "thinking", "ephemeral",
+}
+
+type versionInfo struct {
+	Version      string   `json:"version"`
+	Commit       string   `json:"commit"`
+	BuildDate    string   `json:"build_date"`
+	GoVersion    string   `json:"go_version"`
+	Platform     string   `json:"platform"`
+	Capabilities []string `json:"capabilities"`
+}
+
+func currentVersionInfo() versionInfo {
+	return versionInfo{
+		Version: Version, Commit: Commit, BuildDate: BuildDate,
+		GoVersion: runtime.Version(), Platform: runtime.GOOS + "/" + runtime.GOARCH,
+		Capabilities: append([]string(nil), runtimeCapabilities...),
+	}
+}
+
 func printVersion() error {
+	// --json is a global flag consumed by stripGlobalFlags.
+	if jsonMode {
+		return json.NewEncoder(os.Stdout).Encode(currentVersionInfo())
+	}
 	fmt.Printf("chronos-code %s (%s) built %s\n", Version, Commit, BuildDate)
 	fmt.Printf("go: %s\n", runtime.Version())
 	fmt.Printf("os/arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
@@ -392,6 +437,8 @@ Global flags:
   --json                          Headless run: print one JSON object and exit
   --dangerously-skip-permissions  Run every tool call without asking, including shell commands outside the
                                   allowlist and MCP tools; policy blocks still apply. Use only in sandboxes/CI
+  --mcp-connect <name>            Approve and connect a discovered MCP server for this session (repeatable or
+                                  comma-separated); the non-interactive form of /mcp connect
   --plan-mode                     Start in plan mode: plan first, then implement once the plan is approved
                                   (the TUI asks for approval; headless runs auto-approve)
 `)
@@ -423,6 +470,14 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 		return nil, nil, fmt.Errorf("load config: %w", err)
 	}
 	initModelsCatalog(cfg, true)
+	if resumeSessionID != "" {
+		if err := locateResumeSession(context.Background(), cfg, resumeSessionID); err != nil {
+			return nil, nil, err
+		}
+	}
+	cfg.MCP.CallerConfigs = mcpConfigFiles
+	cfg.MCP.Strict = strictMCPConfig
+	cfg.Ephemeral = ephemeralRun || os.Getenv("CHRONOS_CODE_EPHEMERAL") == "1"
 	ctx := context.Background()
 	orch, err := orchestrator.New(ctx, cfg, resumeSessionID)
 	if err != nil {
@@ -469,6 +524,12 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 		}
 	}
 	provider = auth.CanonicalProvider(provider)
+	if provider == "" {
+		if prefix, rest, ok := splitModelProviderPrefix(modelID, cfg); ok {
+			provider, modelID = prefix, rest
+			providerSource = "model prefix"
+		}
+	}
 	if provider == "" && modelID == "" {
 		_, current, _, _ := cfg.PrimaryAgentModel()
 		store := auth.NewStore()
@@ -514,7 +575,35 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 	if err := cfg.OverridePrimaryModel(provider, modelID, providerSource, modelSource); err != nil {
 		return nil, err
 	}
+	// An explicit model pins the run: the caller does its own model routing,
+	// so the built-in router must not move the turn to another tier.
+	if modelSource != "" {
+		cfg.Router.Enabled = false
+	}
 	return cfg, nil
+}
+
+// splitModelProviderPrefix recognizes "<provider>/<model>" (for example
+// azure/my-deployment or anthropic/claude-sonnet-4-5) when the prefix names a
+// known provider. Unknown prefixes are left alone because some model IDs
+// legitimately contain a slash.
+func splitModelProviderPrefix(modelID string, cfg *config.Config) (provider, model string, ok bool) {
+	prefix, rest, found := strings.Cut(modelID, "/")
+	if !found || prefix == "" || rest == "" {
+		return "", "", false
+	}
+	canonical := auth.CanonicalProvider(prefix)
+	known := map[string]bool{"anthropic": true, "openai": true, "azure": true}
+	for _, name := range configuredProviders(cfg) {
+		known[name] = true
+	}
+	for _, info := range modelinfo.All() {
+		known[auth.CanonicalProvider(info.Provider)] = true
+	}
+	if !known[canonical] {
+		return "", "", false
+	}
+	return canonical, rest, true
 }
 
 // Credentials select a provider only when the configured primary has no usable
@@ -581,52 +670,169 @@ func runREPL() error {
 		return err
 	}
 	defer orch.Close()
+	if err := connectRequestedMCP(context.Background(), orch, os.Stderr); err != nil {
+		return err
+	}
 
 	return tui.RunTUI(orch, streamMode)
 }
 
-func runHeadless() error {
-	if len(os.Args) < 3 {
-		if jsonMode {
-			return writeInvalidJSONResult(os.Stdout, "usage: chronos-code run <message>")
+// connectRequestedMCP approves and connects the servers named with
+// --mcp-connect for this session: the non-interactive equivalent of the
+// TUI's /mcp connect. Trust is exact-identity and in-memory, as there.
+func connectRequestedMCP(ctx context.Context, orch *orchestrator.Orchestrator, stderr io.Writer) error {
+	for _, name := range mcpConnectNames {
+		status, err := orch.ConnectMCP(ctx, name)
+		if err != nil {
+			return fmt.Errorf("--mcp-connect %s: %w", name, err)
 		}
-		return fmt.Errorf("usage: chronos-code run <message>")
+		fmt.Fprintf(stderr, "mcp: connected %s (%d tools)\n", status.Name, status.Tools)
 	}
-	message := strings.Join(os.Args[2:], " ")
+	return nil
+}
 
-	orch, err := loadAndBuild()
-	if err != nil {
-		if jsonMode {
-			envelope := orchestrator.ExecutionEnvelope(orchestrator.ExecutionResult{}, err, orchestrator.EnvelopeMetadata{})
-			return writeJSONResult(os.Stdout, envelope, err)
+// explicitSkillInvocation reports whether message is "/<skill> <task>" for a
+// discovered skill, as the TUI accepts, returning the skill and the task.
+func explicitSkillInvocation(orch *orchestrator.Orchestrator, message string) (skill, task string, ok bool) {
+	if !strings.HasPrefix(message, "/") {
+		return "", "", false
+	}
+	parts := strings.SplitN(message, " ", 2)
+	name := strings.TrimPrefix(parts[0], "/")
+	for _, info := range orch.ListSkills() {
+		if strings.EqualFold(info.Name, name) {
+			if len(parts) == 2 {
+				task = strings.TrimSpace(parts[1])
+			}
+			return info.Name, task, true
 		}
-		return err
+	}
+	return "", "", false
+}
+
+func runHeadless() error {
+	opts, words, err := parseRunFlags(os.Args[2:])
+	if err != nil {
+		return headlessEarlyFailure(opts, os.Stdout, err)
+	}
+	if opts.outputFormat == outputJSON {
+		jsonMode = true
+	}
+	message, err := resolvePrompt(opts, words, os.Stdin)
+	if err != nil {
+		return headlessEarlyFailure(opts, os.Stdout, err)
+	}
+	systemPrompt, err := resolveSystemPrompt(opts)
+	if err != nil {
+		return headlessEarlyFailure(opts, os.Stdout, err)
+	}
+
+	// SIGINT/SIGTERM cancel the run; the terminal event is still written and
+	// a watchdog bounds how long shutdown may take.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	go cancelWatchdog(ctx, cancelGracePeriod, os.Exit)
+
+	mcpConfigFiles, strictMCPConfig, ephemeralRun = opts.mcpConfigs, opts.strictMCPConfig, opts.ephemeral
+	orch, err := loadAndBuild()
+	if errors.Is(err, errSessionNotFound) {
+		if opts.streamJSON() {
+			newStreamEmitter(os.Stdout).terminateInvalid(execution.ErrorSessionNotFound, execution.ErrorCategoryRequest, err.Error(), execution.StatusInvalidRequest, execution.StopInvalidRequest)
+		}
+		return &ExitError{Code: ExitSessionNotFound, Err: err}
+	}
+	if err != nil {
+		return headlessLoadFailure(opts, os.Stdout, err)
 	}
 	defer orch.Close()
+	orch.AppendSystemPrompt(systemPrompt)
+	if opts.thinking != "" {
+		if err := orch.SetThinking(opts.thinking); err != nil {
+			return headlessEarlyFailure(opts, os.Stdout, err)
+		}
+	}
+
+	if err := connectRequestedMCP(ctx, orch, os.Stderr); err != nil {
+		return headlessEarlyFailure(opts, os.Stdout, err)
+	}
 
 	if strings.HasPrefix(message, "@") {
 		parts := strings.SplitN(message[1:], " ", 2)
 		if len(parts) == 2 {
 			if err := orch.SwitchAgent(parts[0]); err != nil {
-				if jsonMode {
-					return writeInvalidJSONResult(os.Stdout, err.Error())
-				}
-				return err
+				return headlessEarlyFailure(opts, os.Stdout, err)
 			}
 			message = parts[1]
 		}
 	}
 
-	request := orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode()}
+	if name, task, ok := explicitSkillInvocation(orch, message); ok {
+		if task == "" {
+			return headlessEarlyFailure(opts, os.Stdout, fmt.Errorf("usage: chronos-code run \"/%s <task>\"", name))
+		}
+		if ctx, err = orch.WithSkill(ctx, name); err != nil {
+			return headlessEarlyFailure(opts, os.Stdout, err)
+		}
+		message = task
+	}
+
+	request := orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode(), MaxTurns: opts.maxTurns}
+	if opts.streamJSON() {
+		cwd, _ := os.Getwd()
+		return runStreamJSON(ctx, orch, request, newStreamEmitter(os.Stdout), cwd)
+	}
 	if jsonMode {
 		request.Mode = orchestrator.ExecutionBlocking
-		return RunJSONExecution(context.Background(), orch, request, os.Stdout)
+		return RunJSONExecution(ctx, orch, request, os.Stdout)
 	}
 	if streamMode {
 		request.Mode = orchestrator.ExecutionStreaming
 	}
-	_, err = RunExecution(context.Background(), orch, request, os.Stdout, os.Stderr)
+	_, err = RunExecution(ctx, orch, request, os.Stdout, os.Stderr)
 	return err
+}
+
+// headlessEarlyFailure reports a failure that happened before execution
+// started (bad flags, unreadable prompt) in the selected output format. The
+// message is a caller error, so the status is invalid_request.
+func headlessEarlyFailure(opts runOptions, stdout io.Writer, err error) error {
+	switch {
+	case opts.streamJSON():
+		newStreamEmitter(stdout).terminateInvalid(execution.ErrorInvalidRequest, execution.ErrorCategoryRequest, err.Error(), execution.StatusInvalidRequest, execution.StopInvalidRequest)
+		return &ExitError{Code: ExitInvalidRequest, Err: err}
+	case jsonMode:
+		return writeInvalidJSONResult(stdout, err.Error())
+	default:
+		return err
+	}
+}
+
+// headlessLoadFailure reports a configuration or startup failure.
+func headlessLoadFailure(opts runOptions, stdout io.Writer, err error) error {
+	envelope := orchestrator.ExecutionEnvelope(orchestrator.ExecutionResult{}, err, orchestrator.EnvelopeMetadata{})
+	switch {
+	case opts.streamJSON():
+		newStreamEmitter(stdout).terminateWithEnvelope(envelope)
+		if envelope.Status == execution.StatusSucceeded {
+			return err
+		}
+		return &ExitError{Code: ExitCodeForStatus(envelope.Status), Err: err}
+	case jsonMode:
+		return writeJSONResult(stdout, envelope, err)
+	default:
+		return err
+	}
+}
+
+// cancelGracePeriod bounds shutdown after SIGINT/SIGTERM.
+const cancelGracePeriod = 10 * time.Second
+
+// cancelWatchdog forces the process to exit with ExitCancelled when shutdown
+// takes longer than grace after ctx is cancelled.
+func cancelWatchdog(ctx context.Context, grace time.Duration, exit func(int)) {
+	<-ctx.Done()
+	time.Sleep(grace)
+	exit(ExitCancelled)
 }
 
 // ExitError carries the stable process status for autonomous callers.
@@ -644,6 +850,8 @@ const (
 	ExitTimeout             = 5
 	ExitBudgetExhausted     = 6
 	ExitVerificationFailure = 7
+	// ExitCancelled follows the shell convention for SIGINT (128+2).
+	ExitCancelled = 130
 )
 
 func (e *ExitError) Error() string {
@@ -707,6 +915,8 @@ func ExitCodeForStatus(status execution.Status) int {
 		return ExitBudgetExhausted
 	case execution.StatusVerificationFailed:
 		return ExitVerificationFailure
+	case execution.StatusCancelled:
+		return ExitCancelled
 	default:
 		return ExitFailure
 	}
@@ -835,6 +1045,12 @@ func runModels() error {
 	}
 	store := auth.NewStore()
 	ctx := context.Background()
+	type jsonProviderModels struct {
+		Provider string   `json:"provider"`
+		Status   string   `json:"status"`
+		Models   []string `json:"models"`
+	}
+	var jsonOut []jsonProviderModels
 	for _, provider := range providers {
 		resolved := auth.Resolve(ctx, store, provider)
 		modelCfg := configuredProviderModel(cfg, provider)
@@ -862,10 +1078,21 @@ func runModels() error {
 		if len(list) == 0 {
 			list = staticProviderModels(cfg, provider)
 		}
+		if jsonMode {
+			entry := jsonProviderModels{Provider: provider, Status: status, Models: make([]string, 0, len(list))}
+			for _, info := range list {
+				entry.Models = append(entry.Models, info.Model)
+			}
+			jsonOut = append(jsonOut, entry)
+			continue
+		}
 		fmt.Printf("%s [%s]\n", provider, status)
 		for _, info := range list {
 			fmt.Printf("  %s\n", info.Model)
 		}
+	}
+	if jsonMode {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"providers": jsonOut})
 	}
 	return nil
 }

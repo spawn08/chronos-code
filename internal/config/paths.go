@@ -93,6 +93,9 @@ func (c *Config) ResolveProjectPaths(root string) (ProjectPaths, error) {
 			}
 		}
 	}
+	if c.SessionsDBOverride != "" {
+		paths.SessionsDB = c.SessionsDBOverride
+	}
 	return paths, nil
 }
 

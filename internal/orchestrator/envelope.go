@@ -120,6 +120,8 @@ func errorEnvelope(reason execution.StopReason, err error) *execution.Error {
 		result.Code, result.Category = execution.ErrorAuthentication, execution.ErrorCategoryAuthentication
 	case execution.StopCancelled:
 		result.Code, result.Category = execution.ErrorCancelled, execution.ErrorCategoryCancellation
+	case execution.StopMaxTurns:
+		result.Code, result.Category = execution.ErrorMaxTurns, execution.ErrorCategoryLimit
 	}
 	return result
 }

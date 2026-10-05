@@ -20,6 +20,22 @@ Start the message with `@agent` to use a specialist:
 chronos-code run "@reviewer review the changes on this branch against main"
 ```
 
+Start it with `/skill-name` to load a skill in full before the task, like the interactive app does (`chronos-code skills list` shows the names):
+
+```bash
+chronos-code run "/code-review the changes on this branch against main"
+```
+
+## MCP servers when nobody is watching
+
+Servers found in `.mcp.json`, `~/.chronos-code/mcp.json` and the other discovery files wait for approval, and in the interactive app you approve them with `/mcp connect <name>`. Headless runs can't ask, so name the servers you trust with `--mcp-connect`:
+
+```bash
+chronos-code run --mcp-connect arxiv "find recent papers on speculative decoding"
+```
+
+The approval lasts for this run only. Calls to the server's tools still need approval, so add `--yolo` or `--dangerously-skip-permissions` if the run should use them unattended. Without `--mcp-connect`, unapproved servers stay disconnected and a warning names them.
+
 ## Permissions when nobody is watching
 
 In headless mode there is nobody to press `y`. Anything that would normally ask for approval is **refused** by default. The agent is told and continues without it. Reading and searching code always works.

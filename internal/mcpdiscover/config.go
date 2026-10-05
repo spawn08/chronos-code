@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -40,18 +41,25 @@ type ManagedServer struct {
 	Command    string
 	Args       []string
 	URL        string
+	Headers    map[string]string
 	Permission string
 }
 
 // ValidateManagedServer rejects unsupported transports and ambiguous shapes.
 func ValidateManagedServer(server ManagedServer) error {
-	if err := validateManagedServerShape(server); err != nil {
+	return ValidateManagedServerWithHosts(server, nil)
+}
+
+// ValidateManagedServerWithHosts is ValidateManagedServer with extra hosts
+// (from security.yaml mcp.allowed_insecure_hosts) that may use http://.
+func ValidateManagedServerWithHosts(server ManagedServer, insecureHosts []string) error {
+	if err := validateManagedServerShape(server, insecureHosts); err != nil {
 		return err
 	}
 	return validateSecretReferences(server)
 }
 
-func validateManagedServerShape(server ManagedServer) error {
+func validateManagedServerShape(server ManagedServer, insecureHosts []string) error {
 	if server.Name == "" || strings.TrimSpace(server.Name) != server.Name {
 		return fmt.Errorf("MCP server name must be non-empty and have no surrounding whitespace")
 	}
@@ -77,10 +85,35 @@ func validateManagedServerShape(server ManagedServer) error {
 		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 			return fmt.Errorf("MCP server %q: sse url must be an absolute HTTPS URL without userinfo or fragment", server.Name)
 		}
+	case mcp.TransportStreamableHTTP:
+		if server.Command != "" || len(server.Args) != 0 {
+			return fmt.Errorf("MCP server %q: streamable-http transport cannot include command or args", server.Name)
+		}
+		parsed, err := url.Parse(server.URL)
+		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+			return fmt.Errorf("MCP server %q: streamable-http url must be absolute without userinfo or fragment", server.Name)
+		}
+		switch parsed.Scheme {
+		case "https":
+		case "http":
+			if !InsecureHostAllowed(parsed.Hostname(), insecureHosts) {
+				return fmt.Errorf("MCP server %q: http:// is only allowed for loopback, *.cluster.local or hosts in mcp.allowed_insecure_hosts; use https", server.Name)
+			}
+		default:
+			return fmt.Errorf("MCP server %q: streamable-http url must use http or https", server.Name)
+		}
 	default:
-		return fmt.Errorf("MCP server %q: unsupported transport %q (supported: stdio, sse; HTTP is not supported)", server.Name, server.Transport)
+		return fmt.Errorf("MCP server %q: unsupported transport %q (supported: stdio, sse, streamable-http)", server.Name, server.Transport)
 	}
 
+	for name := range server.Headers {
+		if name == "" || strings.ContainsAny(name, " \t\r\n:") {
+			return fmt.Errorf("MCP server %q: invalid header name", server.Name)
+		}
+	}
+	if len(server.Headers) > 0 && server.Transport == mcp.TransportStdio {
+		return fmt.Errorf("MCP server %q: headers require an HTTP transport", server.Name)
+	}
 	if server.Permission == "" {
 		server.Permission = "require_approval"
 	}
@@ -146,6 +179,9 @@ func AddManaged(path string, server ManagedServer, userScope bool) error {
 		}
 	} else {
 		entry["url"] = server.URL
+		if len(server.Headers) > 0 {
+			entry["headers"] = server.Headers
+		}
 	}
 	raw, err := json.Marshal(entry)
 	if err != nil {
@@ -173,7 +209,7 @@ func RemoveManaged(path, name string, userScope bool) error {
 
 // RedactedEndpoint returns a safe command or URL summary for terminal output.
 func RedactedEndpoint(server ManagedServer) string {
-	if server.Transport == mcp.TransportSSE {
+	if server.Transport == mcp.TransportSSE || server.Transport == mcp.TransportStreamableHTTP {
 		parsed, err := url.Parse(server.URL)
 		if err != nil {
 			return "<invalid URL>"
@@ -278,10 +314,14 @@ func decodeManagedServer(name string, raw json.RawMessage) (ManagedServer, error
 		Command:    entry.Command,
 		Args:       entry.Args,
 		URL:        entry.URL,
+		Headers:    entry.Headers,
 		Permission: permission,
 	}
 	if server.Transport == "" {
 		server.Transport = mcp.Transport(entry.Type)
+	}
+	if server.Transport == "http" {
+		server.Transport = mcp.TransportStreamableHTTP
 	}
 	if server.Transport == "" {
 		if server.URL != "" {
@@ -290,7 +330,7 @@ func decodeManagedServer(name string, raw json.RawMessage) (ManagedServer, error
 			server.Transport = mcp.TransportStdio
 		}
 	}
-	if err := validateManagedServerShape(server); err != nil {
+	if err := validateManagedServerShape(server, nil); err != nil {
 		return ManagedServer{}, err
 	}
 	return server, nil
@@ -372,7 +412,12 @@ func validateSecretReferences(server ManagedServer) error {
 			}
 		}
 	}
-	if server.Transport == mcp.TransportSSE {
+	for name, value := range server.Headers {
+		if credentialLike(name) && !embedsSecretReference(value) {
+			return fmt.Errorf("MCP server %q: credential-like header %q must use an environment reference such as ${TOKEN}", server.Name, name)
+		}
+	}
+	if server.Transport == mcp.TransportSSE || server.Transport == mcp.TransportStreamableHTTP {
 		parsed, _ := url.Parse(server.URL)
 		for key, values := range parsed.Query() {
 			if credentialLike(key) {
@@ -399,4 +444,29 @@ func credentialLike(value string) bool {
 
 func secretReference(value string) bool {
 	return strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") && len(value) > 3
+}
+
+// InsecureHostAllowed reports whether host may be reached over plain http:
+// loopback, Kubernetes cluster-internal names, or an explicitly allowed host.
+func InsecureHostAllowed(host string, extra []string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "cluster.local" || strings.HasSuffix(host, ".cluster.local") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	for _, allowed := range extra {
+		if strings.EqualFold(strings.TrimSuffix(allowed, "."), host) {
+			return true
+		}
+	}
+	return false
+}
+
+// embedsSecretReference reports whether value contains a ${VAR} reference,
+// as in "Bearer ${TOKEN}".
+func embedsSecretReference(value string) bool {
+	start := strings.Index(value, "${")
+	return start >= 0 && strings.Contains(value[start:], "}") && strings.Index(value[start:], "}") > 2
 }

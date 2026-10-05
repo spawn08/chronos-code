@@ -44,6 +44,8 @@ After that, its tools are available to the agent. Just ask:
 Look up issue #482 and fix the bug it describes
 ```
 
+To connect servers at startup, or in a headless run, pass `--mcp-connect <name>` (repeatable): `chronos-code run --mcp-connect github "..."`.
+
 Each call to an MCP tool asks for your approval, like edits and shell commands do. Press `a` to allow a server's tool for the rest of the session.
 
 ## Servers you already have

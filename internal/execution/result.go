@@ -21,7 +21,9 @@ const (
 	StopBudgetExhausted    StopReason = "budget_exhausted"
 	// StopNoProgress: renewable work windows repeatedly produced no progress
 	// and the run paused for user guidance. Work so far is kept; not success.
-	StopNoProgress    StopReason = "no_progress"
+	StopNoProgress StopReason = "no_progress"
+	// StopMaxTurns: the caller's hard cap on agent loop iterations was reached.
+	StopMaxTurns      StopReason = "max_turns"
 	StopInternalError StopReason = "internal_error"
 )
 

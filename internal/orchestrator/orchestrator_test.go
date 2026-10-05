@@ -2015,6 +2015,24 @@ func TestConnectMCPApprovesDiscoveredServer(t *testing.T) {
 	}
 }
 
+func TestStartupHintsReportsMCPServersAwaitingApproval(t *testing.T) {
+	agents := map[string]*agent.Agent{
+		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
+		"reviewer": {ID: "reviewer", Tools: tool.NewRegistry()},
+	}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	runtimes := setupMCPRuntimes(context.Background(), agents, []mcp.ServerConfig{{
+		Name: "arxiv", Transport: mcp.TransportStdio, Command: "server",
+	}}, policy, time.Second, func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) {
+		return &orchestratorMCPClient{}, nil
+	})
+	orch := &Orchestrator{agents: agents, policy: policy, mcpRuntimes: runtimes}
+	// Two agents share one discovered server: it is reported once.
+	if hint := orch.StartupHints(context.Background()); !strings.Contains(hint, "1 MCP server(s) need approval") {
+		t.Fatalf("StartupHints() = %q, want a single MCP approval hint", hint)
+	}
+}
+
 func TestConnectMCPRejectsInconsistentAgentIdentitiesBeforeLaunch(t *testing.T) {
 	agents := map[string]*agent.Agent{
 		"coder":    {ID: "coder", Tools: tool.NewRegistry()},
@@ -2400,5 +2418,54 @@ func TestApprovalHandlerReplacementRetainsPolicyComposition(t *testing.T) {
 	}
 	if first != 0 || second != 1 || executions != 1 {
 		t.Fatalf("counts = first %d, second %d, executions %d; want 0, 1, 1", first, second, executions)
+	}
+}
+
+func TestCallerMCPServersAreTrustedWithoutSecurityYAMLEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	body := `{"mcpServers":{"state-memory":{"type":"http","url":"http://127.0.0.1:9/mcp","headers":{"Authorization":"${SQUADRON_TOKEN}"}}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	caller, err := loadCallerMCPServers([]string{path}, policy)
+	if err != nil || len(caller) != 1 {
+		t.Fatalf("loadCallerMCPServers() = %v, %v", caller, err)
+	}
+	if caller[0].Transport != mcp.TransportStreamableHTTP || caller[0].Headers["Authorization"] != "${SQUADRON_TOKEN}" {
+		t.Fatalf("caller config = %#v", caller[0])
+	}
+	agents := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
+	client := &orchestratorMCPClient{}
+	runtimes := setupMCPRuntimesWithCaller(context.Background(), agents, caller, nil, policy, time.Second,
+		func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) { return client, nil })
+	if _, ok := agents["coder"].Tools.Get(mcpdiscover.ToolName("state-memory", "read")); !ok {
+		t.Fatalf("caller server tools were not registered: statuses=%v", runtimes[0].Statuses())
+	}
+
+	// The same definition from a discovered source stays approval-gated.
+	discovered := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
+	policy2 := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	rt := setupMCPRuntimesWithCaller(context.Background(), discovered, nil, caller, policy2, time.Second,
+		func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) { return client, nil })
+	if got := rt[0].Statuses()[0].State; got != mcpdiscover.StateApprovalRequired {
+		t.Fatalf("discovered state = %s, want approval_required", got)
+	}
+}
+
+func TestCallerMCPConfigRejectsMissingFileAndDuplicates(t *testing.T) {
+	policy := &security.Policy{}
+	if _, err := loadCallerMCPServers([]string{filepath.Join(t.TempDir(), "absent.json")}, policy); err == nil {
+		t.Fatal("missing file: want error")
+	}
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.json"), filepath.Join(dir, "b.json")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte(`{"mcpServers":{"dup":{"command":"x"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := loadCallerMCPServers([]string{a, b}, policy); err == nil || !strings.Contains(err.Error(), "dup") {
+		t.Fatalf("duplicate: err=%v", err)
 	}
 }
