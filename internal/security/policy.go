@@ -103,6 +103,7 @@ type Policy struct {
 	mcpMu                   sync.RWMutex
 	trustedMCPIdentities    map[[sha256.Size]byte]struct{}
 	sessionMCPIdentities    map[[sha256.Size]byte]struct{}
+	callerMCPIdentities     map[[sha256.Size]byte]struct{}
 	dirMu                   sync.RWMutex
 	sessionDirs             []directoryGrant
 	dirApproval             DirectoryApprovalFunc
@@ -387,7 +388,24 @@ func (p *Policy) TrustCallerMCPServer(identity MCPServerIdentity) {
 	if p.trustedMCPIdentities == nil {
 		p.trustedMCPIdentities = make(map[[sha256.Size]byte]struct{})
 	}
+	if p.callerMCPIdentities == nil {
+		p.callerMCPIdentities = make(map[[sha256.Size]byte]struct{})
+	}
 	p.trustedMCPIdentities[identity.Digest()] = struct{}{}
+	p.callerMCPIdentities[identity.Digest()] = struct{}{}
+}
+
+// CallerSuppliedMCPServer reports whether identity was trusted by
+// TrustCallerMCPServer. The process owner wrote that config, so literal
+// credentials in it are accepted.
+func (p *Policy) CallerSuppliedMCPServer(identity MCPServerIdentity) bool {
+	if p == nil {
+		return false
+	}
+	p.mcpMu.RLock()
+	defer p.mcpMu.RUnlock()
+	_, ok := p.callerMCPIdentities[identity.Digest()]
+	return ok
 }
 
 // DecideMCPServerIdentity resolves launch permission for an exact canonical

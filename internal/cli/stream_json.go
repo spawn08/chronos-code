@@ -73,13 +73,6 @@ func (e *streamEmitter) write(kind execution.EnvelopeEventType, payload any, ter
 	return true
 }
 
-// terminated reports whether the terminal event was written.
-func (e *streamEmitter) terminated() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.done
-}
-
 // errorPayload is the terminal error event: the execution.Error fields plus
 // the run outcome, so a consumer needs no second lookup.
 type errorPayload struct {

@@ -241,7 +241,7 @@ func TestStreamEmitterSingleTerminal(t *testing.T) {
 }
 
 func TestParseRunFlagsAndPrompt(t *testing.T) {
-	opts, words, err := parseRunFlags([]string{"--output-format", "stream-json", "--max-turns=5", "--mcp-config", "a.json", "--mcp-config=b.json", "--strict-mcp-config", "--prompt-stdin", "--thinking", "high", "--ephemeral", "fix", "--json-ish"})
+	opts, words, err := parseRunFlags([]string{"--output-format", "stream-json", "--max-turns=5", "--mcp-config", "a.json", "--mcp-config=b.json", "--strict-mcp-config", "--prompt-stdin", "--thinking", "high", "--ephemeral", "fix", "--", "--json-ish"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,10 +251,16 @@ func TestParseRunFlagsAndPrompt(t *testing.T) {
 	if strings.Join(words, " ") != "fix --json-ish" {
 		t.Fatalf("words = %v", words)
 	}
-	for _, bad := range [][]string{{"--max-turns", "0"}, {"--max-turns", "x"}, {"--output-format", "xml"}, {"--system-prompt"}} {
+	for _, bad := range [][]string{{"--max-turns", "0"}, {"--max-turns", "x"}, {"--output-format", "xml"}, {"--system-prompt"}, {"--bogus-flag", "hi"}} {
 		if _, _, err := parseRunFlags(bad); err == nil {
 			t.Errorf("parseRunFlags(%v) succeeded", bad)
 		}
+	}
+	if opts, _, err := parseRunFlags([]string{"--output-format", "stream-json", "--bogus-flag"}); err == nil || !opts.streamJSON() {
+		t.Fatalf("unknown flag: opts=%+v err=%v; want error that keeps stream-json", opts, err)
+	}
+	if opts, _, err := parseRunFlags([]string{"--help"}); err != nil || !opts.help {
+		t.Fatalf("--help: opts=%+v err=%v", opts, err)
 	}
 	big := strings.Repeat("x", 500<<10)
 	got, err := resolvePrompt(runOptions{promptStdin: true}, nil, strings.NewReader(big+"\n"))

@@ -46,6 +46,8 @@ chronos-code version --json
 
 `run` never asks a question on stdin. Anything that would ask is refused, or the run ends with an error event.
 
+An unknown `--flag` after `run` fails with `invalid_request` (exit 2). To send a message that starts with `--`, put it after `--` or use `--prompt-stdin`. The default input guardrail accepts prompts up to 1,000,000 characters.
+
 ## Event stream
 
 Every line is a JSON object:
@@ -117,9 +119,9 @@ On SIGINT or SIGTERM the run stops the provider stream and tools, kills child pr
 
 - Transports: `stdio`, `sse` and `http` (streamable HTTP, also written `streamable-http`).
 - `${VAR}` and `${VAR:-default}` in `url` and `headers` are read from the environment when the client starts. A missing variable with no default fails the connection and names only the variable. Header values are never printed.
-- A header whose name looks like a credential (`Authorization`, `*-Token`, `*-Key`) must contain a `${VAR}` reference. Literal secrets are rejected.
+- In `.mcp.json` and user-scope files, a header whose name looks like a credential (`Authorization`, `*-Token`, `*-Key`) must contain a `${VAR}` reference. In `--mcp-config` files the caller owns the file, so literal values are accepted. They are never printed.
 - Plain `http://` is allowed only for loopback, `*.cluster.local`, and hosts listed in `mcp.allowed_insecure_hosts` in `security.yaml`. Everything else must use `https://`. An overlay may only narrow that list.
-- A server name defined in two `--mcp-config` files is an error.
+- A server name defined in two `--mcp-config` files is an error. So is a server with an invalid shape (for example a public `http://` URL) or a name in `mcp.denied_servers`: the run ends before it starts, with `invalid_request` and exit 2.
 - Servers from `--mcp-config` connect without approval. Their tools still count as external tools, so pass `--dangerously-skip-permissions` for unattended runs.
 - Tool names are `mcp__<server>__<tool>`, with any character other than letters, digits, `_` and `-` replaced by `_`. For example, tool `echo` on server `fixture` is `mcp__fixture__echo`.
 

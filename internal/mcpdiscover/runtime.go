@@ -282,7 +282,7 @@ func (r *Runtime) connectLocked(ctx context.Context, cfg mcp.ServerConfig, regis
 		status.State = StateLimitReached
 		return r.setStatusLocked(status)
 	}
-	if validateRuntimeConfig(cfg, policy) != nil {
+	if validateRuntimeConfig(cfg, policy, r.serverIdentityLocked(cfg)) != nil {
 		status.State = StateInvalid
 		return r.setStatusLocked(status)
 	}
@@ -377,7 +377,7 @@ func (r *Runtime) ReloadDiscovery(ctx context.Context, snapshot Snapshot) []Serv
 func (r *Runtime) reloadServerLocked(ctx context.Context, cfg mcp.ServerConfig) ServerStatus {
 	old := r.active[cfg.Name]
 	status := ServerStatus{Name: cfg.Name, Agent: r.agent, Source: r.sources[cfg.Name], State: StateReloadFailed, Retained: old != nil}
-	if r.policy == nil || r.policy.DecideMCPServerIdentity(r.serverIdentityLocked(cfg)).Permission != security.MCPAllow || validateRuntimeConfig(cfg, r.policy) != nil {
+	if r.policy == nil || r.policy.DecideMCPServerIdentity(r.serverIdentityLocked(cfg)).Permission != security.MCPAllow || validateRuntimeConfig(cfg, r.policy, r.serverIdentityLocked(cfg)) != nil {
 		return r.setStatusLocked(status)
 	}
 	if old == nil && r.policy.MaxMCPConnections > 0 && r.connected >= r.policy.MaxMCPConnections {
@@ -577,15 +577,29 @@ func cloneServerConfig(cfg mcp.ServerConfig) mcp.ServerConfig {
 	return cfg
 }
 
-func validateRuntimeConfig(cfg mcp.ServerConfig, policy *security.Policy) error {
+func validateRuntimeConfig(cfg mcp.ServerConfig, policy *security.Policy, identity security.MCPServerIdentity) error {
 	var hosts []string
 	if policy != nil {
 		hosts = policy.AllowedInsecureMCPHosts
 	}
-	return ValidateManagedServerWithHosts(ManagedServer{
+	if policy.CallerSuppliedMCPServer(identity) {
+		return ValidateCallerServer(cfg, hosts)
+	}
+	return ValidateManagedServerWithHosts(managedFromConfig(cfg), hosts)
+}
+
+// ValidateCallerServer checks the shape of a server from `run --mcp-config`.
+// The caller owns that file, so literal credentials are allowed; transport,
+// URL scheme and insecure-host rules still apply.
+func ValidateCallerServer(cfg mcp.ServerConfig, insecureHosts []string) error {
+	return validateManagedServerShape(managedFromConfig(cfg), insecureHosts)
+}
+
+func managedFromConfig(cfg mcp.ServerConfig) ManagedServer {
+	return ManagedServer{
 		Name: cfg.Name, Transport: cfg.Transport, Command: cfg.Command,
 		Args: cfg.Args, URL: cfg.URL, Headers: cfg.Headers, Permission: cfg.Permission,
-	}, hosts)
+	}
 }
 
 func toolDefinitions(server string, client RuntimeClient, tools []mcp.ToolInfo) ([]*tool.Definition, []string, bool) {

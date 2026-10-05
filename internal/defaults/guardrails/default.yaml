@@ -2,8 +2,10 @@ name: default
 description: Standard guardrails for coding agents
 
 input:
+  # Headless callers send task prompts of several hundred KB; the context
+  # window guard still rejects input the model cannot hold.
   - type: max_length
-    max_chars: 100000
+    max_chars: 1000000
 
 output:
   - type: max_length

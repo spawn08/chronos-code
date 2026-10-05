@@ -28,6 +28,7 @@ type runOptions struct {
 	strictMCPConfig  bool
 	thinking         string
 	ephemeral        bool
+	help             bool
 }
 
 // streamJSON reports whether events are written as JSONL.
@@ -97,11 +98,13 @@ func parseRunFlags(args []string) (runOptions, []string, error) {
 		case "--":
 			rest = append(rest, args[i+1:]...)
 			i = len(args)
+		case "--help":
+			opts.help = true
 		default:
-			rest = append(rest, arg)
+			err = fmt.Errorf("unknown flag %s for run (put the message after -- or use --prompt-stdin)", name)
 		}
 		if err != nil {
-			return runOptions{}, nil, err
+			return opts, nil, err
 		}
 	}
 	return opts, rest, nil

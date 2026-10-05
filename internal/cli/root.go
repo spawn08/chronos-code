@@ -715,6 +715,9 @@ func runHeadless() error {
 	if err != nil {
 		return headlessEarlyFailure(opts, os.Stdout, err)
 	}
+	if opts.help {
+		return printUsage()
+	}
 	if opts.outputFormat == outputJSON {
 		jsonMode = true
 	}

@@ -421,7 +421,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	var discovered mcpdiscover.Snapshot
 	callerServers, err := loadCallerMCPServers(cfg.MCP.CallerConfigs, policy)
 	if err != nil {
-		return nil, err
+		return nil, &execution.TerminalError{Reason: execution.StopInvalidRequest, Err: err}
 	}
 	if cfg.MCP.DiscoveryEnabled() && !cfg.MCP.Strict {
 		discovered = mcpdiscover.Load(root)
@@ -3696,6 +3696,12 @@ func loadCallerMCPServers(paths []string, policy *security.Policy) ([]mcp.Server
 			}
 			seen[server.Name] = path
 			server.Permission = "allow"
+			if slices.Contains(policy.DeniedMCPServers, server.Name) {
+				return nil, fmt.Errorf("--mcp-config %s: MCP server %q is denied by security policy", path, server.Name)
+			}
+			if err := mcpdiscover.ValidateCallerServer(server, policy.AllowedInsecureMCPHosts); err != nil {
+				return nil, fmt.Errorf("--mcp-config %s: %w", path, err)
+			}
 			policy.TrustCallerMCPServer(mcpdiscover.CallerIdentity(server))
 			out = append(out, server)
 		}

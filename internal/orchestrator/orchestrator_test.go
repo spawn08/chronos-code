@@ -2453,6 +2453,52 @@ func TestCallerMCPServersAreTrustedWithoutSecurityYAMLEntry(t *testing.T) {
 	}
 }
 
+func TestCallerMCPServersAcceptLiteralCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	body := `{"mcpServers":{"state-memory":{"type":"http","url":"http://svc.ns.svc.cluster.local/mcp","headers":{"Authorization":"Bearer literal-token"}}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := &security.Policy{MCPDefaultPermission: security.MCPRequireApproval}
+	caller, err := loadCallerMCPServers([]string{path}, policy)
+	if err != nil {
+		t.Fatalf("loadCallerMCPServers() error = %v", err)
+	}
+	agents := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
+	runtimes := setupMCPRuntimesWithCaller(context.Background(), agents, caller, nil, policy, time.Second,
+		func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) { return &orchestratorMCPClient{}, nil })
+	if got := runtimes[0].Statuses()[0].State; got != mcpdiscover.StateConnected {
+		t.Fatalf("caller server with literal token state = %s, want connected", got)
+	}
+
+	// The same literal token from a discovered source is still refused.
+	discovered := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
+	trusted := &security.Policy{MCPDefaultPermission: security.MCPAllow}
+	rt := setupMCPRuntimesWithCaller(context.Background(), discovered, nil, caller, trusted, time.Second,
+		func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) { return &orchestratorMCPClient{}, nil })
+	if got := rt[0].Statuses()[0].State; got == mcpdiscover.StateConnected {
+		t.Fatal("discovered server with literal token connected")
+	}
+}
+
+func TestCallerMCPConfigRejectsInvalidAndDeniedServers(t *testing.T) {
+	dir := t.TempDir()
+	public := filepath.Join(dir, "public.json")
+	if err := os.WriteFile(public, []byte(`{"mcpServers":{"pub":{"type":"http","url":"http://example.com/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCallerMCPServers([]string{public}, &security.Policy{}); err == nil || !strings.Contains(err.Error(), "http://") {
+		t.Fatalf("public http host: err=%v", err)
+	}
+	denied := filepath.Join(dir, "denied.json")
+	if err := os.WriteFile(denied, []byte(`{"mcpServers":{"bad":{"command":"x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCallerMCPServers([]string{denied}, &security.Policy{DeniedMCPServers: []string{"bad"}}); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("denied server: err=%v", err)
+	}
+}
+
 func TestCallerMCPConfigRejectsMissingFileAndDuplicates(t *testing.T) {
 	policy := &security.Policy{}
 	if _, err := loadCallerMCPServers([]string{filepath.Join(t.TempDir(), "absent.json")}, policy); err == nil {
