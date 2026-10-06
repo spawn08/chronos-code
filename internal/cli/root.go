@@ -128,7 +128,7 @@ func Execute() error {
 		return runCleanup()
 	case "serve":
 		return runServe()
-	case "version":
+	case "version", "--version", "-V":
 		return printVersion()
 	case "help", "-h", "--help":
 		return printUsage()
@@ -403,7 +403,7 @@ Usage:
   chronos-code mcp list [--scope project|user]           List canonical MCP servers with secrets redacted
   chronos-code mcp remove <name> [--scope project|user]  Remove a canonical MCP server
   chronos-code mcp test <name> [--timeout 10s] [--scope project|user]  Initialize, list tools, and close
-  MCP transports: stdio and HTTPS SSE only; HTTP transport is not supported. Credential values must remain ${ENV_VAR} references.
+  MCP transports: stdio, HTTPS SSE, and streamable HTTP (--transport stdio|sse|streamable-http). Credential values must remain ${ENV_VAR} references.
   chronos-code indexer mcp [--repo [name=]dir ...]        Serve the code index's graph tools to MCP hosts over stdio
   chronos-code learn suggest [agent]                     Distill traced sessions into a reviewable suggestion
   chronos-code learn list                                List pending suggestions
@@ -425,7 +425,7 @@ Usage:
   chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>] [--request-timeout 5m] [--instance-id <id>]  Start HTTP server for team deployment
   chronos-code serve --delivery-read-only-worker            Process explicitly queued deliveries as read-only, then park for verification
   chronos-code serve --delivery-plan-worker                 Also run admitted plan generations in private worktrees; retain candidate patches, never write the checkout
-  chronos-code version            Print version information
+  chronos-code version, --version  Print version information
   chronos-code help               Show this help
 
 Global flags:
@@ -1787,7 +1787,7 @@ func runMCPCommand(ctx context.Context, args []string, root, home string, stdout
 
 func parseMCPAdd(args []string) (mcpdiscover.ManagedServer, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "--") {
-		return mcpdiscover.ManagedServer{}, fmt.Errorf("usage: chronos-code mcp add <name> (--command <cmd> [--arg <arg> ...] | --url <https-url>) [--transport stdio|sse] [--scope project|user]")
+		return mcpdiscover.ManagedServer{}, fmt.Errorf("usage: chronos-code mcp add <name> (--command <cmd> [--arg <arg> ...] | --url <https-url>) [--transport stdio|sse|streamable-http] [--scope project|user]")
 	}
 	server := mcpdiscover.ManagedServer{Name: args[0], Permission: "require_approval"}
 	for i := 1; i < len(args); i++ {

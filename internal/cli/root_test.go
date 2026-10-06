@@ -687,7 +687,7 @@ func TestPrintUsageDocumentsMCPCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"mcp add", "mcp list", "mcp remove", "mcp test", "Initialize, list tools, and close", "stdio and HTTPS SSE only", "HTTP transport is not supported", "${ENV_VAR} references"} {
+	for _, want := range []string{"mcp add", "mcp list", "mcp remove", "mcp test", "Initialize, list tools, and close", "stdio, HTTPS SSE, and streamable HTTP", "--transport stdio|sse|streamable-http", "${ENV_VAR} references", "version, --version"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("usage missing %q", want)
 		}
@@ -790,5 +790,32 @@ func TestStripGlobalFlagsMCPConnectRequiresName(t *testing.T) {
 	resetGlobalFlags(t, []string{"chronos-code", "run", "--mcp-connect"})
 	if err := stripGlobalFlags(); err == nil || !strings.Contains(err.Error(), "requires a server name") {
 		t.Fatalf("stripGlobalFlags() error = %v, want missing-name error", err)
+	}
+}
+
+func TestExecuteVersionFlags(t *testing.T) {
+	for _, arg := range []string{"version", "--version", "-V"} {
+		resetGlobalFlags(t, []string{"chronos-code", arg})
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout := os.Stdout
+		os.Stdout = w
+		execErr := Execute()
+		os.Stdout = stdout
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if execErr != nil {
+			t.Fatalf("%s: Execute() = %v", arg, execErr)
+		}
+		if !strings.HasPrefix(string(data), "chronos-code "+Version+" ") || strings.Contains(string(data), "Usage:") {
+			t.Fatalf("%s: output = %q, want the version line", arg, data)
+		}
 	}
 }
