@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/logo.svg" alt="Chronos Code logo" width="128" height="128">
+
 # Chronos Code
 
 **A YAML-native AI coding agent harness, shipped as a single Go binary.**

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 256" role="img" aria-labelledby="cc-wm-title">
+  <title id="cc-wm-title">Chronos Code</title>
+  <g>
+    <rect width="256" height="256" rx="56" fill="#2d3142"/>
+    <path d="M 190.2 65.8 A 88 88 0 1 0 190.2 190.2" fill="none" stroke="#f5f5f5" stroke-width="18" stroke-linecap="round"/>
+    <circle cx="128" cy="40" r="9" fill="#eb6c36"/>
+    <path d="M 96 100 L 134 128 L 96 156" fill="none" stroke="#eb6c36" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 148 160 H 176" fill="none" stroke="#f5f5f5" stroke-width="16" stroke-linecap="round"/>
+  </g>
+  <text x="290" y="150" font-family="ui-monospace, 'SF Mono', 'Geist Mono', Menlo, Consolas, monospace" font-size="84" font-weight="700" fill="#2d3142">chronos<tspan fill="#eb6c36">-code</tspan></text>
+  <text x="294" y="196" font-family="ui-monospace, 'SF Mono', 'Geist Mono', Menlo, Consolas, monospace" font-size="24" fill="#4f5d75" letter-spacing="2">YAML-native AI coding agent</text>
+</svg>
