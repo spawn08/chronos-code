@@ -219,44 +219,72 @@ type skillMDFrontmatter struct {
 	License       string         `yaml:"license"`
 	Compatibility any            `yaml:"compatibility"`
 	Metadata      map[string]any `yaml:"metadata"`
+	// AllowedTools is the Agent Skills spec's tool pre-approval list
+	// (e.g. "Bash(git *) Read"). It is accepted but not enforced: its
+	// entries are permission patterns, not tool names, so it cannot feed
+	// ToolsRequired.
+	AllowedTools any `yaml:"allowed-tools"`
+}
+
+// knownSkillMDFields lists the frontmatter keys skillMDFrontmatter decodes.
+// Other keys (for example Claude Code's "user-invocable") are ignored with a
+// warning so skills written for other agents still load.
+var knownSkillMDFields = map[string]bool{
+	"name": true, "description": true, "version": true, "triggers": true,
+	"model_hint": true, "tools_required": true, "license": true,
+	"compatibility": true, "metadata": true, "allowed-tools": true,
 }
 
 // parseSkillMD splits a SKILL.md file's YAML frontmatter (delimited by a
 // "---" line immediately at the start of the file and a closing "---"
 // line) from its markdown body. A file with no frontmatter delimiters is
 // treated as a body-only skill with no name, which ParseSkillMD's caller
-// rejects.
-func parseSkillMD(data []byte) (*Skill, error) {
+// rejects. The returned warnings name frontmatter keys that were ignored.
+func parseSkillMD(data []byte) (*Skill, []string, error) {
 	if len(data) > MaxSkillFileBytes {
-		return nil, fmt.Errorf("skills: SKILL.md exceeds %d bytes", MaxSkillFileBytes)
+		return nil, nil, fmt.Errorf("skills: SKILL.md exceeds %d bytes", MaxSkillFileBytes)
 	}
 	text := string(data)
 	if !strings.HasPrefix(text, "---") {
-		return nil, fmt.Errorf("skills: SKILL.md must start with a \"---\" frontmatter delimiter")
+		return nil, nil, fmt.Errorf("skills: SKILL.md must start with a \"---\" frontmatter delimiter")
 	}
 	rest := text[3:]
 	end := strings.Index(rest, "\n---")
 	if end == -1 {
-		return nil, fmt.Errorf("skills: SKILL.md frontmatter has no closing \"---\" delimiter")
+		return nil, nil, fmt.Errorf("skills: SKILL.md frontmatter has no closing \"---\" delimiter")
 	}
 	fm := rest[:end]
 	body := rest[end+len("\n---"):]
 	body = strings.TrimLeft(body, "\r\n")
 
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(fm), &document); err != nil {
+		return nil, nil, fmt.Errorf("skills: parse SKILL.md frontmatter: %w", err)
+	}
+	var warnings []string
+	if len(document.Content) > 0 {
+		mapping := document.Content[0]
+		if mapping.Kind != yaml.MappingNode {
+			return nil, nil, fmt.Errorf("skills: SKILL.md frontmatter must be a mapping")
+		}
+		for i := 0; i+1 < len(mapping.Content); i += 2 {
+			if key := mapping.Content[i].Value; !knownSkillMDFields[key] {
+				warnings = append(warnings, fmt.Sprintf("ignored unknown frontmatter field %q", key))
+			}
+		}
+	}
 	var meta skillMDFrontmatter
-	decoder := yaml.NewDecoder(strings.NewReader(fm))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&meta); err != nil {
-		return nil, fmt.Errorf("skills: parse SKILL.md frontmatter: %w", err)
+	if err := document.Decode(&meta); err != nil {
+		return nil, nil, fmt.Errorf("skills: parse SKILL.md frontmatter: %w", err)
 	}
 	if strings.TrimSpace(meta.Name) == "" {
-		return nil, fmt.Errorf("skills: SKILL.md frontmatter missing required \"name\" field")
+		return nil, nil, fmt.Errorf("skills: SKILL.md frontmatter missing required \"name\" field")
 	}
 	if len(meta.Triggers) > MaxTriggers {
-		return nil, fmt.Errorf("skills: SKILL.md has %d triggers; maximum is %d", len(meta.Triggers), MaxTriggers)
+		return nil, nil, fmt.Errorf("skills: SKILL.md has %d triggers; maximum is %d", len(meta.Triggers), MaxTriggers)
 	}
 	if len(meta.ToolsRequired) > MaxToolsRequired {
-		return nil, fmt.Errorf("skills: SKILL.md has %d required tools; maximum is %d", len(meta.ToolsRequired), MaxToolsRequired)
+		return nil, nil, fmt.Errorf("skills: SKILL.md has %d required tools; maximum is %d", len(meta.ToolsRequired), MaxToolsRequired)
 	}
 	skill := &Skill{
 		Name:          meta.Name,
@@ -268,9 +296,9 @@ func parseSkillMD(data []byte) (*Skill, error) {
 		Body:          strings.TrimSpace(body),
 	}
 	if err := validateSkill(skill); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return skill, nil
+	return skill, warnings, nil
 }
 
 func validateSkill(skill *Skill) error {
@@ -345,10 +373,13 @@ func LoadDirReport(dir string) (Discovery, error) {
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Source: path, Message: fmt.Errorf("read skill: %w", errors.Join(readErr, closeErr)).Error()})
 			continue
 		}
-		s, err := parseSkillMD(data)
+		s, warnings, err := parseSkillMD(data)
 		if err != nil {
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Source: path, Message: err.Error()})
 			continue
+		}
+		for _, warning := range warnings {
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{Source: path, Message: warning})
 		}
 		s.Source = path
 		result.Skills = append(result.Skills, s)

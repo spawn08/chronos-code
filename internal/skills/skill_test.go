@@ -407,3 +407,40 @@ func TestDiscoverSourcesProjectOnly(t *testing.T) {
 		t.Fatalf("skills = %+v, want only project-only", result.Skills)
 	}
 }
+
+func TestLoadDirAcceptsOtherAgentFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "lifecycle")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nname: lifecycle\ndescription: call the lifecycle API\nuser-invocable: false\nallowed-tools: Bash(curl *)\n---\nbody"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := LoadDirReport(dir)
+	if err != nil || len(result.Skills) != 1 || result.Skills[0].Name != "lifecycle" {
+		t.Fatalf("LoadDirReport = %+v, %v; want skill loaded", result, err)
+	}
+	if len(result.Skills[0].ToolsRequired) != 0 {
+		t.Fatalf("ToolsRequired = %v; allowed-tools must not gate selection", result.Skills[0].ToolsRequired)
+	}
+	if len(result.Diagnostics) != 1 || !strings.Contains(result.Diagnostics[0].Message, `"user-invocable"`) {
+		t.Fatalf("Diagnostics = %+v; want one warning for user-invocable only", result.Diagnostics)
+	}
+}
+
+func TestLoadDirRejectsNonMappingFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, "list")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\n- name\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := LoadDirReport(dir)
+	if err != nil || len(result.Skills) != 0 || len(result.Diagnostics) != 1 {
+		t.Fatalf("LoadDirReport = %+v, %v; want isolated diagnostic", result, err)
+	}
+}
