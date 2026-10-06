@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/spawn08/chronos-code/internal/skills"
 )
 
 // Output formats accepted by `run --output-format`.
@@ -19,16 +21,20 @@ const (
 // separately from the global flags so a prompt is never confused with them
 // once it is read from stdin.
 type runOptions struct {
-	outputFormat     string
-	promptStdin      bool
-	systemPrompt     string
-	systemPromptFile string
-	maxTurns         int
-	mcpConfigs       []string
-	strictMCPConfig  bool
-	thinking         string
-	ephemeral        bool
-	help             bool
+	outputFormat      string
+	promptStdin       bool
+	systemPrompt      string
+	systemPromptFile  string
+	maxTurns          int
+	mcpConfigs        []string
+	strictMCPConfig   bool
+	requiredMCP       []string
+	skillSources      string
+	projectDocsBudget int
+	policyFiles       []string
+	thinking          string
+	ephemeral         bool
+	help              bool
 }
 
 // streamJSON reports whether events are written as JSONL.
@@ -91,6 +97,37 @@ func parseRunFlags(args []string) (runOptions, []string, error) {
 			}
 		case "--strict-mcp-config":
 			opts.strictMCPConfig = true
+		case "--require-mcp":
+			if v, err = get(); err == nil {
+				names := splitNonEmpty(v)
+				if len(names) == 0 {
+					err = fmt.Errorf("--require-mcp requires a server name")
+				}
+				opts.requiredMCP = append(opts.requiredMCP, names...)
+			}
+		case "--policy-file":
+			if v, err = get(); err == nil {
+				if strings.TrimSpace(v) == "" {
+					err = fmt.Errorf("--policy-file requires a path")
+				}
+				opts.policyFiles = append(opts.policyFiles, v)
+			}
+		case "--project-docs-budget":
+			if v, err = get(); err == nil {
+				n, convErr := strconv.Atoi(strings.TrimSpace(v))
+				if convErr != nil || n < 1 {
+					err = fmt.Errorf("--project-docs-budget %q must be a positive integer", v)
+				}
+				opts.projectDocsBudget = n
+			}
+		case "--skill-sources":
+			if v, err = get(); err == nil {
+				if _, err = skills.ParseSources(v); err == nil {
+					opts.skillSources = v
+				} else {
+					err = fmt.Errorf("--skill-sources: %w", err)
+				}
+			}
 		case "--thinking":
 			opts.thinking, err = get()
 		case "--ephemeral":

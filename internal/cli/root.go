@@ -29,6 +29,7 @@ import (
 	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/server"
 	"github.com/spawn08/chronos-code/internal/session"
+	"github.com/spawn08/chronos-code/internal/skills"
 	"github.com/spawn08/chronos-code/internal/tui"
 	"github.com/spawn08/chronos/engine/mcp"
 	"github.com/spawn08/chronos/engine/model"
@@ -61,6 +62,9 @@ var (
 	mcpConfigFiles      []string
 	strictMCPConfig     bool
 	ephemeralRun        bool
+	skillSourcesRun     string
+	projectDocsBudget   int
+	policyFilesRun      []string
 )
 
 // Specialists retain the lean PRD P1-005 ceiling. The primary agent also owns
@@ -328,6 +332,7 @@ func parseUSDBudget(value string) (budget.Microdollars, error) {
 var runtimeCapabilities = []string{
 	"stream-json", "mcp-http", "mcp-config", "prompt-stdin",
 	"system-prompt", "max-turns", "thinking", "ephemeral",
+	"mcp-status", "require-mcp", "skill-sources", "project-docs-budget", "policy-file",
 }
 
 type versionInfo struct {
@@ -478,6 +483,15 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 	cfg.MCP.CallerConfigs = mcpConfigFiles
 	cfg.MCP.Strict = strictMCPConfig
 	cfg.Ephemeral = ephemeralRun || os.Getenv("CHRONOS_CODE_EPHEMERAL") == "1"
+	cfg.SkillSources = skillSourcesRun
+	cfg.ProjectDocsBudget = projectDocsBudget
+	cfg.PolicyFiles = policyFilesRun
+	if cfg.SkillSources == "" {
+		cfg.SkillSources = os.Getenv("CHRONOS_CODE_SKILL_SOURCES")
+	}
+	if _, err := skills.ParseSources(cfg.SkillSources); err != nil {
+		return nil, nil, fmt.Errorf("CHRONOS_CODE_SKILL_SOURCES: %w", err)
+	}
 	ctx := context.Background()
 	orch, err := orchestrator.New(ctx, cfg, resumeSessionID)
 	if err != nil {
@@ -736,7 +750,8 @@ func runHeadless() error {
 	defer stopSignals()
 	go cancelWatchdog(ctx, cancelGracePeriod, os.Exit)
 
-	mcpConfigFiles, strictMCPConfig, ephemeralRun = opts.mcpConfigs, opts.strictMCPConfig, opts.ephemeral
+	mcpConfigFiles, strictMCPConfig, ephemeralRun, skillSourcesRun = opts.mcpConfigs, opts.strictMCPConfig, opts.ephemeral, opts.skillSources
+	projectDocsBudget, policyFilesRun = opts.projectDocsBudget, opts.policyFiles
 	orch, err := loadAndBuild()
 	if errors.Is(err, errSessionNotFound) {
 		if opts.streamJSON() {
@@ -782,7 +797,10 @@ func runHeadless() error {
 	request := orchestrator.ExecutionRequest{Message: message, VerificationMode: orch.VerificationMode(), MaxTurns: opts.maxTurns}
 	if opts.streamJSON() {
 		cwd, _ := os.Getwd()
-		return runStreamJSON(ctx, orch, request, newStreamEmitter(os.Stdout), cwd)
+		return runStreamJSON(ctx, orch, request, newStreamEmitter(os.Stdout), cwd, opts.requiredMCP)
+	}
+	if err := requiredMCPFailure(mcpStatusReport(orch, opts.requiredMCP), opts.requiredMCP); err != nil {
+		return headlessMCPUnavailable(os.Stdout, orch.CurrentSessionID(), err)
 	}
 	if jsonMode {
 		request.Mode = orchestrator.ExecutionBlocking
@@ -827,6 +845,25 @@ func headlessLoadFailure(opts runOptions, stdout io.Writer, err error) error {
 	}
 }
 
+// headlessMCPUnavailable reports a failed --require-mcp check for the text
+// and json output formats.
+func headlessMCPUnavailable(stdout io.Writer, sessionID string, err error) error {
+	if jsonMode {
+		failure := mcpUnavailableError(err)
+		envelope := execution.ExecutionEnvelope{
+			SchemaVersion: execution.SchemaVersionV1, SessionID: sessionID, Status: execution.StatusFailed, StopReason: execution.StopMCPUnavailable,
+			ChangedPaths: []string{}, Verification: execution.EnvelopeVerification{Status: execution.VerificationPending, Obligations: []execution.VerificationObligation{}},
+			Error: &failure,
+		}
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		if encodeErr := encoder.Encode(envelope); encodeErr != nil {
+			return fmt.Errorf("encode execution result: %w", encodeErr)
+		}
+	}
+	return &ExitError{Code: ExitMCPUnavailable, Err: err}
+}
+
 // cancelGracePeriod bounds shutdown after SIGINT/SIGTERM.
 const cancelGracePeriod = 10 * time.Second
 
@@ -853,6 +890,8 @@ const (
 	ExitTimeout             = 5
 	ExitBudgetExhausted     = 6
 	ExitVerificationFailure = 7
+	// ExitMCPUnavailable: a server named with --require-mcp did not connect.
+	ExitMCPUnavailable = 9
 	// ExitCancelled follows the shell convention for SIGINT (128+2).
 	ExitCancelled = 130
 )

@@ -25,6 +25,8 @@ const (
 	// StopMaxTurns: the caller's hard cap on agent loop iterations was reached.
 	StopMaxTurns      StopReason = "max_turns"
 	StopInternalError StopReason = "internal_error"
+	// StopMCPUnavailable: a server named with --require-mcp did not connect.
+	StopMCPUnavailable StopReason = "mcp_unavailable"
 )
 
 type TerminalError struct {

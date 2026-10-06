@@ -40,6 +40,10 @@ chronos-code version --json
 | `--thinking off\|low\|medium\|high` | Reasoning effort. Other values fail with `invalid_request`. |
 | `--mcp-config <path>` | MCP servers for this run, repeatable. Servers listed here are trusted without approval. |
 | `--strict-mcp-config` | Ignore `.mcp.json` and user-scope MCP files. Use it so a target repository's own MCP file is never loaded. |
+| `--require-mcp <name>` | The run needs this MCP server, repeatable or comma-separated. If it is not connected after startup, the run ends with error `mcp_unavailable`, exit 9, before the first provider call. |
+| `--skill-sources <list>` | Skill tiers to load: comma list of `project` (skills under the working directory), `user` (user-scope directories and plugins), `bundled` (built-in skills). Default: all. Env: `CHRONOS_CODE_SKILL_SOURCES`; the flag wins. With `project`, the `skill` tool refuses any other skill. An invalid value fails with `invalid_request`. |
+| `--project-docs-budget <tokens>` | Token budget for the merged project docs (`AGENTS.md`, `CLAUDE.md`, …). Default 16000. Over the budget, the docs are summarized by the router model, or cut when there is none, and the stream gets a `warning` event. The summary cache is kept in the data home, never in the working directory. |
+| `--policy-file <path>` | Operator `security.yaml`, repeatable. Applied after the user (`$HOME/.chronos-code/security.yaml`) and project (`.chronos-code/security.yaml`) policies. Like them, it can only narrow: add `never_allow`, `denied_patterns`, `confirm`, denied paths or servers. A file that widens the policy, grants `hooks.trusted_digests`, or does not exist stops the run before it starts. `never_allow` still applies with `--dangerously-skip-permissions`. |
 | `--resume <session-id>` | Continue a session, even when the working directory changed (see below). |
 | `--ephemeral` | Same as `CHRONOS_CODE_EPHEMERAL=1`: no cross-project memory, learning or telemetry writes. |
 | `--dangerously-skip-permissions` | Run every tool call that would ask. Policy blocks and paths outside the workspace are still refused. Use only in a disposable environment. |
@@ -61,6 +65,8 @@ Every line is a JSON object:
 | `type` | `payload` |
 |---|---|
 | `session` | `session_id`, `model`, `provider`, `cwd`. Always first. |
+| `mcp_status` | `servers`: `name`, `state` (`connected`, `connection_failed`, `approval_required`, `denied`, `invalid`, `tool_registration_failed`, `not_configured`, …), `tools`, `error`. Second, before the first provider call. Written only when the primary agent has MCP servers or `--require-mcp` is set. `error` is a fixed text per state; it never holds a URL, header value or raw transport error. |
+| `warning` | `code`, `message`. A non-fatal startup condition, before the first provider call. Codes: `project_docs_summarized`, `project_docs_truncated`. |
 | `content` | `content`, `delta`. Assistant text. |
 | `thinking` | Reasoning text, when `--thinking` is on and the model streams it. |
 | `tool` | `id`, `name`, `arguments` (JSON string), `input` (object). |
@@ -96,6 +102,7 @@ Example stream (trimmed):
 | 6 | `budget_exhausted` | Spending cap reached. |
 | 7 | `verification_failed` | Verification did not pass. |
 | 8 | `session_not_found` | `--resume` named an unknown session. Retry without `--resume`. |
+| 9 | `mcp_unavailable` | A `--require-mcp` server did not connect. The `error` event has status `failed` and category `dependency`. |
 | 130 | `cancelled` | SIGINT or SIGTERM. |
 
 On SIGINT or SIGTERM the run stops the provider stream and tools, kills child processes (shell commands and stdio MCP servers) as a process group, saves the session, writes an `error` event with code `cancelled`, and exits 130. It forces exit if shutdown takes longer than 10 seconds.
@@ -107,10 +114,10 @@ On SIGINT or SIGTERM the run stops the provider stream and tools, kills child pr
 ```json
 {
   "mcpServers": {
-    "state-memory": {
+    "notes": {
       "type": "http",
-      "url": "http://state-mcp.ns.svc.cluster.local/mcp",
-      "headers": { "Authorization": "Bearer ${STATE_MCP_TOKEN}" }
+      "url": "http://notes-mcp.ns.svc.cluster.local/mcp",
+      "headers": { "Authorization": "Bearer ${NOTES_MCP_TOKEN}" }
     },
     "files": { "command": "npx", "args": ["-y", "some-mcp-server"] }
   }
@@ -125,6 +132,34 @@ On SIGINT or SIGTERM the run stops the provider stream and tools, kills child pr
 - Servers from `--mcp-config` connect without approval. Their tools still count as external tools, so pass `--dangerously-skip-permissions` for unattended runs.
 - Tool names are `mcp__<server>__<tool>`, with any character other than letters, digits, `_` and `-` replaced by `_`. For example, tool `echo` on server `fixture` is `mcp__fixture__echo`.
 
+## Operator command policy
+
+To refuse build, test and install commands in the `shell` tool and keep other commands, pass a policy file:
+
+```yaml
+shell:
+  never_allow:
+    - '^[\s(]*((\w+=\S*|env|exec|command|nohup|time|sudo|xargs(\s+-\S+)*|timeout(\s+-\S+)*\s+\S+|nice(\s+-\S+)*)\s+)*(\S*/)?(mvn|mvnw|gradle|gradlew|npm|npx|yarn|pnpm|pytest|make|gmake|tox|pip|pip3)(\s|\)|$)'
+    - '^[\s(]*((\w+=\S*|env|exec|command|nohup|time)\s+)*(\S*/)?python3?(\.\d+)?\s+-m\s+(pytest|pip)(\s|$)'
+```
+
+Each pattern is checked against every command segment (`&&`, `;` and `bash -c` are split). A refused call returns `security: shell command denied (matches never_allow pattern …)` to the model, and the run continues. `git status` and `echo make` still run. This is a command filter, not a sandbox: a script can still start a build.
+
+Do not use `denied_patterns` for this. It is a case-insensitive substring match, so `make` also refuses `git commit -m "make …"`.
+
+A `pre_tool_call` hook in a `-c` config file also refuses a call when it exits non-zero, but the model sees only the exit status, not the hook's stderr.
+
+## System content order
+
+Each request to the model is built in this order:
+
+1. The agent's system message: the built-in persona (`internal/defaults/agents/*.yaml`, or the config override) with the security text, then the `--system-prompt` and `--system-prompt-file` text. The caller text goes to the primary agent only, under an "Operator instructions" heading. That heading tells the model that the caller text wins over the built-in guidance (working style, autonomy, when to stop or ask, output format) when they conflict. Security rules still apply.
+2. Pinned system messages, in this order: the skill catalog, then the merged project docs (`AGENTS.md`, `CLAUDE.md`, …, root to working directory, within the `--project-docs-budget`). Project docs go to every agent, including specialists.
+3. The conversation history.
+4. The user message. Per-turn context (recalled memory, session summaries, learned patterns, code-intelligence hints) is put before it in a `<turn_context>` block, so it does not change the cached prefix.
+
+Put a rule that must win in `--system-prompt-file`. A rule at the end of a long `AGENTS.md` comes after the persona and is easier for the model to miss. `scripts/eval-operator-instructions.sh` measures this for a given model.
+
 ## Resume and isolation
 
 `--resume <id>` looks for the session in the current project's database, then in every other project under the same data home, and continues in the current working directory. If no database has it, the stream ends with `error` code `session_not_found` and exit 8. No new session is started.
@@ -137,6 +172,7 @@ On SIGINT or SIGTERM the run stops the provider stream and tools, kills child pr
 |---|---|
 | `CHRONOS_CODE_DATA_HOME` | Root for all state. Use a different value per workspace or tenant. |
 | `CHRONOS_CODE_EPHEMERAL=1` | Same as `--ephemeral`. |
+| `CHRONOS_CODE_SKILL_SOURCES` | Same as `--skill-sources`. The flag wins. |
 | `CHRONOS_CODE_PROVIDER`, `CHRONOS_CODE_MODEL` | Default provider and model when the flags are absent. |
 | `ANTHROPIC_API_KEY`, `AZURE_OPENAI_*`, `OPENAI_API_KEY` | Provider credentials. |
 
@@ -151,5 +187,6 @@ Under `$CHRONOS_CODE_DATA_HOME/projects/<name>-<hash>/` (default `~/.chronos-cod
 | `sessions.db` | Always. Needed for `--resume`. |
 | `plans.db`, `project.json`, `index/` | Always (plans, project marker, code index). |
 | `telemetry.db` | Not with `--ephemeral`. |
+| `projectdocs-cache.json` | Project docs were over the budget and a summary was made. |
 
 `$CHRONOS_CODE_DATA_HOME/memory.db` holds user and organization memory and is not touched with `--ephemeral`.

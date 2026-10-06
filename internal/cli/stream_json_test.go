@@ -63,6 +63,13 @@ func fakeToolModel(t *testing.T, toolRounds int, failWith int, toolName, toolArg
 
 func newStreamTestOrchestrator(t *testing.T, baseURL string) *orchestrator.Orchestrator {
 	t.Helper()
+	return newStreamTestOrchestratorWith(t, baseURL, nil)
+}
+
+// newStreamTestOrchestratorWith lets adjust change the config, and the
+// workspace at cfg.Workspace.Root, before the orchestrator is built.
+func newStreamTestOrchestratorWith(t *testing.T, baseURL string, adjust func(*config.Config)) *orchestrator.Orchestrator {
+	t.Helper()
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "note.txt"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -80,6 +87,9 @@ func newStreamTestOrchestrator(t *testing.T, baseURL string) *orchestrator.Orche
 		},
 		Workspace:    config.WorkspaceConfig{Root: workspace, IndexOnStart: &indexOnStart},
 		Verification: config.VerificationConfig{Mode: verification.ModeReport},
+	}
+	if adjust != nil {
+		adjust(cfg)
 	}
 	orch, err := orchestrator.New(t.Context(), cfg, "")
 	if err != nil {
@@ -113,7 +123,7 @@ func eventTypes(events []execution.EventEnvelope) []string {
 func TestRunStreamJSONToolCallGolden(t *testing.T) {
 	orch := newStreamTestOrchestrator(t, fakeModel(t, 1, 0).URL)
 	var out bytes.Buffer
-	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "read the note"}, newStreamEmitter(&out), "/work")
+	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "read the note"}, newStreamEmitter(&out), "/work", nil)
 	if err != nil {
 		t.Fatalf("runStreamJSON: %v\n%s", err, out.String())
 	}
@@ -172,7 +182,7 @@ func TestRunStreamJSONToolCallGolden(t *testing.T) {
 func TestRunStreamJSONProviderFailureGolden(t *testing.T) {
 	orch := newStreamTestOrchestrator(t, fakeModel(t, 0, http.StatusBadRequest).URL)
 	var out bytes.Buffer
-	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "hello"}, newStreamEmitter(&out), "/work")
+	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "hello"}, newStreamEmitter(&out), "/work", nil)
 	var exit *ExitError
 	if !asExitError(err, &exit) || exit.Code == ExitSuccess {
 		t.Fatalf("err = %v, want a non-zero ExitError", err)
@@ -200,7 +210,7 @@ func TestRunStreamJSONProviderFailureGolden(t *testing.T) {
 func TestRunStreamJSONMaxTurns(t *testing.T) {
 	orch := newStreamTestOrchestrator(t, fakeModel(t, -1, 0).URL)
 	var out bytes.Buffer
-	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "loop", MaxTurns: 1}, newStreamEmitter(&out), "/work")
+	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "loop", MaxTurns: 1}, newStreamEmitter(&out), "/work", nil)
 	var exit *ExitError
 	if !asExitError(err, &exit) || exit.Code != ExitFailure {
 		t.Fatalf("err = %v, want ExitFailure", err)
@@ -237,6 +247,23 @@ func TestStreamEmitterSingleTerminal(t *testing.T) {
 	e.emit(execution.EventContent, execution.ContentPayload{Content: "late"})
 	if got := len(decodeStream(t, out.Bytes())); got != 2 {
 		t.Fatalf("events = %d, want 2", got)
+	}
+}
+
+func TestParseRunFlagsPolicyFiles(t *testing.T) {
+	opts, _, err := parseRunFlags([]string{"--policy-file", "a.yaml", "--policy-file=b.yaml", "go"})
+	if err != nil || strings.Join(opts.policyFiles, ",") != "a.yaml,b.yaml" {
+		t.Fatalf("policyFiles = %v (%v)", opts.policyFiles, err)
+	}
+}
+
+func TestParseRunFlagsSkillSources(t *testing.T) {
+	opts, _, err := parseRunFlags([]string{"--skill-sources", "project", "go"})
+	if err != nil || opts.skillSources != "project" {
+		t.Fatalf("skillSources = %q (%v)", opts.skillSources, err)
+	}
+	if _, _, err := parseRunFlags([]string{"--skill-sources=repo", "go"}); err == nil {
+		t.Fatal("invalid --skill-sources accepted")
 	}
 }
 
@@ -316,7 +343,7 @@ func TestRunStreamJSONCancelDuringToolCall(t *testing.T) {
 	out := &syncBuffer{}
 	done := make(chan error, 1)
 	go func() {
-		done <- runStreamJSON(ctx, orch, orchestrator.ExecutionRequest{Message: "sleep"}, newStreamEmitter(out), "/work")
+		done <- runStreamJSON(ctx, orch, orchestrator.ExecutionRequest{Message: "sleep"}, newStreamEmitter(out), "/work", nil)
 	}()
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -363,4 +390,40 @@ func TestRunStreamJSONCancelDuringToolCall(t *testing.T) {
 func fileExists(path string) bool {
 	data, err := os.ReadFile(path)
 	return err == nil && strings.TrimSpace(string(data)) != ""
+}
+
+func TestRunStreamJSONOverBudgetProjectDocs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var workspace string
+	orch := newStreamTestOrchestratorWith(t, fakeModel(t, 0, 0).URL, func(cfg *config.Config) {
+		workspace = cfg.Workspace.Root
+		if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte(strings.Repeat("rule ", 20000)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.ProjectDocsBudget = 2000
+	})
+	var out bytes.Buffer
+	if err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "hello"}, newStreamEmitter(&out), "/work", nil); err != nil {
+		t.Fatalf("run: %v\n%s", err, out.String())
+	}
+	var warning execution.WarningPayload
+	for _, event := range decodeStream(t, out.Bytes()) {
+		if event.Type == execution.EventWarning {
+			if err := json.Unmarshal(event.Payload, &warning); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if warning.Code != "project_docs_truncated" || !strings.Contains(warning.Message, "2000-token budget") {
+		t.Fatalf("warning = %+v\n%s", warning, out.String())
+	}
+	entries, err := os.ReadDir(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if name := entry.Name(); name != "note.txt" && name != "AGENTS.md" {
+			t.Errorf("run wrote %s under the workspace", name)
+		}
+	}
 }

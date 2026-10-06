@@ -370,3 +370,40 @@ func writeSkill(t *testing.T, dir, name, description string) {
 		t.Fatal(err)
 	}
 }
+
+func TestParseSources(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want Sources
+		ok   bool
+	}{
+		{"", AllSources, true},
+		{"project", Sources{Project: true}, true},
+		{" User , bundled ", Sources{User: true, Bundled: true}, true},
+		{"project,repo", Sources{}, false},
+		{",", Sources{}, false},
+	} {
+		got, err := ParseSources(tc.in)
+		if (err == nil) != tc.ok || got != tc.want {
+			t.Errorf("ParseSources(%q) = %+v, %v", tc.in, got, err)
+		}
+	}
+}
+
+func TestDiscoverSourcesProjectOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	writeSkill(t, filepath.Join(root, ".agents", "skills"), "project-only", "repo")
+	writeSkill(t, filepath.Join(home, ".claude", "skills"), "user-only", "user")
+	writeSkill(t, filepath.Join(home, ".chronos-code", "plugins", "p", "skills"), "plugin-only", "plugin")
+	bundled := []*Skill{{Name: "code-review", Description: "bundled"}}
+
+	result, err := DiscoverSourcesReport(root, bundled, Sources{Project: true})
+	if err != nil {
+		t.Fatalf("DiscoverSourcesReport: %v", err)
+	}
+	if len(result.Skills) != 1 || result.Skills[0].Name != "project-only" {
+		t.Fatalf("skills = %+v, want only project-only", result.Skills)
+	}
+}

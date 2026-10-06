@@ -154,37 +154,63 @@ func (b *Bundle) raw() string {
 // injected function rather than owning a model.Provider itself.
 type Summarizer func(ctx context.Context, text string) (string, error)
 
+// Action reports how Render fitted the docs into the budget.
+type Action string
+
+const (
+	ActionVerbatim   Action = "verbatim"
+	ActionSummarized Action = "summarized"
+	ActionTruncated  Action = "truncated"
+)
+
+// Rendered is Render's output. Tokens is the size of the raw merge and
+// Budget the limit it was checked against.
+type Rendered struct {
+	Text   string
+	Action Action
+	Tokens int
+	Budget int
+}
+
 // Render returns b's merged docs as one string ready for injection at the
-// top of a system prompt. If the raw merge fits within TokenBudget (counted
-// against modelID via chronos's own tokenizer), it's returned verbatim.
-// Otherwise summarize is invoked once per distinct raw-text content hash and
-// the result cached at cachePath (ROADMAP.md §5.4: "cache the summary keyed
-// by content hash"); if summarize is nil or errors, the text is
-// hard-truncated instead, with a marker noting the cut.
-func Render(ctx context.Context, b *Bundle, modelID, cachePath string, summarize Summarizer) (string, error) {
+// top of a system prompt. If the raw merge fits within budget tokens
+// (TokenBudget when budget <= 0, counted against modelID via chronos's own
+// tokenizer), it's returned verbatim. Otherwise summarize is invoked once
+// per distinct raw-text content hash and the result cached at cachePath
+// (ROADMAP.md §5.4: "cache the summary keyed by content hash"); if
+// summarize is nil or errors, the text is hard-truncated instead, with a
+// marker noting the cut.
+func Render(ctx context.Context, b *Bundle, modelID, cachePath string, budget int, summarize Summarizer) (Rendered, error) {
+	if budget <= 0 {
+		budget = TokenBudget
+	}
 	raw := b.raw()
 	if raw == "" {
-		return "", nil
+		return Rendered{Action: ActionVerbatim, Budget: budget}, nil
 	}
 	counter := model.NewTokenCounter(modelID)
-	if counter.CountString(raw) <= TokenBudget {
-		return raw, nil
+	result := Rendered{Text: raw, Action: ActionVerbatim, Tokens: counter.CountString(raw), Budget: budget}
+	if result.Tokens <= budget {
+		return result, nil
 	}
 
 	hash := contentHash(raw)
 	cache := loadSummaryCache(cachePath)
 	if cached, ok := cache[hash]; ok {
-		return cached, nil
+		result.Text, result.Action = cached, ActionSummarized
+		return result, nil
 	}
 
 	if summarize != nil {
 		if summary, err := summarize(ctx, raw); err == nil && strings.TrimSpace(summary) != "" {
 			cache[hash] = summary
 			cache.save(cachePath)
-			return summary, nil
+			result.Text, result.Action = summary, ActionSummarized
+			return result, nil
 		}
 	}
-	return hardTruncate(raw, counter, TokenBudget), nil
+	result.Text, result.Action = hardTruncate(raw, counter, budget), ActionTruncated
+	return result, nil
 }
 
 // hardTruncate binary-searches for the longest byte-prefix of raw (plus a

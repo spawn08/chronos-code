@@ -66,6 +66,43 @@ var (
 	}
 )
 
+// Sources selects the discovery tiers. User covers the user-scope
+// directories and plugins.
+type Sources struct {
+	Project bool
+	User    bool
+	Bundled bool
+}
+
+// AllSources is the default: every tier.
+var AllSources = Sources{Project: true, User: true, Bundled: true}
+
+// ParseSources reads a comma list of "project", "user" and "bundled". An
+// empty value means AllSources.
+func ParseSources(value string) (Sources, error) {
+	if strings.TrimSpace(value) == "" {
+		return AllSources, nil
+	}
+	var sources Sources
+	for _, item := range strings.Split(value, ",") {
+		switch strings.ToLower(strings.TrimSpace(item)) {
+		case "project":
+			sources.Project = true
+		case "user":
+			sources.User = true
+		case "bundled":
+			sources.Bundled = true
+		case "":
+		default:
+			return Sources{}, fmt.Errorf("skill source %q is invalid (want project, user, or bundled)", strings.TrimSpace(item))
+		}
+	}
+	if sources == (Sources{}) {
+		return Sources{}, fmt.Errorf("skill sources %q name no source", value)
+	}
+	return sources, nil
+}
+
 // Skill is chronos-code's own skill representation: a named capability
 // bundle with trigger keywords for selection matching (ROADMAP.md §5.1's
 // SKILL.md frontmatter schema) and a markdown body injected verbatim when
@@ -331,10 +368,15 @@ func Discover(root string, bundled []*Skill) ([]*Skill, error) {
 
 // DiscoverReport merges all tiers while retaining file-level diagnostics.
 func DiscoverReport(root string, bundled []*Skill) (Discovery, error) {
+	return DiscoverSourcesReport(root, bundled, AllSources)
+}
+
+// DiscoverSourcesReport is DiscoverReport limited to the selected tiers.
+func DiscoverSourcesReport(root string, bundled []*Skill, sources Sources) (Discovery, error) {
 	var tiers [][]*Skill
 	var diagnostics []Diagnostic
 
-	if root != "" {
+	if root != "" && sources.Project {
 		for _, dir := range append([]string{filepath.Join(".chronos-code", "skills")}, projectSkillDirs...) {
 			loaded, err := LoadDirReport(filepath.Join(root, dir))
 			if err != nil {
@@ -345,7 +387,7 @@ func DiscoverReport(root string, bundled []*Skill) (Discovery, error) {
 		}
 	}
 
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := os.UserHomeDir(); err == nil && sources.User {
 		for _, dir := range append([]string{filepath.Join(".chronos-code", "skills")}, userSkillDirs...) {
 			loaded, err := LoadDirReport(filepath.Join(home, dir))
 			if err != nil {
@@ -380,7 +422,9 @@ func DiscoverReport(root string, bundled []*Skill) (Discovery, error) {
 		}
 	}
 
-	tiers = append(tiers, bundled)
+	if sources.Bundled {
+		tiers = append(tiers, bundled)
+	}
 
 	seen := make(map[string]bool)
 	var merged []*Skill

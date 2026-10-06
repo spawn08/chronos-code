@@ -95,7 +95,7 @@ func TestSplitModelProviderPrefix(t *testing.T) {
 
 func TestVersionInfoCapabilities(t *testing.T) {
 	info := currentVersionInfo()
-	want := map[string]bool{"stream-json": false, "mcp-http": false, "mcp-config": false, "prompt-stdin": false, "system-prompt": false, "max-turns": false, "thinking": false, "ephemeral": false}
+	want := map[string]bool{"stream-json": false, "mcp-http": false, "mcp-config": false, "prompt-stdin": false, "system-prompt": false, "max-turns": false, "thinking": false, "ephemeral": false, "mcp-status": false, "require-mcp": false, "skill-sources": false, "project-docs-budget": false, "policy-file": false}
 	for _, c := range info.Capabilities {
 		want[c] = true
 	}

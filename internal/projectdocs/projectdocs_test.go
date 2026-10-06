@@ -104,12 +104,12 @@ func TestRenderUnderBudgetReturnsVerbatim(t *testing.T) {
 	}
 
 	cachePath := filepath.Join(t.TempDir(), "cache.json")
-	out, err := Render(context.Background(), b, "gpt-4o", cachePath, nil)
+	out, err := Render(context.Background(), b, "gpt-4o", cachePath, 0, nil)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !strings.Contains(out, "short instructions") {
-		t.Errorf("Render output = %q, want it to contain the raw body verbatim", out)
+	if !strings.Contains(out.Text, "short instructions") || out.Action != ActionVerbatim {
+		t.Errorf("Render output = %+v, want it to contain the raw body verbatim", out)
 	}
 }
 
@@ -128,24 +128,24 @@ func TestRenderOverBudgetUsesSummarizerAndCaches(t *testing.T) {
 		return "condensed summary", nil
 	}
 
-	out, err := Render(context.Background(), b, "gpt-4o", cachePath, summarize)
+	out, err := Render(context.Background(), b, "gpt-4o", cachePath, 0, summarize)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if out != "condensed summary" {
-		t.Fatalf("Render output = %q, want condensed summary", out)
+	if out.Text != "condensed summary" || out.Action != ActionSummarized {
+		t.Fatalf("Render output = %+v, want condensed summary", out)
 	}
 	if calls != 1 {
 		t.Fatalf("summarize called %d times, want 1", calls)
 	}
 
 	// Second call with identical content must hit the cache, not summarize again.
-	out2, err := Render(context.Background(), b, "gpt-4o", cachePath, summarize)
+	out2, err := Render(context.Background(), b, "gpt-4o", cachePath, 0, summarize)
 	if err != nil {
 		t.Fatalf("Render (cached): %v", err)
 	}
-	if out2 != "condensed summary" || calls != 1 {
-		t.Fatalf("Render (cached) = %q, calls = %d, want cache hit with no extra summarize call", out2, calls)
+	if out2.Text != "condensed summary" || out2.Action != ActionSummarized || calls != 1 {
+		t.Fatalf("Render (cached) = %+v, calls = %d, want cache hit with no extra summarize call", out2, calls)
 	}
 }
 
@@ -158,12 +158,12 @@ func TestRenderOverBudgetFallsBackToHardTruncateWithoutSummarizer(t *testing.T) 
 	}
 
 	cachePath := filepath.Join(t.TempDir(), "cache.json")
-	out, err := Render(context.Background(), b, "gpt-4o", cachePath, nil)
+	out, err := Render(context.Background(), b, "gpt-4o", cachePath, 0, nil)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !strings.Contains(out, "truncated") {
-		t.Fatalf("Render output missing truncation marker: %q", out[:min(200, len(out))])
+	if !strings.Contains(out.Text, "truncated") || out.Action != ActionTruncated {
+		t.Fatalf("Render output missing truncation marker: %q", out.Text[:min(200, len(out.Text))])
 	}
 }
 
@@ -185,5 +185,21 @@ func TestWatchDirsIncludesGithubSubdirWhenPresent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("WatchDirs() = %v, want it to include the .github subdirectory", dirs)
+	}
+}
+
+func TestRenderHonorsExplicitBudget(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "AGENTS.md"), strings.Repeat("word ", 500))
+	b, err := Load(root, root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	out, err := Render(context.Background(), b, "gpt-4o", filepath.Join(t.TempDir(), "cache.json"), 100, nil)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if out.Action != ActionTruncated || out.Budget != 100 || out.Tokens <= 100 {
+		t.Fatalf("Render = action %s budget %d tokens %d, want truncated at 100", out.Action, out.Budget, out.Tokens)
 	}
 }

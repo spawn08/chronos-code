@@ -278,8 +278,9 @@ func (b *streamBridge) recordUsage(usage model.Usage) {
 
 // runStreamJSON executes request and writes the event stream. The returned
 // error carries the process exit status; the terminal event has been written
-// whenever execution began.
-func runStreamJSON(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, out *streamEmitter, cwd string) error {
+// whenever execution began. A server in requiredMCP that is not connected
+// ends the run before the first provider call.
+func runStreamJSON(ctx context.Context, orch *orchestrator.Orchestrator, request orchestrator.ExecutionRequest, out *streamEmitter, cwd string, requiredMCP []string) error {
 	provider, modelID := orch.EffectiveModelInfo()
 	bridge := newStreamBridge(out, func() string {
 		_, current := orch.EffectiveModelInfo()
@@ -303,6 +304,17 @@ func runStreamJSON(ctx context.Context, orch *orchestrator.Orchestrator, request
 		wg.Wait()
 	}()
 	out.emit(execution.EventSession, execution.SessionPayload{SessionID: orch.CurrentSessionID(), Model: modelID, Provider: provider, Cwd: cwd})
+	report := mcpStatusReport(orch, requiredMCP)
+	if len(report.Servers) > 0 {
+		out.emit(execution.EventMCPStatus, report)
+	}
+	if err := requiredMCPFailure(report, requiredMCP); err != nil {
+		out.terminate(execution.EventError, errorPayload{Error: mcpUnavailableError(err), Status: execution.StatusFailed, StopReason: execution.StopMCPUnavailable, SessionID: orch.CurrentSessionID()})
+		return &ExitError{Code: ExitMCPUnavailable, Err: err}
+	}
+	if notice := orch.ProjectDocsNotice(); notice != nil {
+		out.emit(execution.EventWarning, execution.WarningPayload{Code: "project_docs_" + notice.Action, Message: notice.Message()})
+	}
 
 	var result orchestrator.ExecutionResult
 	var err error

@@ -581,7 +581,7 @@ func permissionStrength(permission MCPPermission) int {
 }
 
 func safeSource(source string) string {
-	if source == "user" || source == "project" {
+	if source == "user" || source == "project" || source == "operator" {
 		return source
 	}
 	return "configured"

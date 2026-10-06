@@ -36,6 +36,20 @@ type Config struct {
 	// home). Per-process only, never read from YAML.
 	SessionsDBOverride string `yaml:"-"`
 
+	// SkillSources limits skill discovery to a comma list of project, user
+	// and bundled (run --skill-sources or CHRONOS_CODE_SKILL_SOURCES).
+	// Empty means every source. Per-process only, never read from YAML.
+	SkillSources string `yaml:"-"`
+
+	// ProjectDocsBudget is the token budget for merged project docs (run
+	// --project-docs-budget). Zero means the default. Never read from YAML.
+	ProjectDocsBudget int `yaml:"-"`
+
+	// PolicyFiles are operator security.yaml overlays (run --policy-file),
+	// applied after the user and project overlays. They can only narrow the
+	// policy. Never read from YAML.
+	PolicyFiles []string `yaml:"-"`
+
 	Router       RouterConfig                `yaml:"router,omitempty"`
 	Security     SecurityConfig              `yaml:"security,omitempty"`
 	Memory       MemoryConfig                `yaml:"memory,omitempty"`

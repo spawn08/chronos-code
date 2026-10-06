@@ -1608,6 +1608,27 @@ func TestSkillCatalogRequiresAgentCapabilities(t *testing.T) {
 	}
 }
 
+func TestSkillSourcesProjectRefusesBundledSkill(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	writeTestSkill(t, root, "team-workflow", "issuetoken", "project body")
+	a := &agent.Agent{ID: "coder", Model: &routingTestProvider{model: "claude-sonnet"}, Tools: tool.NewRegistry(), Guardrails: guardrails.NewEngine()}
+	catalog := setupSkills(&config.Config{SkillSources: "project"}, root, map[string]*agent.Agent{"coder": a})
+	if len(catalog) != 1 || catalog[0].Name != "team-workflow" {
+		t.Fatalf("catalog = %+v, want only the project skill", catalog)
+	}
+	def, ok := a.Tools.Get(skillToolName)
+	if !ok {
+		t.Fatal("skill tool not registered")
+	}
+	if _, err := def.Handler(context.Background(), map[string]any{"name": "code-review"}); err == nil {
+		t.Fatal("skill tool loaded a bundled skill with project-only sources")
+	}
+	if _, err := def.Handler(context.Background(), map[string]any{"name": "team-workflow"}); err != nil {
+		t.Fatalf("load project skill: %v", err)
+	}
+}
+
 func TestSkillToolResultIsNotCompressed(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
@@ -2423,7 +2444,7 @@ func TestApprovalHandlerReplacementRetainsPolicyComposition(t *testing.T) {
 
 func TestCallerMCPServersAreTrustedWithoutSecurityYAMLEntry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
-	body := `{"mcpServers":{"state-memory":{"type":"http","url":"http://127.0.0.1:9/mcp","headers":{"Authorization":"${SQUADRON_TOKEN}"}}}}`
+	body := `{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:9/mcp","headers":{"Authorization":"${NOTES_MCP_TOKEN}"}}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2432,14 +2453,14 @@ func TestCallerMCPServersAreTrustedWithoutSecurityYAMLEntry(t *testing.T) {
 	if err != nil || len(caller) != 1 {
 		t.Fatalf("loadCallerMCPServers() = %v, %v", caller, err)
 	}
-	if caller[0].Transport != mcp.TransportStreamableHTTP || caller[0].Headers["Authorization"] != "${SQUADRON_TOKEN}" {
+	if caller[0].Transport != mcp.TransportStreamableHTTP || caller[0].Headers["Authorization"] != "${NOTES_MCP_TOKEN}" {
 		t.Fatalf("caller config = %#v", caller[0])
 	}
 	agents := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
 	client := &orchestratorMCPClient{}
 	runtimes := setupMCPRuntimesWithCaller(context.Background(), agents, caller, nil, policy, time.Second,
 		func(mcp.ServerConfig) (mcpdiscover.RuntimeClient, error) { return client, nil })
-	if _, ok := agents["coder"].Tools.Get(mcpdiscover.ToolName("state-memory", "read")); !ok {
+	if _, ok := agents["coder"].Tools.Get(mcpdiscover.ToolName("notes", "read")); !ok {
 		t.Fatalf("caller server tools were not registered: statuses=%v", runtimes[0].Statuses())
 	}
 
@@ -2455,7 +2476,7 @@ func TestCallerMCPServersAreTrustedWithoutSecurityYAMLEntry(t *testing.T) {
 
 func TestCallerMCPServersAcceptLiteralCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mcp.json")
-	body := `{"mcpServers":{"state-memory":{"type":"http","url":"http://svc.ns.svc.cluster.local/mcp","headers":{"Authorization":"Bearer literal-token"}}}}`
+	body := `{"mcpServers":{"notes":{"type":"http","url":"http://svc.ns.svc.cluster.local/mcp","headers":{"Authorization":"Bearer literal-token"}}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

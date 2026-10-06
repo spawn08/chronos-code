@@ -94,6 +94,7 @@ type Orchestrator struct {
 	attBudget          *attention.Budgeter
 	teams              map[string]*team.Team
 	projectDocsWatcher *projectdocs.Watcher
+	projectDocsNotice  *ProjectDocsNotice
 	skillCatalog       []*skills.Skill
 	permissionChecker  *security.PermissionChecker
 	permissionYolo     atomic.Bool
@@ -370,7 +371,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	rt, routingConfig := setupRouter(ctx, cfg, projectDir, selectPrimaryAgent(agents, order))
 	setupPricing(projectDir, userDir)
 
-	policy, err := setupSecurity(projectDir, userDir, root, store, agents)
+	policy, err := setupSecurity(projectDir, userDir, root, store, agents, cfg.PolicyFiles...)
 	if err != nil {
 		return nil, fmt.Errorf("configure security: %w", err)
 	}
@@ -461,7 +462,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 
 	// Project-document compression can invoke a model. Keep it behind the
 	// capability contract so invalid runtime prompts fail before any model call.
-	pdWatcher := setupProjectDocs(ctx, cfg, root, agents)
+	pdWatcher, pdNotice := setupProjectDocs(ctx, cfg, root, paths.Dir, agents)
 	orch.projectDocsWatcher = pdWatcher
 	setupConversationPins(store, agents)
 
@@ -490,6 +491,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		attBudget:          attBudget,
 		teams:              teams,
 		projectDocsWatcher: pdWatcher,
+		projectDocsNotice:  pdNotice,
 		skillCatalog:       skillCatalog,
 		permissionChecker:  security.NewPermissionChecker(policy, root),
 		hookRunner:         hookRunner,
@@ -1396,8 +1398,10 @@ func setupLearnedPatternPins(store *learning.Store, repoPath, sourceRevision str
 // re-renders on any candidate file change without requiring an agent
 // rebuild, since the injected pins read a mutex-guarded pointer rather than
 // a value baked in at startup. Returns nil if there are no instructions
-// files to watch, or if the workspace root can't be established.
-func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agents map[string]*agent.Agent) *projectdocs.Watcher {
+// files to watch, or if the workspace root can't be established. The
+// summary cache lives in dataDir, never in the workspace. The notice is
+// non-nil when the startup render summarized or cut the docs.
+func setupProjectDocs(ctx context.Context, cfg *config.Config, root, dataDir string, agents map[string]*agent.Agent) (*projectdocs.Watcher, *ProjectDocsNotice) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = root
@@ -1411,30 +1415,36 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 	bundle, err := projectdocs.Load(root, cwd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: load project instructions: %v\n", err)
-		return nil
+		return nil, nil
 	}
 	if bundle.Empty() {
-		return nil
+		return nil, nil
 	}
 
 	modelID := ""
 	if cfg.Defaults != nil {
 		modelID = cfg.Defaults.Model.Model
 	}
-	cachePath := filepath.Join(root, config.ConfigDirName, "projectdocs-cache.json")
+	cachePath := filepath.Join(dataDir, "projectdocs-cache.json")
 	summarize := projectDocsSummarizer(cfg)
 
 	var mu sync.RWMutex
+	var notice *ProjectDocsNotice
 	render := func(b *projectdocs.Bundle) string {
-		out, err := projectdocs.Render(ctx, b, modelID, cachePath, summarize)
+		out, err := projectdocs.Render(ctx, b, modelID, cachePath, cfg.ProjectDocsBudget, summarize)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: render project instructions: %v\n", err)
 			return ""
 		}
-		return out
+		if out.Action != projectdocs.ActionVerbatim {
+			notice = &ProjectDocsNotice{Action: string(out.Action), Tokens: out.Tokens, Budget: out.Budget}
+			fmt.Fprintf(os.Stderr, "warning: %s\n", notice.Message())
+		}
+		return out.Text
 	}
 
 	rendered := render(bundle)
+	startup := notice
 	get := func() string {
 		mu.RLock()
 		defer mu.RUnlock()
@@ -1459,7 +1469,7 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 
 	dirs, err := projectdocs.WatchDirs(root, cwd)
 	if err != nil {
-		return nil
+		return nil, startup
 	}
 	watcher, err := projectdocs.Watch(ctx, dirs, func() {
 		b, err := projectdocs.Load(root, cwd)
@@ -1473,9 +1483,27 @@ func setupProjectDocs(ctx context.Context, cfg *config.Config, root string, agen
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: watch project instructions: %v\n", err)
-		return nil
+		return nil, startup
 	}
-	return watcher
+	return watcher, startup
+}
+
+// ProjectDocsNotice reports that the merged project docs did not fit the
+// token budget and were summarized or truncated.
+type ProjectDocsNotice struct {
+	Action string
+	Tokens int
+	Budget int
+}
+
+func (n ProjectDocsNotice) Message() string {
+	return fmt.Sprintf("project instructions (%d tokens) exceed the %d-token budget; %s", n.Tokens, n.Budget, n.Action)
+}
+
+// ProjectDocsNotice returns the startup project-docs notice, or nil when
+// the docs fit the budget.
+func (o *Orchestrator) ProjectDocsNotice() *ProjectDocsNotice {
+	return o.projectDocsNotice
 }
 
 // projectDocsSummarizer builds a projectdocs.Summarizer from cfg.Router's
@@ -1533,7 +1561,12 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 	for _, diagnostic := range bundledDiscovery.Diagnostics {
 		fmt.Fprintf(os.Stderr, "warning: skill %s: %s\n", diagnostic.Source, diagnostic.Message)
 	}
-	discovery, err := skills.DiscoverReport(root, bundledDiscovery.Skills)
+	sources, err := skills.ParseSources(cfg.SkillSources)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: skill sources: %v\n", err)
+		return nil
+	}
+	discovery, err := skills.DiscoverSourcesReport(root, bundledDiscovery.Skills, sources)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: discover skills: %v\n", err)
 		return nil
@@ -1706,11 +1739,12 @@ func setupGuardrails(cfg *config.Config, projectDir string, agents map[string]*a
 	return grCfg
 }
 
-// setupSecurity resolves the embedded security floor with optional user and
-// project overlays, then attaches the effective guard to every agent. Invalid
-// or weakening overlays fail startup rather than dropping to an empty policy.
-func setupSecurity(projectDir, userDir, root string, store storage.Storage, agents map[string]*agent.Agent) (*security.Policy, error) {
-	policy, err := ResolvePolicy(projectDir, userDir)
+// setupSecurity resolves the embedded security floor with optional user,
+// project and operator overlays, then attaches the effective guard to every
+// agent. Invalid or weakening overlays fail startup rather than dropping to
+// an empty policy.
+func setupSecurity(projectDir, userDir, root string, store storage.Storage, agents map[string]*agent.Agent, policyFiles ...string) (*security.Policy, error) {
+	policy, err := ResolvePolicy(projectDir, userDir, policyFiles...)
 	if err != nil {
 		return nil, err
 	}
@@ -1722,8 +1756,11 @@ func setupSecurity(projectDir, userDir, root string, store storage.Storage, agen
 }
 
 // ResolvePolicy resolves the embedded security floor with the optional
-// user and project overlays (security.yaml in userDir and projectDir).
-func ResolvePolicy(projectDir, userDir string) (*security.Policy, error) {
+// user and project overlays (security.yaml in userDir and projectDir), then
+// the operator policy files (run --policy-file). Like every overlay, an
+// operator file can only narrow the policy; unlike the directory overlays,
+// a missing file is an error.
+func ResolvePolicy(projectDir, userDir string, policyFiles ...string) (*security.Policy, error) {
 	floor, err := defaults.ReadFile("security.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded security floor: %w", err)
@@ -1747,6 +1784,13 @@ func ResolvePolicy(projectDir, userDir string) (*security.Policy, error) {
 			return nil, fmt.Errorf("read %s security overlay: %w", candidate.source, readErr)
 		}
 		overlays = append(overlays, security.Overlay{Source: candidate.source, Data: data})
+	}
+	for _, path := range policyFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read operator policy file: %w", err)
+		}
+		overlays = append(overlays, security.Overlay{Source: "operator", Data: data})
 	}
 	return security.ResolvePolicy(floor, overlays...)
 }

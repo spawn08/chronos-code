@@ -36,6 +36,7 @@ const (
 	ErrorMaxTurns           ErrorCode = "max_turns"
 	ErrorSessionNotFound    ErrorCode = "session_not_found"
 	ErrorInternal           ErrorCode = "internal_error"
+	ErrorMCPUnavailable     ErrorCode = "mcp_unavailable"
 )
 
 type ErrorCategory string
@@ -51,6 +52,7 @@ const (
 	ErrorCategoryCancellation   ErrorCategory = "cancellation"
 	ErrorCategoryLimit          ErrorCategory = "limit"
 	ErrorCategoryInternal       ErrorCategory = "internal"
+	ErrorCategoryDependency     ErrorCategory = "dependency"
 )
 
 type Usage struct {
@@ -114,6 +116,8 @@ type EnvelopeEventType string
 
 const (
 	EventSession            EnvelopeEventType = "session"
+	EventMCPStatus          EnvelopeEventType = "mcp_status"
+	EventWarning            EnvelopeEventType = "warning"
 	EventContent            EnvelopeEventType = "content"
 	EventThinking           EnvelopeEventType = "thinking"
 	EventToolResult         EnvelopeEventType = "tool_result"
@@ -158,6 +162,27 @@ type SessionPayload struct {
 	Model     string `json:"model"`
 	Provider  string `json:"provider"`
 	Cwd       string `json:"cwd"`
+}
+
+// MCPStatusPayload reports the primary agent's MCP servers after startup,
+// before any provider call.
+type MCPStatusPayload struct {
+	Servers []MCPServerStatus `json:"servers"`
+}
+
+// MCPServerStatus is one server's startup state. Error is a fixed text per
+// state: it never holds a URL, header value or raw transport error.
+type MCPServerStatus struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Tools int    `json:"tools"`
+	Error string `json:"error,omitempty"`
+}
+
+// WarningPayload is a non-fatal startup condition the caller may act on.
+type WarningPayload struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // ToolResultPayload reports one finished tool call.
