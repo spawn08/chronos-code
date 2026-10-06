@@ -22,6 +22,9 @@ func (o *Orchestrator) openTaskRuntime(taskID string, explicitTaskID bool, works
 	if err != nil {
 		return nil, err
 	}
+	if o.policy != nil {
+		runtime.refusesShell = o.policy.RefusesShellCommand
+	}
 	if !explicitTaskID || o.cfg == nil || !o.cfg.Ledger.Persist {
 		return runtime, nil
 	}

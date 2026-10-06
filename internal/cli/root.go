@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -454,7 +455,7 @@ func runAgents() error {
 	if len(os.Args) < 3 || os.Args[2] != "list" || len(os.Args) > 3 {
 		return fmt.Errorf("usage: chronos-code agents list")
 	}
-	cfg, err := loadConfigWithModelSelection()
+	cfg, err := loadConfigForInspection()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -514,6 +515,19 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 	return orch, cfg, nil
 }
 
+// errProviderModelRequired marks a provider selection that cannot name a
+// model (for example Azure without a deployment). Read-only commands such as
+// `models` and `config show` fall back to the unselected config on it so the
+// user can still inspect what to set.
+var errProviderModelRequired = errors.New("provider has no model")
+
+// providerModelError carries the user-facing explanation while matching
+// errProviderModelRequired under errors.Is.
+type providerModelError struct{ msg string }
+
+func (e *providerModelError) Error() string { return e.msg }
+func (e *providerModelError) Unwrap() error { return errProviderModelRequired }
+
 func loadConfigWithModelSelection() (*config.Config, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -537,6 +551,10 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 			modelSource = ""
 		}
 	}
+	store := auth.NewStore()
+	authorized := func(provider string) bool {
+		return auth.Resolve(context.Background(), store, provider).Token != ""
+	}
 	provider = auth.CanonicalProvider(provider)
 	if provider == "" {
 		if prefix, rest, ok := splitModelProviderPrefix(modelID, cfg); ok {
@@ -546,14 +564,14 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 	}
 	if provider == "" && modelID == "" {
 		_, current, _, _ := cfg.PrimaryAgentModel()
-		store := auth.NewStore()
-		provider = credentialProvider(cfg, current, func(provider string) bool {
-			return auth.Resolve(context.Background(), store, provider).Token != ""
-		})
+		provider = credentialProvider(cfg, current, authorized)
 		if provider == "" {
 			return cfg, nil
 		}
 		providerSource = "auto:only authorized provider"
+		if provider == "azure" && azureEnvConfigured() {
+			providerSource = "auto:azure environment"
+		}
 	}
 	_, current, _, _ := cfg.PrimaryAgentModel()
 	if provider == "" {
@@ -563,9 +581,33 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 		} else {
 			provider = auth.CanonicalProvider(current.Provider)
 			providerSource = ""
+			var owners, authorizedOwners []string
 			for _, info := range modelinfo.All() {
-				if info.Model == modelID && info.Provider != provider {
-					return nil, fmt.Errorf("model %q is not unique to a provider; supply --provider or CHRONOS_CODE_PROVIDER", modelID)
+				owner := auth.CanonicalProvider(info.Provider)
+				if info.Model != modelID || slices.Contains(owners, owner) {
+					continue
+				}
+				owners = append(owners, owner)
+				if authorized(owner) {
+					authorizedOwners = append(authorizedOwners, owner)
+				}
+			}
+			switch {
+			case slices.Contains(owners, provider):
+				// The configured provider serves this model.
+			case len(owners) == 1:
+				provider, providerSource = owners[0], "model:catalog"
+			case len(authorizedOwners) == 1:
+				provider, providerSource = authorizedOwners[0], "model:catalog (only authorized provider)"
+			case len(owners) > 1:
+				return nil, fmt.Errorf("model %q is not unique to a provider; supply --provider or CHRONOS_CODE_PROVIDER", modelID)
+			default:
+				// An unlisted model (typically a custom Azure deployment
+				// name) cannot be placed from the catalog. If the configured
+				// provider has no credential and exactly one other does,
+				// that is the only provider that can serve it.
+				if alt := credentialProvider(cfg, current, authorized); alt != "" {
+					provider, providerSource = alt, "auto:only authorized provider"
 				}
 			}
 		}
@@ -581,7 +623,7 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 		if modelID == "" {
 			modelID = defaultProviderModel(provider)
 			if modelID == "" {
-				return nil, fmt.Errorf("provider %q does not have a configured model; supply --model or CHRONOS_CODE_MODEL (see chronos-code models %s)", provider, provider)
+				return nil, providerModelRequiredError(provider, authorized(provider))
 			}
 			modelSource = "provider default"
 		}
@@ -595,6 +637,45 @@ func loadConfigWithModelSelection() (*config.Config, error) {
 		cfg.Router.Enabled = false
 	}
 	return cfg, nil
+}
+
+// providerModelRequiredError explains how to name a model for a provider that
+// has no usable default. Azure is special: it has no default because the
+// model is the user's own deployment name.
+func providerModelRequiredError(provider string, hasCredential bool) error {
+	if provider == "azure" {
+		msg := "azure needs a deployment name: set AZURE_OPENAI_DEPLOYMENT, or supply --model <deployment> or CHRONOS_CODE_MODEL"
+		if !hasCredential {
+			msg += "; no Azure API key was found either (set AZURE_OPENAI_API_KEY or run chronos-code login azure)"
+		}
+		return &providerModelError{msg: msg}
+	}
+	return &providerModelError{msg: fmt.Sprintf("provider %q does not have a configured model; supply --model or CHRONOS_CODE_MODEL (see chronos-code models %s)", provider, provider)}
+}
+
+// loadConfigForInspection is loadConfigWithModelSelection for commands that
+// only read configuration (models, config show, agents list). When the
+// selection cannot name a model it warns and returns the unselected config
+// rather than failing, since these commands are how a user finds the model.
+func loadConfigForInspection() (*config.Config, error) {
+	cfg, err := loadConfigWithModelSelection()
+	if errors.Is(err, errProviderModelRequired) {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		return config.Load(configPath)
+	}
+	return cfg, err
+}
+
+// azureEnvConfigured reports whether Azure-specific environment variables are
+// set. They are opt-in signals, unlike a bare OPENAI_API_KEY that many tools
+// export.
+func azureEnvConfigured() bool {
+	for _, name := range []string{"AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_DEPLOYMENT"} {
+		if strings.TrimSpace(os.Getenv(name)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // splitModelProviderPrefix recognizes "<provider>/<model>" (for example
@@ -622,7 +703,10 @@ func splitModelProviderPrefix(modelID string, cfg *config.Config) (provider, mod
 
 // Credentials select a provider only when the configured primary has no usable
 // credential and exactly one other provider is authorized. An explicit model
-// or provider flag/env always wins; multiple credentials leave YAML in charge.
+// or provider flag/env always wins; multiple credentials leave YAML in charge,
+// except that Azure wins when its own environment (endpoint or deployment) is
+// set, and an Azure deployment with no credential anywhere selects Azure so the
+// failure names Azure instead of surfacing as an Anthropic auth error.
 func credentialProvider(cfg *config.Config, current agent.ModelConfig, authorized func(string) bool) string {
 	if current.APIKey != "" || authorized(current.Provider) {
 		return ""
@@ -638,17 +722,27 @@ func credentialProvider(cfg *config.Config, current agent.ModelConfig, authorize
 			seen[info.Provider] = true
 		}
 	}
-	selected := ""
+	var candidates []string
 	for _, provider := range providers {
 		if provider == "" || provider == auth.CanonicalProvider(current.Provider) || !authorized(provider) {
 			continue
 		}
-		if selected != "" {
-			return ""
-		}
-		selected = provider
+		candidates = append(candidates, provider)
 	}
-	return selected
+	switch {
+	case len(candidates) == 1:
+		return candidates[0]
+	case len(candidates) > 1:
+		if slices.Contains(candidates, "azure") && azureEnvConfigured() {
+			return "azure"
+		}
+		return ""
+	case auth.CanonicalProvider(current.Provider) != "azure" && strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT")) != "":
+		// A deployment name is deliberate (unlike an ambient endpoint), and
+		// without a credential nothing else could run anyway.
+		return "azure"
+	}
+	return ""
 }
 
 // Provider-only selection uses a known API default, not the arbitrary first
@@ -1012,7 +1106,7 @@ func runConfig() error {
 	}
 	switch os.Args[2] {
 	case "show":
-		cfg, err := loadConfigWithModelSelection()
+		cfg, err := loadConfigForInspection()
 		if err != nil {
 			return err
 		}
@@ -1055,7 +1149,7 @@ func runModels() error {
 	if len(os.Args) > 3 {
 		return fmt.Errorf("usage: chronos-code models [provider] | models refresh")
 	}
-	cfg, err := loadConfigWithModelSelection()
+	cfg, err := loadConfigForInspection()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}

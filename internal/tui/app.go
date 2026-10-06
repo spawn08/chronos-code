@@ -454,6 +454,12 @@ type appModel struct {
 	headerCacheAgent   string
 	headerCacheDir     string
 
+	// liveModels holds provider model lists fetched from vendor APIs (azure
+	// deployments in particular) so /model completions can offer them.
+	// liveModelsRequested ensures the fetch fires once per session.
+	liveModels          map[string][]modelinfo.Info
+	liveModelsRequested bool
+
 	authCheckedAt time.Time
 	authSignedIn  bool
 	authModelID   string
@@ -801,6 +807,15 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.dispatchQueued()
 
 	case modelPickerLiveMsg:
+		for _, r := range msg.results {
+			if r.ok && len(r.models) > 0 {
+				if m.liveModels == nil {
+					m.liveModels = make(map[string][]modelinfo.Info)
+				}
+				m.liveModels[r.provider] = r.models
+			}
+		}
+		m.completionCached = false
 		if m.picker != nil && m.picker.isModelPicker {
 			for _, r := range msg.results {
 				if r.ok && len(r.models) > 0 {
@@ -1039,6 +1054,12 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.input, cmd = m.input.Update(msg)
 	if completions := m.inputCompletions(); m.completionIdx >= len(completions) {
 		m.completionIdx = 0
+	}
+	if m.orch != nil && !m.liveModelsRequested && strings.HasPrefix(m.input.Value(), "/model ") {
+		// First /model argument of the session: fetch live model lists in
+		// the background so completions can include real Azure deployments.
+		m.liveModelsRequested = true
+		cmd = tea.Batch(cmd, fetchModelPickerLiveCmd(m.ctx, m.orch))
 	}
 	m.resizeViewport()
 	return m, cmd

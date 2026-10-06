@@ -249,6 +249,20 @@ func filepathBase(path string) string {
 	return path
 }
 
+// RefusesShellCommand reports whether a shell.never_allow rule refuses a
+// segment of command. Such a command is refused in every approval mode.
+func (p *Policy) RefusesShellCommand(command string) bool {
+	if p == nil {
+		return false
+	}
+	for _, segment := range analyzeShellCommand(command).segments {
+		if matchesAnyRegex(p.neverAllow, segment) {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesAnyRegex(patterns []*regexp.Regexp, value string) bool {
 	for _, pattern := range patterns {
 		if pattern.MatchString(value) {

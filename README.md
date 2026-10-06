@@ -235,9 +235,10 @@ defaults:
 
 - `--provider` and `--model` override the primary agent for the current process. `CHRONOS_CODE_PROVIDER` / `CHRONOS_CODE_MODEL` do the same when the flag is absent. Flags always win over YAML and request-time routing.
 - If you switch provider without a model, a model is reused only when that provider already has one configured on a resolved agent. Otherwise the command fails and asks for `--model`, so a provider is never paired with a model it can't run.
-- At startup, if the configured provider has no credential and exactly one other provider is authorized, Chronos Code switches to that provider. With several authorized providers, the YAML choice is kept.
+- At startup, if the configured provider has no credential and exactly one other provider is authorized, Chronos Code switches to that provider. With several authorized providers, the YAML choice is kept, unless Azure is one of them and `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_BASE_URL`, or `AZURE_OPENAI_DEPLOYMENT` is set, in which case Azure is used. An Azure deployment with no credential anywhere also selects Azure, so a missing key is reported against Azure rather than as an Anthropic authentication failure.
+- `--model <id>` without `--provider` picks the provider that serves that model. When the model is unlisted (a custom Azure deployment name, for example) and the configured provider has no credential, the one authorized provider is used. Use `azure/<deployment>` or `--provider azure` to be explicit.
 - `chronos-code models [provider]` lists live Anthropic, OpenAI, or Azure models when you're authorized, and labels static fallback results. In the TUI, `/model` lists models and Tab completes `/model <provider> <id>`.
-- Azure needs an endpoint and a real deployment name (`AZURE_OPENAI_DEPLOYMENT` or `--model`).
+- Azure needs an endpoint and a real deployment name (`AZURE_OPENAI_DEPLOYMENT` or `--model`). If you have only the key and endpoint, startup fails with a message saying so; `chronos-code models azure` and `config show` still work to help you find it. In the TUI, `/model azure-openai …` (or `azure openai`) matches Azure entries, and live Azure models are added to the suggestions once fetched.
 - `chronos-code config show` prints the effective primary agent, provider, and model, and where each value came from.
 
 </details>

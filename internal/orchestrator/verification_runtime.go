@@ -33,6 +33,9 @@ type taskRuntime struct {
 	usageMu          sync.Mutex
 	usage            model.Usage
 	costMicrodollars int64
+	// refusesShell reports whether the security policy refuses a shell
+	// command outright; nil refuses nothing.
+	refusesShell func(command string) bool
 }
 
 func newTaskRuntime(taskID, workspaceRoot string) (*taskRuntime, error) {

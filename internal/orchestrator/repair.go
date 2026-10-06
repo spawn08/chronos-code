@@ -164,21 +164,52 @@ func obligationAction(obligation verification.Obligation, changed []string) stri
 }
 
 func testCommandHint(changed []string) string {
+	commands := testCommandCandidates(changed)
+	for i, command := range commands {
+		commands[i] = "`" + command + "`"
+	}
+	if len(commands) == 1 {
+		return commands[0]
+	}
+	return strings.Join(commands[:len(commands)-1], ", ") + ", or " + commands[len(commands)-1]
+}
+
+// testCommandCandidates lists the test commands suggested for changed paths:
+// the first recognized language's command, or common commands otherwise.
+func testCommandCandidates(changed []string) []string {
 	for _, path := range changed {
 		switch strings.ToLower(filepath.Ext(path)) {
 		case ".go":
-			return "`go test ./...`"
+			return []string{"go test ./..."}
 		case ".py":
-			return "`pytest`"
+			return []string{"pytest"}
 		case ".rs":
-			return "`cargo test`"
+			return []string{"cargo test"}
 		case ".js", ".jsx", ".ts", ".tsx":
-			return "`npm test`"
+			return []string{"npm test"}
 		case ".java", ".kt":
-			return "`mvn test`"
+			return []string{"mvn test"}
 		}
 	}
-	return "`go test ./...`, `npm test`, `pytest`, or `cargo test`"
+	return []string{"go test ./...", "npm test", "pytest", "cargo test"}
+}
+
+// obligationRefused reports whether every command that could satisfy the
+// obligation is refused. A test obligation without a command counts as
+// refused only when all of its suggested test commands are.
+func obligationRefused(obligation verification.Obligation, refused func(string) bool) bool {
+	if obligation.Command != "" {
+		return refused(obligation.Command)
+	}
+	if obligation.Kind != verification.KindTest {
+		return false
+	}
+	for _, command := range testCommandCandidates(obligation.Paths) {
+		if !refused(command) {
+			return false
+		}
+	}
+	return true
 }
 
 func verificationFailureFingerprint(decision verification.Decision) string {

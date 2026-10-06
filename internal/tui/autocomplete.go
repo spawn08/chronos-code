@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -84,7 +85,34 @@ func inputCompletions(input string, agents, subagents, skillNames, files, mcpSer
 	default:
 		return nil
 	}
-	return rankCompletions(candidates, strings.ToLower(input))
+	needle := strings.ToLower(input)
+	if strings.HasPrefix(input, "/model ") {
+		needle = normalizeModelQuery(needle)
+	}
+	return rankCompletions(candidates, needle)
+}
+
+// modelProviderAliases are spellings people type for the azure provider.
+// Candidates always use the canonical "azure", so without this a query such
+// as "/model azure-openai" or "/model azure openai" matches nothing.
+var modelProviderAliases = []string{"azure-openai", "azure_openai", "azure openai", "azureopenai"}
+
+// normalizeModelQuery rewrites a leading provider alias in a lowercased
+// "/model <query>" input to the canonical provider name.
+func normalizeModelQuery(input string) string {
+	rest := strings.TrimPrefix(input, "/model ")
+	trimmed := strings.TrimLeft(rest, " \t")
+	for _, alias := range modelProviderAliases {
+		if !strings.HasPrefix(trimmed, alias) {
+			continue
+		}
+		tail := trimmed[len(alias):]
+		if tail != "" && tail[0] != ' ' && tail[0] != '\t' {
+			continue
+		}
+		return "/model azure" + tail
+	}
+	return input
 }
 
 func atCompletions(query string, agents, files []string) []string {
@@ -267,7 +295,7 @@ func (m *appModel) computeInputCompletions(value string) []string {
 }
 
 func (m *appModel) modelCompletionValues() []string {
-	list := modelinfo.All()
+	list := mergeLiveModelInfos(modelinfo.All(), m.liveModels)
 	if m.orch != nil {
 		authorized := m.authorizedProviderNames()
 		if len(authorized) > 0 {
@@ -309,4 +337,40 @@ func fuzzyCommandScore(candidate, query string) int {
 		return -1
 	}
 	return 2 + gaps
+}
+
+// mergeLiveModelInfos replaces list's entries for each provider in live with
+// that provider's live model IDs, so completions offer a provider's real
+// models rather than only its generic examples. Azure deployment names are
+// the user's own choice, so the AZURE_OPENAI_DEPLOYMENT entry that
+// modelinfo.All adds is kept even when the live list omits it.
+func mergeLiveModelInfos(list []modelinfo.Info, live map[string][]modelinfo.Info) []modelinfo.Info {
+	if len(live) == 0 {
+		return list
+	}
+	deployment := strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT"))
+	out := make([]modelinfo.Info, 0, len(list))
+	seen := make(map[[2]string]bool, len(list))
+	for _, info := range list {
+		if _, replaced := live[info.Provider]; replaced && !(info.Provider == "azure" && info.Model == deployment && deployment != "") {
+			continue
+		}
+		out = append(out, info)
+		seen[[2]string{info.Provider, info.Model}] = true
+	}
+	providers := make([]string, 0, len(live))
+	for provider := range live {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		for _, info := range live[provider] {
+			key := [2]string{info.Provider, info.Model}
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, info)
+			}
+		}
+	}
+	return out
 }

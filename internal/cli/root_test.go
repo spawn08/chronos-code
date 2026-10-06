@@ -161,8 +161,7 @@ func TestLoadConfigModelOnlyInfersKnownProvider(t *testing.T) {
 
 func TestLoadConfigAmbiguousModelRequiresProvider(t *testing.T) {
 	resetGlobalFlags(t, []string{"chronos-code", "--model", "gpt-4o", "config", "show"})
-	t.Setenv("CHRONOS_CODE_PROVIDER", "")
-	t.Setenv("CHRONOS_CODE_MODEL", "")
+	isolateProviderEnv(t)
 	if err := stripGlobalFlags(); err != nil {
 		t.Fatal(err)
 	}

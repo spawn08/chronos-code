@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -184,5 +185,46 @@ func TestRuntimeVerificationSkipsDiffOutsideGit(t *testing.T) {
 		if hasDiff != git {
 			t.Fatalf("git=%v: diff obligation present=%v, obligations=%#v", git, hasDiff, decision.Obligations)
 		}
+	}
+}
+
+func TestRuntimeVerificationDropsRefusedChecks(t *testing.T) {
+	refusedTests := regexp.MustCompile(`^(go test|npm test|pytest|cargo test|make check)(\s|$)`)
+	for _, tc := range []struct {
+		name     string
+		refuses  func(string) bool
+		path     string
+		wantTest bool
+	}{
+		{name: "no policy", path: "main.go", wantTest: true},
+		{name: "language test command refused", refuses: refusedTests.MatchString, path: "main.go"},
+		{name: "unrefused language test command", refuses: refusedTests.MatchString, path: "Main.java", wantTest: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := newTaskRuntime("task", root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.refusesShell = tc.refuses
+			if _, err := runtime.recordWrite(tc.path, "hash", 1, execution.ProvenanceRuntime, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			request := ExecutionRequest{VerificationObligations: []verification.Obligation{
+				{ID: "test:make check", Kind: verification.KindTest, Command: "make check", Paths: []string{tc.path}, Status: verification.StatusPending},
+			}}
+			decision := assessRuntimeVerification(request, router.Classification{Kind: router.TaskKindEdit}, runtime)
+			var hasTest, hasDiff bool
+			for _, obligation := range decision.Obligations {
+				hasTest = hasTest || obligation.Kind == verification.KindTest
+				hasDiff = hasDiff || obligation.Kind == verification.KindDiff
+			}
+			if hasTest != tc.wantTest || !hasDiff {
+				t.Fatalf("test obligation=%v diff obligation=%v, obligations=%#v", hasTest, hasDiff, decision.Obligations)
+			}
+		})
 	}
 }

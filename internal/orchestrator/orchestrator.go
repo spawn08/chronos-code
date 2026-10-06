@@ -2494,6 +2494,13 @@ func assessRuntimeVerification(request ExecutionRequest, classification router.C
 		derived = slices.DeleteFunc(derived, func(o verification.Obligation) bool { return o.Kind == verification.KindDiff })
 	}
 	obligations = append(obligations, derived...)
+	if runtime != nil && runtime.refusesShell != nil {
+		// A check the security policy refuses can never produce evidence;
+		// requiring it only sends the model into a refused command.
+		obligations = slices.DeleteFunc(obligations, func(o verification.Obligation) bool {
+			return obligationRefused(o, runtime.refusesShell)
+		})
+	}
 	return verification.Assess(request.VerificationMode, true, obligations, events)
 }
 

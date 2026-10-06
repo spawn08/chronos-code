@@ -631,3 +631,22 @@ func TestEmbeddedSecurityPolicy_LoadsAndAllowsNormalShell(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicyRefusesShellCommand(t *testing.T) {
+	policy := &Policy{}
+	policy.neverAllow = compileTestPatterns(t, `^go\s+test(\s|$)`)
+	for command, want := range map[string]bool{
+		"go test ./...":                    true,
+		"cd services/api && go test ./...": true,
+		"go vet ./...":                     false,
+		"git diff --stat":                  false,
+	} {
+		if got := policy.RefusesShellCommand(command); got != want {
+			t.Errorf("RefusesShellCommand(%q) = %v, want %v", command, got, want)
+		}
+	}
+	var none *Policy
+	if none.RefusesShellCommand("go test ./...") {
+		t.Error("nil policy refused a command")
+	}
+}
