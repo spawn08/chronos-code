@@ -171,7 +171,7 @@ func (s *IndexScope) Prefetch(ctx context.Context, message string, maxTokens int
 		return "", nil
 	}
 	sel := retrieve.Retrieve(b.view, retrieve.Request{
-		Query: message, Callers: true, Callees: true, Excerpts: true,
+		Query: message, Callers: true, Callees: true, Excerpts: true, NeedAnchor: true,
 		Budget: maxTokens * 8 / 10, ItemOverhead: 20, Seen: b.seen,
 	})
 	if sel.Seeds == 0 || len(sel.Items) == 0 {

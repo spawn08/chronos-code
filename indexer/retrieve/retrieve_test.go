@@ -137,6 +137,26 @@ func TestRetrieveMissesAndSeeds(t *testing.T) {
 	}
 }
 
+// NeedAnchor (per-turn prefetch) must not match loose words: a conversational
+// task that names no code selects nothing, while the same words still work
+// for an explicit search and next to an exact anchor.
+func TestRetrieveNeedAnchor(t *testing.T) {
+	v := newEnv(t).view(t)
+	chat := "please validate that an order persists, then check the repo"
+	loose := Retrieve(v, Request{Query: chat, Callers: true, Budget: 4096})
+	if loose.Seeds == 0 {
+		t.Fatalf("premise: word matching should seed without NeedAnchor: %+v", loose)
+	}
+	strict := Retrieve(v, Request{Query: chat, Callers: true, Budget: 4096, NeedAnchor: true})
+	if strict.Seeds != 0 || len(strict.Items) != 0 {
+		t.Fatalf("task naming no code produced context: %+v", strict.Items)
+	}
+	anchored := Retrieve(v, Request{Query: "Handle should validate the order", Callers: true, Budget: 4096, NeedAnchor: true})
+	if find(anchored, "Handle") == nil || find(anchored, "validate") == nil {
+		t.Fatalf("anchored task lost its seeds: %+v", anchored.Items)
+	}
+}
+
 func TestRetrievePacksWithinBudget(t *testing.T) {
 	v := newEnv(t).view(t)
 	full := Retrieve(v, Request{Query: "validate", Callers: true, Tests: true, Callees: true, Excerpts: true, Budget: 4096})

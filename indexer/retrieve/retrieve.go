@@ -95,7 +95,12 @@ type Request struct {
 	Tests    bool // include tests reaching the seeds
 	Callees  bool // include callees of the seeds
 	Excerpts bool // allow excerpt zoom
-	Budget   int  // estimated token budget for the items
+	// NeedAnchor limits word matching to tasks that name code: lower-case
+	// name guesses and free-text search seed only when the request carries an
+	// exact anchor (a symbol, range, path or code-shaped identifier). Chat
+	// text with no anchor selects nothing instead of loosely matching words.
+	NeedAnchor bool
+	Budget     int // estimated token budget for the items
 	// LineTokens is the estimated tokens per excerpt line in the caller's
 	// rendering (JSON escaping costs more than plain text); 0 means 12.
 	LineTokens int
@@ -172,6 +177,7 @@ func Retrieve(v *query.View, req Request) Result {
 			add(s, 1, fmt.Sprintf("declared in %s:%d-%d", r.File, r.Start, r.End))
 		}
 	}
+	var weakSeeds []func() // deferred under NeedAnchor until an anchor exists
 	if q := strings.TrimSpace(req.Query); q != "" {
 		for _, tok := range identifiers(q) {
 			if isPath(tok) {
@@ -191,12 +197,19 @@ func Retrieve(v *query.View, req Request) Result {
 				if len(tok) < 4 || commonWords[strings.ToLower(tok)] {
 					continue
 				}
-				syms := codeSymbols(v, tok)
-				exact = false
-				for _, s := range capSyms(syms, maxSeedsByName) {
-					add(s, 0.3/float64(min(len(syms), maxSeedsByName)), "name in the task: "+tok)
+				weak := func() {
+					syms := codeSymbols(v, tok)
+					exact = false
+					for _, s := range capSyms(syms, maxSeedsByName) {
+						add(s, 0.3/float64(min(len(syms), maxSeedsByName)), "name in the task: "+tok)
+					}
+					exact = true
 				}
-				exact = true
+				if req.NeedAnchor {
+					weakSeeds = append(weakSeeds, weak)
+				} else {
+					weak()
+				}
 				continue
 			}
 			syms := codeSymbols(v, tok)
@@ -208,6 +221,14 @@ func Retrieve(v *query.View, req Request) Result {
 			}
 			for _, s := range capSyms(syms, maxSeedsByName) {
 				add(s, 1/float64(min(len(syms), maxSeedsByName)), "exact name in the task: "+tok)
+			}
+		}
+		if req.NeedAnchor {
+			if len(nodes) == 0 {
+				return res // the task names no code: no loose word matches
+			}
+			for _, weak := range weakSeeds {
+				weak()
 			}
 		}
 		exact = false
