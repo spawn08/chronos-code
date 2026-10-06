@@ -250,3 +250,21 @@ func TestCategoryString(t *testing.T) {
 		t.Errorf("Category(999).String() = %q, want %q", s, "unknown")
 	}
 }
+
+func TestExtractErrorMessageKeepsEscapedQuotes(t *testing.T) {
+	anthropic := `{"type":"error","error":{"type":"invalid_request_error","message":"\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\"."}}`
+	want := `"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive".`
+	if got := extractErrorMessage(anthropic); got != want {
+		t.Fatalf("extractErrorMessage = %q, want %q", got, want)
+	}
+	if got := extractErrorMessage(`{"message":"top level"}`); got != "top level" {
+		t.Fatalf("top-level message = %q", got)
+	}
+	truncated := `{"error":{"message":"say \"hi\" now","type":"x"},"padding":"abc`
+	if got := extractErrorMessage(truncated); got != `say "hi" now` {
+		t.Fatalf("truncated body message = %q", got)
+	}
+	if got := extractErrorMessage("not json"); got != "" {
+		t.Fatalf("plain body message = %q, want empty", got)
+	}
+}

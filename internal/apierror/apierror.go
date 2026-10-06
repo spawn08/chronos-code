@@ -1,8 +1,10 @@
 package apierror
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -351,11 +353,37 @@ func isContentFilterError(body string) bool {
 
 func extractErrorMessage(body string) string {
 	body = strings.TrimSpace(body)
+	var parsed struct {
+		Message string          `json:"message"`
+		Error   json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &parsed) == nil {
+		if parsed.Message != "" {
+			return parsed.Message
+		}
+		var nested struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(parsed.Error, &nested) == nil && nested.Message != "" {
+			return nested.Message
+		}
+	}
+	// The body can be cut at the read limit, so it is not always valid JSON.
+	// Read the first message string up to its unescaped closing quote.
 	for _, prefix := range []string{`"message":"`, `"message": "`} {
 		if idx := strings.Index(strings.ToLower(body), strings.ToLower(prefix)); idx >= 0 {
 			start := idx + len(prefix)
-			if end := strings.Index(body[start:], `"`); end >= 0 {
-				return body[start : start+end]
+			for i := start; i < len(body); i++ {
+				if body[i] == '\\' {
+					i++
+					continue
+				}
+				if body[i] == '"' {
+					if msg, err := strconv.Unquote(`"` + body[start:i] + `"`); err == nil {
+						return msg
+					}
+					return body[start:i]
+				}
 			}
 		}
 	}
