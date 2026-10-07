@@ -3764,6 +3764,11 @@ func setupMCPRuntimesWithCaller(ctx context.Context, agents map[string]*agent.Ag
 	if factory == nil {
 		factory = mcpdiscover.NewSharedClientFactory(nil).NewClient
 	}
+	// Every agent gets the caller servers. A server that fails for the first
+	// agent is not started again for each of the others during this pass;
+	// reloads after the pass connect normally.
+	memo := mcpdiscover.NewStartupFailureMemo(factory)
+	defer memo.Stop()
 	agentIDs := make([]string, 0, len(agents))
 	for id := range agents {
 		agentIDs = append(agentIDs, id)
@@ -3782,7 +3787,7 @@ func setupMCPRuntimesWithCaller(ctx context.Context, agents map[string]*agent.Ag
 		}
 		a.MCPClients = nil
 		configured = append(configured, caller...)
-		runtime := mcpdiscover.Start(ctx, configured, discovered, a.Tools, policy, timeout, factory)
+		runtime := mcpdiscover.Start(ctx, configured, discovered, a.Tools, policy, timeout, memo.NewClient)
 		runtime.SetAgent(id)
 		runtimes = append(runtimes, runtime)
 		for _, status := range runtime.Statuses() {
