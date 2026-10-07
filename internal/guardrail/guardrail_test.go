@@ -186,3 +186,22 @@ func TestNewSecretGuardrail_InvalidPattern(t *testing.T) {
 		t.Fatal("expected error for invalid regex, got nil")
 	}
 }
+
+func TestSecretGuardrailSkipsDocumentedPlaceholders(t *testing.T) {
+	g, err := NewSecretGuardrail([]string{`AKIA[0-9A-Z]{16}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		"fixture key AKIAIOSFODNN7EXAMPLE in testdata",
+		"use AKIAXXXXXXXXXXXXXXXX as the access key",
+		"AKIA0000000000000000",
+	} {
+		if res := g.Check(context.Background(), content); !res.Passed {
+			t.Errorf("%q: blocked a placeholder: %s", content, res.Reason)
+		}
+	}
+	if res := g.Check(context.Background(), "placeholder AKIAIOSFODNN7EXAMPLE then real AKIA2E0A8F3B244C9986"); res.Passed {
+		t.Fatal("a real-looking key next to a placeholder must still be blocked")
+	}
+}

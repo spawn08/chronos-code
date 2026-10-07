@@ -99,6 +99,17 @@ func TestDetect_EmptyDirGenericBanner(t *testing.T) {
 	}
 }
 
+func TestPromptBanner_OmitsFileCount(t *testing.T) {
+	a := &Info{Root: "/some/root", Languages: []string{"Go"}, FileCount: 42}
+	b := &Info{Root: "/some/root", Languages: []string{"Go"}, FileCount: 43}
+	if a.PromptBanner() != b.PromptBanner() {
+		t.Fatalf("PromptBanner changed with file count: %q vs %q", a.PromptBanner(), b.PromptBanner())
+	}
+	if got, want := a.PromptBanner(), "Workspace: Go project at /some/root."; got != want {
+		t.Fatalf("PromptBanner() = %q, want %q", got, want)
+	}
+}
+
 func TestTool_HandlerReturnsWorkspaceSummary(t *testing.T) {
 	info := &Info{
 		Root:      "/some/root",

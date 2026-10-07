@@ -1001,7 +1001,7 @@ func setupWorkspace(root string, agents map[string]*agent.Agent) *workspace.Info
 			if detectErr != nil {
 				return pins
 			}
-			content := selected.Banner() + "\n" + environmentLine(selected.Root, time.Now()) + modelLine(requestModelProvider(ctx, a))
+			content := selected.PromptBanner() + "\n" + environmentLine(selected.Root, time.Now()) + modelLine(requestModelProvider(ctx, a))
 			return append(pins, model.Message{Role: model.RoleSystem, Content: content})
 		}
 	}

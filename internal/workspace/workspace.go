@@ -179,6 +179,18 @@ func (i *Info) Banner() string {
 	return fmt.Sprintf("Workspace: %s project at %s (%d files indexed).", lang, i.Root, i.FileCount)
 }
 
+// PromptBanner is Banner without the file count. The count changes whenever
+// a file is added or removed, and the banner is pinned in the system prompt
+// ahead of the conversation, so a resumed session would otherwise rewrite
+// its whole cached transcript. workspace_info still reports the count.
+func (i *Info) PromptBanner() string {
+	lang := "generic"
+	if len(i.Languages) > 0 {
+		lang = strings.Join(i.Languages, ", ")
+	}
+	return fmt.Sprintf("Workspace: %s project at %s.", lang, i.Root)
+}
+
 // Tool returns a T0 (zero-LLM-cost) tool exposing the workspace's root,
 // detected language(s), and total indexed file count. It deliberately does
 // not return the full Files list; agents should use file_glob/file_list/graph

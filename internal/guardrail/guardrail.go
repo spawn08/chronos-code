@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	guardrails "github.com/spawn08/chronos/engine/guardrails"
 	"gopkg.in/yaml.v3"
@@ -94,11 +95,14 @@ func NewSecretGuardrail(patterns []string) (*SecretGuardrail, error) {
 	return g, nil
 }
 
-// Check implements guardrails.Guardrail. It fails on the first pattern that
-// matches the content.
+// Check implements guardrails.Guardrail. It fails on the first pattern with
+// a match that is not a documented placeholder (see isPlaceholderSecret).
 func (g *SecretGuardrail) Check(_ context.Context, content string) guardrails.Result {
 	for i, re := range g.patterns {
-		if re.MatchString(content) {
+		for _, match := range re.FindAllString(content, -1) {
+			if isPlaceholderSecret(match) {
+				continue
+			}
 			return guardrails.Result{
 				Passed: false,
 				Reason: fmt.Sprintf("possible secret detected (pattern: %s)", g.names[i]),
@@ -106,6 +110,27 @@ func (g *SecretGuardrail) Check(_ context.Context, content string) guardrails.Re
 		}
 	}
 	return guardrails.Result{Passed: true}
+}
+
+// isPlaceholderSecret reports whether a match is a documented example value
+// rather than a credential: vendor documentation keys mark themselves with
+// "EXAMPLE" (AKIAIOSFODNN7EXAMPLE), and test fixtures fill the random part
+// with one repeated character (AKIAXXXXXXXXXXXXXXXX). Reviews and test code
+// quote these, and blocking them fails the whole run for no gain.
+func isPlaceholderSecret(match string) bool {
+	if strings.Contains(strings.ToUpper(match), "EXAMPLE") {
+		return true
+	}
+	body := match
+	if len(body) > 8 {
+		body = body[len(body)-8:]
+	}
+	for i := 1; i < len(body); i++ {
+		if body[i] != body[0] {
+			return false
+		}
+	}
+	return len(body) > 0
 }
 
 // ruleFromSpec builds a guardrails.Guardrail from a single RuleSpec.
