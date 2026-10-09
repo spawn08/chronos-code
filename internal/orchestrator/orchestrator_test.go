@@ -2536,3 +2536,106 @@ func TestCallerMCPConfigRejectsMissingFileAndDuplicates(t *testing.T) {
 		t.Fatalf("duplicate: err=%v", err)
 	}
 }
+
+// off disables thinking but keeps the effort, which Anthropic applies without
+// thinking; xhigh and max are accepted levels.
+func TestSetThinkingOffKeepsEffortAndAcceptsXHighMax(t *testing.T) {
+	a, err := agent.New("coder", "Coder").Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder"}
+	for _, level := range []string{"xhigh", "max"} {
+		if err := orch.SetThinking(level); err != nil {
+			t.Fatalf("SetThinking(%s) error = %v", level, err)
+		}
+		if got := orch.ThinkingLevel(); got != level {
+			t.Fatalf("ThinkingLevel() = %q, want %s", got, level)
+		}
+	}
+	a.ReasoningConfig.Effort = "low"
+	if err := orch.SetThinking("off"); err != nil {
+		t.Fatal(err)
+	}
+	if a.ReasoningConfig.Enabled || a.ReasoningConfig.Effort != "low" || orch.ThinkingLevel() != "off" {
+		t.Fatalf("after off: ReasoningConfig = %#v, level %q", a.ReasoningConfig, orch.ThinkingLevel())
+	}
+}
+
+// A delegated task is routed by its own complexity, like a top-level message,
+// and an explicit model choice for the role still wins.
+func TestRouteSubagentByTaskAndRespectsOverride(t *testing.T) {
+	orch := newRoutingTestOrchestrator(t, map[router.Complexity]map[router.TaskKind]router.ModelSpec{
+		router.ComplexityHigh: {router.TaskKindDebug: {Provider: "routed", Model: "high-debug"}},
+		router.ComplexityLow:  {router.TaskKindEdit: {Provider: "routed", Model: "low-edit"}},
+	})
+	registry := newRoleModelRegistry(orch.agents)
+	registry.setRoute(orch.routeSubagent)
+
+	got := registry.providerFor(context.Background(), "debugger", "fix this bug across multiple files")
+	if got == nil || got.Model() != "high-debug" {
+		t.Fatalf("routed subagent model = %v, want high-debug", got)
+	}
+	orch.modelOverrides["debugger"] = true
+	if got := registry.providerFor(context.Background(), "debugger", "fix this bug across multiple files"); got.Model() != "old-debugger" {
+		t.Fatalf("overridden subagent model = %q, want the role's own model", got.Model())
+	}
+	unrouted := newRoleModelRegistry(orch.agents)
+	if got := unrouted.providerFor(context.Background(), "coder", "rename x"); got.Model() != "old-coder" {
+		t.Fatalf("registry without routing = %q, want the role's own model", got.Model())
+	}
+}
+
+// A subagent's relevance-ranked context is chosen for its own task, not the
+// parent's user message.
+func TestSubagentContextRanksByOwnTask(t *testing.T) {
+	childProvider := &subagentTestProvider{name: "child-provider", modelID: "cheap", response: "child"}
+	child, err := agent.New("specialist", "Specialist").WithModel(childProvider).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var query string
+	child.ContextPinsFn = func(ctx context.Context) []model.Message {
+		query, _ = ctx.Value(messageKey{}).(string)
+		return nil
+	}
+	runner := &configuredAgentRunner{agents: map[string]*agent.Agent{"specialist": child}}
+	parentCtx := context.WithValue(context.Background(), messageKey{}, "the parent's request")
+	if _, err := runner.Run(parentCtx, harness.SubAgentSpec{Name: "specialist"}, "inspect the parser"); err != nil {
+		t.Fatal(err)
+	}
+	if query != "inspect the parser" {
+		t.Fatalf("subagent relevance query = %q, want its own task", query)
+	}
+}
+
+// Prior-session summaries are parent-conversation context: a delegated,
+// self-contained task does not pay for them.
+func TestSessionSummariesSkippedForSubagents(t *testing.T) {
+	store := storagememory.New()
+	ctx := storage.WithTenant(context.Background(), "tenant-a")
+	now := time.Now().Add(-time.Hour)
+	if err := store.CreateSession(ctx, &storage.Session{ID: "prior", AgentID: "coder", Status: "completed", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(ctx, &storage.Event{ID: "prior-summary", SessionID: "prior", SeqNum: 1, Type: "chat_summary", Payload: map[string]any{"summary": "fix the parser carefully"}, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	a := &agent.Agent{ID: "coder"}
+	setupSessionSummaries(session.NewManager(store, ""), map[string]*agent.Agent{"coder": a})
+	ctx = context.WithValue(storage.WithSession(ctx, "active"), messageKey{}, "fix parser")
+	hasSummary := func(pins []model.Message) bool {
+		for _, m := range pins {
+			if strings.HasPrefix(m.Content, "Relevant context from prior sessions:") {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasSummary(a.ContextPinsFn(ctx)) {
+		t.Fatal("top-level agent did not receive the prior-session summary")
+	}
+	if hasSummary(a.ContextPinsFn(context.WithValue(ctx, subagentActiveKey{}, true))) {
+		t.Fatal("subagent received prior-session summaries")
+	}
+}

@@ -17,7 +17,7 @@ router:
     the configured model with a tight token budget.
   model:
     provider: "anthropic"
-    model: "claude-haiku-4-5"
+    model: "claude-haiku-5-5"
   budget_tokens: 500
   classification_prompt: |
     Classify this user message into ONE intent. Reply with only the intent name.
@@ -69,24 +69,24 @@ model_routing:
     low:
       edit:
         provider: "anthropic"
-        model: "claude-haiku-4-5"
+        model: "claude-haiku-5-5"
       explain:
         provider: "anthropic"
-        model: "claude-haiku-4-5"
+        model: "claude-haiku-5-5"
     medium:
       edit:
         provider: "anthropic"
-        model: "claude-sonnet-5"
+        model: "claude-sonnet-5-5"
     high:
       refactor:
         provider: "anthropic"
-        model: "claude-sonnet-5"
+        model: "claude-sonnet-5-5"
       debug:
         provider: "anthropic"
-        model: "claude-opus-4-8"
+        model: "claude-opus-5-5"
       architect:
         provider: "anthropic"
-        model: "claude-opus-4-8"
+        model: "claude-opus-5-5"
 
 # The legacy-named ppd section defaults to observation only. Enabled mode
 # delegates one turn to the read-only strategist; no production rolling

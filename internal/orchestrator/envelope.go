@@ -69,7 +69,7 @@ func statusFor(reason execution.StopReason, err error) execution.Status {
 		}
 	}
 	switch reason {
-	case execution.StopInvalidRequest:
+	case execution.StopInvalidRequest, execution.StopContentFiltered:
 		return execution.StatusInvalidRequest
 	case execution.StopPolicyDenied:
 		return execution.StatusApprovalBlocked
@@ -104,7 +104,7 @@ func errorEnvelope(reason execution.StopReason, err error) *execution.Error {
 		}
 	}
 	switch reason {
-	case execution.StopInvalidRequest:
+	case execution.StopInvalidRequest, execution.StopContentFiltered:
 		result.Code, result.Category = execution.ErrorInvalidRequest, execution.ErrorCategoryRequest
 	case execution.StopPolicyDenied:
 		result.Code, result.Category = execution.ErrorApprovalRequired, execution.ErrorCategoryPolicy

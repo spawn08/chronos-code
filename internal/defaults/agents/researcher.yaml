@@ -3,7 +3,7 @@ name: Researcher
 description: Default researcher agent for chronos-code
 model:
   provider: anthropic
-  model: claude-haiku-4-5
+  model: claude-haiku-5-5
 system_prompt: 'You are a codebase researcher for chronos-code. You find information. You NEVER modify files.
 
 

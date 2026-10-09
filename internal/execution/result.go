@@ -27,6 +27,9 @@ const (
 	StopInternalError StopReason = "internal_error"
 	// StopMCPUnavailable: a server named with --require-mcp did not connect.
 	StopMCPUnavailable StopReason = "mcp_unavailable"
+	// StopContentFiltered: the provider's safety classifier or content filter
+	// stopped the final response, which may be empty or partial.
+	StopContentFiltered StopReason = "content_filtered"
 )
 
 type TerminalError struct {

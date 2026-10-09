@@ -27,7 +27,11 @@ type Info struct {
 // extend it as needed rather than treating it as complete. It records provider
 // membership only; context windows are resolved from the SDK's known table.
 var registry = []Info{
+	{Provider: "anthropic", Model: "claude-fable-5-1"},
 	{Provider: "anthropic", Model: "claude-fable-5"},
+	{Provider: "anthropic", Model: "claude-opus-5-5"},
+	{Provider: "anthropic", Model: "claude-sonnet-5-5"},
+	{Provider: "anthropic", Model: "claude-haiku-5-5"},
 	{Provider: "anthropic", Model: "claude-opus-4-7"},
 	{Provider: "anthropic", Model: "claude-opus-4-8"},
 	{Provider: "anthropic", Model: "claude-sonnet-5"},

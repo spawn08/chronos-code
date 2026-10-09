@@ -120,7 +120,12 @@ models_catalog:
 defaults:
   model:
     provider: "anthropic"
-    model: "claude-sonnet-4-6"
+    model: "claude-sonnet-5-5"
+    # Anthropic only: keep tools and the base system prompt cached across idle
+    # gaps and long tool runs (one-hour writes cost 2x input vs 1.25x, paid
+    # only on that static prefix). Pinned context and the conversation keep
+    # the 5-minute default. Other providers ignore it.
+    prompt_cache_ttl: "1h"
   storage:
     backend: "sqlite"
     dsn: ".chronos-code/sessions.db"
@@ -135,7 +140,11 @@ defaults:
     summary: false
   context:
     max_tokens: 128000
-    summarize_threshold: 0.8
+    # Fraction of max_tokens, counted locally (o200k) without the output
+    # reserve or tool schemas. 0.45 (~75K Claude tokens) compacts once, at one
+    # cut point, before the context guard's ~96K budget starts trimming and
+    # rewriting the provider prompt cache on later calls.
+    summarize_threshold: 0.45
     preserve_recent_turns: 6
 
 agents:
@@ -143,7 +152,7 @@ agents:
     name: Chronos Code
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -172,7 +181,7 @@ agents:
     name: Coding Agent
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -196,7 +205,7 @@ agents:
     name: Planner
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -211,7 +220,7 @@ agents:
     name: Code Reviewer
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -226,7 +235,7 @@ agents:
     name: Debugger
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -241,7 +250,7 @@ agents:
     name: Researcher
     model:
       provider: "anthropic"
-      model: "claude-haiku-4-5"
+      model: "claude-haiku-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -256,7 +265,7 @@ agents:
     name: Architect
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -271,7 +280,7 @@ agents:
     name: Explainer
     model:
       provider: "anthropic"
-      model: "claude-haiku-4-5"
+      model: "claude-haiku-5-5"
     tools:
       - name: file_read
         permission: allow
@@ -286,7 +295,7 @@ agents:
     name: Tester
     model:
       provider: "anthropic"
-      model: "claude-sonnet-4-6"
+      model: "claude-sonnet-5-5"
     tools:
       - name: file_read
         permission: allow

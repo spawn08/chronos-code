@@ -21,6 +21,8 @@ func TestBundledModelPricing(t *testing.T) {
 		{model: "claude-sonnet-4-6", want: Rates{3_000_000, 15_000_000, 300_000, 3_750_000, 6_000_000}},
 		{model: "claude-sonnet-5", want: Rates{2_000_000, 10_000_000, 200_000, 2_500_000, 4_000_000}},
 		{model: "claude-opus-4-8", want: Rates{5_000_000, 25_000_000, 500_000, 6_250_000, 10_000_000}},
+		{model: "claude-sonnet-5-5", want: Rates{2_000_000, 10_000_000, 100_000, 2_500_000, 4_000_000}},
+		{model: "claude-haiku-5-5", want: Rates{100_000, 500_000, 10_000, 125_000, 200_000}},
 		// Sub-dollar rates must be exact; cache writes default to input.
 		{model: "gpt-5-nano", want: Rates{50_000, 400_000, 5_000, 50_000, 50_000}},
 		// Omitted cache rates default to the input rate.

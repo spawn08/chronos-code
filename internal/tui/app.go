@@ -2750,7 +2750,7 @@ func (m *appModel) handleModelCommand(arg string) {
 		if info, ok := modelinfo.Lookup(provider, modelID); ok {
 			fmt.Fprintf(&b, "  (context window: %s tokens)", formatTokenCount(info.ContextWindow))
 		}
-		fmt.Fprintf(&b, "\nthinking: %s  (change with /think off|low|medium|high)", m.orch.ThinkingLevel())
+		fmt.Fprintf(&b, "\nthinking: %s  (change with /think off|low|medium|high|xhigh|max)", m.orch.ThinkingLevel())
 		b.WriteString("\n\n")
 
 		fetchCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
@@ -2808,7 +2808,7 @@ func (m *appModel) handleModelCommand(arg string) {
 
 func (m *appModel) handleThinkCommand(arg string) {
 	if arg == "" {
-		m.appendSystem(fmt.Sprintf("thinking: %s\nset with: /think off|low|medium|high", m.orch.ThinkingLevel()))
+		m.appendSystem(fmt.Sprintf("thinking: %s\nset with: /think off|low|medium|high|xhigh|max", m.orch.ThinkingLevel()))
 		return
 	}
 	if err := m.orch.SetThinking(arg); err != nil {

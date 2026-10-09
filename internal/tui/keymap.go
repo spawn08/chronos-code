@@ -44,7 +44,7 @@ Commands:
   /agents            List all agents (* active, primary marked)
   /agent <id>        Switch to a specialist (or back to chronos-code)
   /model [name]      Show or switch the active model
-  /think [level]     Show or set native thinking (off|low|medium|high)
+  /think [level]     Show or set native thinking (off|low|medium|high|xhigh|max)
   /login [provider]  Sign in (Claude Code / Codex / API key / enterprise OAuth)
   /logout <provider> Remove provider authentication
   /whoami [provider] Show authentication status

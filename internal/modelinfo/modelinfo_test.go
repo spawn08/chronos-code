@@ -7,8 +7,8 @@ func TestLookupKnownModel(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup: want found for a known model")
 	}
-	if info.ContextWindow != 200_000 {
-		t.Errorf("ContextWindow = %d, want 200000", info.ContextWindow)
+	if info.ContextWindow != 1_000_000 {
+		t.Errorf("ContextWindow = %d, want 1000000", info.ContextWindow)
 	}
 }
 

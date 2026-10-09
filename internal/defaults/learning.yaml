@@ -11,7 +11,7 @@
 distillation:
   model:
     provider: "anthropic"
-    model: "claude-sonnet-4-6"
+    model: "claude-sonnet-5-5"
   prompt: |
     You analyze aggregated execution statistics from an AI coding agent
     harness (tool-call counts, common tool sequences, error rates across

@@ -78,9 +78,9 @@ func TestInputCompletionsIncludesModelsAndThink(t *testing.T) {
 	}{
 		{input: "/model clau", want: []string{"/model anthropic claude-sonnet-4-6"}},
 		{input: "/model gpt", want: []string{"/model openai gpt-4o"}},
-		{input: "/think m", want: []string{"/think medium"}},
+		{input: "/think m", want: []string{"/think max", "/think medium"}},
 		{input: "/think of", want: []string{"/think off"}},
-		{input: "/think hi", want: []string{"/think high"}},
+		{input: "/think hi", want: []string{"/think high", "/think xhigh"}},
 	}
 	for _, tt := range tests {
 		if got := inputCompletions(tt.input, nil, nil, nil, nil, nil, models); !reflect.DeepEqual(got, tt.want) {

@@ -2,15 +2,18 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/spawn08/chronos-code/internal/tokencache"
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/sdk/agent"
+	"github.com/spawn08/chronos/storage"
 )
 
 // contextGuardHook prevents token-explosion failures by trimming the request
@@ -23,7 +26,63 @@ type contextGuardHook struct {
 	modelID string
 	options contextGuardOptions
 	tokens  tokencache.Cache
+
+	// trims holds the last trimmed history per conversation (session and
+	// invocation, see contextTrimKey) so later calls send
+	// the same prefix. Providers with prompt caching (Anthropic) reuse a
+	// cached prompt only when everything before the new messages is
+	// byte-identical; recomputing the trim from the full history on every
+	// call changes old messages each time and rewrites the whole cache.
+	mu    sync.Mutex
+	trims map[string]*contextTrim
+	clock uint64
+	// scale maps a model ID to provider-reported prompt tokens per locally
+	// counted token. The local counter (o200k) undercounts newer Claude and
+	// other non-OpenAI tokenizers by 20-30%, so the uncalibrated budget would
+	// let requests run past the configured ceiling.
+	scale map[string]float64
 }
+
+// contextTrim is a trimmed copy of the first baseLen request messages. A later
+// request whose first baseLen messages hash to base reuses trimmed and appends
+// only its newer messages.
+type contextTrim struct {
+	used    uint64 // recency stamp for eviction
+	modelID string
+	baseLen int
+	base    [sha256.Size]byte
+	trimmed []model.Message
+	dropped []ContextSourceKind
+}
+
+// contextGuardHeadroom is the share of the budget left free after a trim, so
+// the trimmed prefix can be reused for many calls before it must be rebuilt.
+const contextGuardHeadroom = 0.2
+
+// Calibration bounds and smoothing: one odd response (an unusual attachment)
+// must not swing the budget. Calibration only ever shrinks the budget:
+// providers differ in what their prompt count covers (Ollama and llama.cpp
+// omit KV-cached tokens, for example), and an under-report must never let a
+// request grow past the model's window.
+const (
+	minTokenScale       = 1.0
+	maxTokenScale       = 2.0
+	tokenScaleWeight    = 0.3
+	minCalibrationCount = 4000
+)
+
+// guardEstimateMetadataKey carries the request's local token estimate from
+// Before to After for calibration.
+const guardEstimateMetadataKey = "chronos_code.context_guard_estimate"
+
+type guardEstimate struct {
+	modelID string
+	tokens  int
+}
+
+// maxContextTrims bounds remembered conversations; the least recently used
+// is forgotten first (finished subagent runs), which costs only a rebuild.
+const maxContextTrims = 256
 
 // contextGuardOptions accepts a configured context ceiling, clamped to the live
 // model's known SDK window. Unknown deployments use the configured value;
@@ -88,6 +147,13 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 	} else if contextLimit <= 0 {
 		contextLimit = model.ContextLimit(modelID, 0)
 	}
+	// A deployment can serve a smaller window than the catalog (a local
+	// Ollama server's context setting), and may truncate silently past it.
+	if provider, ok := evt.Metadata["provider"].(model.Provider); ok && provider != nil {
+		if served, ok := model.ServedContextLimit(ctx, provider); ok && served < contextLimit {
+			contextLimit = served
+		}
+	}
 
 	baseCounter := h.tokens.ForModel(modelID)
 	if evt.Metadata == nil {
@@ -118,9 +184,11 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 	// Keep at least the existing safety margin for provider framing/tokenizer
 	// differences, but never under-reserve an explicit output allowance.
 	outputTokens = max(outputTokens, contextLimit-int(float64(contextLimit)*(1-contextGuardMargin)))
-	effectiveLimit := contextLimit - outputTokens - schemaTokens
+	// The ceiling is in provider tokens; convert it to local counter units.
+	effectiveLimit := int(float64(contextLimit-outputTokens)/h.tokenScale(modelID)) - schemaTokens
 	total := counter.CountTokens(req.Messages)
 	if total <= effectiveLimit {
+		evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: total + schemaTokens}
 		return nil
 	}
 
@@ -129,7 +197,24 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 	for protectedPrefix < len(req.Messages) && req.Messages[protectedPrefix].Role == model.RoleSystem {
 		protectedPrefix++
 	}
-	trimmed, droppedSources := trimMessages(counter, req.Messages, protectedPrefix, effectiveLimit)
+	trimKey := contextTrimKey(ctx)
+	if trimmed, dropped, ok := h.reuseTrim(trimKey, modelID, effectiveLimit, counter, req.Messages); ok {
+		for _, source := range dropped {
+			contextSourceOmitted(ctx, source, ContextOmittedBudget)
+		}
+		req.Messages = trimmed
+		evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: counter.CountTokens(trimmed) + schemaTokens}
+		return nil
+	}
+	// Trim below the budget so the next calls fit with the same prefix.
+	target := effectiveLimit - int(float64(effectiveLimit)*contextGuardHeadroom)
+	trimmed, droppedSources := trimMessages(counter, req.Messages, protectedPrefix, target)
+	if model.AnthropicThinkingBoundToConversation(modelID) {
+		// Trimming edits earlier turns, so thinking kept from before it no
+		// longer verifies. Later blocks bind to this remembered, append-only
+		// history and stay valid.
+		trimmed = model.StripAnthropicThinking(trimmed)
+	}
 	for _, source := range droppedSources {
 		contextSourceOmitted(ctx, source, ContextOmittedBudget)
 	}
@@ -138,11 +223,149 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 			BudgetTokens: effectiveLimit, ContextLimit: contextLimit,
 			SchemaTokens: schemaTokens, OutputTokens: outputTokens}
 	}
+	h.rememberTrim(trimKey, modelID, req.Messages, trimmed, droppedSources)
 	req.Messages = trimmed
+	evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: counter.CountTokens(trimmed) + schemaTokens}
 	return nil
 }
 
-func (h *contextGuardHook) After(_ context.Context, _ *hooks.Event) error {
+// tokenScale returns the calibrated provider/local token ratio for modelID,
+// or 1 before any usage has been observed.
+func (h *contextGuardHook) tokenScale(modelID string) float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if scale, ok := h.scale[modelID]; ok {
+		return scale
+	}
+	return 1
+}
+
+// calibrate folds one call's provider-reported prompt size into modelID's
+// scale. Small requests are skipped: fixed provider framing dominates them.
+func (h *contextGuardHook) calibrate(modelID string, estimated, actual int) {
+	if estimated < minCalibrationCount || actual <= 0 {
+		return
+	}
+	observed := min(max(float64(actual)/float64(estimated), minTokenScale), maxTokenScale)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.scale == nil {
+		h.scale = make(map[string]float64)
+	}
+	previous, ok := h.scale[modelID]
+	if !ok {
+		previous = 1
+	}
+	h.scale[modelID] = previous + tokenScaleWeight*(observed-previous)
+}
+
+// contextTrimKey identifies one conversation. Every top-level run (each user
+// turn) gets a fresh invocation, so a top-level agent is keyed by session and
+// role to keep its trim across turns. Subagents inherit the parent's session
+// but are separate conversations, so a child run is keyed by its invocation;
+// keying by session alone would let concurrent agents evict each other.
+func contextTrimKey(ctx context.Context) string {
+	identity, _ := agent.RunIdentityFromContext(ctx)
+	session := storage.SessionFromContext(ctx)
+	if identity.ParentInvocationID != "" {
+		return session + "\x00child\x00" + identity.InvocationID
+	}
+	return session + "\x00role\x00" + identity.RoleID
+}
+
+// reuseTrim returns the remembered trimmed prefix plus the request's newer
+// messages when the request still starts with the remembered history and the
+// result fits the budget.
+func (h *contextGuardHook) reuseTrim(key, modelID string, limit int, counter model.TokenCounter, messages []model.Message) ([]model.Message, []ContextSourceKind, bool) {
+	h.mu.Lock()
+	trim := h.trims[key]
+	if trim != nil {
+		h.clock++
+		trim.used = h.clock
+	}
+	h.mu.Unlock()
+	if trim == nil || trim.modelID != modelID || stableLen(messages) < trim.baseLen {
+		return nil, nil, false
+	}
+	base, ok := hashMessages(messages[:trim.baseLen])
+	if !ok || base != trim.base {
+		return nil, nil, false
+	}
+	candidate := make([]model.Message, 0, len(trim.trimmed)+len(messages)-trim.baseLen)
+	candidate = append(candidate, trim.trimmed...)
+	candidate = append(candidate, messages[trim.baseLen:]...)
+	if counter.CountTokens(candidate) > limit {
+		return nil, nil, false
+	}
+	return candidate, trim.dropped, true
+}
+
+// rememberTrim stores trimmed as the reusable form of original. Trailing
+// Uncached messages change on every call, so they are excluded from both.
+func (h *contextGuardHook) rememberTrim(key, modelID string, original, trimmed []model.Message, dropped []ContextSourceKind) {
+	baseLen, trimmedLen := stableLen(original), stableLen(trimmed)
+	if len(original)-baseLen != len(trimmed)-trimmedLen {
+		return
+	}
+	base, ok := hashMessages(original[:baseLen])
+	if !ok {
+		return
+	}
+	trim := &contextTrim{modelID: modelID, baseLen: baseLen, base: base,
+		trimmed: append([]model.Message(nil), trimmed[:trimmedLen]...),
+		dropped: append([]ContextSourceKind(nil), dropped...)}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.trims == nil {
+		h.trims = make(map[string]*contextTrim)
+	}
+	if _, exists := h.trims[key]; !exists && len(h.trims) >= maxContextTrims {
+		oldest := ""
+		for k, t := range h.trims {
+			if oldest == "" || t.used < h.trims[oldest].used {
+				oldest = k
+			}
+		}
+		delete(h.trims, oldest)
+	}
+	h.clock++
+	trim.used = h.clock
+	h.trims[key] = trim
+}
+
+// stableLen is the number of messages before any trailing Uncached ones.
+func stableLen(messages []model.Message) int {
+	n := len(messages)
+	for n > 0 && messages[n-1].Uncached {
+		n--
+	}
+	return n
+}
+
+// hashMessages fingerprints the serialized messages (provider-opaque state
+// is excluded by the model's JSON tags).
+func hashMessages(messages []model.Message) ([sha256.Size]byte, bool) {
+	var sum [sha256.Size]byte
+	digest := sha256.New()
+	if err := json.NewEncoder(digest).Encode(messages); err != nil {
+		return sum, false
+	}
+	copy(sum[:], digest.Sum(nil))
+	return sum, true
+}
+
+func (h *contextGuardHook) After(_ context.Context, evt *hooks.Event) error {
+	if evt == nil || evt.Type != hooks.EventModelCallAfter || evt.Error != nil {
+		return nil
+	}
+	estimate, ok := evt.Metadata[guardEstimateMetadataKey].(guardEstimate)
+	if !ok {
+		return nil
+	}
+	delete(evt.Metadata, guardEstimateMetadataKey)
+	if resp, ok := evt.Output.(*model.ChatResponse); ok && resp != nil && resp.UsageKnown {
+		h.calibrate(estimate.modelID, estimate.tokens, resp.Usage.PromptWindowTokens())
+	}
 	return nil
 }
 
@@ -217,17 +440,20 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 		}
 	}
 	var dropped []ContextSourceKind
-	for _, source := range droppableContextSources {
-		for i := 0; total > limit && i < len(msgs); i++ {
-			if msgs[i].Role != model.RoleSystem || contextSourceFromMessage(msgs[i]) != source {
-				continue
+	dropSources := func(sources []ContextSourceKind) {
+		for _, source := range sources {
+			for i := 0; total > limit && i < len(msgs); i++ {
+				if msgs[i].Role != model.RoleSystem || contextSourceFromMessage(msgs[i]) != source {
+					continue
+				}
+				total -= counter.CountTokens([]model.Message{msgs[i]})
+				msgs = append(msgs[:i], msgs[i+1:]...)
+				dropped = append(dropped, source)
+				i--
 			}
-			total -= counter.CountTokens([]model.Message{msgs[i]})
-			msgs = append(msgs[:i], msgs[i+1:]...)
-			dropped = append(dropped, source)
-			i--
 		}
 	}
+	dropSources(droppableContextSources)
 	protectedPrefix = 0
 	for protectedPrefix < len(msgs) && msgs[protectedPrefix].Role == model.RoleSystem {
 		protectedPrefix++
@@ -274,6 +500,16 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 		msgs = append(kept, msgs[nextUser:]...)
 		total = counter.CountTokens(msgs)
 	}
+	// Skills and project instructions sit in the provider's system prompt:
+	// dropping one invalidates the cached prompt after it and loses standing
+	// guidance, so they go only after every older turn is gone.
+	before := len(msgs)
+	dropSources(lastResortContextSources)
+	if len(msgs) != before {
+		// Room freed by dropping standing guidance must not be refilled with
+		// old prompts: that would trade the guidance for older turns.
+		droppedUserPrompts = nil
+	}
 	if total <= limit && len(droppedUserPrompts) > 0 {
 		// Do not trade the live task or tool progress for an old prompt.
 		for i := len(droppedUserPrompts) - 1; i >= 0 && i >= len(droppedUserPrompts)-4; i-- {
@@ -298,8 +534,13 @@ var droppableContextSources = []ContextSourceKind{
 	ContextSourceSessionSummaries,
 	ContextSourceMemory,
 	ContextSourceLearnedPattern,
-	ContextSourceSkills,
 	ContextSourceUserHook,
+}
+
+// lastResortContextSources are droppable request-time context that the guard
+// removes only when trimming old turns was not enough.
+var lastResortContextSources = []ContextSourceKind{
+	ContextSourceSkills,
 	ContextSourceProjectDocs,
 }
 

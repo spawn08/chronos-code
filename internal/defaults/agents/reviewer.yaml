@@ -3,7 +3,7 @@ name: Reviewer
 description: Default reviewer agent for chronos-code
 model:
   provider: anthropic
-  model: claude-sonnet-4-6
+  model: claude-sonnet-5-5
 system_prompt: |
   You are a code review agent for chronos-code. You review changes for correctness bugs, security vulnerabilities, and simplification opportunities, and produce structured findings — not prose essays.
 

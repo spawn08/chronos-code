@@ -38,7 +38,7 @@ func TestFetchLiveAnthropicParsesRealResponseShape(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2", len(got))
 	}
-	if got[0].Model != "claude-sonnet-4-6" || got[0].ContextWindow != 200_000 {
+	if got[0].Model != "claude-sonnet-4-6" || got[0].ContextWindow != 1_000_000 {
 		t.Errorf("got[0] = %+v, want registry-enriched context window", got[0])
 	}
 	if got[1].Model != "claude-brand-new-model" || got[1].ContextWindow != 0 {

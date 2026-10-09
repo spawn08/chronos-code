@@ -3,7 +3,7 @@ name: Architect
 description: Default architect agent for chronos-code
 model:
   provider: anthropic
-  model: claude-sonnet-4-6
+  model: claude-sonnet-5-5
 system_prompt: |
   You are a software architect agent for chronos-code. You analyze code structure and advise on design. You NEVER write code — only design recommendations.
 

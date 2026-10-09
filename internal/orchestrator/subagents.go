@@ -85,6 +85,9 @@ type configuredAgentRunner struct {
 type roleModelRegistry struct {
 	mu        sync.RWMutex
 	providers map[string]model.Provider
+	// route, when set, selects a role's model for one delegated task (nil
+	// keeps the role's configured model).
+	route func(ctx context.Context, roleID, task string) model.Provider
 }
 
 func newRoleModelRegistry(agents map[string]*agent.Agent) *roleModelRegistry {
@@ -104,6 +107,32 @@ func (r *roleModelRegistry) provider(roleID string) model.Provider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.providers[roleID]
+}
+
+// providerFor is the model for one delegated task of roleID: the routed model
+// when routing selects one, else the role's model.
+func (r *roleModelRegistry) providerFor(ctx context.Context, roleID, task string) model.Provider {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	route := r.route
+	r.mu.RUnlock()
+	if route != nil {
+		if routed := route(ctx, roleID, task); routed != nil {
+			return routed
+		}
+	}
+	return r.provider(roleID)
+}
+
+func (r *roleModelRegistry) setRoute(route func(ctx context.Context, roleID, task string) model.Provider) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.route = route
 }
 
 func (r *roleModelRegistry) set(roleID string, provider model.Provider) {
@@ -211,13 +240,16 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	nextPath := append(append([]string(nil), path...), spec.Name)
 	runCtx = context.WithValue(runCtx, subagentPathKey{}, nextPath)
 	runCtx = context.WithValue(runCtx, subagentActiveKey{}, true)
+	// Relevance-ranked context (memory, diagnostics, learned patterns) is
+	// chosen for the delegated task, not the parent's user message.
+	runCtx = context.WithValue(runCtx, messageKey{}, task)
 	var result string
 	var err error
 	if configured := r.agents[spec.Name]; configured != nil {
 		runCtx = attenuateEffectGrant(runCtx, configured.Tools.List())
 		provider := configured.Model
 		if r.models != nil {
-			provider = r.models.provider(spec.Name)
+			provider = r.models.providerFor(runCtx, spec.Name, task)
 		}
 		if provider == nil {
 			return "", fmt.Errorf("configured subagent %q has no model", spec.Name)

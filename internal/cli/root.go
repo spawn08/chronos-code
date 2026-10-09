@@ -751,7 +751,7 @@ func credentialProvider(cfg *config.Config, current agent.ModelConfig, authorize
 func defaultProviderModel(provider string) string {
 	switch provider {
 	case "anthropic":
-		return "claude-sonnet-4-6"
+		return "claude-sonnet-5-5"
 	case "openai":
 		return "gpt-4o"
 	case "gemini", "google":

@@ -166,7 +166,7 @@ To cap spending for a session, start with `chronos-code --budget 5` (US dollars)
 | `/plan [on\|off]` | Plan mode: plan first, approve, then implement |
 | `/agent [name]` · `/agents` | Show or switch the active agent · list agents |
 | `/model [provider] [model]` | Show or switch the model |
-| `/think off\|low\|medium\|high` | Set the thinking level |
+| `/think off\|low\|medium\|high\|xhigh\|max` | Set the thinking level |
 | `/login` · `/logout` · `/whoami` | Manage provider credentials |
 | `/resume` · `/session` · `/clear` · `/compact` | Session management |
 | `/rewind` | Undo the last file edit |

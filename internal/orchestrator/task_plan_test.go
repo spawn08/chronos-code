@@ -95,3 +95,25 @@ func TestInstallTaskPlanRegistersOnlyForWritingAgents(t *testing.T) {
 		t.Fatal("read-only agent received update_plan")
 	}
 }
+
+// Models that bind thinking to the conversation get no per-call plan pin:
+// re-pinning edits the previous request's last message every call. The
+// update_plan result already appends each change to the conversation.
+func TestTaskPlanHookSkipsPinOnThinkingBoundModels(t *testing.T) {
+	store := newTaskPlanStore()
+	ctx := storage.WithSession(context.Background(), "s")
+	if err := store.Save(ctx, &builtins.Plan{Tasks: []builtins.PlanTask{{Content: "write css", Status: builtins.TaskPending}}}); err != nil {
+		t.Fatal(err)
+	}
+	for modelID, wantPin := range map[string]bool{"claude-opus-5-5": false, "claude-sonnet-4-6": true} {
+		req := &model.ChatRequest{Messages: []model.Message{{Role: model.RoleUser, Content: "task"}}}
+		evt := &hooks.Event{Type: hooks.EventModelCallBefore, Input: req,
+			Metadata: map[string]any{"provider": outputTokensProvider{model: modelID}}}
+		if err := (taskPlanHook{store: store}).Before(ctx, evt); err != nil {
+			t.Fatal(err)
+		}
+		if pinned := len(req.Messages) == 2; pinned != wantPin {
+			t.Fatalf("%s: pinned = %v, want %v (%+v)", modelID, pinned, wantPin, req.Messages)
+		}
+	}
+}

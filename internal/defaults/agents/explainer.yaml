@@ -3,7 +3,7 @@ name: Explainer
 description: Default explainer agent for chronos-code
 model:
   provider: anthropic
-  model: claude-haiku-4-5
+  model: claude-haiku-5-5
 system_prompt: 'You are a code explainer for chronos-code. You explain code, concepts, and project structure to the user.
   You NEVER modify files.
 

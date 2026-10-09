@@ -37,7 +37,7 @@ chronos-code version --json
 | `--max-turns <n>` | Hard cap on model turns. Reaching it ends the run with error `max_turns`, exit 1. |
 | `--model <id>` | A model id, or `<provider>/<model>` such as `azure/my-deployment` or `anthropic/claude-sonnet-4-5`. An explicit model turns the built-in router off. |
 | `--provider <name>` | Provider, when the model id has no prefix. |
-| `--thinking off\|low\|medium\|high` | Reasoning effort. Other values fail with `invalid_request`. |
+| `--thinking off\|low\|medium\|high\|xhigh\|max` | Native thinking level. `off` disables thinking but keeps the configured effort, which Anthropic models still apply. Other values fail with `invalid_request`. |
 | `--mcp-config <path>` | MCP servers for this run, repeatable. Servers listed here are trusted without approval. |
 | `--strict-mcp-config` | Ignore `.mcp.json` and user-scope MCP files. Use it so a target repository's own MCP file is never loaded. |
 | `--require-mcp <name>` | The run needs this MCP server, repeatable or comma-separated. If it is not connected after startup, the run ends with error `mcp_unavailable`, exit 9, before the first provider call. |
@@ -95,7 +95,7 @@ Example stream (trimmed):
 |---|---|---|
 | 0 | `succeeded` | Done. |
 | 1 | `failed` | Failed, including error `max_turns`. |
-| 2 | `invalid_request` | Bad flag or input, such as an unknown `--thinking` value. |
+| 2 | `invalid_request` | Bad flag or input, such as an unknown `--thinking` value, or stop reason `content_filtered`: the provider's safety classifier or content filter stopped the final response, so its content may be empty or partial. |
 | 3 | `approval_blocked` | A tool needed approval and none could be given. |
 | 4 | `retryable_provider_error` | Provider error worth retrying. |
 | 5 | `timed_out` | Timeout. |

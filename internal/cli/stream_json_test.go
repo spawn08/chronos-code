@@ -427,3 +427,32 @@ func TestRunStreamJSONOverBudgetProjectDocs(t *testing.T) {
 		}
 	}
 }
+
+// A response the provider stops with its content filter (Anthropic refusal,
+// OpenAI content_filter) is not a successful run, whatever text preceded it.
+func TestRunStreamJSONContentFilteredResponseFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"r1\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"r1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\n")
+		fmt.Fprint(w, "data: {\"id\":\"r1\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	orch := newStreamTestOrchestrator(t, server.URL)
+	var out bytes.Buffer
+	err := runStreamJSON(context.Background(), orch, orchestrator.ExecutionRequest{Message: "hello"}, newStreamEmitter(&out), "/work", nil)
+	var exit *ExitError
+	if !asExitError(err, &exit) || exit.Code != ExitCodeForStatus(execution.StatusInvalidRequest) {
+		t.Fatalf("err = %v, want exit code for invalid_request\n%s", err, out.String())
+	}
+	events := decodeStream(t, out.Bytes())
+	last := events[len(events)-1]
+	if last.Type != execution.EventError {
+		t.Fatalf("last event = %s, want error", last.Type)
+	}
+	var payload errorPayload
+	if err := json.Unmarshal(last.Payload, &payload); err != nil || payload.StopReason != execution.StopContentFiltered || payload.Status != execution.StatusInvalidRequest || payload.Retryable {
+		t.Fatalf("error payload = %+v (%v)", payload, err)
+	}
+}

@@ -513,6 +513,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if cfg.PrimaryModelSelected() {
 		orch.modelOverrides[active] = true
 	}
+	roleModels.setRoute(orch.routeSubagent)
 	for i, id := range sortedAgentIDs(agents) {
 		if i < len(orch.mcpRuntimes) {
 			orch.mcpRuntimes[i].SetAgent(id)
@@ -1043,6 +1044,12 @@ func setupSessionSummaries(manager *session.Manager, agents map[string]*agent.Ag
 			var messages []model.Message
 			if prev != nil {
 				messages = append(messages, prev(ctx)...)
+			}
+			// A delegated task is self-contained; prior-session context
+			// belongs to the parent conversation and only costs tokens here.
+			if delegated, _ := ctx.Value(subagentActiveKey{}).(bool); delegated {
+				contextSourceOmitted(ctx, ContextSourceSessionSummaries, ContextOmittedNotSelected)
+				return messages
 			}
 			query, _ := ctx.Value(messageKey{}).(string)
 			summaries, err := manager.RecallSummaries(ctx, agentID, storage.SessionFromContext(ctx), query, maxPriorSessionSummaries, maxPriorSessionSummaryBytes)
@@ -2380,6 +2387,12 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 						}
 					}
 					decision := assessRuntimeVerification(request, classification, runtime)
+					if stop == model.StopReasonFilter {
+						// A refusal is not a completed task, whatever text
+						// arrived before it.
+						complete(decision, execution.StopContentFiltered, nil)
+						return
+					}
 					if paused {
 						// The governor paused for lack of progress; a repair
 						// prompt would resume the loop the user must steer.
@@ -2675,21 +2688,13 @@ func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message 
 	}
 	classification := router.ClassifyTask(message)
 	o.routingMu.Lock()
-	routingConfig := o.routingConfig
-	overridden := o.modelOverrides[agentID]
-	selected := o.agents[agentID].Model
+	var selected model.Provider
+	if a := o.agents[agentID]; a != nil {
+		selected = a.Model
+	}
 	o.routingMu.Unlock()
-	if routingConfig != nil && !overridden {
-		if spec, ok := routingConfig.ResolveModelForRole(agentID, classification.Complexity, classification.Kind); ok {
-			// A bundled route must not send an authorized agent to a provider
-			// for which no credential can be resolved.
-			if o.cfg == nil || selected == nil || auth.CanonicalProvider(spec.Provider) == auth.CanonicalProvider(selected.Name()) ||
-				resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, spec.Provider, spec.Model).APIKey != "" {
-				if provider, err := o.buildModelProvider(ctx, agentID, spec.Provider, spec.Model); err == nil {
-					selected = provider
-				}
-			}
-		}
+	if routed := o.routedProvider(ctx, agentID, classification); routed != nil {
+		selected = routed
 	}
 	if selected == nil {
 		return ctx
@@ -2699,6 +2704,44 @@ func (o *Orchestrator) applyResolvedModel(ctx context.Context, agentID, message 
 	return context.WithValue(ctx, requestRoutingKey{}, requestRouting{
 		AgentID: agentID, Classification: classification, Provider: selected.Name(), Model: selected.Model(),
 	})
+}
+
+// routedProvider returns the provider the routing table selects for agentID
+// and classification, or nil to keep the agent's selected model: no routing,
+// an explicit model override, or a route whose provider has no credential.
+func (o *Orchestrator) routedProvider(ctx context.Context, agentID string, classification router.Classification) model.Provider {
+	o.routingMu.Lock()
+	routingConfig := o.routingConfig
+	overridden := o.modelOverrides[agentID]
+	var selected model.Provider
+	if a := o.agents[agentID]; a != nil {
+		selected = a.Model
+	}
+	o.routingMu.Unlock()
+	if routingConfig == nil || overridden {
+		return nil
+	}
+	spec, ok := routingConfig.ResolveModelForRole(agentID, classification.Complexity, classification.Kind)
+	if !ok {
+		return nil
+	}
+	// A bundled route must not send an authorized agent to a provider for
+	// which no credential can be resolved.
+	if o.cfg != nil && selected != nil && auth.CanonicalProvider(spec.Provider) != auth.CanonicalProvider(selected.Name()) &&
+		resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, spec.Provider, spec.Model).APIKey == "" {
+		return nil
+	}
+	provider, err := o.buildModelProvider(ctx, agentID, spec.Provider, spec.Model)
+	if err != nil {
+		return nil
+	}
+	return provider
+}
+
+// routeSubagent selects a delegated role's model from its task, as the
+// top-level agent's model is selected from the user's message.
+func (o *Orchestrator) routeSubagent(ctx context.Context, roleID, task string) model.Provider {
+	return o.routedProvider(ctx, roleID, router.ClassifyTask(task))
 }
 
 // SetDirectoryApprovalHandler installs the interactive handler asked when a
@@ -2941,6 +2984,10 @@ func thinkingBudgetForEffort(effort string) int {
 		return 1024
 	case "high":
 		return 10000
+	case "xhigh":
+		return 16000
+	case "max":
+		return 32000
 	default:
 		return 4096
 	}
@@ -2969,7 +3016,7 @@ func (o *Orchestrator) ThinkingLevel() string {
 	}
 	effort := strings.ToLower(strings.TrimSpace(a.ReasoningConfig.Effort))
 	switch effort {
-	case "low", "medium", "high":
+	case "low", "medium", "high", "xhigh", "max":
 		return effort
 	default:
 		return "medium"
@@ -2977,7 +3024,9 @@ func (o *Orchestrator) ThinkingLevel() string {
 }
 
 // SetThinking enables or disables provider-native thinking on every loaded
-// agent. level is off, low, medium, or high. Gemini agents that have tools
+// agent. level is off, low, medium, high, xhigh, or max. off keeps each
+// agent's current effort, which still bounds output on providers that apply
+// effort without thinking (Anthropic). Gemini agents that have tools
 // are skipped because Chronos cannot yet preserve their signed thought
 // blocks across tool rounds.
 func (o *Orchestrator) SetThinking(level string) error {
@@ -2985,9 +3034,11 @@ func (o *Orchestrator) SetThinking(level string) error {
 	defer o.routingMu.Unlock()
 	level = strings.ToLower(strings.TrimSpace(level))
 	var cfg model.ReasoningConfig
+	off := false
 	switch level {
 	case "off", "none", "false", "0":
-	case "low", "medium", "high":
+		off = true
+	case "low", "medium", "high", "xhigh", "max":
 		cfg = model.ReasoningConfig{
 			Enabled:      true,
 			Effort:       level,
@@ -2995,7 +3046,7 @@ func (o *Orchestrator) SetThinking(level string) error {
 			Summary:      true,
 		}
 	default:
-		return fmt.Errorf("thinking level %q is invalid (want off, low, medium, or high)", level)
+		return fmt.Errorf("thinking level %q is invalid (want off, low, medium, high, xhigh, or max)", level)
 	}
 
 	skipped := 0
@@ -3005,6 +3056,10 @@ func (o *Orchestrator) SetThinking(level string) error {
 		}
 		if cfg.Enabled && nativeThinkingUnsupported(a) {
 			skipped++
+			continue
+		}
+		if off {
+			a.ReasoningConfig = model.ReasoningConfig{Effort: a.ReasoningConfig.Effort}
 			continue
 		}
 		a.ReasoningConfig = cfg

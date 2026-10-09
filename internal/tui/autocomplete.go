@@ -28,7 +28,7 @@ func inputCompletions(input string, agents, subagents, skillNames, files, mcpSer
 		if strings.ContainsAny(rest, " \t\n") {
 			return nil
 		}
-		for _, name := range []string{"off", "low", "medium", "high"} {
+		for _, name := range []string{"off", "low", "medium", "high", "xhigh", "max"} {
 			candidates = append(candidates, "/think "+name)
 		}
 		candidates = append(candidates, "/think")

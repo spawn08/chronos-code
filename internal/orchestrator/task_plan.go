@@ -86,6 +86,17 @@ func (h taskPlanHook) Before(ctx context.Context, evt *hooks.Event) error {
 	if !ok || req == nil || storage.SessionFromContext(ctx) == "" {
 		return nil
 	}
+	modelID := req.Model
+	if provider, ok := evt.Metadata["provider"].(model.Provider); modelID == "" && ok && provider != nil {
+		modelID = provider.Model()
+	}
+	if model.AnthropicThinkingBoundToConversation(modelID) {
+		// A pin rebuilt on every call edits the previous request's last
+		// message, which invalidates every later thinking block on these
+		// models. Each plan change is already appended to the conversation
+		// as the update_plan result, so the history stays append-only.
+		return nil
+	}
 	plan, err := h.store.Load(ctx)
 	if err != nil || plan == nil {
 		return nil

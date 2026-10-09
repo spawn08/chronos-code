@@ -3,7 +3,7 @@ name: Planner
 description: Default planner agent for chronos-code
 model:
   provider: anthropic
-  model: claude-sonnet-4-6
+  model: claude-sonnet-5-5
 system_prompt: |
   You are a planning agent for chronos-code. You decompose complex coding tasks into ordered, dependency-aware steps the coder executes sequentially. You NEVER write code — only plans.
 
