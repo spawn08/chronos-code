@@ -98,3 +98,20 @@ func TestApplyPrimaryProvider_NoopWhenPrimaryUncredentialed(t *testing.T) {
 		t.Errorf("researcher provider = %q, want anthropic untouched", got)
 	}
 }
+
+// A Bedrock primary signs with the AWS credential chain and has no key in
+// config; uncredentialed Anthropic subagents must follow it to Bedrock.
+func TestApplyPrimaryProvider_BedrockPrimaryWithoutKey(t *testing.T) {
+	primary := agent.ModelConfig{Provider: "bedrock", Model: "anthropic.claude-sonnet-5-5", Region: "us-east-1"}
+	cfg := &config.Config{}
+	cfg.Agents = []agent.AgentConfig{
+		{ID: "chronos-code", Model: primary},
+		{ID: "researcher", Model: agent.ModelConfig{Provider: "anthropic", Model: "claude-haiku-5-5"}},
+	}
+
+	applyPrimaryProviderToUncredentialedAgents(cfg)
+
+	if got := agentByID(t, cfg, "researcher").Model; got != primary {
+		t.Errorf("researcher model = %+v, want the Bedrock primary %+v", got, primary)
+	}
+}

@@ -70,9 +70,12 @@ type Config struct {
 	Providers    map[string]ProviderOverride `yaml:"providers,omitempty"`
 	Models       ModelsCatalogConfig         `yaml:"models_catalog,omitempty"`
 
-	set                  map[string]struct{}
-	sources              map[string]string
-	agentModelSources    map[string]map[string]string
+	set               map[string]struct{}
+	sources           map[string]string
+	agentModelSources map[string]map[string]string
+	// agentModelPinned marks agents whose provider or model a user or
+	// project overlay sets explicitly.
+	agentModelPinned     map[string]bool
 	primaryModelSelected bool
 }
 
@@ -1026,7 +1029,19 @@ func setAgentModelSources(cfg *Config, agents []agent.AgentConfig, source string
 			continue
 		}
 		cfg.agentModelSources[id] = map[string]string{"provider": source, "model": source}
+		if source != "embedded" && (configured.Model.Provider != "" || configured.Model.Model != "") {
+			if cfg.agentModelPinned == nil {
+				cfg.agentModelPinned = make(map[string]bool)
+			}
+			cfg.agentModelPinned[id] = true
+		}
 	}
+}
+
+// AgentModelPinned reports whether a user or project config explicitly sets
+// the agent's provider or model, which automatic model routing must keep.
+func (c *Config) AgentModelPinned(agentID string) bool {
+	return c != nil && c.agentModelPinned[strings.ToLower(agentID)]
 }
 
 // PrimaryAgentModel returns the same primary-agent selection used by the

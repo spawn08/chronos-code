@@ -35,7 +35,8 @@ func TestOutputTokensHookRaisesStreamingAnthropicDefault(t *testing.T) {
 		{"claude 3 haiku keeps default", "anthropic", "claude-3-haiku-20240307", true, 0, 0},
 		{"unary keeps default", "anthropic", "claude-sonnet-4-6", false, 0, 0},
 		{"explicit cap kept", "anthropic", "claude-sonnet-4-6", true, 2000, 2000},
-		{"other provider untouched", "bedrock", "anthropic.claude-sonnet-4-6", true, 0, 0},
+		{"bedrock messages endpoint", "bedrock", "anthropic.claude-sonnet-5-5", true, 0, 32000},
+		{"other provider untouched", "openai", "gpt-5.5", true, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := &model.ChatRequest{Model: tc.model, MaxTokens: tc.maxTokens}

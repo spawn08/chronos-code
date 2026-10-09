@@ -228,3 +228,21 @@ func TestRuntimeVerificationDropsRefusedChecks(t *testing.T) {
 		})
 	}
 }
+
+// A refused response ends a blocking run as content_filtered: no nudge or
+// repair prompt re-asks the refused request.
+func TestRepairBlockingStopsOnContentFilter(t *testing.T) {
+	runtime, err := newTaskRuntimeWithLimits("task", t.TempDir(), execution.TaskLimits{RepairAttempts: 3, ModelCalls: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.recordWrite("main.go", "hash", 1, execution.ProvenanceRuntime, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	provider := &repairEvidenceProvider{}
+	a := newExecutionTestAgent("coder", provider)
+	_, _, reason, err := (&Orchestrator{}).repairBlocking(withTaskRuntime(context.Background(), runtime), a, "", ExecutionRequest{VerificationMode: verification.ModeEnforce}, router.Classification{Kind: router.TaskKindEdit}, runtime, &model.ChatResponse{Content: "partial", StopReason: model.StopReasonFilter})
+	if err != nil || reason != execution.StopContentFiltered || len(provider.requests) != 0 {
+		t.Fatalf("repairBlocking = (%q, %v), provider calls = %d; want content_filtered and no calls", reason, err, len(provider.requests))
+	}
+}

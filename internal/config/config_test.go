@@ -690,3 +690,22 @@ func TestSCIPSourcesCarryTheirLayer(t *testing.T) {
 		t.Error("digest ignores the layer")
 	}
 }
+
+// Automatic model routing keeps models a user or project sets explicitly;
+// bundled defaults and overlays that leave the model alone stay routable.
+func TestAgentModelPinned(t *testing.T) {
+	cfg := &Config{}
+	setAgentModelSources(cfg, []agent.AgentConfig{{ID: "coder", Model: agent.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-5-5"}}}, "embedded")
+	setAgentModelSources(cfg, []agent.AgentConfig{
+		{ID: "Tester", Model: agent.ModelConfig{Provider: "openai", Model: "gpt-5.5"}},
+		{ID: "reviewer", System: "only a prompt change"},
+	}, "project")
+	for id, want := range map[string]bool{"coder": false, "tester": true, "reviewer": false, "unknown": false} {
+		if got := cfg.AgentModelPinned(id); got != want {
+			t.Errorf("AgentModelPinned(%q) = %v, want %v", id, got, want)
+		}
+	}
+	if (*Config)(nil).AgentModelPinned("coder") {
+		t.Error("nil config reported a pinned model")
+	}
+}

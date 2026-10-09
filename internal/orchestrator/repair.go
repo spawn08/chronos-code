@@ -22,6 +22,10 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 		// A no-progress pause awaits the user; repairing would resume it.
 		return response, assessRuntimeVerification(request, classification, runtime), pausedStopReason(ctx), nil
 	}
+	// A refusal is not a completed task, and repairing would re-ask it.
+	if filtered(response) {
+		return response, assessRuntimeVerification(request, classification, runtime), execution.StopContentFiltered, nil
+	}
 	gate := &completionGate{}
 	response, err := o.nudgeBlocking(ctx, a, sessionID, gate, runtime, response)
 	if err != nil {
@@ -29,6 +33,9 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 	}
 	if response != nil && response.StopReason == model.StopReasonPaused {
 		return response, assessRuntimeVerification(request, classification, runtime), pausedStopReason(ctx), nil
+	}
+	if filtered(response) {
+		return response, assessRuntimeVerification(request, classification, runtime), execution.StopContentFiltered, nil
 	}
 	decision := assessRuntimeVerification(request, classification, runtime)
 	seen := make(map[string]struct{})
@@ -63,8 +70,17 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 			return response, decision, execution.StopReasonForError(err), err
 		}
 		decision = assessRuntimeVerification(request, classification, runtime)
+		if filtered(response) {
+			return response, decision, execution.StopContentFiltered, nil
+		}
 	}
 	return response, decision, execution.StopSuccess, nil
+}
+
+// filtered reports whether the provider's safety classifier or content
+// filter stopped response.
+func filtered(response *model.ChatResponse) bool {
+	return response != nil && response.StopReason == model.StopReasonFilter
 }
 
 // nudgeBlocking sends the model back to work while the completion gate finds

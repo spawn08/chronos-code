@@ -272,7 +272,7 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		}
 		// Durable delivery relies on the blocking path's reply journal; other
 		// providers keep their existing blocking behavior.
-		if _, durable := execution.OperationLeaseFromContext(runCtx); !durable && provider.Name() == "anthropic" {
+		if _, durable := execution.OperationLeaseFromContext(runCtx); !durable && anthropicMessagesProvider(provider) {
 			result, err = executeSubagentStream(runCtx, configured, task)
 		} else {
 			result, err = configured.Execute(runCtx, task)

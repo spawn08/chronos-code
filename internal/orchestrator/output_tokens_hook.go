@@ -33,7 +33,7 @@ func (outputTokensHook) Before(ctx context.Context, evt *hooks.Event) error {
 		return nil
 	}
 	provider, ok := evt.Metadata["provider"].(model.Provider)
-	if !ok || provider == nil || provider.Name() != "anthropic" {
+	if !ok || !anthropicMessagesProvider(provider) {
 		return nil
 	}
 	if lease, ok := execution.OperationLeaseFromContext(ctx); ok && lease.Lease.Delivery.MaxCostMicrodollars > 0 {

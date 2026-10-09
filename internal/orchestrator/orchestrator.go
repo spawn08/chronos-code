@@ -614,13 +614,16 @@ func applyStoredCredentials(ctx context.Context, cfg *config.Config) {
 // because Azure needs the primary's endpoint, deployment, and API version,
 // not just its key. Agents with their own credential and keyless/local
 // providers are left untouched, as is everything when the primary itself has
-// no credential.
+// no credential, unless the primary authenticates without one (Bedrock with
+// the AWS credential chain).
 func applyPrimaryProviderToUncredentialedAgents(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
 	primaryID, primaryModel, _, _ := cfg.PrimaryAgentModel()
-	if primaryID == "" || primaryModel.APIKey == "" {
+	// Bedrock usually authenticates through the AWS credential chain, with
+	// no API key in the config.
+	if primaryID == "" || primaryModel.APIKey == "" && !ambientCredentialProvider(auth.CanonicalProvider(primaryModel.Provider)) {
 		return
 	}
 	primaryProvider := auth.CanonicalProvider(primaryModel.Provider)
@@ -632,6 +635,18 @@ func applyPrimaryProviderToUncredentialedAgents(cfg *config.Config) {
 		}
 		a.Model = primaryModel
 	}
+}
+
+// ambientCredentialProvider reports whether provider can authenticate
+// without a configured key (Bedrock: SigV4 with the AWS credential chain).
+func ambientCredentialProvider(provider string) bool {
+	return provider == "bedrock"
+}
+
+// anthropicMessagesProvider reports whether a provider speaks the Anthropic
+// Messages API (first-party, or Bedrock's Messages endpoint).
+func anthropicMessagesProvider(p model.Provider) bool {
+	return p != nil && (p.Name() == "anthropic" || p.Name() == "bedrock")
 }
 
 // credentialedProvider reports whether provider always needs a resolved
@@ -2739,8 +2754,12 @@ func (o *Orchestrator) routedProvider(ctx context.Context, agentID string, class
 }
 
 // routeSubagent selects a delegated role's model from its task, as the
-// top-level agent's model is selected from the user's message.
+// top-level agent's model is selected from the user's message. A role whose
+// model the user or project configured explicitly keeps it.
 func (o *Orchestrator) routeSubagent(ctx context.Context, roleID, task string) model.Provider {
+	if o.cfg.AgentModelPinned(roleID) {
+		return nil
+	}
 	return o.routedProvider(ctx, roleID, router.ClassifyTask(task))
 }
 
