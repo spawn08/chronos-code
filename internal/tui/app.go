@@ -614,6 +614,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.PasteMsg:
+		if m.approval == nil {
+			if cmd, ok := m.updateWizardInput(msg); ok {
+				return m, cmd
+			}
+		}
 		if m.approval != nil || m.wizard != nil || m.picker != nil || m.inspection != nil || m.searching {
 			return m, nil
 		}
@@ -876,6 +881,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleOAuthEvent(msg)
 	}
 
+	if cmd, ok := m.updateWizardInput(msg); ok {
+		return m, cmd
+	}
 	return m, nil
 }
 
@@ -2894,6 +2902,24 @@ func (m *appModel) handleLoginCommand(arg string) tea.Cmd {
 	m.refreshPrompt()
 	m.appendSystem(fmt.Sprintf("stored API key for %q", provider))
 	return nil
+}
+
+// handleAzureLogin stores the Azure OpenAI key and resource settings the
+// /login wizard collected, switching to the deployment when one was given.
+func (m *appModel) handleAzureLogin(apiKey string, settings auth.AzureSettings) {
+	if err := m.orch.LoginAzure(m.ctx, apiKey, settings); err != nil {
+		m.appendError(err)
+		return
+	}
+	m.invalidateAuthIdentity()
+	m.refreshPrompt()
+	msg := fmt.Sprintf("stored Azure OpenAI credentials for %s", settings.Endpoint)
+	if settings.Deployment != "" {
+		msg += fmt.Sprintf("\nswitched to azure / %s", settings.Deployment)
+	} else {
+		msg += "\nchoose a deployment with /model azure <deployment>"
+	}
+	m.appendSystem(msg)
 }
 
 // startSubscriptionLogin kicks off the OpenAI/ChatGPT subscription browser

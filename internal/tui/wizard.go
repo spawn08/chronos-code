@@ -2,11 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/spawn08/chronos-code/internal/auth"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
 )
 
@@ -30,6 +32,16 @@ type wizardItem struct {
 	value string
 }
 
+// wizardField is one prompt of stepTextInput. Most providers need only an
+// API key; Azure also needs its endpoint, deployment, and API version.
+type wizardField struct {
+	title       string
+	placeholder string
+	password    bool
+	optional    bool
+	validate    func(string) error
+}
+
 // loginWizard drives /login's interactive picker. It is nil on appModel
 // whenever no wizard is in progress.
 type loginWizard struct {
@@ -39,6 +51,9 @@ type loginWizard struct {
 	items    []wizardItem
 	idx      int
 	input    textinput.Model
+	fields   []wizardField
+	answers  []string
+	err      string
 }
 
 // subscriptionLoginValue is the wizard item value that triggers the
@@ -95,16 +110,51 @@ func newTextPrompt(placeholder string, password bool) textinput.Model {
 	return ti
 }
 
+// loginFields lists the text prompts stepTextInput asks for method and
+// provider, in order.
+func loginFields(method, provider string) []wizardField {
+	if method != "apikey" {
+		return []wizardField{{
+			title:       fmt.Sprintf("Enter OAuth config for %s (client-id auth-url token-url):", provider),
+			placeholder: "client-id auth-url token-url",
+		}}
+	}
+	apiKey := wizardField{title: fmt.Sprintf("Enter API key for %s:", provider), placeholder: fmt.Sprintf("API key for %s", provider), password: true}
+	if provider != "azure" {
+		return []wizardField{apiKey}
+	}
+	apiKey.title = "Azure OpenAI API key (2/4):"
+	return []wizardField{
+		{title: "Azure OpenAI endpoint (1/4):", placeholder: "https://<resource>.openai.azure.com", validate: validateEndpoint},
+		apiKey,
+		{title: "Deployment name (3/4):", placeholder: "e.g. gpt-4o · optional, choose later with /model azure <deployment>", optional: true},
+		{title: "API version (4/4):", placeholder: "optional · default 2024-10-21", optional: true},
+	}
+}
+
+func validateEndpoint(v string) error {
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("endpoint must be a URL such as https://<resource>.openai.azure.com")
+	}
+	return nil
+}
+
+// startField focuses a fresh text input for the field at len(w.answers).
+func (w *loginWizard) startField() tea.Cmd {
+	f := w.fields[len(w.answers)]
+	w.input = newTextPrompt(f.placeholder, f.password)
+	w.err = ""
+	return textinput.Blink
+}
+
 // title returns the wizard's current step heading, for renderWizardModal.
 func (w *loginWizard) title() string {
 	switch w.step {
 	case stepProvider:
 		return "Select provider to configure:"
 	case stepTextInput:
-		if w.method == "apikey" {
-			return fmt.Sprintf("Enter API key for %s:", w.provider)
-		}
-		return fmt.Sprintf("Enter OAuth config for %s (client-id auth-url token-url):", w.provider)
+		return w.fields[len(w.answers)].title
 	default:
 		return "Select authentication method:"
 	}
@@ -113,7 +163,15 @@ func (w *loginWizard) title() string {
 // View renders the wizard's current step body (list picker or text input).
 func (w *loginWizard) View() string {
 	if w.step == stepTextInput {
-		return w.input.View()
+		view := w.input.View()
+		if w.err != "" {
+			view += "\n" + styleError.Render(w.err)
+		}
+		hint := "enter submit  esc cancel"
+		if w.fields[len(w.answers)].optional {
+			hint = "enter submit (blank to skip)  esc cancel"
+		}
+		return view + "\n" + styleDim.Render(hint)
 	}
 	var b strings.Builder
 	for i, it := range w.items {
@@ -202,33 +260,62 @@ func (m *appModel) advanceWizard(value string) (tea.Model, tea.Cmd) {
 	case stepProvider:
 		w.provider = value
 		w.step = stepTextInput
-		if w.method == "apikey" {
-			w.input = newTextPrompt(fmt.Sprintf("API key for %s", w.provider), true)
-		} else {
-			w.input = newTextPrompt("client-id auth-url token-url", false)
-		}
-		return m, textinput.Blink
+		w.fields = loginFields(w.method, w.provider)
+		w.answers = nil
+		return m, w.startField()
 	}
 	return m, nil
 }
 
-// submitWizardInput closes the wizard and hands its collected answer to
+// updateWizardInput forwards a non-key message (bracketed paste, the
+// textinput's own clipboard paste result, cursor blink) to the wizard's
+// text input. It reports false when no text-input step is active.
+func (m *appModel) updateWizardInput(msg tea.Msg) (tea.Cmd, bool) {
+	if m.wizard == nil || m.wizard.step != stepTextInput {
+		return nil, false
+	}
+	var cmd tea.Cmd
+	m.wizard.input, cmd = m.wizard.input.Update(msg)
+	return cmd, true
+}
+
+// submitWizardInput records the current field's answer and moves to the next
+// field. After the last one it closes the wizard and hands the answers to
 // handleLoginCommand — the exact same parsing/execution path the typed
 // "/login <provider> ..." form uses, so the wizard is purely a friendlier
-// way to compose that command, not a second implementation of login.
+// way to compose that command, not a second implementation of login. Azure
+// goes through handleAzureLogin, since its settings have no typed form.
 func (m *appModel) submitWizardInput() (tea.Model, tea.Cmd) {
 	w := m.wizard
 	line := strings.TrimSpace(w.input.Value())
-	m.wizard = nil
-	if line == "" {
+	field := w.fields[len(w.answers)]
+	if line == "" && !field.optional {
+		if len(w.fields) == 1 {
+			m.wizard = nil
+		}
 		return m, nil
 	}
-
-	arg := w.provider + " " + line
-	if w.method == "oauth" {
-		arg = w.provider + " oauth " + line
+	if line != "" && field.validate != nil {
+		if err := field.validate(line); err != nil {
+			w.err = err.Error()
+			return m, nil
+		}
 	}
-	cmd := m.handleLoginCommand(arg)
+	w.answers = append(w.answers, line)
+	if len(w.answers) < len(w.fields) {
+		return m, w.startField()
+	}
+	m.wizard = nil
+
+	var cmd tea.Cmd
+	switch {
+	case w.method == "apikey" && w.provider == "azure":
+		m.handleAzureLogin(w.answers[1], auth.AzureSettings{Endpoint: w.answers[0], Deployment: w.answers[2], APIVersion: w.answers[3]})
+	case w.method == "oauth":
+		cmd = m.handleLoginCommand(w.provider + " oauth " + line)
+	default:
+		cmd = m.handleLoginCommand(w.provider + " " + line)
+	}
 	m.viewport.SetContent(m.renderTranscript())
 	m.viewport.GotoBottom()
 	return m, cmd

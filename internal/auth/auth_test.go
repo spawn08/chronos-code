@@ -343,3 +343,24 @@ func TestLogout(t *testing.T) {
 		t.Fatalf("GetStatus after Logout = %+v, want not authenticated", st)
 	}
 }
+
+func TestLoginAzureStoresSettingsWithKey(t *testing.T) {
+	t.Setenv("AZURE_OPENAI_API_KEY", "")
+	store := newTestStore(t)
+	settings := AzureSettings{Endpoint: "https://res.openai.azure.com", Deployment: "gpt-4o", APIVersion: "2024-10-21"}
+	if err := LoginAzure(store, "az-key", settings); err != nil {
+		t.Fatalf("LoginAzure: %v", err)
+	}
+	if got := StoredAzureSettings(store); got != settings {
+		t.Fatalf("StoredAzureSettings = %+v, want %+v", got, settings)
+	}
+	if rc := resolveGeneric(store, "azure"); rc.Token != "az-key" {
+		t.Fatalf("resolved azure token = %q, want az-key", rc.Token)
+	}
+	if err := LoginAPIKey(store, "azure", "other-key"); err != nil {
+		t.Fatalf("LoginAPIKey: %v", err)
+	}
+	if got := StoredAzureSettings(store); got != (AzureSettings{}) {
+		t.Fatalf("key-only login kept settings %+v", got)
+	}
+}

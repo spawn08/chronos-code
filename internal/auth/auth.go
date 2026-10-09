@@ -30,6 +30,20 @@ type Credential struct {
 	AuthURL  string   `json:"auth_url,omitempty"`
 	TokenURL string   `json:"token_url,omitempty"`
 	Scopes   []string `json:"scopes,omitempty"`
+
+	// AzureSettings holds the Azure OpenAI resource settings saved with an
+	// Azure API key, so /login alone can configure a working Azure provider.
+	AzureSettings
+}
+
+// AzureSettings are the non-secret Azure OpenAI resource settings stored
+// beside an Azure API key. Config YAML and AZURE_OPENAI_* environment
+// variables take precedence over them, as AZURE_OPENAI_API_KEY does over the
+// stored key.
+type AzureSettings struct {
+	Endpoint   string `json:"endpoint,omitempty"`
+	Deployment string `json:"deployment,omitempty"`
+	APIVersion string `json:"api_version,omitempty"`
 }
 
 // LoginAPIKey stores a bring-your-own API key credential for provider. API
@@ -41,6 +55,27 @@ func LoginAPIKey(store *Store, provider, apiKey string) error {
 		Method:   MethodAPIKey,
 		APIKey:   apiKey,
 	})
+}
+
+// LoginAzure stores an Azure OpenAI API key together with the resource
+// settings it is used with.
+func LoginAzure(store *Store, apiKey string, settings AzureSettings) error {
+	return store.Save("azure", Credential{
+		Provider:      "azure",
+		Method:        MethodAPIKey,
+		APIKey:        apiKey,
+		AzureSettings: settings,
+	})
+}
+
+// StoredAzureSettings returns the Azure settings saved by LoginAzure, or the
+// zero value when none are stored.
+func StoredAzureSettings(store *Store) AzureSettings {
+	cred, err := store.Load("azure")
+	if err != nil || cred.Method != MethodAPIKey {
+		return AzureSettings{}
+	}
+	return cred.AzureSettings
 }
 
 // Logout removes the stored credential for provider. It is idempotent:

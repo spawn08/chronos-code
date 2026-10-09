@@ -85,6 +85,8 @@ type Orchestrator struct {
 	modelOverrides     map[string]bool
 	roleModels         *roleModelRegistry
 	buildProvider      func(agent.ModelConfig) (model.Provider, error)
+	routedProvidersMu  sync.Mutex
+	routedProviders    map[routedProviderKey]routedProviderEntry
 	budget             *budget.Tracker
 	budgetMu           sync.RWMutex
 	usdBudget          *budget.Tracker
@@ -689,7 +691,23 @@ func resolveModelConfig(ctx context.Context, cfg *config.Config, store *auth.Sto
 			}
 		}
 	}
+	if provider == "azure" {
+		applyStoredAzureSettings(&mc, store)
+	}
 	return mc
+}
+
+// applyStoredAzureSettings fills the endpoint and API version saved by
+// /login for Azure when neither config nor the AZURE_OPENAI_* environment
+// sets them, matching the stored key's precedence below AZURE_OPENAI_API_KEY.
+func applyStoredAzureSettings(mc *agent.ModelConfig, store *auth.Store) {
+	stored := auth.StoredAzureSettings(store)
+	if mc.Endpoint == "" && mc.BaseURL == "" && os.Getenv("AZURE_OPENAI_ENDPOINT") == "" && os.Getenv("AZURE_OPENAI_BASE_URL") == "" {
+		mc.Endpoint = stored.Endpoint
+	}
+	if mc.APIVersion == "" && os.Getenv("AZURE_OPENAI_API_VERSION") == "" {
+		mc.APIVersion = stored.APIVersion
+	}
 }
 
 // sessionOrAgentKey resolves the same per-conversation cache/tracking key
@@ -2746,11 +2764,53 @@ func (o *Orchestrator) routedProvider(ctx context.Context, agentID string, class
 		resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, spec.Provider, spec.Model).APIKey == "" {
 		return nil
 	}
-	provider, err := o.buildModelProvider(ctx, agentID, spec.Provider, spec.Model)
+	provider, err := o.cachedRoutedProvider(ctx, agentID, spec.Provider, spec.Model)
 	if err != nil {
 		return nil
 	}
 	return provider
+}
+
+type routedProviderKey struct {
+	agentID, provider, model string
+}
+
+type routedProviderEntry struct {
+	config   agent.ModelConfig
+	provider model.Provider
+}
+
+// cachedRoutedProvider returns the provider built for an earlier routed
+// request to the same agent, provider, and model, so each request does not
+// open a new connection. An entry is reused only while its resolved config,
+// credential included, is unchanged, so a refreshed token or edited setting
+// rebuilds it; /login, /logout, and /model also clear the cache.
+func (o *Orchestrator) cachedRoutedProvider(ctx context.Context, agentID, provider, modelID string) (model.Provider, error) {
+	provider = auth.CanonicalProvider(provider)
+	mc := resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, provider, modelID)
+	key := routedProviderKey{agentID: agentID, provider: provider, model: modelID}
+	o.routedProvidersMu.Lock()
+	defer o.routedProvidersMu.Unlock()
+	if entry, ok := o.routedProviders[key]; ok && entry.config == mc {
+		return entry.provider, nil
+	}
+	p, err := o.buildFromModelConfig(provider, modelID, mc)
+	if err != nil {
+		return nil, err
+	}
+	if o.routedProviders == nil {
+		o.routedProviders = make(map[routedProviderKey]routedProviderEntry)
+	}
+	o.routedProviders[key] = routedProviderEntry{config: mc, provider: p}
+	return p, nil
+}
+
+// clearRoutedProviders drops every cached routed provider after a credential
+// or model change.
+func (o *Orchestrator) clearRoutedProviders() {
+	o.routedProvidersMu.Lock()
+	o.routedProviders = nil
+	o.routedProvidersMu.Unlock()
 }
 
 // routeSubagent selects a delegated role's model from its task, as the
@@ -2965,6 +3025,7 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 	if err != nil {
 		return err
 	}
+	o.clearRoutedProviders()
 	o.routingMu.Lock()
 	defer o.routingMu.Unlock()
 	a := o.agents[o.active]
@@ -2985,7 +3046,10 @@ func (o *Orchestrator) SwitchModel(ctx context.Context, provider, modelID string
 
 func (o *Orchestrator) buildModelProvider(ctx context.Context, agentID, provider, modelID string) (model.Provider, error) {
 	provider = auth.CanonicalProvider(provider)
-	mc := resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, provider, modelID)
+	return o.buildFromModelConfig(provider, modelID, resolveModelConfig(ctx, o.cfg, auth.NewStore(), agentID, provider, modelID))
+}
+
+func (o *Orchestrator) buildFromModelConfig(provider, modelID string, mc agent.ModelConfig) (model.Provider, error) {
 	buildProvider := o.buildProvider
 	if buildProvider == nil {
 		buildProvider = agent.BuildProvider
@@ -3100,7 +3164,24 @@ func (o *Orchestrator) Login(ctx context.Context, provider, apiKey string) error
 	return o.rebuildProviderAgents(ctx, provider)
 }
 
+// LoginAzure stores an Azure OpenAI API key with its resource settings and
+// rebuilds every loaded Azure agent. A non-empty deployment also becomes
+// the active model, as if chosen with /model azure <deployment>.
+func (o *Orchestrator) LoginAzure(ctx context.Context, apiKey string, settings auth.AzureSettings) error {
+	if err := auth.LoginAzure(auth.NewStore(), apiKey, settings); err != nil {
+		return err
+	}
+	if err := o.rebuildProviderAgents(ctx, "azure"); err != nil {
+		return err
+	}
+	if settings.Deployment == "" {
+		return nil
+	}
+	return o.SwitchModel(ctx, "azure", settings.Deployment)
+}
+
 func (o *Orchestrator) rebuildProviderAgents(ctx context.Context, provider string) error {
+	o.clearRoutedProviders()
 	for agentID, configured := range o.agents {
 		if configured == nil || configured.Model == nil || auth.CanonicalProvider(configured.Model.Name()) != provider {
 			continue
@@ -3136,7 +3217,9 @@ func (o *Orchestrator) LoginOAuth(ctx context.Context, cfg auth.ProviderOAuthCon
 // effect on a credential reused from ~/.claude or ~/.codex (those belong to
 // the other CLI, not chronos-code) or on env-var-based auth.
 func (o *Orchestrator) Logout(provider string) error {
-	return auth.Logout(auth.NewStore(), provider)
+	err := auth.Logout(auth.NewStore(), provider)
+	o.clearRoutedProviders()
+	return err
 }
 
 // ExternalLogin identifies a provider whose credential chronos-code is

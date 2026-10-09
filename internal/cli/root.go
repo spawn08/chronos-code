@@ -759,7 +759,10 @@ func defaultProviderModel(provider string) string {
 	case "mistral":
 		return "mistral-large-latest"
 	case "azure":
-		return strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT"))
+		if deployment := strings.TrimSpace(os.Getenv("AZURE_OPENAI_DEPLOYMENT")); deployment != "" {
+			return deployment
+		}
+		return auth.StoredAzureSettings(auth.NewStore()).Deployment
 	default:
 		return ""
 	}
