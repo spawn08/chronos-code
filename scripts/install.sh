@@ -71,8 +71,18 @@ mkdir -p "$INSTALL_DIR"
 tar xzf "${workdir}/${archive}" -C "$workdir" chronos-code
 install -m 755 "${workdir}/chronos-code" "${INSTALL_DIR}/chronos-code"
 
-echo "Installed chronos-code ${tag} to ${INSTALL_DIR}/chronos-code"
+installed="${INSTALL_DIR}/chronos-code"
+echo "Installed chronos-code ${tag} to ${installed}"
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
+  *":$INSTALL_DIR:"*)
+    # Another chronos-code earlier on PATH (e.g. ~/go/bin from `go install`)
+    # would shadow this install, making the update look like it did nothing.
+    resolved="$(command -v chronos-code || true)"
+    if [ -n "$resolved" ] && [ "$resolved" != "$installed" ]; then
+      shadow_version="$("$resolved" version 2>/dev/null | head -n1 || true)"
+      echo "Warning: '${resolved}' comes earlier on your PATH and will run instead${shadow_version:+ (${shadow_version})}." >&2
+      echo "         Remove it (rm \"${resolved}\") or re-run with INSTALL_DIR=\"$(dirname "$resolved")\"." >&2
+    fi
+    ;;
   *) echo "Note: ${INSTALL_DIR} is not on your PATH. Add it, e.g.: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
