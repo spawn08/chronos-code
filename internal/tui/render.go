@@ -337,7 +337,8 @@ func RenderMarkdownLite(s string, width int) string {
 	lines := strings.Split(s, "\n")
 	var out []string
 	inFence := false
-	for _, line := range lines {
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			if !inFence {
@@ -351,6 +352,26 @@ func RenderMarkdownLite(s string, width int) string {
 		if inFence {
 			out = append(out, styleCodeBlock.Render(truncateToWidth(" "+line, width)))
 			continue
+		}
+		if text, last, ok := displayMathBlock(lines, i); ok {
+			out = append(out, wrapText("  "+text, width))
+			i = last
+			continue
+		}
+		if isTableRow(line) && i+1 < len(lines) {
+			if aligns, ok := tableAligns(lines[i+1]); ok {
+				head := splitTableRow(line)
+				if len(head) == len(aligns) {
+					var rows [][]string
+					j := i + 2
+					for ; j < len(lines) && isTableRow(lines[j]); j++ {
+						rows = append(rows, splitTableRow(lines[j]))
+					}
+					out = append(out, renderTable(head, aligns, rows, width))
+					i = j - 1
+					continue
+				}
+			}
 		}
 		if m := reHeader.FindStringSubmatch(line); m != nil {
 			out = append(out, wrapText(styleHeader.Render(m[2]), width))
@@ -427,6 +448,10 @@ func inlineStyle(s string) string {
 	var code []string
 	s = reInlineCode.ReplaceAllStringFunc(s, func(match string) string {
 		code = append(code, styleInlineCode.Render(match[1:len(match)-1]))
+		return fmt.Sprintf("\x00C%d\x00", len(code)-1)
+	})
+	s = replaceMath(s, func(tex string) string {
+		code = append(code, latexToText(tex))
 		return fmt.Sprintf("\x00C%d\x00", len(code)-1)
 	})
 	s = reBold.ReplaceAllStringFunc(s, func(match string) string {
