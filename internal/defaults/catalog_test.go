@@ -56,8 +56,8 @@ func TestCatalogMarksUnsupportedArtifactsExportOnly(t *testing.T) {
 			t.Errorf("%s activation = %q, want %q", path, got, ExportOnly)
 		}
 	}
-	if got := byPath["agents/delivery-strategist.yaml"].Activation; got != RuntimeActive {
-		t.Errorf("agents/delivery-strategist.yaml activation = %q, want %q", got, RuntimeActive)
+	if _, exists := byPath["agents/delivery-strategist.yaml"]; exists {
+		t.Error("removed delivery-strategist remains bundled")
 	}
 	if _, exists := byPath["agents/ppd-planner.yaml"]; exists {
 		t.Error("deprecated ppd-planner remains bundled without a runtime compatibility requirement")
@@ -113,21 +113,11 @@ func TestBundledRuntimeAgentInventoryAndTesterWiring(t *testing.T) {
 	if err := yaml.Unmarshal(data, &configDocument); err != nil {
 		t.Fatal(err)
 	}
-	byID := make(map[string]bundledAgentDefinition, len(configDocument.Agents)+1)
+	byID := make(map[string]bundledAgentDefinition, len(configDocument.Agents))
 	for _, definition := range configDocument.Agents {
 		byID[definition.ID] = definition
 	}
-	strategistData, err := ReadFile("agents/delivery-strategist.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var strategist bundledAgentDefinition
-	if err := yaml.Unmarshal(strategistData, &strategist); err != nil {
-		t.Fatal(err)
-	}
-	byID[strategist.ID] = strategist
-
-	expected := []string{"chronos-code", "coder", "planner", "delivery-strategist", "reviewer", "debugger", "researcher", "architect", "explainer", "tester"}
+	expected := []string{"chronos-code", "coder", "planner", "reviewer", "debugger", "researcher", "architect", "explainer", "tester", "security-auditor"}
 	if len(byID) != len(expected) {
 		t.Fatalf("bundled agent count = %d, want %d: %#v", len(byID), len(expected), byID)
 	}
@@ -179,9 +169,7 @@ func TestBundledRuntimeAgentInventoryAndTesterWiring(t *testing.T) {
 }
 
 func TestSpecialistPromptsUseStructuredSpawnedHandoffs(t *testing.T) {
-	// delivery-strategist is intentionally excluded: its output is parsed as an exact,
-	// runtime-owned decomposition JSON schema rather than a conversational handoff.
-	for _, id := range []string{"coder", "planner", "reviewer", "debugger", "researcher", "architect", "explainer", "tester"} {
+	for _, id := range []string{"coder", "planner", "reviewer", "debugger", "researcher", "architect", "explainer", "tester", "security-auditor"} {
 		data, err := ReadFile("agents/" + id + ".yaml")
 		if err != nil {
 			t.Fatal(err)
@@ -194,22 +182,6 @@ func TestSpecialistPromptsUseStructuredSpawnedHandoffs(t *testing.T) {
 			if !strings.Contains(definition.SystemPrompt, required) {
 				t.Errorf("%s prompt missing handoff contract text %q", id, required)
 			}
-		}
-	}
-}
-
-func TestDeliveryStrategistPromptIsBoundedAndRuntimeHonest(t *testing.T) {
-	data, err := ReadFile("agents/delivery-strategist.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var definition bundledAgentDefinition
-	if err := yaml.Unmarshal(data, &definition); err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{"next useful work frontier", "1 to 6 nodes", "Kind must be investigate, decide, implement, verify, or integrate", "actual artifact or ordering requirements", "never edit code", "not evidence of execution or completion", "claim that rolling replanning occurs automatically"} {
-		if !strings.Contains(definition.SystemPrompt, required) {
-			t.Errorf("delivery strategist prompt missing %q", required)
 		}
 	}
 }

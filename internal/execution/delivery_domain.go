@@ -62,15 +62,6 @@ const (
 // checkpointed sequential team, never a model-supplied routing instruction.
 const ReadOnlyTeamPolicyPrefix = "admission-readonly-team:"
 
-// InternalPlanPolicyReference is reserved for a host-created plan already
-// persisted under this delivery ID. Public admission never selects this route.
-const InternalPlanPolicyReference = "internal-plan-worker-v1"
-
-// CandidatePlanPolicyReference identifies an authenticated plan generation
-// whose nodes may write only private worktrees and retained candidate patches.
-// It never authorizes integration into the user's checkout.
-const CandidatePlanPolicyReference = "plan-candidate-worker-v1"
-
 const (
 	DeliveryEventAdmitted            DeliveryEventType = "admitted"
 	DeliveryEventTransitioned        DeliveryEventType = "transitioned"

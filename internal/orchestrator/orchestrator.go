@@ -47,7 +47,6 @@ import (
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/modelinfo"
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/projectdocs"
 	"github.com/spawn08/chronos-code/internal/retention"
 	"github.com/spawn08/chronos-code/internal/router"
@@ -58,7 +57,6 @@ import (
 	"github.com/spawn08/chronos-code/internal/toolcompress"
 	"github.com/spawn08/chronos-code/internal/verification"
 	"github.com/spawn08/chronos-code/internal/workspace"
-	"github.com/spawn08/chronos-code/internal/worktree"
 
 	"github.com/spawn08/chronos/sdk/team"
 )
@@ -106,9 +104,6 @@ type Orchestrator struct {
 	learningStore      *learning.SQLStore
 	telemetryRecorders []*learning.TelemetryRecorder
 	runtimeMemory      *runtimeMemory
-	planStore          *plan.SQLStore
-	planController     *plan.Controller
-	worktreeManager    *worktree.Manager
 	planMode           atomic.Bool
 	planApprovalMu     sync.Mutex
 	planApproval       PlanApprovalFunc
@@ -123,7 +118,6 @@ type Orchestrator struct {
 	operationalMu      sync.RWMutex
 	operationalActive  map[string]*operationalExecution
 	operationalLast    ExecutionSnapshot
-	operationalPlan    *PlanRuntimeIdentity
 	lspManager         interface{ Close() error }
 	broker             *chronosstream.Broker
 	policy             *security.Policy
@@ -137,10 +131,6 @@ type Orchestrator struct {
 	capabilities       RuntimeCapabilityManifest
 	closeOnce          sync.Once
 	closeErr           error
-
-	// planImplementationAgent is the role the plan controller's node executor
-	// runs; empty when startup found no implementation role.
-	planImplementationAgent string
 }
 
 type SkillInfo struct {
@@ -278,16 +268,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	var learningStore *learning.SQLStore
 	var languageServerManager *lsp.Manager
 	var mcpRuntimes []*mcpdiscover.Runtime
-	worktreeManager, err := worktree.New(paths.Dir, nil)
-	if err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("configure worktree manager: %w", err)
-	}
-	if err := worktreeManager.Prune(ctx); err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("recover worktrees: %w", err)
-	}
-	orch := &Orchestrator{store: store, worktreeManager: worktreeManager}
+	orch := &Orchestrator{store: store}
 	defer func() {
 		if err == nil {
 			return
@@ -403,7 +384,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	for _, a := range agents {
 		a.Broker = broker
 	}
-	orch.taskPlans = newTaskPlanStore()
+	orch.taskPlans = newDurableTaskPlanStore(builtins.NewStoragePlanStore(store))
 	installTaskPlan(agents, orch.taskPlans, broker)
 	installExitPlanMode(agents, orch)
 	roleModels := newRoleModelRegistry(agents)
@@ -449,19 +430,13 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	teams := setupTeams(cfg, agents)
 
 	normalizeToolPermissions(agents)
-	capabilityManifest, capabilityWarnings, err := validateRuntimeCapabilities(cfg, agents, graphStore != nil, routingConfig)
+	capabilityManifest, capabilityWarnings, err := validateRuntimeCapabilities(cfg, agents, graphStore != nil)
 	if err != nil {
 		return nil, err
 	}
 	for _, warning := range capabilityWarnings {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
 	}
-	planStore, err := plan.OpenSQLStore(ctx, paths.PlansDB)
-	if err != nil {
-		return nil, fmt.Errorf("open plan store: %w", err)
-	}
-	orch.planStore = planStore
-
 	// Project-document compression can invoke a model. Keep it behind the
 	// capability contract so invalid runtime prompts fail before any model call.
 	pdWatcher, pdNotice := setupProjectDocs(ctx, cfg, root, paths.Dir, agents)
@@ -501,8 +476,6 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		learningStore:      learningStore,
 		telemetryRecorders: orch.telemetryRecorders,
 		runtimeMemory:      orch.runtimeMemory,
-		planStore:          planStore,
-		worktreeManager:    worktreeManager,
 		lspManager:         languageServerManager,
 		broker:             broker,
 		policy:             policy,
@@ -522,18 +495,6 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 			orch.mcpRuntimes[i].SetDiscoveryMetadata(discovered, orch.mcpToolTransform(agents[id]))
 		}
 	}
-	implementationAgent := "coder"
-	if _, ok := agents[implementationAgent]; !ok {
-		if routingConfig == nil || active != routingConfig.PPD.Specialist {
-			implementationAgent = active
-		} else {
-			implementationAgent = ""
-		}
-	}
-	orch.planController = plan.NewController(planStore, &planNodeExecutor{
-		runner: orch, worktrees: worktreeManager, repositoryRoot: root, implementationAgent: implementationAgent, permissionChecker: orch.permissionChecker,
-	}, nil, nil, plan.ControllerConfig{})
-	orch.planImplementationAgent = implementationAgent
 	orch.SetApprovalHandler(nil)
 	for _, a := range agents {
 		// Context guard runs before budget: it trims messages that would exceed
@@ -1962,19 +1923,16 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 				ppdRequest = *request.PPD
 			}
 			ppdRequest.Kind = classification.Kind
-			ppdRequest.HighRisk = ppdRequest.HighRisk || classification.Complexity == router.ComplexityHigh
+			ppdRequest.ExplicitPPD = ppdRequest.ExplicitPPD || router.MentionsPPD(request.Message)
+			if ppdRequest.FileCount == 0 && ppdRequest.PackageCount == 0 {
+				ppdRequest.FileCount, ppdRequest.PackageCount = router.ReferenceBreadth(request.Message)
+			}
 			decision := router.NewPPDPolicy(o.routingConfig.PPD, nil).Decide(ppdRequest)
 			ppdDecision = &decision
-			if decision.Action == router.PPDActionDelegate {
-				agentID = decision.Specialist
-			}
 		}
 	}
 	a, ok := o.agents[agentID]
 	if !ok || a == nil {
-		if ppdDecision != nil && ppdDecision.Action == router.PPDActionDelegate {
-			return ExecutionResult{AgentID: agentID, PPDDecision: ppdDecision}, fmt.Errorf("delivery strategist %q not found", agentID)
-		}
 		return ExecutionResult{}, fmt.Errorf("agent %q not found", agentID)
 	}
 	ctx = o.applyResolvedModel(ctx, agentID, request.Message)
@@ -2660,9 +2618,6 @@ func (o *Orchestrator) implementationPath(complexity router.Complexity) router.I
 }
 
 func formatRoutingHint(agentID, intent, specialist string, matched bool, class router.Classification, path router.ImplementationPath, ppd *router.PPDDecision) string {
-	if ppd != nil && ppd.Action == router.PPDActionDelegate {
-		return ""
-	}
 	if path.Hint == "" {
 		path = router.DefaultPath(class.Complexity)
 	}
@@ -2675,11 +2630,28 @@ func formatRoutingHint(agentID, intent, specialist string, matched bool, class r
 	if matched && specialist != "" && specialist != agentID {
 		parts = append(parts, fmt.Sprintf("Routing hint: intent=%s specialist=%s. You remain %s; spawn_subagent %s if that specialist loop is needed.", intent, specialist, agentID, specialist))
 	}
-	if ppd != nil && ppd.Action == router.PPDActionShadow && ppd.Specialist != "" && ppd.Specialist != agentID {
-		parts = append(parts, "PPD hint: consider spawn_subagent "+ppd.Specialist+" if this work needs a durable dependency-ordered plan; retain ownership of implementation and verification.")
+	if ppd != nil && ppd.Action != router.PPDActionBypass && agentID != ppdPlannerAgent {
+		if ppd.Action == router.PPDActionDelegate || ppd.Reason == "explicit_ppd" {
+			parts = append(parts, ppdLoopDirective)
+		} else {
+			parts = append(parts, "PPD hint: this request spans several files or packages. If it needs a dependency-ordered plan, spawn_subagent "+ppdPlannerAgent+" for the next few verifiable steps and track them with update_plan; retain ownership of implementation and verification.")
+		}
 	}
 	return strings.Join(parts, "\n")
 }
+
+// ppdPlannerAgent plans PPD frontiers for the primary agent.
+const ppdPlannerAgent = "planner"
+
+// ppdLoopDirective turns a delegated or explicit PPD request into a rolling
+// plan run by the primary agent: plan a short frontier, verify each item, then
+// re-plan.
+const ppdLoopDirective = "PPD requested: run this as a rolling plan. " +
+	"1. spawn_subagent " + ppdPlannerAgent + " for the next frontier only: at most 6 steps, each with target paths and one verification command with its expected result. " +
+	"2. Record those steps with update_plan, putting each step's verification command in its item. " +
+	"3. Work one item at a time; mark an item completed only after its verification command passed. Independent items with disjoint files may go to parallel coder subagents. " +
+	"4. When the frontier is done, a verification fails three times, or evidence contradicts the plan, spawn_subagent " + ppdPlannerAgent + " again with the results and the remaining goal. " +
+	"5. Finish only when the original request is satisfied and verified."
 
 // Route classifies message via the T0 intent router, falling back to the T1
 // cheap-model classifier when configured (PRD P2-006), and returns the
@@ -4024,16 +3996,6 @@ func (o *Orchestrator) Close() error {
 		if o.broker != nil {
 			if err := o.broker.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close activity broker: %w", err))
-			}
-		}
-		if o.planStore != nil {
-			if err := o.planStore.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close plan store: %w", err))
-			}
-		}
-		if o.worktreeManager != nil {
-			if err := o.worktreeManager.Close(context.Background()); err != nil {
-				errs = append(errs, fmt.Errorf("close worktree manager: %w", err))
 			}
 		}
 		stores := map[storage.Storage]bool{}

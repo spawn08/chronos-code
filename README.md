@@ -115,8 +115,11 @@ In the TUI, mention a specialist to skip the router:
 ```text
 @reviewer check my last commit
 @debugger why is TestAuth failing
-@delivery-strategist propose the next evidence-driven frontier for this migration
+@security-auditor threat-model the HTTP handlers
+/ppd migrate the config loader to the new schema
 ```
+
+`/ppd <task>` (or mentioning "PPD" in a request) runs the task as a rolling plan: `planner` proposes the next few steps with a verification command each, the primary agent tracks them with `update_plan`, completes each only after its check passes, and re-plans until the request is verified. The checklist is saved with the session, so `/resume` picks it back up.
 
 ## Architecture
 
@@ -155,7 +158,6 @@ Chronos (`github.com/spawn08/chronos`) is used as a **library**: agent SDK, harn
 | | `internal/lsp` | Optional `lsp` tag: diagnostics, hover, references, rename preview |
 | Context | `internal/session` | Session persistence and resume |
 | | `internal/memory` | Local YAML memory (project / user / feedback) |
-| | `internal/plan` | Durable PPD plan store and scheduler |
 | | `internal/skills` | Skill discovery and selection |
 | | `internal/activation`, `internal/attention`, `internal/incctx`, `internal/toolcompress` | Context window budgeting and compression |
 | Safety | `internal/security` | Path/shell policy, permissions, hooks, sandbox |
@@ -176,10 +178,10 @@ Chronos (`github.com/spawn08/chronos`) is used as a **library**: agent SDK, harn
 |---|---|---|
 | `chronos-code` | Primary conversation agent: orients, routes, synthesizes | Frontier |
 | `coder` | Implement, test, iterate | Frontier |
-| `planner` | Task decomposition | Frontier |
-| `delivery-strategist` | Read-only, evidence-driven proposal of the next bounded work frontier | Frontier |
-| `reviewer` | Bugs, security, style | Frontier |
-| `debugger` | Diagnose failures from errors and traces | Frontier |
+| `planner` | Next verifiable frontier of steps; re-plans from results | Frontier |
+| `reviewer` | Bugs, style, simplification | Frontier |
+| `debugger` | Reproduce first, test hypotheses, propose a verified fix | Frontier |
+| `security-auditor` | Threat model, scan, validate findings, propose fixes | Frontier |
 | `architect` | Design and structure | Frontier |
 | `researcher` | Read-only search | Cheap |
 | `explainer` | Explain code and concepts | Cheap |
@@ -271,7 +273,7 @@ Restart after changing these. `memory.enabled: false` stops both persistence and
 | Learning suggestions | ✅ On, human review required (`auto_distill: false`) |
 | PostgreSQL storage | 🔧 Optional `postgres` build |
 | LSP tools | 🔧 Optional `lsp` build |
-| Delivery-strategy policy | 👀 `ppd.mode: shadow` observes only · `enabled` delegates one turn · `disabled` skips |
+| Delivery-strategy policy | 👀 `ppd.mode: shadow` (default) runs explicit `/ppd` requests as a rolling plan and only hints otherwise · `enabled` runs every qualifying request that way · `disabled` skips |
 | Vector recall, branchable sessions | 🗺️ Roadmap |
 
 ## Interactive TUI
@@ -321,7 +323,6 @@ chronos-code indexer mcp [--repo DIR]  Serve code graph tools over MCP stdio
 chronos-code learn suggest | list | show | accept | reject
 chronos-code skills list | show
 chronos-code team list | run
-chronos-code plan … --db <path>        Durable plan database operations
 chronos-code eval run | ppd
 chronos-code serve                     Start the HTTP API server
 chronos-code version
@@ -348,7 +349,7 @@ Every push and pull request to `main` runs [CI](.github/workflows/ci.yml): build
 - `make eval` replays offline fixtures and compares paired totals with `benchmark/eval/baseline.json`. It fails on contract errors, stale baseline totals, or a regression of more than 10% in optimized tokens.
 - `benchmark/eval/report.md` comes from synthetic fixture replay. It is not a comparison with any external tool, so it can't support a performance claim on its own; that requires paired model runs on the same tasks, model, corpus revision, and success gate.
 - `benchmark/ppd/results.json` is marked `invalid` because no real model was invoked. It supports no PPD quality or efficiency claim, and `chronos-code eval ppd --report` fails closed on it. `--validate-only` checks registration, not efficacy.
-- The `ppd` config key remains for compatibility. Embedded routing sets `ppd.mode: shadow`, so qualifying decisions are observed without invoking `delivery-strategist`. Production rolling replanning is not implemented.
+- The `ppd` config key remains for compatibility. Embedded routing sets `ppd.mode: shadow`: explicit PPD requests get the interactive rolling-plan loop (planner, `update_plan`, per-step verification, re-plan), and other qualifying requests get an advisory hint. `ppd.mode: enabled` gives the rolling-plan loop to every qualifying request.
 
 </details>
 

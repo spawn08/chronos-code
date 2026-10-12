@@ -14,7 +14,6 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/defaults"
-	"github.com/spawn08/chronos-code/internal/router"
 )
 
 func TestBuildRuntimeCapabilityManifestScopesLiveCapabilities(t *testing.T) {
@@ -47,7 +46,6 @@ func TestBuildRuntimeCapabilityManifestScopesLiveCapabilities(t *testing.T) {
 	for _, requirement := range []config.Capability{
 		{Name: capabilityToolPrefix + "file_write", Agent: "reader"},
 		{Name: capabilityToolPrefix + "denied", Agent: "coder"},
-		{Name: capabilityClosedLoopPPD},
 	} {
 		if err := (config.CapabilityManifest{Capabilities: []config.Capability{requirement}}).Validate(available); err == nil {
 			t.Errorf("unexpected capability %+v", requirement)
@@ -61,7 +59,7 @@ func TestValidateRuntimeCapabilitiesRejectsUninstalledConfiguredTool(t *testing.
 	}}}}
 	agents := map[string]*agent.Agent{"coder": {ID: "coder", Tools: tool.NewRegistry()}}
 
-	_, _, err := validateRuntimeCapabilities(cfg, agents, false, nil)
+	_, _, err := validateRuntimeCapabilities(cfg, agents, false)
 	if err == nil || !strings.Contains(err.Error(), `"tool:update_plan"`) {
 		t.Fatalf("validateRuntimeCapabilities() error = %v, want unavailable configured tool", err)
 	}
@@ -96,7 +94,7 @@ func TestLegacySemanticSearchConfigExplainsMigration(t *testing.T) {
 	cfg := &config.Config{FileConfig: agent.FileConfig{Agents: []agent.AgentConfig{{
 		ID: "chronos-code", Tools: []agent.ToolConfig{{Name: "semantic_search"}},
 	}}}}
-	_, _, err := validateRuntimeCapabilities(cfg, nil, false, nil)
+	_, _, err := validateRuntimeCapabilities(cfg, nil, false)
 	if err == nil || !strings.Contains(err.Error(), "remove the legacy semantic_search entry") {
 		t.Fatalf("legacy configuration error = %v", err)
 	}
@@ -107,21 +105,12 @@ func TestValidateRuntimeCapabilitiesWarnsForOptionalRequirement(t *testing.T) {
 		Name: "lsp:tools", Optional: true,
 	}}}}
 
-	_, warnings, err := validateRuntimeCapabilities(cfg, nil, false, nil)
+	_, warnings, err := validateRuntimeCapabilities(cfg, nil, false)
 	if err != nil {
 		t.Fatalf("validateRuntimeCapabilities() error = %v", err)
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], `"lsp:tools"`) {
 		t.Fatalf("warnings = %v, want optional LSP warning", warnings)
-	}
-}
-
-func TestValidateRuntimeCapabilitiesRejectsEnabledPPD(t *testing.T) {
-	routingConfig := &router.Config{PPD: router.PPDConfig{Mode: router.PPDModeEnabled}}
-
-	_, _, err := validateRuntimeCapabilities(&config.Config{}, nil, false, routingConfig)
-	if err == nil || !strings.Contains(err.Error(), capabilityClosedLoopPPD) {
-		t.Fatalf("validateRuntimeCapabilities() error = %v, want closed-loop PPD requirement", err)
 	}
 }
 

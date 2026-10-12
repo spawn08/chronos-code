@@ -1,15 +1,12 @@
 package integration
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/router"
 	"gopkg.in/yaml.v3"
 )
@@ -49,8 +46,7 @@ func TestRuntimeAcceptance(t *testing.T) {
 	fixture := loadRuntimeFixture(t, root)
 	assertRuntimeContractEvidence(t, root, fixture)
 	assertCharterEvidence(t, root, fixture)
-	t.Run("stale context and generation", assertCurrentRuntimeState)
-	t.Run("backup restore and legacy bypass", assertRuntimeRollback)
+	t.Run("legacy bypass", assertLegacyBypass)
 }
 
 func loadRuntimeFixture(t *testing.T, root string) runtimeFixture {
@@ -78,13 +74,10 @@ func assertRuntimeContractEvidence(t *testing.T, root string, fixture runtimeFix
 		{"IC-004", runtimeEvidence{"internal/eval/taskrunner.go", "TaskOutcome{"}, []runtimeEvidence{{"internal/eval/report.go", "func Summarize"}, {"internal/eval/gate.go", "func CheckRegression"}, {"internal/learning/learning_test.go", "ReplayEvidence"}}},
 		{"IC-005", runtimeEvidence{"internal/memory/memory.go", "Fingerprint"}, []runtimeEvidence{{"internal/orchestrator/orchestrator.go", "store.ForContext(ctx)"}, {"internal/learning/learning_test.go", "TestStorePatternApprovalRetrievalAndRollback"}}},
 		{"IC-006", runtimeEvidence{"internal/security/policy.go", "func ResolvePolicy"}, []runtimeEvidence{{"internal/integration/surfaces_test.go", "TestSurfacesTrustFailuresFailClosed"}, {"internal/config/capabilities_test.go", "TestCapabilityManifestValidateRejectsMissingRequiredCapability"}}},
-		{"IC-007", runtimeEvidence{"internal/plan/sqlstore.go", "type SQLStore struct"}, []runtimeEvidence{{"internal/plan/scheduler.go", "type Scheduler struct"}, {"internal/plan/controller.go", "type Controller struct"}, {"internal/plan/sqlstore_test.go", "TestSQLRoundTrip"}}},
-		{"IC-008", runtimeEvidence{"internal/plan/scheduler.go", "func NewScheduler"}, []runtimeEvidence{{"internal/plan/controller.go", "NewScheduler(store"}, {"internal/integration/plan_recovery_test.go", "TestPlanRecovery"}}},
-		{"IC-009", runtimeEvidence{"internal/plan/sqlstore.go", "func (s *SQLStore) Backup"}, []runtimeEvidence{{"internal/cli/plan_cmd_test.go", "TestPlanCommandInspectionJSON"}, {"scripts/ppd-db", "exec \"$binary\" plan"}}},
-		{"IC-010", runtimeEvidence{"internal/router/ppd.go", "func (p *PPDPolicy) Decide"}, []runtimeEvidence{{"internal/integration/delegation_test.go", "TestDelegation"}, {"internal/plan/controller.go", "func (c *Controller) Run"}}},
+		{"IC-007", runtimeEvidence{"internal/router/ppd.go", "func (p *PPDPolicy) Decide"}, []runtimeEvidence{{"internal/router/ppd_test.go", "TestPPDPolicy_ComplexTasksDelegate"}, {"internal/orchestrator/orchestrator.go", "ppdLoopDirective"}}},
 	}
-	if len(contracts) != 10 {
-		t.Fatalf("contract evidence mappings = %d, want 10", len(contracts))
+	if len(contracts) != 7 {
+		t.Fatalf("contract evidence mappings = %d, want 7", len(contracts))
 	}
 
 	want := make(map[string]struct{}, len(fixture.RuntimeContracts))
@@ -135,9 +128,9 @@ func assertCharterEvidence(t *testing.T, root string, fixture runtimeFixture) {
 		switch measure.Status {
 		case "covered":
 			assertEvidence(t, root, measure.ID, runtimeEvidence{measure.Artifact, measure.Marker})
-		case "external":
+		case "external", "retired":
 			if measure.Reason == "" {
-				t.Errorf("%s external acceptance condition has no reason", measure.ID)
+				t.Errorf("%s %s acceptance condition has no reason", measure.ID, measure.Status)
 			}
 		default:
 			t.Errorf("%s has unsupported status %q", measure.ID, measure.Status)
@@ -161,110 +154,9 @@ func assertEvidence(t *testing.T, root, label string, evidence runtimeEvidence) 
 	}
 }
 
-func assertCurrentRuntimeState(t *testing.T) {
-	ctx := context.Background()
-	entries := []plan.ContextEntry{{ID: "request", Content: "original"}}
-	current, err := plan.BuildRestartContext(entries, 1024, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := plan.BuildRestartContext([]plan.ContextEntry{{ID: "request", Content: "changed"}}, 1024, current.Fingerprint); !errors.Is(err, plan.ErrStaleContextFingerprint) {
-		t.Fatalf("changed restart context error = %v, want %v", err, plan.ErrStaleContextFingerprint)
-	}
-
-	store := openRuntimeStore(t, filepath.Join(t.TempDir(), "generation.db"))
-	source := runtimePlan("runtime-plan", "one", plan.PlanReplanning)
-	if err := store.Create(ctx, source); err != nil {
-		t.Fatal(err)
-	}
-	next, err := source.NewGeneration("two", []plan.Node{{ID: "work", State: plan.NodePending}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Create(ctx, next); err != nil {
-		t.Fatal(err)
-	}
-	executor := &generationExecutor{}
-	controller := plan.NewController(store, executor, nil, nil, plan.ControllerConfig{})
-	stale, err := controller.Run(ctx, source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stale.State != plan.PlanReplanning || executor.generations != nil {
-		t.Fatalf("superseded generation executed: state=%s calls=%v", stale.State, executor.generations)
-	}
-	completed, err := controller.Run(ctx, next)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if completed.State != plan.PlanCompleted || fmt.Sprint(executor.generations) != "[two]" {
-		t.Fatalf("current generation result=%s calls=%v", completed.State, executor.generations)
-	}
-}
-
-func assertRuntimeRollback(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	target := openRuntimeStore(t, filepath.Join(dir, "target.db"))
-	legacy := runtimePlan("legacy-path", "one", plan.PlanDraft)
-	if err := target.Create(ctx, legacy); err != nil {
-		t.Fatal(err)
-	}
-	backupPath := filepath.Join(dir, "durable-backup.db")
-	if _, err := target.Backup(ctx, plan.BackupRequest{Path: backupPath}); err != nil {
-		t.Fatal(err)
-	}
-
-	sourcePath := filepath.Join(dir, "source.db")
-	source := openRuntimeStore(t, sourcePath)
-	replacement := runtimePlan("replacement", "two", plan.PlanDraft)
-	if err := source.Create(ctx, replacement); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.Close(); err != nil {
-		t.Fatal(err)
-	}
-	preRestorePath := filepath.Join(dir, "pre-restore.db")
-	if _, err := target.Restore(ctx, plan.RestoreRequest{SourcePath: sourcePath, BackupPath: preRestorePath}); err != nil {
-		t.Fatal(err)
-	}
-	assertStoredPlan(t, ctx, target, replacement.ID)
-	assertStoredPlan(t, ctx, openRuntimeStore(t, backupPath), legacy.ID)
-	assertStoredPlan(t, ctx, openRuntimeStore(t, preRestorePath), legacy.ID)
-
+func assertLegacyBypass(t *testing.T) {
 	decision := router.NewPPDPolicy(router.PPDConfig{Version: "v1", Mode: router.PPDModeDisabled}, nil).Decide(router.PPDRequest{HighRisk: true})
 	if decision.Action != router.PPDActionBypass || decision.Reason != "policy_disabled" {
 		t.Fatalf("legacy non-PPD path = %#v, want policy-disabled bypass", decision)
-	}
-}
-
-type generationExecutor struct {
-	generations []plan.GenerationID
-}
-
-func (e *generationExecutor) Execute(_ context.Context, request plan.NodeExecutionRequest) error {
-	e.generations = append(e.generations, request.Plan.Generation)
-	return nil
-}
-
-func runtimePlan(id plan.PlanID, generation plan.GenerationID, state plan.PlanState) plan.Plan {
-	return plan.Plan{TenantID: "runtime-tenant", RepositoryID: "runtime-repository", TaskID: "verified-bugfix-001", ID: id, Generation: generation, State: state, Nodes: []plan.Node{{ID: "work", State: plan.NodePending}}}
-}
-
-func openRuntimeStore(t *testing.T, path string) *plan.SQLStore {
-	t.Helper()
-	store, err := plan.OpenSQLStore(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	return store
-}
-
-func assertStoredPlan(t *testing.T, ctx context.Context, store *plan.SQLStore, id plan.PlanID) {
-	t.Helper()
-	plans, err := store.List(ctx, plan.PlanScope{TenantID: "runtime-tenant", RepositoryID: "runtime-repository"})
-	if err != nil || len(plans) != 1 || plans[0].PlanID != id {
-		t.Fatalf("stored plans = %#v, error = %v; want %s", plans, err, id)
 	}
 }

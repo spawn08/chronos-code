@@ -185,7 +185,7 @@ Under `$CHRONOS_CODE_DATA_HOME/projects/<name>-<hash>/` (default `~/.chronos-cod
 | File | Written when |
 |---|---|
 | `sessions.db` | Always. Needed for `--resume`. |
-| `plans.db`, `project.json`, `index/` | Always (plans, project marker, code index). |
+| `project.json`, `index/` | Always (project marker, code index). |
 | `telemetry.db` | Not with `--ephemeral`. |
 | `projectdocs-cache.json` | Project docs were over the budget and a summary was made. |
 

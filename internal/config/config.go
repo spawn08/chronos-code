@@ -853,15 +853,6 @@ func loadEmbeddedDefaults() (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse embedded config: %w", err)
 	}
-	data, err = defaults.ReadFile("agents/delivery-strategist.yaml")
-	if err != nil {
-		return nil, fmt.Errorf("read embedded delivery-strategist agent: %w", err)
-	}
-	var deliveryStrategist agent.AgentConfig
-	if err := yaml.Unmarshal(data, &deliveryStrategist); err != nil {
-		return nil, fmt.Errorf("parse embedded delivery-strategist agent: %w", err)
-	}
-	cfg.Agents = mergeAgents(cfg.Agents, []agent.AgentConfig{deliveryStrategist})
 	setConfigSource(&cfg, "embedded")
 	setAgentModelSources(&cfg, cfg.Agents, "embedded")
 	return &cfg, nil

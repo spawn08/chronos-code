@@ -21,10 +21,11 @@ router:
   budget_tokens: 500
   classification_prompt: |
     Classify this user message into ONE intent. Reply with only the intent name.
-    Intents: explain, review, debug, plan, search, architecture, code (default).
+    Intents: explain, security, review, debug, plan, search, architecture, code (default).
 
     Rules:
     - "explain" = user wants something explained, not changed
+    - "security" = user wants a security review, audit, or vulnerability check
     - "review" = user wants existing code reviewed/audited
     - "debug" = user mentions an error, failure, crash, or test failing
     - "plan" = user wants to decompose or plan before implementing
@@ -49,7 +50,7 @@ implementation_paths:
     max_tool_calls: 24
     graph: "L0-L3"
     plan: "durable-or-working-plan"
-    hint: "map dependencies and acceptance criteria; ask delivery-strategist for a bounded evidence-driven frontier when durable planning is useful; shadow mode does not execute that frontier, so otherwise track the steps with update_plan and verify every deliverable"
+    hint: "map dependencies and acceptance criteria; when durable planning is useful, spawn planner for the next few verifiable steps, track them with update_plan, and re-plan after each frontier; verify every deliverable"
 
 # Task complexity and kind to model mapping. Undeclared cells fall back to
 # medium/edit so model selection is deterministic for every classification.
@@ -60,11 +61,11 @@ model_routing:
     chronos-code: medium
     coder: medium
     planner: medium
-    delivery-strategist: medium
     reviewer: medium
     debugger: medium
     architect: medium
     tester: medium
+    security-auditor: medium
   models:
     low:
       edit:
@@ -88,14 +89,16 @@ model_routing:
         provider: "anthropic"
         model: "claude-opus-5-5"
 
-# The legacy-named ppd section defaults to observation only. Enabled mode
-# delegates one turn to the read-only strategist; no production rolling
-# replanning loop currently consumes successive frontiers.
-# Set mode to "enabled" for explicit planning trials or "disabled" to skip it.
+# The legacy-named ppd section. A PPD directive tells the primary agent to run
+# a rolling plan: planner frontier, update_plan, per-step verification,
+# re-plan. Shadow mode (default) gives the directive to explicit requests
+# ("/ppd" or "PPD" in the message) and only an advisory hint to requests that
+# name several files or packages. Enabled mode gives the directive to every
+# qualifying request. "disabled" skips the policy.
 ppd:
   version: "v1"
   mode: "shadow"
-  specialist: "delivery-strategist"
+  specialist: "planner"
   max_planner_calls: 1
   thresholds:
     min_files: 3
@@ -120,6 +123,18 @@ intent_routing:
       - "tell me about"
     reason: "Explanation is delegated to the read-only explainer"
 
+  - intent: "security"
+    agent: "security-auditor"
+    tier: "T2"
+    patterns:
+      - "security (check|audit|review)"
+      - "vulnerab"
+      - "threat model"
+      - "pen ?test"
+      - "(injection|xss|ssrf|cve)\\b"
+      - "secrets? (scan|leak)"
+    reason: "Security findings need a threat model and validation, not a checklist"
+
   - intent: "review"
     agent: "reviewer"
     tier: "T2"
@@ -130,7 +145,6 @@ intent_routing:
       - "look at (my|the|this) (changes|diff|code|PR)"
       - "any (bugs|issues|problems)"
       - "code quality"
-      - "security (check|audit|review)"
     reason: "Review needs nuanced judgment and security awareness"
 
   - intent: "debug"
@@ -207,7 +221,8 @@ explicit_switch:
     The @ prefix routes to the named agent regardless of intent classification.
   examples:
     - "@chronos-code implement the rest after the plan"
-    - "@reviewer check my last commit for security issues"
+    - "@reviewer check my last commit for bugs"
+    - "@security-auditor threat-model the delivery HTTP handlers"
     - "@planner break down this feature into tasks"
     - "@debugger why is TestBuildAgent failing with nil pointer"
     - "@explainer how does the middleware chain work in this project"

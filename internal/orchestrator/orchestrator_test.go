@@ -861,14 +861,25 @@ func TestFormatRoutingHintStaysAdvisory(t *testing.T) {
 	if !strings.Contains(same, "Path:") || strings.Contains(same, "spawn_subagent debugger") {
 		t.Fatalf("same-agent hint = %q", same)
 	}
-	shadow := &router.PPDDecision{Action: router.PPDActionShadow, Specialist: "delivery-strategist"}
+	shadow := &router.PPDDecision{Action: router.PPDActionShadow, Specialist: "planner"}
 	low := router.Classification{Complexity: router.ComplexityLow, Kind: router.TaskKindEdit}
-	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), shadow); !strings.Contains(got, "delivery-strategist") || !strings.Contains(got, "Path:") {
+	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), shadow); !strings.Contains(got, "PPD hint:") || !strings.Contains(got, "spawn_subagent planner") || !strings.Contains(got, "Path:") || strings.Contains(got, "PPD requested") {
 		t.Fatalf("shadow hint = %q", got)
 	}
-	delegate := &router.PPDDecision{Action: router.PPDActionDelegate, Specialist: "delivery-strategist"}
-	if got := formatRoutingHint("delivery-strategist", "code", "coder", true, class, path, delegate); got != "" {
-		t.Fatalf("delegate hint = %q, want empty", got)
+	explicit := &router.PPDDecision{Action: router.PPDActionShadow, Reason: "explicit_ppd", Specialist: "planner"}
+	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), explicit); !strings.Contains(got, "PPD requested: run this as a rolling plan") || !strings.Contains(got, "update_plan") || strings.Contains(got, "PPD hint:") {
+		t.Fatalf("explicit PPD hint = %q", got)
+	}
+	if got := formatRoutingHint("planner", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), explicit); strings.Contains(got, "PPD") {
+		t.Fatalf("planner PPD hint = %q, want none", got)
+	}
+	delegate := &router.PPDDecision{Action: router.PPDActionDelegate, Reason: "package_breadth", Specialist: "planner"}
+	if got := formatRoutingHint("chronos-code", "code", "coder", true, class, path, delegate); !strings.Contains(got, "PPD requested: run this as a rolling plan") || !strings.Contains(got, "Path:") {
+		t.Fatalf("enabled-mode delegate hint = %q, want the rolling-plan directive", got)
+	}
+	bypass := &router.PPDDecision{Action: router.PPDActionBypass, Reason: "simple_task", Specialist: "planner"}
+	if got := formatRoutingHint("chronos-code", "code", "chronos-code", false, low, router.DefaultPath(low.Complexity), bypass); strings.Contains(got, "PPD") {
+		t.Fatalf("bypass hint = %q, want no PPD text", got)
 	}
 }
 

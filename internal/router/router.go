@@ -161,7 +161,7 @@ func DefaultPath(complexity Complexity) ImplementationPath {
 			MaxToolCalls: 24,
 			Graph:        "L0-L3",
 			Plan:         "durable-or-working-plan",
-			Hint:         "map dependencies and acceptance criteria; ask delivery-strategist for a bounded evidence-driven frontier when durable planning is useful; shadow mode does not execute that frontier, so otherwise track the steps with update_plan and verify every deliverable",
+			Hint:         "map dependencies and acceptance criteria; when durable planning is useful, spawn planner for the next few verifiable steps, track them with update_plan, and re-plan after each frontier; verify every deliverable",
 		}
 	case ComplexityMedium:
 		return ImplementationPath{

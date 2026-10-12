@@ -65,7 +65,7 @@ func TestPPDPolicy_ShadowAndObservability(t *testing.T) {
 	if decision.Action != PPDActionShadow || decision.Reason != "package_breadth" || !decision.FalsePositive {
 		t.Fatalf("Decide() = %+v, want observable shadow false positive", decision)
 	}
-	if decision.ClassifierVersion != "v1" || decision.Features.PackageCount != 2 || decision.Thresholds.MinPackages != 2 || decision.Specialist != "delivery-strategist" || decision.OracleCohort != "simple" {
+	if decision.ClassifierVersion != "v1" || decision.Features.PackageCount != 2 || decision.Thresholds.MinPackages != 2 || decision.Specialist != "planner" || decision.OracleCohort != "simple" {
 		t.Errorf("Decision observability fields = %+v", decision)
 	}
 }
@@ -99,14 +99,40 @@ func TestPPDPolicy_BundledConfigDefaultsToShadow(t *testing.T) {
 		t.Fatalf("bundled PPD mode = %q, want %q", cfg.PPD.Mode, PPDModeShadow)
 	}
 	decision := NewPPDPolicy(cfg.PPD, nil).Decide(PPDRequest{PackageCount: cfg.PPD.Thresholds.MinPackages})
-	if decision.Action != PPDActionShadow || decision.ClassifierVersion != cfg.PPD.Version || decision.Specialist != "delivery-strategist" {
+	if decision.Action != PPDActionShadow || decision.ClassifierVersion != cfg.PPD.Version || decision.Specialist != "planner" {
 		t.Errorf("bundled policy decision = %+v, want shadow with version %q", decision, cfg.PPD.Version)
 	}
 }
 
 func testPPDConfig(mode PPDMode) PPDConfig {
 	return PPDConfig{
-		Version: "v1", Mode: mode, Specialist: "delivery-strategist", MaxPlannerCalls: 1,
+		Version: "v1", Mode: mode, Specialist: "planner", MaxPlannerCalls: 1,
 		Thresholds: PPDThresholds{MinFiles: 3, MinPackages: 2, MinEstimatedCalls: 5},
+	}
+}
+
+func TestMentionsPPD(t *testing.T) {
+	for message, want := range map[string]bool{
+		"use PPD for this feature":               true,
+		"ppd: migrate the config loader":         true,
+		"apply persistent plan decomposition":    true,
+		"(PPD) resume the task":                  true,
+		"update the cppdefs header":              false,
+		"refactor across multiple packages":      false,
+		"rename ppd_report.go to plan_report.go": false,
+	} {
+		if got := MentionsPPD(message); got != want {
+			t.Errorf("MentionsPPD(%q) = %t, want %t", message, got, want)
+		}
+	}
+}
+
+func TestReferenceBreadth(t *testing.T) {
+	files, packages := ReferenceBreadth("touch internal/router/ppd.go, internal/router/router.go and internal/cli/root.go; also main.go and internal/router/ppd.go")
+	if files != 4 || packages != 2 {
+		t.Fatalf("ReferenceBreadth() = (%d, %d), want (4, 2)", files, packages)
+	}
+	if files, packages := ReferenceBreadth("refactor across every package"); files != 0 || packages != 0 {
+		t.Fatalf("ReferenceBreadth(no refs) = (%d, %d), want (0, 0)", files, packages)
 	}
 }

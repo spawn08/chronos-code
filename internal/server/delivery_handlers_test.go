@@ -138,7 +138,7 @@ func TestDeliveryAdmissionRequiresAuthenticatedAuthorizedStorage(t *testing.T) {
 	}
 }
 
-func TestPlanGenerationAdmissionRequiresExplicitPlanWorker(t *testing.T) {
+func TestPlanGenerationAdmissionIsRejected(t *testing.T) {
 	ctx := context.Background()
 	store, err := execution.OpenDeliveryStore(ctx, filepath.Join(t.TempDir(), "deliveries.db"))
 	if err != nil {
@@ -146,17 +146,12 @@ func TestPlanGenerationAdmissionRequiresExplicitPlanWorker(t *testing.T) {
 	}
 	defer store.Close()
 	config := ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store}
-	worker, err := execution.NewWorker(store, parkedDeliveryExecutor{}, execution.WorkerConfig{OwnerID: "reader", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	config.DeliveryWorker = worker
 	response := deliveryRequest(New(nil, config).Handler(), http.MethodPost, "/v1/deliveries", "plan-key", `{"goal":"add api","plan_generation":{}}`, "secret")
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unconfigured plan admission = %d: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "plan_generation") {
+		t.Fatalf("removed plan_generation admission = %d: %s", response.Code, response.Body.String())
 	}
 	if deliveries, err := store.List(ctx, execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}); err != nil || len(deliveries) != 0 {
-		t.Fatalf("unconfigured plan became runnable = %+v, error = %v", deliveries, err)
+		t.Fatalf("rejected plan admission persisted = %+v, error = %v", deliveries, err)
 	}
 }
 
@@ -308,74 +303,5 @@ func TestDeliveryCostAuthorityIsScopedAndImmutableAtAdmission(t *testing.T) {
 	}
 	if invalid := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "invalid", `{"goal":"build feature","max_cost_microdollars":-1}`, "secret"); invalid.Code != http.StatusBadRequest {
 		t.Fatalf("negative authority accepted: %d", invalid.Code)
-	}
-}
-
-// TestCandidatePlanAdmissionFromProductionStartup exercises orchestrator.New,
-// the candidate plan executor and the routed worker without the interactive
-// closed-loop PPD capability. The worker is not run: it would call a provider.
-func TestCandidatePlanAdmissionFromProductionStartup(t *testing.T) {
-	t.Setenv("CHRONOS_CODE_DATA_HOME", t.TempDir())
-	root := t.TempDir()
-	indexOnStart := false
-	configured := &config.Config{FileConfig: agent.FileConfig{
-		Defaults: &agent.AgentConfig{Storage: agent.StorageConfig{Backend: "sqlite", DSN: filepath.Join(root, "sessions.db")}},
-		Agents:   []agent.AgentConfig{{ID: "reader", Name: "reader", Model: agent.ModelConfig{Provider: "openai", Model: "gpt-4o-mini", APIKey: "test-key"}}},
-	}, Workspace: config.WorkspaceConfig{Root: root, IndexOnStart: &indexOnStart}}
-	orch, err := orchestrator.New(context.Background(), configured, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer orch.Close()
-	store, err := execution.OpenDeliveryStore(context.Background(), filepath.Join(t.TempDir(), "deliveries.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	authorizer := authorization.RepositoryAuthorizer{RepositoryID: "repo", AllowedActions: map[string]struct{}{"delivery.execute": {}}}
-	readOnly, err := orchestrator.NewReadOnlyDeliveryExecutor(orch, authorizer, security.SandboxPolicy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := orchestrator.NewPlanDeliveryExecutor(orch, authorizer, security.SandboxPolicy{}); err == nil {
-		t.Fatal("write plan executor started without the closed-loop PPD capability")
-	}
-	candidate, err := orchestrator.NewCandidatePlanDeliveryExecutor(orch, authorizer, security.SandboxPolicy{})
-	if err != nil {
-		t.Fatalf("candidate plan executor from production startup: %v", err)
-	}
-	routed, err := orchestrator.NewRoutedDeliveryExecutor(readOnly, candidate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker, err := execution.NewWorker(store, routed, execution.WorkerConfig{OwnerID: "worker", Concurrency: 1, LeaseDuration: time.Minute, HeartbeatEvery: time.Second, PollEvery: time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := New(orch, ServerConfig{AuthType: "api_key", APIKey: "secret", TenantID: "tenant", RepositoryID: "repo", DeliveryStore: store, DeliveryWorker: worker}).Handler()
-	proposal := `{"source_request_ref":"source","classifier_ref":"classifier","nodes":[{"id":"a","kind":"implement","objective":"add api","depends_on":[],"scope":"api.go","context_refs":[],"expected_artifacts":["api.go"],"assumptions":[],"invalidation_triggers":[],"recovery_class":"replan","risks":["compatibility"],"verification":"go test ./..."}]}`
-	body := `{"goal":"add api","plan_generation":` + proposal + `}`
-	if capped := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "capped-plan", `{"goal":"add api","max_cost_microdollars":10,"plan_generation":`+proposal+`}`, "secret"); capped.Code != http.StatusServiceUnavailable {
-		t.Fatalf("capped candidate plan admission = %d: %s", capped.Code, capped.Body.String())
-	}
-	response := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "plan-key", body, "secret")
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("candidate plan admission = %d: %s", response.Code, response.Body.String())
-	}
-	var admitted deliveryResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &admitted); err != nil {
-		t.Fatal(err)
-	}
-	scope := execution.DeliveryScope{TenantID: "tenant", RepositoryID: "repo"}
-	loaded, err := store.Load(context.Background(), scope, admitted.ID)
-	if err != nil || loaded.PolicyReference != execution.CandidatePlanPolicyReference || loaded.State != execution.DeliveryQueued {
-		t.Fatalf("candidate plan route = %+v, error = %v", loaded, err)
-	}
-	if retry := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "plan-key", body, "secret"); retry.Code != http.StatusAccepted {
-		t.Fatalf("retried candidate plan admission = %d: %s", retry.Code, retry.Body.String())
-	}
-	changed := strings.Replace(body, "add api", "remove api", 2)
-	if conflict := deliveryRequest(handler, http.MethodPost, "/v1/deliveries", "plan-key", changed, "secret"); conflict.Code != http.StatusConflict {
-		t.Fatalf("changed proposal under same key = %d: %s", conflict.Code, conflict.Body.String())
 	}
 }

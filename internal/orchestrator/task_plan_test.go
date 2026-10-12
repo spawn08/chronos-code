@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -80,6 +81,72 @@ func TestTaskPlanStoreIsolatesDelegatedChildren(t *testing.T) {
 	open := store.openItems(context.Background(), "s")
 	if len(open) != 1 || open[0].Content != "parent item" {
 		t.Fatalf("parent open items = %+v; a child overwrote the parent plan", open)
+	}
+}
+
+// recordingPlanStore is a durable plan store double that can fail writes.
+type recordingPlanStore struct {
+	plans    map[string]*builtins.Plan
+	saves    int
+	saveErr  error
+	sessions []string
+}
+
+func (r *recordingPlanStore) Load(ctx context.Context) (*builtins.Plan, error) {
+	if plan, ok := r.plans[storage.SessionFromContext(ctx)]; ok {
+		return plan.Clone(), nil
+	}
+	return &builtins.Plan{}, nil
+}
+
+func (r *recordingPlanStore) Save(ctx context.Context, plan *builtins.Plan) error {
+	r.saves++
+	r.sessions = append(r.sessions, storage.SessionFromContext(ctx))
+	if r.saveErr != nil {
+		return r.saveErr
+	}
+	r.plans[storage.SessionFromContext(ctx)] = plan.Clone()
+	return nil
+}
+
+func TestTaskPlanStoreRestoresPrimaryPlanAfterRestart(t *testing.T) {
+	durable := &recordingPlanStore{plans: map[string]*builtins.Plan{}}
+	ctx := storage.WithSession(context.Background(), "s")
+	before := newDurableTaskPlanStore(durable)
+	if err := before.Save(ctx, &builtins.Plan{Tasks: []builtins.PlanTask{{Content: "done", Status: builtins.TaskCompleted}, {Content: "next", Status: builtins.TaskPending}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	after := newDurableTaskPlanStore(durable)
+	open := after.openItems(context.Background(), "s")
+	if len(open) != 1 || open[0].Content != "next" {
+		t.Fatalf("open items after restart = %+v, want the persisted pending item", open)
+	}
+	if err := after.Save(ctx, &builtins.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	if plan, _ := after.Load(ctx); len(plan.Tasks) != 0 {
+		t.Fatalf("cleared plan = %+v, want empty", plan.Tasks)
+	}
+}
+
+func TestTaskPlanStoreKeepsChildPlansAndFailedWritesInMemory(t *testing.T) {
+	durable := &recordingPlanStore{plans: map[string]*builtins.Plan{}, saveErr: errors.New("session missing")}
+	store := newDurableTaskPlanStore(durable)
+	parent := agent.WithRunIdentity(storage.WithSession(context.Background(), "s"), agent.RunIdentity{InvocationID: "parent", RoleID: "chronos-code"})
+	child := agent.WithRunIdentity(parent, agent.RunIdentity{InvocationID: "child", ParentInvocationID: "parent", RoleID: "coder"})
+
+	if err := store.Save(parent, &builtins.Plan{Tasks: []builtins.PlanTask{{Content: "parent item"}}}); err != nil {
+		t.Fatalf("Save() with failing durable store = %v, want nil", err)
+	}
+	if err := store.Save(child, &builtins.Plan{Tasks: []builtins.PlanTask{{Content: "child item"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if durable.saves != 1 || durable.sessions[0] != "s" {
+		t.Fatalf("durable saves = %d for sessions %v, want only the primary session", durable.saves, durable.sessions)
+	}
+	if plan, _ := store.Load(parent); len(plan.Tasks) != 1 || plan.Tasks[0].Content != "parent item" {
+		t.Fatalf("parent plan = %+v, want in-memory copy", plan.Tasks)
 	}
 }
 

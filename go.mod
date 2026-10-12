@@ -16,7 +16,6 @@ require (
 	github.com/spawn08/chronos v0.0.0-00010101000000-000000000000
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/oauth2 v0.27.0
-	golang.org/x/sys v0.47.0
 	golang.org/x/tools v0.49.0
 	google.golang.org/protobuf v1.36.5
 	gopkg.in/yaml.v3 v3.0.1
@@ -88,6 +87,7 @@ require (
 	golang.org/x/mod v0.39.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.9.0 // indirect

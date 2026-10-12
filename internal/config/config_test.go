@@ -21,14 +21,10 @@ func TestEmbeddedDefaultsStartFreshSession(t *testing.T) {
 	if cfg.Session.AutoResume {
 		t.Fatal("embedded session.auto_resume = true, want false for a clean default startup")
 	}
-	foundStrategist := false
 	for _, configured := range cfg.Agents {
 		if configured.ID == "delivery-strategist" {
-			foundStrategist = configured.System != "" && len(configured.Tools) > 0
+			t.Fatal("embedded defaults still include the removed delivery-strategist")
 		}
-	}
-	if !foundStrategist {
-		t.Fatal("embedded defaults do not include a configured delivery-strategist")
 	}
 }
 

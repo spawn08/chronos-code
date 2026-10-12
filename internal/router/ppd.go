@@ -1,9 +1,14 @@
 package router
 
-import "fmt"
+import (
+	"fmt"
+	"path"
+	"regexp"
+)
 
-// PPDMode controls whether qualifying requests are recorded only or sent to
-// the configured delivery strategist. The name is retained for config compatibility.
+// PPDMode controls which qualifying requests get the rolling-plan directive:
+// shadow gives it to explicit requests only, enabled to every qualifying
+// request. The name is retained for config compatibility.
 type PPDMode string
 
 const (
@@ -28,8 +33,8 @@ type PPDThresholds struct {
 	MinEstimatedCalls int `yaml:"min_estimated_calls"`
 }
 
-// PPDConfig is the legacy-named routing.yaml policy section. Enabled delegates
-// qualifying work to the strategist. Shadow preserves a decision without invoking it.
+// PPDConfig is the legacy-named routing.yaml policy section. Specialist names
+// the planning agent recorded with each decision.
 type PPDConfig struct {
 	Version         string        `yaml:"version"`
 	Mode            PPDMode       `yaml:"mode"`
@@ -174,4 +179,30 @@ func (p *PPDPolicy) qualifies(request PPDRequest) (bool, string) {
 func (p *PPDPolicy) withOracle(decision PPDDecision, oracle PPDAction) PPDDecision {
 	decision.FalsePositive = (decision.Action == PPDActionShadow || decision.Action == PPDActionDelegate) && oracle == PPDActionBypass
 	return decision
+}
+
+// ppdMentionPattern matches an explicit request for durable planning, such as
+// "use PPD" or "persistent plan decomposition".
+var ppdMentionPattern = regexp.MustCompile(`(?i)(^|[^[:alnum:]_])(ppd|persistent plan decomposition)([^[:alnum:]_]|$)`)
+
+// MentionsPPD reports whether message explicitly asks for durable planning.
+func MentionsPPD(message string) bool {
+	return ppdMentionPattern.MatchString(message)
+}
+
+// ReferenceBreadth counts the distinct file references in message and the
+// distinct directories among references that name one.
+func ReferenceBreadth(message string) (files, packages int) {
+	seenFiles := make(map[string]bool)
+	seenDirs := make(map[string]bool)
+	for _, ref := range fileReferencePattern.FindAllString(message, -1) {
+		if seenFiles[ref] {
+			continue
+		}
+		seenFiles[ref] = true
+		if dir := path.Dir(ref); dir != "." {
+			seenDirs[dir] = true
+		}
+	}
+	return len(seenFiles), len(seenDirs)
 }

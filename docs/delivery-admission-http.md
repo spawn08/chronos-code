@@ -37,23 +37,9 @@ record or HTTP 404. Authentication is mandatory on both endpoints (`auth: none`
 returns HTTP 403). The ID is stable across server restarts. The idempotency key
 is never included in the HTTP response.
 
-An authenticated request may include `plan_generation` (strict strategist JSON
-with `source_request_ref`, `classifier_ref`, and bounded `nodes`). Only an
-explicitly installed plan-capable worker accepts it; the default read-only
-worker returns HTTP 503 without writing an admission. The host derives the
-tenant, repository, task, plan, and generation (`1`) from the admission identity.
-The plan proposal is persisted first, then delivery admission and queue state
-commit together; retrying the same key/proposal repairs a crash between the two
-databases. A changed proposal is rejected with HTTP 409. Plan results park for
-acceptance verification; the packaged server does not enable write-capable plan
-workers while the F10 acceptance gate is pending.
-`serve --delivery-plan-worker` installs a candidate plan worker alongside the
-read-only one. Plan admissions are then stamped `plan-candidate-worker-v1`:
-nodes run in private worktrees with read, scratch-write and sandboxed process
-grants only; each verified node patch is retained by content hash, and
-dependent nodes compose accepted predecessor patches privately. The checkout,
-network and external systems are never mutated. Capped plan admission still
-returns HTTP 503.
+The durable plan runtime and its `plan_generation` admission field were
+removed; a request that still sends `plan_generation` is rejected with HTTP 400
+as an unknown field, and `serve --delivery-plan-worker` fails at startup.
 
 `run_read_only` with `team_id` accepts a configured sequential or parallel
 team. Each member's response is checkpointed under the worker lease; after a
@@ -63,22 +49,7 @@ strategies return HTTP 400.
 
 The delivery aggregate, ordered events, worker attempts, and queue share the
 same SQLite database. `QueueAdmitted` commits a promotion event, state, and
-queue entry in one transaction. Plan generations use a separate database;
-their persistence and queue promotion are recoverable by idempotent retry,
-not an atomic cross-database commit.
-Legacy plan generations have separate timed node leases: the controller renews
-an active lease, and a resumed scheduler parks expired or pre-migration leases
-as blocked/ambiguous rather than replaying an unobserved effect. A stale owner
-cannot finalize after expiration. Plan generations still require explicit
-reconciliation/replanning before that work can safely continue.
-
-A host-authorized `plan.reconcile` operation can accept an applied plan patch
-after a crash before its plan receipt, but only while the delivery is parked.
-The receipt must bind the original attempt and passed verification, and the
-retained patch, parent revision, and selected file postimages must still match.
-The operator transition fences the queue and commits the accepted artifact with
-the plan node; it never reapplies the patch or assumes unknown provider/API
-effects succeeded. Conflicting edits or an unverified receipt remain parked.
+queue entry in one transaction.
 
 `server.delivery_http.request_url` and `observation_url` may configure a single
 destination-specific `http_observed_mutation` tool. The destination must honor

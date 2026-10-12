@@ -10,14 +10,12 @@ import (
 	"github.com/spawn08/chronos/sdk/agent"
 
 	"github.com/spawn08/chronos-code/internal/config"
-	"github.com/spawn08/chronos-code/internal/router"
 )
 
 const (
 	capabilityGraphCode      = "graph:code"
 	capabilityLSPTools       = "lsp:tools"
 	capabilityPlanMode       = "planning:plan-mode"
-	capabilityClosedLoopPPD  = "planning:closed-loop-ppd"
 	capabilityToolPrefix     = "tool:"
 	capabilityMCPPrefix      = "mcp:"
 	capabilityWriteFiles     = "write:files"
@@ -112,7 +110,7 @@ func compactCapabilities(capabilities []config.Capability) []config.Capability {
 	return compacted
 }
 
-func validateRuntimeCapabilities(cfg *config.Config, agents map[string]*agent.Agent, graphAvailable bool, routingConfig *router.Config) (RuntimeCapabilityManifest, []string, error) {
+func validateRuntimeCapabilities(cfg *config.Config, agents map[string]*agent.Agent, graphAvailable bool) (RuntimeCapabilityManifest, []string, error) {
 	manifest := buildRuntimeCapabilityManifest(agents, graphAvailable)
 	available := config.CapabilityManifest{Capabilities: manifest.Capabilities}
 	required := make([]config.Capability, 0, len(cfg.RuntimeCaps.Capabilities))
@@ -130,9 +128,6 @@ func validateRuntimeCapabilities(cfg *config.Config, agents map[string]*agent.Ag
 		}
 	}
 	required = append(required, cfg.RuntimeCaps.Capabilities...)
-	if routingConfig != nil && routingConfig.PPD.Mode == router.PPDModeEnabled {
-		required = append(required, config.Capability{Name: capabilityClosedLoopPPD})
-	}
 
 	warnings := make([]string, 0)
 	for _, requirement := range required {

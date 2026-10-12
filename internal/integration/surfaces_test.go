@@ -23,7 +23,6 @@ import (
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/mcpdiscover"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/server"
 	"github.com/spawn08/chronos-code/internal/tui"
@@ -488,9 +487,6 @@ func assertLocalTrustBoundaries(t *testing.T) {
 	guard := security.NewGuard(&security.Policy{WritablePaths: []string{"."}}, workspace, nil)
 	if err := guard.Before(context.Background(), &hooks.Event{Type: hooks.EventToolCallBefore, Name: "file_write", Input: map[string]any{"path": "../outside.go"}}); err == nil {
 		t.Fatal("file_write traversal was allowed")
-	}
-	if _, err := plan.AdmitPlanScope("trusted-tenant", plan.PlanScope{TenantID: "untrusted-tenant", RepositoryID: "repository"}); !errors.Is(err, plan.ErrTenantScopeMismatch) {
-		t.Fatalf("AdmitPlanScope() error = %v, want ErrTenantScopeMismatch", err)
 	}
 }
 

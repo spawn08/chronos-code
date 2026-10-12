@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
@@ -17,27 +18,79 @@ const taskPlanHeader = "Current task plan (update_plan; replace it when you star
 // taskPlanStore scopes the update_plan list. A delegated child inherits the
 // parent's session context, so it gets a list keyed by its own invocation;
 // otherwise a child's update_plan call would overwrite the parent's plan.
+//
+// Primary-session plans are also written through to an optional durable store
+// so a resumed session gets its checklist back after a restart. The in-memory
+// copy stays authoritative within a process: a failed durable write never
+// fails update_plan, and a session already touched here never re-reads a
+// possibly stale durable copy.
 type taskPlanStore struct {
-	plans *builtins.InMemoryPlanStore
+	plans   *builtins.InMemoryPlanStore
+	durable builtins.PlanStore
+
+	mu     sync.Mutex
+	loaded map[string]bool
 }
 
 func newTaskPlanStore() *taskPlanStore {
-	return &taskPlanStore{plans: builtins.NewInMemoryPlanStore()}
+	return newDurableTaskPlanStore(nil)
 }
 
-func (s *taskPlanStore) scope(ctx context.Context) context.Context {
+func newDurableTaskPlanStore(durable builtins.PlanStore) *taskPlanStore {
+	return &taskPlanStore{plans: builtins.NewInMemoryPlanStore(), durable: durable, loaded: make(map[string]bool)}
+}
+
+// scope returns the plan context and whether it is a primary session, the
+// only scope that exists in durable session storage.
+func (s *taskPlanStore) scope(ctx context.Context) (context.Context, bool) {
 	if identity, ok := agent.RunIdentityFromContext(ctx); ok && identity.ParentInvocationID != "" && identity.InvocationID != "" {
-		return storage.WithSession(ctx, "subagent:"+identity.InvocationID)
+		return storage.WithSession(ctx, "subagent:"+identity.InvocationID), false
 	}
-	return ctx
+	return ctx, true
 }
 
 func (s *taskPlanStore) Load(ctx context.Context) (*builtins.Plan, error) {
-	return s.plans.Load(s.scope(ctx))
+	scoped, primary := s.scope(ctx)
+	return s.load(scoped, primary)
 }
 
 func (s *taskPlanStore) Save(ctx context.Context, plan *builtins.Plan) error {
-	return s.plans.Save(s.scope(ctx), plan)
+	scoped, primary := s.scope(ctx)
+	if err := s.plans.Save(scoped, plan); err != nil {
+		return err
+	}
+	s.markLoaded(scoped)
+	if primary && s.durable != nil {
+		_ = s.durable.Save(scoped, plan)
+	}
+	return nil
+}
+
+func (s *taskPlanStore) load(ctx context.Context, primary bool) (*builtins.Plan, error) {
+	if !primary || s.durable == nil || s.markLoaded(ctx) {
+		return s.plans.Load(ctx)
+	}
+	restored, err := s.durable.Load(ctx)
+	if err != nil || restored == nil || len(restored.Tasks) == 0 {
+		return s.plans.Load(ctx)
+	}
+	if err := s.plans.Save(ctx, restored); err != nil {
+		return nil, err
+	}
+	return restored.Clone(), nil
+}
+
+// markLoaded records that ctx's session has an in-process plan and reports
+// whether it already had one.
+func (s *taskPlanStore) markLoaded(ctx context.Context) bool {
+	key := storage.TenantFromContext(ctx) + "\x00" + storage.SessionFromContext(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loaded[key] {
+		return true
+	}
+	s.loaded[key] = true
+	return false
 }
 
 // openItems returns the unfinished tasks of the primary plan for sessionID.
@@ -45,7 +98,7 @@ func (s *taskPlanStore) openItems(ctx context.Context, sessionID string) []built
 	if s == nil || sessionID == "" {
 		return nil
 	}
-	plan, err := s.plans.Load(storage.WithSession(ctx, sessionID))
+	plan, err := s.load(storage.WithSession(ctx, sessionID), true)
 	if err != nil || plan == nil {
 		return nil
 	}

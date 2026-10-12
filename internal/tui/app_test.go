@@ -136,14 +136,13 @@ func TestExecutionControlsAreTypedAndNeverReuseOriginalRequest(t *testing.T) {
 	}
 }
 
-func TestOperationalStatusBoundsSpecialistsAndWorktrees(t *testing.T) {
+func TestOperationalStatusBoundsSpecialists(t *testing.T) {
 	m := &appModel{width: 120, operational: orchestrator.OperationalSnapshot{
 		PermissionMode: "prompt", VerificationMode: verification.ModeEnforce,
 		ActiveSpecialists: []orchestrator.SpecialistSnapshot{{AgentID: "one"}, {AgentID: "two"}, {AgentID: "three"}, {AgentID: "four"}},
-		WorktreeIDs:       []string{"1234567890", "abcdefghij", "klmnopqrst", "uvwxyz1234"},
 	}}
 	got := m.renderOperationalBar()
-	if strings.Contains(got, "@four") || strings.Contains(got, "uvwxyz") || !strings.Contains(got, "+1") {
+	if strings.Contains(got, "@four") || !strings.Contains(got, "+1") {
 		t.Fatalf("operational status was not bounded: %q", got)
 	}
 }

@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos-code/internal/config"
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/retention"
 )
 
-const cleanupUsage = "usage: chronos-code cleanup status [scope] | cleanup run [--dry-run] [--scope <scope>] | cleanup prune <scope> [--dry-run] [--tenant <id> --repository <id>]"
+const cleanupUsage = "usage: chronos-code cleanup status [scope] | cleanup run [--dry-run] [--scope <scope>] | cleanup prune <scope> [--dry-run]"
 
 func runCleanup() error {
 	cfg, err := config.Load(configPath)
@@ -49,7 +48,7 @@ func runCleanupCommand(ctx context.Context, cfg *config.Config, args []string, s
 		result, err := manager.Status(ctx, scopes...)
 		return writeCleanupResult(stdout, result, err)
 	case "run":
-		dryRun, scope, _, _, err := parseCleanupFlags(args[1:])
+		dryRun, scope, err := parseCleanupFlags(args[1:])
 		if err != nil {
 			return err
 		}
@@ -64,18 +63,12 @@ func runCleanupCommand(ctx context.Context, cfg *config.Config, args []string, s
 			return errors.New(cleanupUsage)
 		}
 		scope := args[1]
-		dryRun, flagScope, tenant, repository, err := parseCleanupFlags(args[2:])
+		dryRun, flagScope, err := parseCleanupFlags(args[2:])
 		if err != nil {
 			return err
 		}
 		if flagScope != "" {
 			return fmt.Errorf("cleanup prune: --scope is not allowed")
-		}
-		if scope == retention.ScopePlanDB {
-			return prunePlanDB(ctx, stdout, paths.PlansDB, tenant, repository, cleanupBatchSize(cfg), dryRun)
-		}
-		if tenant != "" || repository != "" {
-			return fmt.Errorf("cleanup prune: tenant and repository apply only to plan_db")
 		}
 		result, err := manager.Prune(ctx, scope, dryRun)
 		return writeCleanupResult(stdout, result, err)
@@ -84,34 +77,34 @@ func runCleanupCommand(ctx context.Context, cfg *config.Config, args []string, s
 	}
 }
 
-func parseCleanupFlags(args []string) (dryRun bool, scope, tenant, repository string, err error) {
-	values := map[string]*string{"scope": &scope, "tenant": &tenant, "repository": &repository}
+func parseCleanupFlags(args []string) (dryRun bool, scope string, err error) {
+	values := map[string]*string{"scope": &scope}
 	seen := make(map[string]bool)
 	for i := 0; i < len(args); i++ {
 		name, value, hasValue := strings.Cut(strings.TrimPrefix(args[i], "--"), "=")
 		if !strings.HasPrefix(args[i], "--") {
-			return false, "", "", "", fmt.Errorf("cleanup: unexpected argument %q", args[i])
+			return false, "", fmt.Errorf("cleanup: unexpected argument %q", args[i])
 		}
 		if name == "dry-run" {
 			if hasValue || seen[name] {
-				return false, "", "", "", fmt.Errorf("cleanup: invalid --dry-run")
+				return false, "", fmt.Errorf("cleanup: invalid --dry-run")
 			}
 			dryRun, seen[name] = true, true
 			continue
 		}
 		destination, ok := values[name]
 		if !ok || seen[name] {
-			return false, "", "", "", fmt.Errorf("cleanup: invalid --%s", name)
+			return false, "", fmt.Errorf("cleanup: invalid --%s", name)
 		}
 		if !hasValue {
 			i++
 			if i >= len(args) {
-				return false, "", "", "", fmt.Errorf("cleanup: --%s requires a value", name)
+				return false, "", fmt.Errorf("cleanup: --%s requires a value", name)
 			}
 			value = args[i]
 		}
 		if value == "" {
-			return false, "", "", "", fmt.Errorf("cleanup: --%s requires a value", name)
+			return false, "", fmt.Errorf("cleanup: --%s requires a value", name)
 		}
 		*destination, seen[name] = value, true
 	}
@@ -131,22 +124,6 @@ func cleanupBatchSize(cfg *config.Config) int {
 		return cfg.Retention.BatchSize
 	}
 	return 100
-}
-
-func prunePlanDB(ctx context.Context, stdout io.Writer, path, tenant, repository string, limit int, dryRun bool) error {
-	if tenant == "" || repository == "" {
-		return fmt.Errorf("cleanup prune plan_db: --tenant and --repository are required")
-	}
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("open plan store: %w", err)
-	}
-	store, err := plan.OpenSQLStore(ctx, path)
-	if err != nil {
-		return fmt.Errorf("open plan store: %w", err)
-	}
-	defer store.Close()
-	result, err := store.Prune(ctx, plan.PruneRequest{Scope: plan.PlanScope{TenantID: plan.TenantID(tenant), RepositoryID: plan.RepositoryID(repository)}, DryRun: dryRun, Limit: limit})
-	return writeCleanupResult(stdout, result, err)
 }
 
 func writeCleanupResult(stdout io.Writer, value any, err error) error {

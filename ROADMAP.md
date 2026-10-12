@@ -32,8 +32,12 @@ as follows:
   local-tool token totals are useful for the offline contract gate only; they
   are not a paired Chronos Code versus external-tool model benchmark.
 - The bundled PPD policy is `shadow` mode. A qualifying request returns an
-  observable shadow decision without invoking the PPD specialist. `enabled` delegates and
-  must remain a future rollout stage until valid paired model evidence exists.
+  observable shadow decision without invoking the PPD specialist. An explicit
+  PPD request (`/ppd` or "PPD" in the message) gets the interactive rolling-plan
+  directive; file and package breadth only adds an advisory hint. `enabled` gives
+  the directive to every qualifying request and must remain a future rollout
+  stage until valid paired model evidence exists. The durable SQLite plan
+  runtime, its `plan` CLI, and the delivery plan worker were removed.
 - Self-learning is enabled by the default configuration, but automatic
   distillation is disabled. Distillation is explicit, uses aggregated
   session-scoped statistics rather than raw tool input/output, and produces
@@ -50,24 +54,17 @@ as follows:
    same task corpus and revision, model revision and temperature, permissions,
    context limit, timeout, graph warm state, baseline, repeats, and a
    successful-task denominator. Until then, do not set `ppd.mode: enabled`.
-4. If a plan database is in use, back it up and check it before migration:
-   `chronos-code plan backup --db <path> --backup <backup-path>` followed by
-   `chronos-code plan verify-db --db <path>`. Run
-   `chronos-code plan migrate --db <path>`, then repeat `verify-db`. The plan
-   store rejects an unsupported newer schema or incompatible migration.
-5. Keep learning suggestions pending for review. To suspend learning for a
+4. Keep learning suggestions pending for review. To suspend learning for a
    rollout, set `learning.enabled: false` in `.chronos-code/config.yaml` before
    starting the process; re-enable it only after reviewing the pending output.
-6. Preserve the default security policy unless a reviewed project-specific
+5. Preserve the default security policy unless a reviewed project-specific
    requirement justifies a change. Review `.chronos-code/security.yaml` path
    restrictions, allowed shell commands, denied patterns, and secret patterns
    before rollout. Security hooks block disallowed paths and commands before
    execution.
-7. Roll back a delegation trial by returning `ppd.mode` to `shadow` (or
+6. Roll back a delegation trial by returning `ppd.mode` to `shadow` (or
    `disabled`) and restarting the process. Roll back learning by setting
-   `learning.enabled: false`. Restore a plan database only with the recorded
-   backup using `chronos-code plan restore --db <path> --source <backup-path>
-   --backup <pre-restore-backup-path> --yes`, then run `verify-db` again. Keep
+   `learning.enabled: false`. Keep
    benchmark reports as historical evidence; do not rewrite them to imply a
    successful trial.
 

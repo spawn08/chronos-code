@@ -15,7 +15,6 @@ type ProjectPaths struct {
 	ID           string
 	Dir          string
 	SessionsDB   string
-	PlansDB      string
 	DeliveriesDB string
 	TelemetryDB  string
 	MemoryDB     string
@@ -51,7 +50,6 @@ func ResolveProjectPaths(root string) (ProjectPaths, error) {
 	return ProjectPaths{
 		Root: root, ID: id, Dir: dir,
 		SessionsDB:   filepath.Join(dir, "sessions.db"),
-		PlansDB:      filepath.Join(dir, "plans.db"),
 		DeliveriesDB: filepath.Join(dir, "deliveries.db"),
 		TelemetryDB:  filepath.Join(dir, "telemetry.db"),
 		MemoryDB:     filepath.Join(dir, "memory.db"),

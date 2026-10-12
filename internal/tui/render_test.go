@@ -9,7 +9,6 @@ import (
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/memory"
 	"github.com/spawn08/chronos-code/internal/orchestrator"
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/verification"
 )
 
@@ -247,13 +246,12 @@ func TestRenderOperationalSnapshotSeparatesVCSAndCheckpoints(t *testing.T) {
 			Verification: verification.Decision{Allowed: false, Disagreement: true},
 			Budget:       execution.BudgetSnapshot{Limits: execution.TaskLimits{ModelCalls: 4, ToolCalls: 8}, ModelCalls: 1, ToolCalls: 3},
 		},
-		Plan:              orchestrator.PlanSnapshot{ID: "plan-1", State: plan.PlanActive, Nodes: []orchestrator.PlanNodeSnapshot{{ID: "n1", State: plan.NodeRunning}}},
 		ActiveSpecialists: []orchestrator.SpecialistSnapshot{{AgentID: "coder", TaskID: "task-1"}},
-		WorktreeIDs:       []string{"wt-1"}, ChangedPaths: []string{"actual.go"},
-		Checkpoints: []orchestrator.CheckpointSnapshot{{Path: "journal.go", State: "committed"}},
+		ChangedPaths:      []string{"actual.go"},
+		Checkpoints:       []orchestrator.CheckpointSnapshot{{Path: "journal.go", State: "committed"}},
 	}
 	got := RenderOperationalSnapshot(snapshot, 80)
-	for _, want := range []string{"permission=prompt", "verification=failed", "model=3", "tool=5", "plan-1", "@coder(task-1)", "wt-1", "VCS changed paths: actual.go", "checkpoint history: journal.go(committed)"} {
+	for _, want := range []string{"permission=prompt", "verification=failed", "model=3", "tool=5", "@coder(task-1)", "VCS changed paths: actual.go", "checkpoint history: journal.go(committed)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("operational snapshot missing %q:\n%s", want, got)
 		}

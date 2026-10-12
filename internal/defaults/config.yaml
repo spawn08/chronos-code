@@ -169,13 +169,13 @@ agents:
     sub_agents:
       - coder
       - planner
-      - delivery-strategist
       - reviewer
       - debugger
       - researcher
       - architect
       - explainer
       - tester
+      - security-auditor
 
   - id: coder
     name: Coding Agent
@@ -293,6 +293,23 @@ agents:
 
   - id: tester
     name: Tester
+    model:
+      provider: "anthropic"
+      model: "claude-sonnet-5-5"
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_list
+        permission: allow
+      - name: file_glob
+        permission: allow
+      - name: file_grep
+        permission: allow
+      - name: shell
+        permission: require_approval
+
+  - id: security-auditor
+    name: Security Auditor
     model:
       provider: "anthropic"
       model: "claude-sonnet-5-5"

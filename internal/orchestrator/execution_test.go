@@ -412,7 +412,7 @@ func TestExecuteRequestedAgentAndChatAdaptersRemainCompatible(t *testing.T) {
 
 func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 	ppdConfig := router.PPDConfig{
-		Version: "v1", Mode: router.PPDModeEnabled, Specialist: "delivery-strategist", MaxPlannerCalls: 1,
+		Version: "v1", Mode: router.PPDModeEnabled, Specialist: "planner", MaxPlannerCalls: 1,
 		Thresholds: router.PPDThresholds{MinFiles: 3, MinPackages: 2, MinEstimatedCalls: 5},
 	}
 
@@ -437,8 +437,8 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		planner := &executionTestProvider{name: "planner", modelID: "test"}
 		orch := newPPDExecutionTestOrchestrator(config, coder, planner)
 
-		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "refactor across multiple packages"})
-		if err != nil || result.AgentID != "coder" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionShadow || result.PPDDecision.Features.Kind != router.TaskKindRefactor || !result.PPDDecision.Features.HighRisk {
+		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "refactor internal/router/ppd.go and internal/cli/root.go"})
+		if err != nil || result.AgentID != "coder" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionShadow || result.PPDDecision.Features.Kind != router.TaskKindRefactor || result.PPDDecision.Features.PackageCount != 2 || result.PPDDecision.Features.HighRisk {
 			t.Fatalf("Execute() = %#v, %v; want observed shadow on coder", result, err)
 		}
 		if len(planner.requests) != 0 {
@@ -446,28 +446,45 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("high complexity delegates", func(t *testing.T) {
+	t.Run("broad wording alone bypasses", func(t *testing.T) {
 		coder := &executionTestProvider{name: "coder", modelID: "test"}
 		planner := &executionTestProvider{name: "planner", modelID: "test"}
 		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, planner)
 
-		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "refactor across multiple packages"})
-		if err != nil || result.AgentID != "delivery-strategist" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate || result.PPDDecision.Reason != "high_risk" {
-			t.Fatalf("Execute() = %#v, %v; want live PPD delegation on high complexity", result, err)
+		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "fix all typos in every comment"})
+		if err != nil || result.AgentID != "coder" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionBypass || result.PPDDecision.Features.HighRisk {
+			t.Fatalf("Execute() = %#v, %v; want keyword-only request to bypass", result, err)
 		}
-		if len(coder.requests) != 0 {
-			t.Fatalf("coder calls = %d, want 0", len(coder.requests))
+		if len(planner.requests) != 0 {
+			t.Fatalf("planner calls = %d, want 0", len(planner.requests))
 		}
 	})
 
-	t.Run("enabled delegation", func(t *testing.T) {
+	t.Run("explicit PPD mention gets the rolling-plan directive", func(t *testing.T) {
+		config := ppdConfig
+		config.Mode = router.PPDModeShadow
 		coder := &executionTestProvider{name: "coder", modelID: "test"}
-		planner := &executionTestProvider{name: "planner", modelID: "test"}
-		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, planner)
+		orch := newPPDExecutionTestOrchestrator(config, coder, nil)
+
+		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "use PPD to add the export command"})
+		if err != nil || result.AgentID != "coder" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionShadow || result.PPDDecision.Reason != "explicit_ppd" {
+			t.Fatalf("Execute() = %#v, %v; want explicit PPD on coder", result, err)
+		}
+		if !requestsContain(coder, "PPD requested: run this as a rolling plan") {
+			t.Fatal("explicit PPD request did not carry the rolling-plan directive")
+		}
+	})
+
+	t.Run("enabled mode keeps the primary agent and directs a rolling plan", func(t *testing.T) {
+		coder := &executionTestProvider{name: "coder", modelID: "test"}
+		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, nil)
 
 		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "change behavior", PPD: &router.PPDRequest{FileCount: 3}})
-		if err != nil || result.AgentID != "delivery-strategist" || result.Response.Content != "planner" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate {
-			t.Fatalf("Execute() = %#v, %v; want planner delegation", result, err)
+		if err != nil || result.AgentID != "coder" || result.Response.Content != "coder" || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate || result.PPDDecision.Specialist != "planner" {
+			t.Fatalf("Execute() = %#v, %v; want coder with an enabled PPD decision", result, err)
+		}
+		if !requestsContain(coder, "PPD requested: run this as a rolling plan") {
+			t.Fatal("enabled PPD request did not carry the rolling-plan directive")
 		}
 	})
 
@@ -482,19 +499,6 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 		}
 		if len(planner.requests) != 0 {
 			t.Fatalf("planner calls = %d, want 0", len(planner.requests))
-		}
-	})
-
-	t.Run("missing specialist failure", func(t *testing.T) {
-		coder := &executionTestProvider{name: "coder", modelID: "test"}
-		orch := newPPDExecutionTestOrchestrator(ppdConfig, coder, nil)
-
-		result, err := orch.Execute(context.Background(), ExecutionRequest{Message: "change behavior", PPD: &router.PPDRequest{PackageCount: 2}})
-		if err == nil || !contains(err.Error(), `delivery strategist "delivery-strategist" not found`) || result.PPDDecision == nil || result.PPDDecision.Action != router.PPDActionDelegate {
-			t.Fatalf("Execute() = %#v, %v; want explicit missing specialist failure", result, err)
-		}
-		if len(coder.requests) != 0 {
-			t.Fatalf("coder calls = %d, want 0", len(coder.requests))
 		}
 	})
 
@@ -516,13 +520,27 @@ func TestExecuteAppliesPPDPolicyToAutomaticRouting(t *testing.T) {
 func newPPDExecutionTestOrchestrator(config router.PPDConfig, coder, planner *executionTestProvider) *Orchestrator {
 	agents := map[string]*agent.Agent{"coder": newExecutionTestAgent("coder", coder)}
 	if planner != nil {
-		agents["delivery-strategist"] = newExecutionTestAgent("delivery-strategist", planner)
+		agents["planner"] = newExecutionTestAgent("planner", planner)
 	}
 	return &Orchestrator{
 		agents: agents, active: "coder",
 		routingConfig:  &router.Config{PPD: config},
 		modelOverrides: make(map[string]bool),
 	}
+}
+
+// requestsContain reports whether any message sent to provider contains text.
+func requestsContain(provider *executionTestProvider, text string) bool {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	for _, request := range provider.requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, text) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestExecuteRejectsUnsupportedVerifiedCompletion(t *testing.T) {

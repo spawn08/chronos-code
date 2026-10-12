@@ -2,6 +2,8 @@
 
 Status: implementation specification; tasks below are initially unimplemented.
 
+> **Note:** the durable SQLite plan runtime (`internal/plan`, `internal/worktree`, the `plan` CLI, `serve --delivery-plan-worker`, and the `delivery-strategist` agent) described in parts of this guide has been removed. PPD now runs in the primary agent as a rolling plan (`planner`, `update_plan`, per-step verification, re-plan). Treat plan-runtime sections as historical.
+
 This is the single implementation guide for the repository reviews, principal-engineer working model, ten research proposals, subagent redesign, and headless/TUI delivery roadmap. An implementing agent must be able to start here without the originating conversation.
 
 **Product objective:** a user can say “build this feature end-to-end; ask me only for consequential decisions or genuine blockers,” disconnect, return later, and inspect a verified result. Routine execution-window limits must checkpoint and continue rather than terminate the delivery with `budget_exhausted`.

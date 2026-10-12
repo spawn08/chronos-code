@@ -62,6 +62,7 @@ Commands:
   /compact           Summarize session history and reset the token budget
   /rewind            Undo the last file_write (alias: /undo)
   /plan [on|off]     Plan mode: plan read-only, approve, then implement
+  /ppd <task>        Run a task as a rolling plan, verifying each step
   /learn             List pending learning suggestions
   /learn accept <id> Apply a pending suggestion (next start)
   /learn reject <id> Discard a pending suggestion

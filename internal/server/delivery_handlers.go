@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,17 +11,14 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/authorization"
 	"github.com/spawn08/chronos-code/internal/execution"
-	"github.com/spawn08/chronos-code/internal/orchestrator"
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos/sdk/team"
 )
 
 type deliveryAdmissionRequest struct {
-	Goal                string          `json:"goal"`
-	RunReadOnly         bool            `json:"run_read_only,omitempty"`
-	PlanGeneration      json.RawMessage `json:"plan_generation,omitempty"`
-	TeamID              string          `json:"team_id,omitempty"`
-	MaxCostMicrodollars int64           `json:"max_cost_microdollars,omitempty"`
+	Goal                string `json:"goal"`
+	RunReadOnly         bool   `json:"run_read_only,omitempty"`
+	TeamID              string `json:"team_id,omitempty"`
+	MaxCostMicrodollars int64  `json:"max_cost_microdollars,omitempty"`
 	Requirements        []struct {
 		Statement string   `json:"statement"`
 		Checks    []string `json:"checks"`
@@ -79,16 +75,6 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "max_cost_microdollars must be non-negative"})
 		return
 	}
-	if len(request.PlanGeneration) != 0 {
-		if request.RunReadOnly || request.TeamID != "" || s.orch == nil || s.cfg.DeliveryWorker == nil || s.cfg.DeliveryWorker.PlanPolicyReference() == "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "plan generation requires an explicitly configured plan worker"})
-			return
-		}
-		if request.MaxCostMicrodollars > 0 && !s.cfg.DeliveryWorker.CanRunCappedPlan() {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "capped plan delivery requires durable model-call admission"})
-			return
-		}
-	}
 	if request.TeamID != "" {
 		if !request.RunReadOnly || strings.TrimSpace(request.TeamID) != request.TeamID || s.orch == nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "team_id requires a configured read-only delivery worker"})
@@ -141,24 +127,6 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 			policyReference = execution.ReadOnlyTeamPolicyPrefix + request.TeamID
 		}
 	}
-	if len(request.PlanGeneration) != 0 {
-		policyReference = s.cfg.DeliveryWorker.PlanPolicyReference()
-		identity := orchestrator.PlanRuntimeIdentity{
-			TenantID: plan.TenantID(scope.TenantID), RepositoryID: plan.RepositoryID(scope.RepositoryID),
-			TaskID: plan.TaskID(id), PlanID: plan.PlanID(id), Generation: "1",
-		}
-		if err := s.orch.PrepareDeliveryPlan(r.Context(), request.PlanGeneration, identity); err != nil {
-			if errors.Is(err, orchestrator.ErrPlanHandoffConflict) {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": "plan generation conflicts with persisted proposal"})
-			} else if errors.Is(err, plan.ErrInvalidDecomposition) {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			} else {
-				s.logger.Error("delivery_plan_handoff_failed", "error", err)
-				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "plan generation handoff is unavailable"})
-			}
-			return
-		}
-	}
 	admission := execution.Admission{
 		Scope: scope, DeliveryID: id, AdmissionKey: execution.AdmissionKey(key),
 		Goal:         execution.Goal{Statement: request.Goal, Actor: authority.PrincipalID},
@@ -167,7 +135,7 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 	}
 	var delivery execution.Delivery
 	var err error
-	if request.RunReadOnly || len(request.PlanGeneration) != 0 {
+	if request.RunReadOnly {
 		delivery, err = s.cfg.DeliveryStore.AdmitRunnable(r.Context(), admission)
 	} else {
 		delivery, err = s.cfg.DeliveryStore.Admit(r.Context(), admission)
@@ -189,7 +157,7 @@ func (s *Server) handleAdmitDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := http.StatusCreated
-	if request.RunReadOnly || len(request.PlanGeneration) != 0 {
+	if request.RunReadOnly {
 		status = http.StatusAccepted
 	}
 	response := responseForDelivery(delivery)

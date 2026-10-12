@@ -352,6 +352,31 @@ func TestBundledCodeIntentStaysOnChronosCode(t *testing.T) {
 	}
 }
 
+func TestBundledSecurityIntentRoutesToSecurityAuditor(t *testing.T) {
+	data, err := defaults.ReadFile("routing.yaml")
+	if err != nil {
+		t.Fatalf("defaults.ReadFile(routing.yaml) error = %v", err)
+	}
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	r, err := New(cfg, "chronos-code")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for message, want := range map[string]string{
+		"run a security review of the auth middleware": "security-auditor",
+		"is this handler vulnerable to SSRF?":          "security-auditor",
+		"check for SQL injection in the store":         "security-auditor",
+		"review my diff before I push":                 "reviewer",
+	} {
+		if _, agent, matched := r.Classify(message); !matched || agent != want {
+			t.Errorf("Classify(%q) = (%q, %v), want %q", message, agent, matched, want)
+		}
+	}
+}
+
 func TestBundledImplementationPaths(t *testing.T) {
 	data, err := defaults.ReadFile("routing.yaml")
 	if err != nil {

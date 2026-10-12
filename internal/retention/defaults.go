@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/spawn08/chronos-code/internal/config"
-	"github.com/spawn08/chronos-code/internal/worktree"
 )
 
 const (
@@ -22,15 +21,11 @@ const (
 	ScopeLayeredMemory   = "layered_memory"
 	ScopeEditCheckpoints = "edit_checkpoints"
 	ScopeInputArtifacts  = "input_artifacts"
-	ScopeWorktrees       = "worktrees"
 	ScopeTUILogs         = "tui_logs"
-	ScopePlanDB          = "plan_db"
 	ScopeLimiterEntries  = "limiter_entries"
 )
 
-// DefaultAdapters returns every locally accessible retention surface. The plan
-// database is deliberately handled only by explicit scoped prune because its
-// schema has no timestamps and deleting the database would destroy active work.
+// DefaultAdapters returns every locally accessible retention surface.
 func DefaultAdapters(paths config.ProjectPaths, activeSessionIDs []string) []Adapter {
 	active := make(map[string]bool, len(activeSessionIDs))
 	var activeCheckpointDirs []string
@@ -57,11 +52,7 @@ func DefaultAdapters(paths config.ProjectPaths, activeSessionIDs []string) []Ada
 		&SQLiteResource{Name: ScopeLayeredMemory, Path: paths.MemoryDB, Table: "layer_memories", TimeColumn: "updated_at", SessionColumn: "session_id", SizeExpr: byteExpr("content", "steps"), Active: active},
 		&FileAdapter{Name: ScopeEditCheckpoints, Root: filepath.Join(paths.Dir, "edit-checkpoints"), ActivePrefixes: activeCheckpointDirs},
 		&FileAdapter{Name: ScopeInputArtifacts, Root: filepath.Join(paths.Dir, "artifacts"), ActivePrefixes: []string{"patches", "receipts"}},
-		ReadOnlyFileAdapter{Name: ScopePlanDB, Path: paths.PlansDB},
 	)
-	if manager, err := worktree.New(paths.Dir, nil); err == nil {
-		adapters = append(adapters, &WorktreeAdapter{Manager: manager})
-	}
 	if cache, err := os.UserCacheDir(); err == nil {
 		adapters = append(adapters, &FileAdapter{Name: ScopeTUILogs, Root: filepath.Join(cache, "chronos-code")})
 	}

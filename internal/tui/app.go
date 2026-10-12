@@ -2610,6 +2610,12 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		default:
 			m.appendError(fmt.Errorf("usage: /plan [on|off]"))
 		}
+	case "/ppd":
+		if strings.TrimSpace(arg) == "" {
+			m.appendError(fmt.Errorf("usage: /ppd <task>"))
+			break
+		}
+		return m.handleSubmit("PPD: " + arg)
 	case "/learn":
 		m.handleLearnCommand(arg)
 	case "/sandbox":
@@ -3946,15 +3952,7 @@ func (m *appModel) renderOperationalBar() string {
 	if specialists := m.activeSpecialists(snapshot.ActiveSpecialists); !overlay && len(specialists) > 0 {
 		text = appendOperationalSegment(text, "specialists:"+strings.Join(boundedStatusValues(specialists, 3), ","), m.width)
 	}
-	if !overlay && len(snapshot.WorktreeIDs) > 0 {
-		ids := make([]string, len(snapshot.WorktreeIDs))
-		for i, id := range snapshot.WorktreeIDs {
-			ids[i] = shortOperationalID(id)
-		}
-		text = appendOperationalSegment(text, "worktrees:"+strings.Join(boundedStatusValues(ids, 3), ","), m.width)
-	}
 	text = appendOperationalSegment(text, "limits:"+renderRemainingLimits(snapshot.Execution), m.width)
-	text = appendOperationalSegment(text, "plan:"+renderPlanState(snapshot.Plan), m.width)
 	return styleDim.Render(truncateToWidth(text, m.width))
 }
 
@@ -3972,13 +3970,6 @@ func boundedStatusValues(values []string, limit int) []string {
 	}
 	result := append([]string(nil), values[:limit]...)
 	return append(result, fmt.Sprintf("+%d", len(values)-limit))
-}
-
-func shortOperationalID(value string) string {
-	if len(value) <= 8 {
-		return value
-	}
-	return value[:8]
 }
 
 func (m *appModel) activeSpecialists(snapshot []orchestrator.SpecialistSnapshot) []string {

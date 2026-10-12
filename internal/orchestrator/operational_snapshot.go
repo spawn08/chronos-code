@@ -11,9 +11,7 @@ import (
 	"github.com/spawn08/chronos/engine/tool"
 
 	"github.com/spawn08/chronos-code/internal/execution"
-	"github.com/spawn08/chronos-code/internal/plan"
 	"github.com/spawn08/chronos-code/internal/verification"
-	"github.com/spawn08/chronos-code/internal/worktree"
 )
 
 const maxOperationalItems = 8
@@ -26,9 +24,7 @@ type OperationalSnapshot struct {
 	PlanOnly          bool
 	VerificationMode  verification.Mode
 	Execution         ExecutionSnapshot
-	Plan              PlanSnapshot
 	ActiveSpecialists []SpecialistSnapshot
-	WorktreeIDs       []string
 	ChangedPaths      []string
 	Checkpoints       []CheckpointSnapshot
 }
@@ -45,18 +41,6 @@ type ExecutionSnapshot struct {
 type SpecialistSnapshot struct {
 	TaskID  string
 	AgentID string
-}
-
-type PlanSnapshot struct {
-	ID         string
-	State      plan.PlanState
-	StopReason plan.StopReason
-	Nodes      []PlanNodeSnapshot
-}
-
-type PlanNodeSnapshot struct {
-	ID    string
-	State plan.NodeState
 }
 
 type CheckpointSnapshot struct {
@@ -121,13 +105,6 @@ func (o *Orchestrator) observeOperationalCompletion(initial ExecutionResult, sou
 	return out
 }
 
-func (o *Orchestrator) setOperationalPlan(identity PlanRuntimeIdentity) {
-	copy := identity
-	o.operationalMu.Lock()
-	o.operationalPlan = &copy
-	o.operationalMu.Unlock()
-}
-
 // OperationalState returns a bounded immutable snapshot. VCS paths come from
 // git status and are intentionally distinct from the edit checkpoint journal.
 func (o *Orchestrator) OperationalState(ctx context.Context) OperationalSnapshot {
@@ -155,11 +132,6 @@ func (o *Orchestrator) OperationalState(ctx context.Context) OperationalSnapshot
 		}
 		activeExecutions = append(activeExecutions, current)
 	}
-	var planIdentity *PlanRuntimeIdentity
-	if o.operationalPlan != nil {
-		copy := *o.operationalPlan
-		planIdentity = &copy
-	}
 	o.operationalMu.RUnlock()
 	sort.Slice(activeExecutions, func(i, j int) bool { return activeExecutions[i].TaskID < activeExecutions[j].TaskID })
 	if len(activeExecutions) > 0 {
@@ -173,23 +145,6 @@ func (o *Orchestrator) OperationalState(ctx context.Context) OperationalSnapshot
 	})
 	snapshot.ActiveSpecialists = boundSpecialists(snapshot.ActiveSpecialists)
 
-	if planIdentity != nil && o.planStore != nil {
-		ref := plan.Plan{TenantID: planIdentity.TenantID, RepositoryID: planIdentity.RepositoryID, TaskID: planIdentity.TaskID, ID: planIdentity.PlanID, Generation: planIdentity.Generation}
-		if current, err := o.planStore.Load(ctx, ref); err == nil {
-			snapshot.Plan = clonePlanSnapshot(current)
-		}
-	}
-	if o.worktreeManager != nil {
-		if handles, err := o.worktreeManager.Recover(); err == nil {
-			for _, handle := range handles {
-				if handle.Manifest.CleanupState == worktree.CleanupActive || handle.Manifest.CleanupState == worktree.CleanupPrepared {
-					snapshot.WorktreeIDs = append(snapshot.WorktreeIDs, handle.Manifest.ID)
-				}
-			}
-			sort.Strings(snapshot.WorktreeIDs)
-			snapshot.WorktreeIDs = boundStrings(snapshot.WorktreeIDs)
-		}
-	}
 	snapshot.ChangedPaths = o.vcsChangedPaths(ctx)
 	o.editsMu.Lock()
 	for i := len(o.edits) - 1; i >= 0 && len(snapshot.Checkpoints) < maxOperationalItems; i-- {
@@ -210,14 +165,6 @@ func cloneVerification(source verification.Decision) verification.Decision {
 	result.Obligations = append([]verification.Obligation(nil), source.Obligations...)
 	for i := range result.Obligations {
 		result.Obligations[i].Paths = append([]string(nil), source.Obligations[i].Paths...)
-	}
-	return result
-}
-
-func clonePlanSnapshot(source plan.Plan) PlanSnapshot {
-	result := PlanSnapshot{ID: string(source.ID), State: source.State, StopReason: source.StopReason, Nodes: make([]PlanNodeSnapshot, 0, len(source.Nodes))}
-	for _, node := range source.Nodes {
-		result.Nodes = append(result.Nodes, PlanNodeSnapshot{ID: string(node.ID), State: node.State})
 	}
 	return result
 }

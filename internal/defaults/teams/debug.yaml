@@ -1,3 +1,5 @@
+# The debugger coordinates: it reproduces the failure, tests hypotheses,
+# hands the fix to coder, and ends only when its reproduction command passes.
 id: debug-team
 name: Debug Team
 strategy: coordinator

@@ -119,8 +119,6 @@ func Execute() error {
 		return runEval()
 	case "team":
 		return runTeam()
-	case "plan":
-		return runPlan()
 	case "delivery":
 		return runDeliveryDB()
 	case "skills":
@@ -416,16 +414,14 @@ Usage:
   chronos-code eval ppd --report [--baseline <path>]       Report and gate completed PPD evidence
   chronos-code team list                                   List configured teams
   chronos-code team run <team_id> <message>                Run a team on a task
-  chronos-code plan <operation> --db <path> ...             Inspect or operate a durable plan database
   chronos-code delivery backup <path> | restore <source> <new-path>  Offline delivery database snapshots
   chronos-code skills list                                  List discovered skills (project + user + bundled)
   chronos-code skills show <name>                           Show a skill's metadata and body
   chronos-code cleanup status [scope]                       Inventory retention-managed resources
   chronos-code cleanup run [--dry-run] [--scope <scope>]    Apply one bounded cleanup batch per scope
-  chronos-code cleanup prune <scope> [--dry-run]             Prune one scope (plan_db also requires tenant/repository)
+  chronos-code cleanup prune <scope> [--dry-run]             Prune one scope
   chronos-code serve [--listen :8430] [--auth api_key] [--tenant-id <id>] [--request-timeout 5m] [--instance-id <id>]  Start HTTP server for team deployment
   chronos-code serve --delivery-read-only-worker            Process explicitly queued deliveries as read-only, then park for verification
-  chronos-code serve --delivery-plan-worker                 Also run admitted plan generations in private worktrees; retain candidate patches, never write the checkout
   chronos-code version, --version  Print version information
   chronos-code help               Show this help
 
@@ -2140,19 +2136,17 @@ func runServe() error {
 		defer cfg.DeliveryStore.Close()
 		deliveryPaths = paths
 	}
-	readOnlyWorker, planWorker := false, false
+	readOnlyWorker := false
 	for _, arg := range args {
 		if arg == "--delivery-read-only-worker" {
 			readOnlyWorker = true
 		} else if strings.HasPrefix(arg, "--delivery-read-only-worker=") {
 			return fmt.Errorf("serve: --delivery-read-only-worker takes no value")
-		} else if arg == "--delivery-plan-worker" {
-			planWorker = true
-		} else if strings.HasPrefix(arg, "--delivery-plan-worker=") {
-			return fmt.Errorf("serve: --delivery-plan-worker takes no value")
+		} else if arg == "--delivery-plan-worker" || strings.HasPrefix(arg, "--delivery-plan-worker=") {
+			return fmt.Errorf("serve: --delivery-plan-worker was removed with the durable plan runtime")
 		}
 	}
-	if readOnlyWorker || planWorker {
+	if readOnlyWorker {
 		if cfg.DeliveryStore == nil {
 			return fmt.Errorf("serve: delivery read-only worker requires authenticated delivery storage")
 		}
@@ -2172,18 +2166,7 @@ func runServe() error {
 		if err != nil {
 			return fmt.Errorf("serve: create delivery read-only executor: %w", err)
 		}
-		var planExecutor *orchestrator.PlanDeliveryExecutor
-		if planWorker {
-			planExecutor, err = orchestrator.NewCandidatePlanDeliveryExecutor(orch, authorizer, sandboxPolicy)
-			if err != nil {
-				return fmt.Errorf("serve: delivery plan worker requires plan storage, a worktree manager and an implementation agent: %w", err)
-			}
-		}
-		executor, err := orchestrator.NewRoutedDeliveryExecutor(readOnlyExecutor, planExecutor)
-		if err != nil {
-			return fmt.Errorf("serve: create delivery executor: %w", err)
-		}
-		cfg.DeliveryWorker, err = execution.NewWorker(cfg.DeliveryStore, executor, execution.WorkerConfig{
+		cfg.DeliveryWorker, err = execution.NewWorker(cfg.DeliveryStore, readOnlyExecutor, execution.WorkerConfig{
 			OwnerID: "serve:" + session.NewSessionID(), Concurrency: 1,
 			LeaseDuration: time.Minute, HeartbeatEvery: 15 * time.Second, PollEvery: time.Second,
 		})

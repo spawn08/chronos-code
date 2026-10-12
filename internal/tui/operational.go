@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,9 +13,7 @@ func RenderOperationalSnapshot(snapshot orchestrator.OperationalSnapshot, width 
 		fmt.Sprintf("safety: permission=%s · plan-only=%t · verification=%s", emptyLabel(snapshot.PermissionMode), snapshot.PlanOnly, emptyLabel(string(snapshot.VerificationMode))),
 		"task: " + renderExecutionState(snapshot.Execution),
 		"limits remaining: " + renderRemainingLimits(snapshot.Execution),
-		"plan: " + renderPlanState(snapshot.Plan),
 		"active specialists: " + renderSpecialists(snapshot.ActiveSpecialists),
-		"worktree IDs: " + emptyList(snapshot.WorktreeIDs),
 		"VCS changed paths: " + emptyList(snapshot.ChangedPaths),
 		"checkpoint history: " + renderCheckpoints(snapshot.Checkpoints),
 	}
@@ -64,33 +61,6 @@ func renderRemainingLimits(snapshot orchestrator.ExecutionSnapshot) string {
 		values = append(values, "exhausted="+string(budget.ExhaustedDimension))
 	}
 	return strings.Join(values, " · ")
-}
-
-func renderPlanState(snapshot orchestrator.PlanSnapshot) string {
-	if snapshot.ID == "" {
-		return "none"
-	}
-	states := make(map[string]int)
-	for _, node := range snapshot.Nodes {
-		states[string(node.State)]++
-	}
-	keys := make([]string, 0, len(states))
-	for state := range states {
-		keys = append(keys, state)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, state := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%d", state, states[state]))
-	}
-	result := fmt.Sprintf("%s · %s", snapshot.ID, snapshot.State)
-	if snapshot.StopReason != "" {
-		result += " · stop=" + string(snapshot.StopReason)
-	}
-	if len(parts) > 0 {
-		result += " · " + strings.Join(parts, ",")
-	}
-	return result
 }
 
 func renderSpecialists(values []orchestrator.SpecialistSnapshot) string {
