@@ -123,10 +123,10 @@ func latexConvert(r []rune, i int) (string, int) {
 	var b strings.Builder
 	for i < len(r) {
 		c := r[i]
-		switch {
-		case c == '{' || c == '}':
+		switch c {
+		case '{', '}':
 			i++
-		case c == '_' || c == '^':
+		case '_', '^':
 			arg, next := latexGroup(r, i+1)
 			if c == '_' {
 				b.WriteString(latexScript(arg, subscripts, "_"))
@@ -134,7 +134,7 @@ func latexConvert(r []rune, i int) (string, int) {
 				b.WriteString(latexScript(arg, superscripts, "^"))
 			}
 			i = next
-		case c == '\\':
+		case '\\':
 			i++
 			if i >= len(r) {
 				continue
@@ -334,9 +334,10 @@ func splitTableRow(line string) []string {
 			} else {
 				cur.WriteByte(c)
 				cur.WriteByte(t[i+1])
-				if t[i+1] == '(' {
+				switch t[i+1] {
+				case '(':
 					inMath = true
-				} else if t[i+1] == ')' {
+				case ')':
 					inMath = false
 				}
 			}
