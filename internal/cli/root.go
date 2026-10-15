@@ -489,6 +489,9 @@ func loadConfigAndBuild() (*orchestrator.Orchestrator, *config.Config, error) {
 	if _, err := skills.ParseSources(cfg.SkillSources); err != nil {
 		return nil, nil, fmt.Errorf("CHRONOS_CODE_SKILL_SOURCES: %w", err)
 	}
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+	}
 	ctx := context.Background()
 	orch, err := orchestrator.New(ctx, cfg, resumeSessionID)
 	if err != nil {
@@ -1130,9 +1133,12 @@ func runConfig() error {
 		}
 		return nil
 	case "validate":
-		_, err := config.Load(configPath)
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return fmt.Errorf("validation failed: %w", err)
+		}
+		for _, warning := range cfg.Warnings {
+			fmt.Printf("warning: %s\n", warning)
 		}
 		fmt.Println("config is valid")
 		return nil

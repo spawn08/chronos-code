@@ -321,7 +321,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if !cfg.Ephemeral {
 		learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents, paths)
 		if err != nil {
-			return nil, fmt.Errorf("configure learning telemetry: %w", err)
+			// Telemetry is optional: an unopenable database (for example one
+			// a newer chronos-code migrated) must not stop the agent.
+			fmt.Fprintf(os.Stderr, "warning: learning telemetry disabled for this session: %v\n", err)
+			learningStore = nil
 		}
 	}
 	orch.learningStore = learningStore
