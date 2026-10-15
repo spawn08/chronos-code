@@ -11,7 +11,9 @@ func TestNeverCompressTool(t *testing.T) {
 		{"spawn_subagent", nil, true},
 		{skillToolName, nil, true},
 		{"await_shell", nil, true},
-		{"file_read", map[string]any{"path": "a.go", "start_line": 10.0}, true},
+		{"file_read", map[string]any{"path": "a.go", "start_line": 10.0, "end_line": 80.0}, true},
+		{"file_read", map[string]any{"path": "a.go", "start_line": 1.0, "end_line": 100000.0}, false},
+		{"file_read", map[string]any{"path": "a.go", "start_line": 10.0}, false},
 		{"file_read", map[string]any{"path": "a.go"}, false},
 		{"shell", map[string]any{"command": "ls"}, false},
 	}

@@ -138,7 +138,10 @@ func newWindowGovernor(policy *longRunningPolicy, runtime *taskRuntime, now func
 	// the parent's work when this governs a subagent) is neither progress
 	// nor repetition by it.
 	g.observeEvidence()
-	g.futility.seed(g.stateLocked())
+	if runtime != nil {
+		_, total := runtime.ledger.EventsSince(0)
+		g.futility.seed(total)
+	}
 	return g
 }
 
@@ -159,7 +162,7 @@ func (g *windowGovernor) AfterToolRound(ctx context.Context, round agent.ToolRou
 	}
 	// Rung 1 of the escalation ladder: a specific steer as soon as one
 	// round shows a futile pattern, without waiting for the window to fill.
-	steer := g.futility.observe(round.ToolCalls, g.stateLocked())
+	steer := g.futility.observe(round.ToolCalls, g.newEventsLocked())
 	sessionID := storage.SessionFromContext(ctx)
 	sessionFull := g.policy.budget != nil && sessionID != "" && g.policy.budget.Ratio(sessionID) >= sessionRenewRatio
 	if !sessionFull && !g.windowFullLocked() {
@@ -198,16 +201,16 @@ func (g *windowGovernor) escalationSteer() string {
 	}
 }
 
-// stateLocked returns the ledger state for the futility detector, or nil.
-func (g *windowGovernor) stateLocked() *execution.State {
+// newEventsLocked returns the ledger events appended since the futility
+// detector last looked; it copies only those, so cost per round does not
+// grow with the length of the run.
+func (g *windowGovernor) newEventsLocked() []execution.Event {
 	if g.runtime == nil {
 		return nil
 	}
-	state, err := g.runtime.snapshot()
-	if err != nil {
-		return nil
-	}
-	return &state
+	events, total := g.runtime.ledger.EventsSince(g.futility.eventsSeen)
+	g.futility.eventsSeen = total
+	return events
 }
 
 func joinSteers(steers ...string) string {

@@ -156,3 +156,39 @@ func TestVerificationObserverRecordsBackgroundShellAtExit(t *testing.T) {
 		}
 	}
 }
+
+// A background server killed after a passing test must not stale the test.
+func TestVerificationObserverKilledBackgroundKeepsChecks(t *testing.T) {
+	root := t.TempDir()
+	runtime, err := newTaskRuntime("task", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tool.NewRegistry()
+	registry.Register(&tool.Definition{Name: "shell", Handler: func(_ context.Context, args map[string]any) (any, error) {
+		if args["command"] == "npm run dev" {
+			return map[string]any{"status": "running", "shell_id": "sh-1"}, nil
+		}
+		return map[string]any{"exit_code": 0}, nil
+	}})
+	registry.Register(&tool.Definition{Name: "kill_shell", Handler: func(context.Context, map[string]any) (any, error) {
+		return map[string]any{"status": "exited", "shell_id": "sh-1", "exit_code": -1, "killed": true}, nil
+	}})
+	a := &agent.Agent{ID: "coder", Tools: registry}
+	wrapVerificationEvidence(a)
+	ctx := withTaskRuntime(context.Background(), runtime)
+	for _, step := range []struct{ tool, command string }{{"shell", "npm run dev"}, {"shell", "npm test"}, {"kill_shell", ""}} {
+		args := map[string]any{"command": step.command}
+		if step.tool == "kill_shell" {
+			args = map[string]any{"shell_id": "sh-1"}
+		}
+		if _, err := registry.Execute(ctx, step.tool, args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, _ := runtime.snapshot()
+	last := state.Events[len(state.Events)-1]
+	if last.Type != execution.EventVerification || last.Command != "npm test" || !last.Passed {
+		t.Fatalf("last ledger event = %#v; the kill must not append a mutation or failed check after the passing test", last)
+	}
+}

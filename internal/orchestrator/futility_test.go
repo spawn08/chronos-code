@@ -61,18 +61,16 @@ func TestFutilityDetectorChecksAndWrites(t *testing.T) {
 	d := newFutilityDetector()
 	fail := 1
 	now := time.Now()
-	state := func() *execution.State {
-		s, err := runtime.snapshot()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return &s
+	newEvents := func() []execution.Event {
+		events, total := runtime.ledger.EventsSince(d.eventsSeen)
+		d.eventsSeen = total
+		return events
 	}
 	runTest := func() string {
 		if _, err := runtime.recordCommand("cargo test", execution.CommandTest, &fail, execution.TerminalExited, nil, execution.ProvenanceRuntime, now, now); err != nil {
 			t.Fatal(err)
 		}
-		return d.observe(call("shell", `{"command":"cargo test"}`), state())
+		return d.observe(call("shell", `{"command":"cargo test"}`), newEvents())
 	}
 	if steer := runTest(); steer != "" {
 		t.Fatalf("first run steered: %q", steer)

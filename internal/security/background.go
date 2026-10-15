@@ -1,7 +1,6 @@
 package security
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -60,12 +59,17 @@ type backgroundShell struct {
 	readCount int        // output bytes already returned to the model
 }
 
-// unread returns output not yet returned without consuming it.
-func (sh *backgroundShell) unread() string {
+// patternOverlap is how far before the last scanned byte a pattern scan
+// restarts, so a match spanning two ticks' output is still found.
+const patternOverlap = 4 << 10
+
+// unreadFrom returns unread output from max(offset, readCount) and the total
+// length, so repeated pattern scans read only new bytes.
+func (sh *backgroundShell) unreadFrom(offset int) (string, int) {
 	sh.readMu.Lock()
 	defer sh.readMu.Unlock()
-	text, _, _ := sh.output.since(sh.readCount)
-	return text
+	text, total, _ := sh.output.since(max(offset, sh.readCount))
+	return text, total
 }
 
 // NewBackgroundShells stores logs under dir (created on first use).
@@ -77,15 +81,28 @@ func NewBackgroundShells(dir string) *BackgroundShells {
 // streams to the shell's log file and records when output last arrived.
 type shellOutput struct {
 	mu       sync.Mutex
-	buf      bytes.Buffer
+	buf      []byte // the last shellBufferLimit bytes; the log file has all
+	base     int    // absolute offset of buf[0] in the whole output
 	file     *os.File
 	lastByte time.Time
 }
 
+// exitedShellRetention is how long an exited shell stays awaitable before it
+// is forgotten.
+const exitedShellRetention = 10 * time.Minute
+
+// shellBufferLimit bounds the output kept in memory per shell. A call never
+// returns more than shellOutputTail, so older bytes are only in log_path.
+const shellBufferLimit = 4 * shellOutputTail
+
 func (o *shellOutput) Write(p []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.buf.Write(p)
+	o.buf = append(o.buf, p...)
+	if drop := len(o.buf) - shellBufferLimit; drop > 0 {
+		o.buf = append(o.buf[:0], o.buf[drop:]...)
+		o.base += drop
+	}
 	o.lastByte = time.Now()
 	if o.file != nil {
 		_, _ = o.file.Write(p)
@@ -93,15 +110,14 @@ func (o *shellOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// since returns output after byte offset n and the new total length.
+// since returns output after absolute byte offset n (from the oldest byte
+// still in memory when n is older) and the new total length.
 func (o *shellOutput) since(n int) (string, int, time.Time) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	b := o.buf.Bytes()
-	if n > len(b) {
-		n = len(b)
-	}
-	return string(b[n:]), len(b), o.lastByte
+	total := o.base + len(o.buf)
+	start := min(max(n-o.base, 0), len(o.buf))
+	return string(o.buf[start:]), total, o.lastByte
 }
 
 // start runs command in dir and returns once it exits or yield passes,
@@ -145,6 +161,9 @@ func (b *BackgroundShells) start(ctx context.Context, command, dir string, yield
 		out.file = nil
 		out.mu.Unlock()
 		close(sh.done)
+		// A shell whose exit nobody awaits (the turn was interrupted) is
+		// dropped after a grace period; its full output stays in log_path.
+		time.AfterFunc(exitedShellRetention, func() { b.forget(id) })
 	}()
 
 	timer := time.NewTimer(yield)
@@ -163,6 +182,14 @@ func (b *BackgroundShells) start(ctx context.Context, command, dir string, yield
 // report renders a shell's state and the output not yet returned. A finished
 // shell is forgotten once its final output has been reported.
 func (b *BackgroundShells) report(sh *backgroundShell, final bool) map[string]any {
+	// Decide exit before reading: output written up to exit is then all in
+	// the buffer, so an exited result never drops the final lines.
+	exited := false
+	select {
+	case <-sh.done:
+		exited = true
+	default:
+	}
 	sh.readMu.Lock()
 	text, total, last := sh.output.since(sh.readCount)
 	sh.readCount = total
@@ -177,14 +204,13 @@ func (b *BackgroundShells) report(sh *backgroundShell, final bool) map[string]an
 	if truncated {
 		result["output_truncated"] = true
 	}
-	select {
-	case <-sh.done:
+	if exited {
 		result["status"] = "exited"
 		result["exit_code"] = sh.exitCode
 		if final {
 			b.forget(sh.id)
 		}
-	default:
+	} else {
 		result["status"] = "running"
 		result["idle_ms"] = time.Since(last).Milliseconds()
 		result["hint"] = "Still running in the background. Use await_shell with this shell_id (optionally a pattern) to wait for it, or kill_shell to stop it. Do not poll with sleep or by re-reading the log."
@@ -219,6 +245,7 @@ func (b *BackgroundShells) await(ctx context.Context, id string, pattern *regexp
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
+	scanned := 0 // absolute offset already scanned for pattern
 	for {
 		select {
 		case <-sh.done:
@@ -229,7 +256,9 @@ func (b *BackgroundShells) await(ctx context.Context, id string, pattern *regexp
 			return b.report(sh, false), nil
 		case <-tick.C:
 			if pattern != nil {
-				if pattern.MatchString(sh.unread()) {
+				text, total := sh.unreadFrom(scanned - patternOverlap)
+				scanned = total
+				if pattern.MatchString(text) {
 					r := b.report(sh, false)
 					r["matched"] = true
 					return r, nil

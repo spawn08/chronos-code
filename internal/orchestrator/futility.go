@@ -33,8 +33,7 @@ type futilityDetector struct {
 	checks map[string]int
 	// failures counts consecutive failures of each check command.
 	failures map[string]int
-	// writesSeen and eventsSeen are how much of the ledger was processed.
-	writesSeen int
+	// eventsSeen is how much of the ledger was processed.
 	eventsSeen int
 	round      int
 }
@@ -47,12 +46,7 @@ func newFutilityDetector() *futilityDetector {
 }
 
 // seed skips ledger entries recorded before this detector started.
-func (d *futilityDetector) seed(state *execution.State) {
-	if state == nil {
-		return
-	}
-	d.writesSeen, d.eventsSeen = len(state.Writes), len(state.Events)
-}
+func (d *futilityDetector) seed(eventCount int) { d.eventsSeen = eventCount }
 
 // Thresholds: how many identical repetitions without any state change
 // before the model is steered.
@@ -62,14 +56,17 @@ const (
 	repeatedFailureAttempts = 3
 )
 
-// observe processes one round and the ledger state after it, returning a
-// steer for the model, or "" when nothing futile is happening.
-func (d *futilityDetector) observe(calls []model.ToolCall, state *execution.State) string {
+// observe processes one round and the ledger events appended since the
+// last round, returning a steer for the model, or "" when nothing futile is
+// happening.
+func (d *futilityDetector) observe(calls []model.ToolCall, events []execution.Event) string {
 	d.round++
-	if state != nil && d.stateChanged(state) {
+	if d.writesIn(events) {
 		// New file content resets repetition: the same read or test after an
 		// edit is a legitimate re-check.
 		d.calls = map[string]int{}
+		d.checks = map[string]int{}
+		d.lastNotice = map[string]int{}
 	}
 	var findings []string
 	for _, call := range calls {
@@ -79,32 +76,28 @@ func (d *futilityDetector) observe(calls []model.ToolCall, state *execution.Stat
 			findings = append(findings, repeatedCallSteer(call, n))
 		}
 	}
-	if state != nil {
-		findings = append(findings, d.checkFindings(state)...)
-	}
+	findings = append(findings, d.checkFindings(events)...)
 	if len(findings) == 0 {
 		return ""
 	}
 	return "Futility check: " + strings.Join(findings, " ")
 }
 
-// stateChanged consumes new ledger writes and reports whether file content
-// changed since the last round.
-func (d *futilityDetector) stateChanged(state *execution.State) bool {
-	changed := len(state.Writes) > d.writesSeen
-	d.writesSeen = len(state.Writes)
-	if changed {
-		d.checks = map[string]int{}
-		d.lastNotice = map[string]int{}
+// writesIn reports whether events include a file or workspace change.
+func (d *futilityDetector) writesIn(events []execution.Event) bool {
+	for _, event := range events {
+		if event.Type == execution.EventWrite {
+			return true
+		}
 	}
-	return changed
+	return false
 }
 
 // checkFindings flags a check re-run on an unchanged tree and a check that
 // keeps failing across fix attempts.
-func (d *futilityDetector) checkFindings(state *execution.State) []string {
+func (d *futilityDetector) checkFindings(events []execution.Event) []string {
 	var findings []string
-	for _, event := range state.Events[min(d.eventsSeen, len(state.Events)):] {
+	for _, event := range events {
 		if event.Type != execution.EventVerification || event.Command == "" {
 			continue
 		}
@@ -126,7 +119,6 @@ func (d *futilityDetector) checkFindings(state *execution.State) []string {
 			findings = append(findings, fmt.Sprintf("`%s` has failed %d times in a row. Before another attempt, state the failure's root cause from its output, what the previous attempts changed, and why they did not fix it; then take a different approach, or report the failure if it predates your change.", event.Command, n))
 		}
 	}
-	d.eventsSeen = len(state.Events)
 	return findings
 }
 

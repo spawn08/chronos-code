@@ -376,6 +376,13 @@ func newAuditID() string {
 // for the default denied_paths pattern set (basename globs like ".env",
 // ".env.*", "*.pem", and "**/"-prefixed suffix globs like "**/*.pem",
 // "**/secrets/**").
+// PathDenied reports whether the policy's denied_paths cover path. Recursive
+// search tools apply it to every file they return: the guard checks only
+// the search root.
+func (p *Policy) PathDenied(path string) bool {
+	return p != nil && matchesAnyGlob(p.DeniedPaths, path)
+}
+
 func matchesAnyGlob(patterns []string, relOrAbsPath string) bool {
 	base := filepath.Base(relOrAbsPath)
 	for _, pattern := range patterns {

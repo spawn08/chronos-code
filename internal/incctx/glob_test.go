@@ -73,3 +73,21 @@ func TestWrapGlob(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapGlobOmitsDeniedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ".env", "x")
+	writeFile(t, dir, "a.go", "x")
+	a := newTestAgent(t)
+	a.Tools.Register(builtins.NewFileGlobTool(dir))
+	WrapGlob(a, dir, func(p string) bool { return filepath.Base(p) == ".env" })
+	out, err := a.Tools.Execute(context.Background(), "file_glob", map[string]any{"pattern": "**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range out.(map[string]any)["matches"].([]string) {
+		if filepath.Base(m) == ".env" {
+			t.Fatalf("denied file listed: %v", m)
+		}
+	}
+}

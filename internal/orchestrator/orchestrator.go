@@ -422,8 +422,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// Finish logical implementations before adding cross-cutting wrappers:
 		// outlines, ranges, grep and cache hits all enter the same pipeline.
 		incctx.Wrap(a, root)
-		incctx.WrapGrep(a, root)
-		incctx.WrapGlob(a, root)
+		incctx.WrapGrep(a, root, policy.PathDenied)
+		incctx.WrapGlob(a, root, policy.PathDenied)
 		if graphStore != nil {
 			activation.Wrap(a, graphStore, actBuf)
 		}
@@ -2093,7 +2093,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		}
 	}
 	if !request.BoundedContext && !hasIntent {
-		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, classification, o.implementationPath(classification.Complexity), ppdDecision); hint != "" {
+		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, ppdDecision); hint != "" {
 			message = hint + "\n\n" + message
 		}
 	}
@@ -2667,19 +2667,11 @@ func selectPrimaryAgent(agents map[string]*agent.Agent, order []string) string {
 	return ""
 }
 
-func (o *Orchestrator) implementationPath(complexity router.Complexity) router.ImplementationPath {
-	if o.routingConfig != nil {
-		return o.routingConfig.PathFor(complexity)
-	}
-	return router.DefaultPath(complexity)
-}
-
-func formatRoutingHint(agentID, intent, specialist string, matched bool, class router.Classification, path router.ImplementationPath, ppd *router.PPDDecision) string {
+func formatRoutingHint(agentID, intent, specialist string, matched bool, ppd *router.PPDDecision) string {
 	// The complexity classification and implementation path stay internal
 	// (routing, model choice, telemetry). Shown to the model they anchored
 	// effort: "complexity=low suggested_plan=skip" was attached to a
 	// multi-system cloud migration as readily as to a yes/no question.
-	_, _ = class, path
 	var parts []string
 	if matched && specialist != "" && specialist != agentID {
 		parts = append(parts, fmt.Sprintf("Routing hint: intent=%s specialist=%s. You remain %s; spawn_subagent %s if that specialist loop is needed.", intent, specialist, agentID, specialist))
@@ -3563,10 +3555,25 @@ func neverCompressTool(name string, args map[string]any) bool {
 	case skillToolName, "spawn_subagent", "await_shell":
 		return true
 	case "file_read":
-		_, ranged := args["start_line"]
-		return ranged
+		start, hasStart := lineNumber(args["start_line"])
+		end, hasEnd := lineNumber(args["end_line"])
+		return hasStart && hasEnd && end >= start && end-start < maxUncompressedRangeLines
 	}
 	return false
+}
+
+// maxUncompressedRangeLines is the widest ranged read exempt from
+// compression; a wider range is no more targeted than a whole-file read.
+const maxUncompressedRangeLines = 400
+
+func lineNumber(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	}
+	return 0, false
 }
 
 func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config.HooksConfig, runner *security.HookRunner, activity *hookActivityTracker) {

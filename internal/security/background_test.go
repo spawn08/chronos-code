@@ -140,3 +140,19 @@ func TestConcurrentAwaitsReturnOutputOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestShellOutputBufferIsBounded(t *testing.T) {
+	var o shellOutput
+	chunk := []byte(strings.Repeat("x", 1000) + "\n")
+	for i := 0; i < (shellBufferLimit/len(chunk))*3; i++ {
+		_, _ = o.Write(chunk)
+	}
+	o.Write([]byte("END\n"))
+	text, total, _ := o.since(0)
+	if len(o.buf) > shellBufferLimit || !strings.HasSuffix(text, "END\n") || total != o.base+len(o.buf) {
+		t.Fatalf("buffer len=%d base=%d total=%d", len(o.buf), o.base, total)
+	}
+	if tail, _, _ := o.since(total - 4); tail != "END\n" {
+		t.Fatalf("since(total-4) = %q", tail)
+	}
+}

@@ -179,3 +179,29 @@ func TestGrepRipgrepPathsAndOversizedLines(t *testing.T) {
 		t.Errorf("workspace under a 'target' ancestor returned %d files (truncated=%v): %v", n, res["truncated"], res["files"])
 	}
 }
+
+// Files the security policy denies never appear in recursive search results,
+// with ripgrep or the Go walker.
+func TestGrepAndGlobOmitDeniedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ".env", "API_KEY=secret\n")
+	writeFile(t, dir, "app.py", "API_KEY = os.environ['API_KEY']\n")
+	denied := func(p string) bool { return filepath.Base(p) == ".env" }
+	original := os.Getenv("PATH")
+	defer os.Setenv("PATH", original)
+	for _, path := range []string{original, ""} {
+		os.Setenv("PATH", path)
+		a := newTestAgent(t)
+		registerFakeFileGrep(a, dir, new(atomic.Int64))
+		WrapGrep(a, dir, denied)
+		out, err := a.Tools.Execute(context.Background(), "file_grep", map[string]any{"path": ".", "pattern": "API_KEY", "output_mode": "content"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range out.(map[string]any)["matches"].([]map[string]any) {
+			if strings.Contains(m["content"].(string), "secret") {
+				t.Fatalf("PATH=%q: denied file content returned: %v", path, m)
+			}
+		}
+	}
+}

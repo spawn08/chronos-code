@@ -24,7 +24,7 @@ const globMaxResults = 500
 // "**": 41% of observed file_glob calls returned no matches for patterns such
 // as "**/main.rs". The wrapper walks the tree with .gitignore and ecosystem
 // ignore rules, supports ** and {a,b}, and returns the newest files first.
-func WrapGlob(a *agent.Agent, root string) {
+func WrapGlob(a *agent.Agent, root string, denied ...DeniedFunc) {
 	def, ok := a.Tools.Get(fileGlobTool)
 	if !ok {
 		return
@@ -58,7 +58,7 @@ func WrapGlob(a *agent.Agent, root string) {
 				return nil, fmt.Errorf("file_glob: pattern must be relative to path")
 			}
 		}
-		matches, truncated, err := globWalk(ctx, fsignore.New(workspaceRoot(ctx, root)), dir, pattern)
+		matches, truncated, err := globWalk(ctx, fsignore.New(workspaceRoot(ctx, root)), firstDenied(denied), dir, pattern)
 		if err != nil {
 			return nil, fmt.Errorf("file_glob: %w", err)
 		}
@@ -71,7 +71,7 @@ type globHit struct {
 	modTime int64
 }
 
-func globWalk(ctx context.Context, ignore *fsignore.Matcher, dir, pattern string) ([]string, bool, error) {
+func globWalk(ctx context.Context, ignore *fsignore.Matcher, denied DeniedFunc, dir, pattern string) ([]string, bool, error) {
 	var hits []globHit
 	entries := 0
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -96,7 +96,7 @@ func globWalk(ctx context.Context, ignore *fsignore.Matcher, dir, pattern string
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || ignore.Ignored(p, false) {
+		if !d.Type().IsRegular() || ignore.Ignored(p, false) || denied != nil && denied(p) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(dir, p)

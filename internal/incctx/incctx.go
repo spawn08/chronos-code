@@ -314,7 +314,10 @@ func lineArg(args map[string]any, key string, fallback int) (int, error) {
 // Directory traversal is batched (not WalkDir's whole-directory sort), skips
 // symlinks/special files, and has aggregate byte, entry, depth and output limits.
 // Ignore names are explicit below; this is not a gitignore interpreter.
-func WrapGrep(a *agent.Agent, root string) {
+// DeniedFunc reports a file that must not appear in search results.
+type DeniedFunc func(path string) bool
+
+func WrapGrep(a *agent.Agent, root string, denied ...DeniedFunc) {
 	def, ok := a.Tools.Get(fileGrepTool)
 	if !ok {
 		return
@@ -403,7 +406,8 @@ func WrapGrep(a *agent.Agent, root string) {
 		}
 
 		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0),
-			ignore: fsignore.New(workspaceRoot(ctx, root)), glob: glob, root: resolvedPath, mode: mode, counts: map[string]int{}}
+			ignore: fsignore.New(workspaceRoot(ctx, root)), glob: glob, root: resolvedPath, mode: mode, counts: map[string]int{},
+			denied: firstDenied(denied)}
 		if info.IsDir() {
 			search.recursive = true
 			err = rg.search(ctx, &search, resolvedPath, pattern, useRegex, caseInsensitive)
@@ -452,8 +456,9 @@ func (s *grepSearch) result(path, pattern string, recursive bool) map[string]any
 type grepSearch struct {
 	matcher   func([]byte) bool
 	ignore    *fsignore.Matcher
-	glob      string // root-relative file filter; "" matches all
-	root      string // search root, for glob-relative paths
+	denied    DeniedFunc // policy-denied files, skipped like ignored ones
+	glob      string     // root-relative file filter; "" matches all
+	root      string     // search root, for glob-relative paths
 	mode      string
 	recursive bool     // matches carry their file path
 	files     []string // files with at least one match, in walk order
@@ -633,14 +638,25 @@ func (s *grepSearch) reset() {
 // ignoredByMatcher drops rg results inside ecosystem directories that a
 // nested .gitignore did not cover (rg sees only the --glob exclusions).
 func ignoredByMatcher(s *grepSearch, path string) bool {
-	return s.ignore != nil && s.ignore.Ignored(path, false)
+	return s.ignored(path, false)
 }
 
 func fsignoreDirNames() []string { return fsignore.DirNames() }
 
-// ignored applies ecosystem and .gitignore rules; a search without a matcher
-// (tests driving walk directly) still skips ecosystem directories.
+func firstDenied(denied []DeniedFunc) DeniedFunc {
+	if len(denied) > 0 {
+		return denied[0]
+	}
+	return nil
+}
+
+// ignored applies policy denials, ecosystem and .gitignore rules; a search
+// without a matcher (tests driving walk directly) still skips ecosystem
+// directories.
 func (s *grepSearch) ignored(path string, isDir bool) bool {
+	if !isDir && s.denied != nil && s.denied(path) {
+		return true
+	}
 	if s.ignore == nil {
 		return isDir && fsignore.SkipDirName(filepath.Base(path))
 	}
