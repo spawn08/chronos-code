@@ -220,6 +220,15 @@ func (l *Ledger) Events() []Event {
 	return cloneEvents(l.events)
 }
 
+// EventsSince returns a copy of the events after the first n and the total
+// count, so a reader that tracks its position copies only new events.
+func (l *Ledger) EventsSince(n int) ([]Event, int) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	n = min(max(n, 0), len(l.events))
+	return cloneEvents(l.events[n:]), len(l.events)
+}
+
 // State reduces a consistent snapshot of the ledger.
 func (l *Ledger) State() (State, error) {
 	l.mu.RLock()

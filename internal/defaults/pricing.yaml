@@ -48,6 +48,25 @@ models:
   claude-haiku-4-5:  { input: 1,  output: 5,  cache_read: 0.1,  cache_write: 1.25, cache_write_1h: 2 }
 
   # OpenAI (cached input is reported inside prompt tokens; no write surcharge)
+  # GPT-6 family: models.dev snapshot 2026-10-14 (tiers above 272k).
+  gpt-6-astra:
+    input: 10
+    output: 50
+    cache_read: 1
+    tiers:
+      - { above: 272000, input: 20, output: 75, cache_read: 2 }
+  gpt-6.1-sol:
+    input: 2
+    output: 10
+    cache_read: 0.1
+    tiers:
+      - { above: 272000, input: 4, output: 15, cache_read: 0.2 }
+  gpt-6-sol:
+    input: 2
+    output: 10
+    cache_read: 0.2
+    tiers:
+      - { above: 272000, input: 4, output: 15, cache_read: 0.4 }
   gpt-5.5:
     input: 5
     output: 30

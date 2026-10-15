@@ -13,7 +13,7 @@ func TestEmbeddedDefaultsRenewLongRunningWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	lr := cfg.LongRunning
-	if !lr.Renewing() || !lr.ToolRoundsPersisted() || lr.NoProgressWindows != 2 || lr.SubagentTimeoutSec != 0 {
+	if !lr.Renewing() || !lr.ToolRoundsPersisted() || lr.NoProgressWindows != 3 || lr.SubagentTimeoutSec != 0 {
 		t.Fatalf("long_running defaults = %+v", lr)
 	}
 	if lr.Window.ToolRounds <= 0 || lr.Window.ToolCalls <= 0 || lr.Window.Seconds <= 0 || lr.Window.Tokens <= 0 {

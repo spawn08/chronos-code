@@ -77,6 +77,12 @@ type Config struct {
 	// project overlay sets explicitly.
 	agentModelPinned     map[string]bool
 	primaryModelSelected bool
+
+	// Warnings are non-fatal problems found while loading, shown at startup.
+	Warnings []string `yaml:"-"`
+	// agentFiles maps a lowercase agent ID to the agent file it was last
+	// loaded from, for messages that point at the file to edit.
+	agentFiles map[string]string
 }
 
 // EffectiveConfig is a safe representation of the resolved configuration.
@@ -751,6 +757,7 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("load user config: %w", err)
 		}
 		userAgents, err := loadAgentDir(filepath.Join(userDir, "agents"))
+		recordAgentFiles(base, filepath.Join(userDir, "agents"), userAgents)
 		if err != nil {
 			return nil, fmt.Errorf("load user agents: %w", err)
 		}
@@ -765,6 +772,7 @@ func Load(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("load project config: %w", err)
 		}
 		projectAgents, err := loadAgentDir(filepath.Join(projectDir, "agents"))
+		recordAgentFiles(base, filepath.Join(projectDir, "agents"), projectAgents)
 		if err != nil {
 			return nil, fmt.Errorf("load project agents: %w", err)
 		}
@@ -785,8 +793,42 @@ func Load(configPath string) (*Config, error) {
 
 	injectSystemPrompts(base)
 	agent.NormalizeFileConfig(&base.FileConfig)
+	pruneUnknownSubAgents(base)
 
 	return base, nil
+}
+
+// pruneUnknownSubAgents drops sub_agents entries naming no configured agent,
+// with a warning. Copies of agent files exported by an older `init`
+// (project .chronos-code/agents or ~/.chronos-code/agents) keep listing
+// agents later removed from the bundle, such as ppd-planner or
+// delivery-strategist; failing startup on such a stale reference left
+// chronos-code unusable in that project until the file was found and edited.
+// agentFileHint names the file an agent was loaded from, when known.
+func agentFileHint(cfg *Config, id string) string {
+	if path := cfg.agentFiles[strings.ToLower(id)]; path != "" {
+		return " in " + path
+	}
+	return ""
+}
+
+func pruneUnknownSubAgents(cfg *Config) {
+	known := make(map[string]bool, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		known[a.ID] = true
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		kept := a.SubAgents[:0]
+		for _, sub := range a.SubAgents {
+			if known[sub] {
+				kept = append(kept, sub)
+				continue
+			}
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("agent %q lists sub-agent %q, which is not defined; ignoring it. Remove it from that agent's sub_agents%s.", a.ID, sub, agentFileHint(cfg, a.ID)))
+		}
+		a.SubAgents = kept
+	}
 }
 
 // loadAgentDir reads immediate YAML children as complete agent definitions.
@@ -821,6 +863,23 @@ func loadAgentDir(dir string) ([]agent.AgentConfig, error) {
 		out = append(out, cfg)
 	}
 	return out, nil
+}
+
+// recordAgentFiles notes the file each agent in dir was loaded from; agent
+// files are named after the agent ID as `init` writes them.
+func recordAgentFiles(cfg *Config, dir string, agents []agent.AgentConfig) {
+	if cfg.agentFiles == nil {
+		cfg.agentFiles = make(map[string]string)
+	}
+	for _, a := range agents {
+		for _, ext := range []string{".yaml", ".yml"} {
+			path := filepath.Join(dir, a.ID+ext)
+			if _, err := os.Stat(path); err == nil {
+				cfg.agentFiles[strings.ToLower(a.ID)] = path
+				break
+			}
+		}
+	}
 }
 
 // mergeAgents overlays complete agent definitions by case-insensitive ID.

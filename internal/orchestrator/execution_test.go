@@ -208,8 +208,8 @@ func TestExecuteKeepsActiveAgentAndAppliesModel(t *testing.T) {
 	for _, msg := range req.Messages {
 		joined += msg.Content
 	}
-	if !strings.Contains(joined, "spawn_subagent debugger") || !strings.Contains(joined, "Path: complexity=") {
-		t.Fatalf("prompt missing specialist or path hint: %q", joined)
+	if !strings.Contains(joined, "spawn_subagent debugger") || strings.Contains(joined, "Path: complexity=") {
+		t.Fatalf("prompt must carry the specialist hint without the internal classification: %q", joined)
 	}
 }
 

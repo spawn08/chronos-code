@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"strings"
 
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
@@ -49,20 +48,6 @@ func (outputTokensHook) Before(ctx context.Context, evt *hooks.Event) error {
 
 func (outputTokensHook) After(context.Context, *hooks.Event) error { return nil }
 
-// anthropicOutputTokens returns an output allowance every listed model family
-// accepts, or 0 to keep the provider default. Claude 3.7 and 4.x accept at
-// least 32000 output tokens; 3.5 accepts 8192; older 3.x models only 4096.
-func anthropicOutputTokens(modelID string) int {
-	id := strings.ToLower(modelID)
-	switch {
-	case !strings.Contains(id, "claude"):
-		return 0
-	case strings.Contains(id, "claude-3-5") || strings.Contains(id, "claude-3.5"):
-		return 8192
-	case strings.Contains(id, "claude-3-7") || strings.Contains(id, "claude-3.7"):
-		return 32000
-	case strings.Contains(id, "claude-3") || strings.Contains(id, "claude-2") || strings.Contains(id, "claude-instant"):
-		return 0
-	}
-	return 32000
-}
+// anthropicOutputTokens returns an output allowance every listed model
+// family accepts, or 0 to keep the provider default.
+func anthropicOutputTokens(modelID string) int { return model.AnthropicOutputTokens(modelID) }

@@ -18,8 +18,9 @@ import (
 
 const (
 	// defaultNoProgressWindows applies when long_running.no_progress_windows
-	// is unset: one idle window can be exploration, two in a row is a stall.
-	defaultNoProgressWindows = 2
+	// is unset. Idle windows climb the escalation ladder (reflect, then change
+	// strategy) before the run pauses for the user.
+	defaultNoProgressWindows = 3
 	// sessionRenewRatio treats a nearly exhausted session token budget as a
 	// full window, renewing it at a round boundary before the budget hook
 	// would reject the next model call.
@@ -121,6 +122,7 @@ type windowGovernor struct {
 	seenCalls   map[string]struct{}
 	seenWrites  map[string]struct{}
 	seenChecks  map[string]struct{}
+	futility    *futilityDetector
 }
 
 func newWindowGovernor(policy *longRunningPolicy, runtime *taskRuntime, now func() time.Time) *windowGovernor {
@@ -130,10 +132,16 @@ func newWindowGovernor(policy *longRunningPolicy, runtime *taskRuntime, now func
 	g := &windowGovernor{
 		policy: policy, runtime: runtime, now: now, windowStart: now(),
 		seenCalls: make(map[string]struct{}), seenWrites: make(map[string]struct{}), seenChecks: make(map[string]struct{}),
+		futility: newFutilityDetector(),
 	}
-	// Evidence recorded before this execution (a persisted task ledger) is
-	// not progress made by it.
+	// Evidence recorded before this execution (a persisted task ledger, or
+	// the parent's work when this governs a subagent) is neither progress
+	// nor repetition by it.
 	g.observeEvidence()
+	if runtime != nil {
+		_, total := runtime.ledger.EventsSince(0)
+		g.futility.seed(total)
+	}
 	return g
 }
 
@@ -152,10 +160,13 @@ func (g *windowGovernor) AfterToolRound(ctx context.Context, round agent.ToolRou
 			g.newCalls++
 		}
 	}
+	// Rung 1 of the escalation ladder: a specific steer as soon as one
+	// round shows a futile pattern, without waiting for the window to fill.
+	steer := g.futility.observe(round.ToolCalls, g.newEventsLocked())
 	sessionID := storage.SessionFromContext(ctx)
 	sessionFull := g.policy.budget != nil && sessionID != "" && g.policy.budget.Ratio(sessionID) >= sessionRenewRatio
 	if !sessionFull && !g.windowFullLocked() {
-		return agent.ToolLoopAction{}, nil
+		return agent.ToolLoopAction{Steer: steer}, nil
 	}
 	if g.progressedLocked() {
 		g.idle = 0
@@ -164,6 +175,7 @@ func (g *windowGovernor) AfterToolRound(ctx context.Context, round agent.ToolRou
 	}
 	g.windowStart, g.rounds, g.calls, g.tokens, g.newCalls = g.now(), 0, 0, 0, 0
 	if g.idle >= g.policy.noProgressWindows {
+		// Last rung: pause for the user, keeping all completed work.
 		return agent.ToolLoopAction{Stop: true, Message: g.pauseMessage()}, nil
 	}
 	if sessionFull {
@@ -171,7 +183,44 @@ func (g *windowGovernor) AfterToolRound(ctx context.Context, round agent.ToolRou
 		// usage is still reported by the execution result.
 		g.policy.budget.ResetSession(sessionID)
 	}
-	return agent.ToolLoopAction{}, nil
+	return agent.ToolLoopAction{Steer: joinSteers(steer, g.escalationSteer())}, nil
+}
+
+// escalationSteer is the middle of the ladder: after one window without
+// progress, reflect; after more, change strategy. The run continues.
+func (g *windowGovernor) escalationSteer() string {
+	switch {
+	case g.idle == 0:
+		return ""
+	case g.idle == 1:
+		return "The last work window produced no progress (no new file content, no new check results, mostly repeated calls). " +
+			"Before your next tool call, state in two or three sentences what you are trying to establish, what you tried, and why it did not work; then continue with a different approach."
+	default:
+		return fmt.Sprintf("%d work windows in a row produced no progress. Change strategy now: narrow the problem to one failing case, read the code path it exercises, or hand the stuck sub-problem to a debugger subagent with what you have ruled out. "+
+			"If the task needs a decision only the user can make, say exactly what it is.", g.idle)
+	}
+}
+
+// newEventsLocked returns the ledger events appended since the futility
+// detector last looked; it copies only those, so cost per round does not
+// grow with the length of the run.
+func (g *windowGovernor) newEventsLocked() []execution.Event {
+	if g.runtime == nil {
+		return nil
+	}
+	events, total := g.runtime.ledger.EventsSince(g.futility.eventsSeen)
+	g.futility.eventsSeen = total
+	return events
+}
+
+func joinSteers(steers ...string) string {
+	var kept []string
+	for _, s := range steers {
+		if s = strings.TrimSpace(s); s != "" {
+			kept = append(kept, s)
+		}
+	}
+	return strings.Join(kept, "\n\n")
 }
 
 func (g *windowGovernor) windowFullLocked() bool {

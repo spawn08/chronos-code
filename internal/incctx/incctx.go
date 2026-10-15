@@ -29,6 +29,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/spawn08/chronos-code/internal/document"
+	"github.com/spawn08/chronos-code/internal/fsignore"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/engine/tool/builtins"
 	"github.com/spawn08/chronos/sdk/agent"
@@ -66,20 +67,6 @@ var (
 	errStopScan  = errors.New("requested scan complete")
 	errBinary    = errors.New("binary file skipped")
 )
-
-// grepSkipDirs are directory names a recursive file_grep never descends
-// into: version control internals and dependency trees are large, rarely
-// what a caller is searching for, and expensive to walk.
-var grepSkipDirs = map[string]bool{
-	".git":          true,
-	"node_modules":  true,
-	"vendor":        true,
-	".chronos-code": true,
-	".hg":           true,
-	".svn":          true,
-	"__pycache__":   true,
-	".venv":         true,
-}
 
 // Wrap installs bounded source reads and optional Go outlines. Relative paths
 // resolve against root, as in the SDK. force is accepted for compatibility;
@@ -180,6 +167,16 @@ func readDocumentRange(ctx context.Context, path string, start, end int) (any, e
 		"start_line": start, "end_line": last, "total_lines": len(lines),
 		"document": true, "hint": "text extracted from document; PDF layout and DOCX formatting are not preserved",
 	}, nil
+}
+
+// workspaceRoot is the canonical request workspace root, the base for ignore
+// rules; it falls back to the configured root when canonicalization fails.
+func workspaceRoot(ctx context.Context, configuredRoot string) string {
+	root := builtins.WorkspaceRoot(ctx, configuredRoot)
+	if canonical, err := canonicalPath(root); err == nil {
+		return canonical
+	}
+	return root
 }
 
 func resolvePath(ctx context.Context, configuredRoot, path string) (string, error) {
@@ -317,16 +314,36 @@ func lineArg(args map[string]any, key string, fallback int) (int, error) {
 // Directory traversal is batched (not WalkDir's whole-directory sort), skips
 // symlinks/special files, and has aggregate byte, entry, depth and output limits.
 // Ignore names are explicit below; this is not a gitignore interpreter.
-func WrapGrep(a *agent.Agent, root string) {
+// DeniedFunc reports a file that must not appear in search results.
+type DeniedFunc func(path string) bool
+
+func WrapGrep(a *agent.Agent, root string, denied ...DeniedFunc) {
 	def, ok := a.Tools.Get(fileGrepTool)
 	if !ok {
 		return
 	}
 	def.ParallelSafe = true
-	def.Description = "Search a file or directory recursively, skipping binary files, symlinks and .git/.hg/.svn/vendor/node_modules/.chronos-code/.venv/__pycache__ directories. Set regex=true for a regular expression; otherwise matches a literal substring. Bounded to 500 matches, 256 KiB output, 64 KiB lines, 8 MiB per file, 32 MiB total, 10000 entries and 64 directory levels. Check truncated for incomplete searches."
-	toolProperties(def)["regex"] = map[string]any{
+	rg := &ripgrep{}
+	def.Description = "Search file contents in a file or directory tree. Respects .gitignore and skips dependency, build and cache directories of every ecosystem (node_modules, .venv, target, .next, dist-style build output, vendor, ...), binary files and symlinks. " +
+		"Literal substring by default; regex=true for a regular expression. output_mode files_with_matches (default for directories) lists matching files, content returns matching lines, count returns per-file counts; use files_with_matches first, then read or search one file. " +
+		"glob restricts files by name pattern (\"**/*.py\", \"*.{ts,tsx}\"). Bounded to 500 results and 256 KiB output; check truncated, and narrow path or glob when it is set."
+	props := toolProperties(def)
+	props["regex"] = map[string]any{
 		"type":        "boolean",
 		"description": "Treat pattern as a regular expression instead of a literal substring",
+	}
+	props["output_mode"] = map[string]any{
+		"type":        "string",
+		"enum":        []string{grepModeFiles, grepModeContent, grepModeCount},
+		"description": "files_with_matches (default when path is a directory), content (default for a single file), or count",
+	}
+	props["glob"] = map[string]any{
+		"type":        "string",
+		"description": "Only search files whose root-relative path matches this pattern; ** spans directories, {a,b} alternates",
+	}
+	props["case_insensitive"] = map[string]any{
+		"type":        "boolean",
+		"description": "Match regardless of letter case",
 	}
 
 	def.Handler = func(ctx context.Context, args map[string]any) (any, error) {
@@ -336,8 +353,19 @@ func WrapGrep(a *agent.Agent, root string) {
 		p, _ := args["path"].(string)
 		pattern, _ := args["pattern"].(string)
 		useRegex, _ := args["regex"].(bool)
-		if p == "" || pattern == "" {
-			return nil, fmt.Errorf("file_grep: 'path' and non-empty 'pattern' arguments are required")
+		caseInsensitive, _ := args["case_insensitive"].(bool)
+		glob, _ := args["glob"].(string)
+		mode, _ := args["output_mode"].(string)
+		if p == "" {
+			p = "."
+		}
+		if pattern == "" {
+			return nil, fmt.Errorf("file_grep: non-empty 'pattern' argument is required")
+		}
+		switch mode {
+		case "", grepModeFiles, grepModeContent, grepModeCount:
+		default:
+			return nil, fmt.Errorf("file_grep: output_mode must be %s, %s or %s", grepModeFiles, grepModeContent, grepModeCount)
 		}
 		if len(pattern) > maxLineBytes {
 			return nil, fmt.Errorf("file_grep: pattern exceeds 64 KiB")
@@ -352,20 +380,41 @@ func WrapGrep(a *agent.Agent, root string) {
 		}
 
 		var matcher func(line []byte) bool
-		if useRegex {
-			re, reErr := regexp.Compile(pattern)
+		switch {
+		case useRegex || caseInsensitive:
+			expr := pattern
+			if !useRegex {
+				expr = regexp.QuoteMeta(pattern)
+			}
+			if caseInsensitive {
+				expr = "(?i)" + expr
+			}
+			re, reErr := regexp.Compile(expr)
 			if reErr != nil {
 				return nil, fmt.Errorf("file_grep: invalid regex pattern: %w", reErr)
 			}
 			matcher = re.Match
-		} else {
+		default:
 			literal := []byte(pattern)
 			matcher = func(line []byte) bool { return bytes.Contains(line, literal) }
 		}
+		if mode == "" {
+			mode = grepModeContent
+			if info.IsDir() {
+				mode = grepModeFiles
+			}
+		}
 
-		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0)}
+		search := grepSearch{matcher: matcher, remaining: grepMaxScanBytes, matches: make([]map[string]any, 0),
+			ignore: fsignore.New(workspaceRoot(ctx, root)), glob: glob, root: resolvedPath, mode: mode, counts: map[string]int{},
+			denied: firstDenied(denied)}
 		if info.IsDir() {
-			err = search.walk(ctx, resolvedPath, 0)
+			search.recursive = true
+			err = rg.search(ctx, &search, resolvedPath, pattern, useRegex, caseInsensitive)
+			if errors.Is(err, errRipgrepUnusable) {
+				search.reset()
+				err = search.walk(ctx, resolvedPath, 0)
+			}
 		} else if info.Mode().IsRegular() {
 			err = search.file(ctx, resolvedPath, false)
 		} else {
@@ -374,18 +423,46 @@ func WrapGrep(a *agent.Agent, root string) {
 		if err != nil {
 			return nil, fmt.Errorf("file_grep: %w", err)
 		}
-		return map[string]any{
-			"path":      resolvedPath,
-			"pattern":   pattern,
-			"recursive": info.IsDir(),
-			"matches":   search.matches,
-			"truncated": search.truncated,
-		}, nil
+		return search.result(resolvedPath, pattern, info.IsDir()), nil
 	}
+}
+
+// file_grep output modes.
+const (
+	grepModeFiles   = "files_with_matches"
+	grepModeContent = "content"
+	grepModeCount   = "count"
+)
+
+// result renders the search in its output mode. content keeps the original
+// shape ({file, line_number, content} matches); the other modes list files.
+func (s *grepSearch) result(path, pattern string, recursive bool) map[string]any {
+	out := map[string]any{"path": path, "pattern": pattern, "recursive": recursive, "output_mode": s.mode, "truncated": s.truncated}
+	switch s.mode {
+	case grepModeFiles:
+		out["files"] = s.files
+	case grepModeCount:
+		counts := make([]map[string]any, 0, len(s.files))
+		for _, f := range s.files {
+			counts = append(counts, map[string]any{"file": f, "count": s.counts[f]})
+		}
+		out["counts"] = counts
+	default:
+		out["matches"] = s.matches
+	}
+	return out
 }
 
 type grepSearch struct {
 	matcher   func([]byte) bool
+	ignore    *fsignore.Matcher
+	denied    DeniedFunc // policy-denied files, skipped like ignored ones
+	glob      string     // root-relative file filter; "" matches all
+	root      string     // search root, for glob-relative paths
+	mode      string
+	recursive bool     // matches carry their file path
+	files     []string // files with at least one match, in walk order
+	counts    map[string]int
 	matches   []map[string]any
 	remaining int64
 	output    int
@@ -395,7 +472,13 @@ type grepSearch struct {
 }
 
 func (s *grepSearch) file(ctx context.Context, path string, recursive bool) error {
-	before, outputBefore := len(s.matches), s.output
+	before, outputBefore, filesBefore := len(s.matches), s.output, len(s.files)
+	s.recursive = recursive
+	if looksBinary(path) {
+		// Sniff before scanning: files and count modes stop at the first
+		// match and would otherwise never reach a later NUL byte.
+		return nil
+	}
 	stats, err := scanFile(ctx, path, min(int64(maxScanBytes), s.remaining), func(n int, line []byte) error {
 		if bytes.IndexByte(line, 0) >= 0 || !utf8.Valid(line) {
 			return errBinary
@@ -403,27 +486,7 @@ func (s *grepSearch) file(ctx context.Context, path string, recursive bool) erro
 		if !s.matcher(line) {
 			return nil
 		}
-		// Allow for JSON escaping (up to six bytes per source byte), keys,
-		// coordinates, and repeated file paths, not just matched text.
-		cost := 6*len(line) + 80
-		if recursive {
-			cost += 6 * len(path)
-		}
-		if len(s.matches) >= grepMaxMatches || s.output+cost > maxOutputBytes {
-			s.truncated, s.stopped = true, true
-			return errStopScan
-		}
-		m := map[string]any{"line_number": n, "content": string(line)}
-		if recursive {
-			m["file"] = path
-		}
-		s.matches = append(s.matches, m)
-		s.output += cost
-		if len(s.matches) == grepMaxMatches {
-			s.truncated, s.stopped = true, true
-			return errStopScan
-		}
-		return nil
+		return s.addMatch(path, n, line)
 	})
 	s.remaining -= stats.bytes
 	if ctx.Err() != nil {
@@ -431,7 +494,8 @@ func (s *grepSearch) file(ctx context.Context, path string, recursive bool) erro
 	}
 	if errors.Is(err, errBinary) {
 		// Discard earlier text matches if a later scanned line identifies binary.
-		s.matches, s.output = s.matches[:before], outputBefore
+		s.matches, s.output, s.files = s.matches[:before], outputBefore, s.files[:filesBefore]
+		delete(s.counts, path)
 		return nil
 	}
 	if errors.Is(err, errScanLimit) || errors.Is(err, errLongLine) {
@@ -441,11 +505,76 @@ func (s *grepSearch) file(ctx context.Context, path string, recursive bool) erro
 	return err
 }
 
+// addMatch records one matching line within the output bounds, returning
+// errStopScan once the search must stop or the file needs no more lines.
+func (s *grepSearch) addMatch(path string, n int, line []byte) error {
+	if s.mode == grepModeFiles || s.mode == grepModeCount {
+		return s.recordFile(path)
+	}
+	// Allow for JSON escaping (up to six bytes per source byte), keys,
+	// coordinates, and repeated file paths, not just matched text.
+	cost := 6*len(line) + 80
+	if s.recursive {
+		cost += 6 * len(path)
+	}
+	if len(s.matches) >= grepMaxMatches || s.output+cost > maxOutputBytes {
+		s.truncated, s.stopped = true, true
+		return errStopScan
+	}
+	m := map[string]any{"line_number": n, "content": string(line)}
+	if s.recursive {
+		m["file"] = path
+	}
+	s.matches = append(s.matches, m)
+	s.output += cost
+	if len(s.matches) == grepMaxMatches {
+		s.truncated, s.stopped = true, true
+		return errStopScan
+	}
+	return nil
+}
+
+// recordFile notes a match for the files and count modes. In files mode the
+// rest of the file is skipped; in count mode every line is counted.
+func (s *grepSearch) recordFile(path string) error {
+	if s.counts[path] == 0 {
+		cost := 6*len(path) + 32
+		if len(s.files) >= grepMaxMatches || s.output+cost > maxOutputBytes {
+			s.truncated, s.stopped = true, true
+			return errStopScan
+		}
+		s.files = append(s.files, path)
+		s.output += cost
+	}
+	s.counts[path]++
+	if s.mode == grepModeFiles {
+		return errStopScan
+	}
+	return nil
+}
+
+// skipFile applies the glob filter to a file below the search root.
+func (s *grepSearch) skipFile(path string) bool {
+	if s.glob == "" {
+		return false
+	}
+	rel, err := filepath.Rel(s.root, path)
+	if err != nil {
+		return true
+	}
+	rel = filepath.ToSlash(rel)
+	if fsignore.Match(s.glob, rel) {
+		return false
+	}
+	// A pattern without a slash matches the base name anywhere, as in rg -g.
+	return strings.Contains(s.glob, "/") || !fsignore.Match(s.glob, filepath.Base(path))
+}
+
 func (s *grepSearch) walk(ctx context.Context, path string, depth int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if grepSkipDirs[filepath.Base(path)] {
+	if depth > 0 && s.ignored(path, true) {
 		return nil
 	}
 	if depth >= grepMaxDepth {
@@ -479,7 +608,7 @@ func (s *grepSearch) walk(ctx context.Context, path string, depth int) error {
 			var err error
 			if entry.IsDir() {
 				err = s.walk(ctx, child, depth+1)
-			} else if entry.Type().IsRegular() {
+			} else if entry.Type().IsRegular() && !s.skipFile(child) && !s.ignored(child, false) {
 				err = s.file(ctx, child, true)
 			}
 			if ctx.Err() != nil {
@@ -497,6 +626,41 @@ func (s *grepSearch) walk(ctx context.Context, path string, depth int) error {
 			return readErr
 		}
 	}
+}
+
+// reset clears partial results before a fallback search.
+func (s *grepSearch) reset() {
+	s.matches, s.files, s.counts = s.matches[:0], nil, map[string]int{}
+	s.output, s.entries, s.truncated, s.stopped = 0, 0, false, false
+	s.remaining = grepMaxScanBytes
+}
+
+// ignoredByMatcher drops rg results inside ecosystem directories that a
+// nested .gitignore did not cover (rg sees only the --glob exclusions).
+func ignoredByMatcher(s *grepSearch, path string) bool {
+	return s.ignored(path, false)
+}
+
+func fsignoreDirNames() []string { return fsignore.DirNames() }
+
+func firstDenied(denied []DeniedFunc) DeniedFunc {
+	if len(denied) > 0 {
+		return denied[0]
+	}
+	return nil
+}
+
+// ignored applies policy denials, ecosystem and .gitignore rules; a search
+// without a matcher (tests driving walk directly) still skips ecosystem
+// directories.
+func (s *grepSearch) ignored(path string, isDir bool) bool {
+	if !isDir && s.denied != nil && s.denied(path) {
+		return true
+	}
+	if s.ignore == nil {
+		return isDir && fsignore.SkipDirName(filepath.Base(path))
+	}
+	return s.ignore.Ignored(path, isDir)
 }
 
 type scanStats struct {
@@ -526,6 +690,21 @@ func (r *budgetReader) Read(p []byte) (int, error) {
 	n, err := r.r.Read(p)
 	r.remaining -= int64(n)
 	return n, err
+}
+
+// binarySniffBytes is how much of a file looksBinary inspects, as git and
+// ripgrep do: a NUL byte in the first 8 KiB marks the file binary.
+const binarySniffBytes = 8 << 10
+
+func looksBinary(path string) bool {
+	f, err := openRegular(path)
+	if err != nil {
+		return false // the scan reports the error
+	}
+	defer f.Close()
+	buf := make([]byte, binarySniffBytes)
+	n, _ := io.ReadFull(f, buf)
+	return bytes.IndexByte(buf[:n], 0) >= 0
 }
 
 func openRegular(path string) (*os.File, error) {

@@ -247,6 +247,7 @@ func RunTask(ctx context.Context, t Task, rt *router.Router, tiers map[string]st
 	// Match the production logical-handler -> final compression order.
 	incctx.Wrap(optAgent, dir)
 	incctx.WrapGrep(optAgent, dir)
+	incctx.WrapGlob(optAgent, dir)
 	wrapNormalize(optReg, dir, workspacePlaceholder)
 	// Observe the same execution, rather than replaying tools to determine the
 	// compression threshold (which would duplicate mutations). RunTask is serial.

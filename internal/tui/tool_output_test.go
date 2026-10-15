@@ -169,3 +169,32 @@ func TestRetryEventReachesTranscript(t *testing.T) {
 		t.Fatalf("retry not shown:\n%s", got)
 	}
 }
+
+func TestFormatToolOutputNewResultShapes(t *testing.T) {
+	tests := []struct {
+		name, tool  string
+		values      map[string]any
+		wantText    []string
+		wantSummary string
+	}{
+		{"background shell exited", "shell", map[string]any{"status": "exited", "output": "ok\n", "exit_code": 0}, []string{"ok"}, ""},
+		{"background shell running", "shell", map[string]any{"status": "running", "shell_id": "sh-3", "output": "building\n"}, []string{"building"}, "running in background · sh-3"},
+		{"await_shell", "await_shell", map[string]any{"status": "exited", "output": "PASS\n", "exit_code": 0}, []string{"PASS"}, ""},
+		{"grep files mode", "file_grep", map[string]any{"files": []string{"/repo/a.go", "/repo/b/c.go"}}, []string{"a.go", "b/c.go"}, "2 files"},
+		{"grep count mode", "file_grep", map[string]any{"counts": []map[string]any{{"file": "/repo/a.go", "count": 3}}}, []string{"a.go: 3"}, "1 file"},
+	}
+	for _, tt := range tests {
+		out := formatToolOutput(tt.tool, tt.values, "/repo")
+		for _, want := range tt.wantText {
+			if !strings.Contains(out.text, want) {
+				t.Errorf("%s: text %q lacks %q", tt.name, out.text, want)
+			}
+		}
+		if tt.wantSummary != "" && out.summary != tt.wantSummary {
+			t.Errorf("%s: summary = %q, want %q", tt.name, out.summary, tt.wantSummary)
+		}
+	}
+	if text, _ := shellToolOutput(map[string]any{"status": "running", "shell_id": "sh-1", "output": "x"}); !strings.Contains(text, "sh-1") {
+		t.Errorf("running user shell not reported: %q", text)
+	}
+}

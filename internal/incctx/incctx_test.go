@@ -107,7 +107,7 @@ func TestWrapUsesRequestWorkspaceRoot(t *testing.T) {
 	if got := read.(map[string]any)["content"]; got != "request marker" {
 		t.Fatalf("file_read content = %q, want request workspace", got)
 	}
-	grep, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": ".", "pattern": "marker"})
+	grep, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": ".", "pattern": "marker", "output_mode": "content"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +585,7 @@ func TestWrapGrepRecursiveSkipsVendor(t *testing.T) {
 	WrapGrep(a, dir)
 
 	ctx := context.Background()
-	out, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": ".", "pattern": "target"})
+	out, err := a.Tools.Execute(ctx, "file_grep", map[string]any{"path": ".", "pattern": "target", "output_mode": "content"})
 	if err != nil {
 		t.Fatalf("execute file_grep: %v", err)
 	}
@@ -833,7 +833,7 @@ func TestScanStopsAtRangeByteBudgetAndCancellation(t *testing.T) {
 
 func TestWrapGrepSkipsRuntimeBinaryAndSymlinks(t *testing.T) {
 	dir := t.TempDir()
-	for name := range grepSkipDirs {
+	for _, name := range []string{".git", "node_modules", "vendor", ".chronos-code", ".hg", ".svn", "__pycache__", ".venv", "target", ".next"} {
 		if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -849,7 +849,7 @@ func TestWrapGrepSkipsRuntimeBinaryAndSymlinks(t *testing.T) {
 	var calls atomic.Int64
 	registerFakeFileGrep(a, dir, &calls)
 	WrapGrep(a, dir)
-	out, err := a.Tools.Execute(context.Background(), "file_grep", map[string]any{"path": ".", "pattern": "target"})
+	out, err := a.Tools.Execute(context.Background(), "file_grep", map[string]any{"path": ".", "pattern": "target", "output_mode": "content"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,6 +861,7 @@ func TestWrapGrepSkipsRuntimeBinaryAndSymlinks(t *testing.T) {
 }
 
 func TestWrapGrepOutputBounds(t *testing.T) {
+	t.Setenv("PATH", "") // the Go walker's bounds; ripgrep_test.go covers rg
 	for _, content := range []string{strings.Repeat("target\n", 1000), strings.Repeat(strings.Repeat("target", 1000)+"\n", 100), strings.Repeat("x", maxLineBytes+1)} {
 		dir := t.TempDir()
 		writeFile(t, dir, "matches.txt", content)
@@ -869,7 +870,7 @@ func TestWrapGrepOutputBounds(t *testing.T) {
 		registerFakeFileGrep(a, dir, &calls)
 		WrapGrep(a, dir)
 		for _, path := range []string{"matches.txt", "."} {
-			out, err := a.Tools.Execute(context.Background(), "file_grep", map[string]any{"path": path, "pattern": "target"})
+			out, err := a.Tools.Execute(context.Background(), "file_grep", map[string]any{"path": path, "pattern": "target", "output_mode": "content"})
 			if err != nil {
 				t.Fatal(err)
 			}

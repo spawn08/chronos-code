@@ -73,14 +73,65 @@ func wrapVerificationEvidence(a *agent.Agent) {
 					runtime.recordReadClaim(args, result)
 				}
 			case "shell", "shell_auto":
+				if running, id := backgroundRunning(result); running {
+					// Still running: record its mutations now, in order with
+					// the calls around it, and its check results when
+					// await_shell reports the exit.
+					runtime.trackBackground(id, args, startedAt)
+					if recordErr := recordBackgroundMutations(runtime, args, completedAt); recordErr != nil {
+						return result, errors.Join(err, recordErr)
+					}
+					break
+				}
 				if recordErr := recordShellEvidence(runtime, ctx, args, result, err, startedAt, completedAt); recordErr != nil {
 					return result, errors.Join(err, recordErr)
+				}
+			case "await_shell":
+				if exited, id := backgroundExited(result); exited {
+					if shellArgs, started, ok := runtime.finishBackground(id); ok {
+						// Record only its check results. Staleness follows
+						// ledger order, so a mutation appended now would
+						// stale checks that ran while it was in the
+						// background; its changes were recorded by the
+						// mutation entry written when it started.
+						if recordErr := recordBackgroundChecks(runtime, shellArgs, result, started, completedAt); recordErr != nil {
+							return result, errors.Join(err, recordErr)
+						}
+					}
+				}
+			case "kill_shell":
+				// A killed command produced no check result, and any change
+				// it made was already in place before later checks ran.
+				if exited, id := backgroundExited(result); exited {
+					runtime.finishBackground(id)
 				}
 			}
 			return result, err
 		}
 		a.Tools.Register(&wrapped)
 	}
+}
+
+// backgroundRunning reports a shell result for a command that continues in
+// the background, with its shell id.
+func backgroundRunning(result any) (bool, string) {
+	values, ok := result.(map[string]any)
+	if !ok || values["status"] != "running" {
+		return false, ""
+	}
+	id, _ := values["shell_id"].(string)
+	return id != "", id
+}
+
+// backgroundExited reports an await_shell or kill_shell result for a
+// background command that has exited.
+func backgroundExited(result any) (bool, string) {
+	values, ok := result.(map[string]any)
+	if !ok || values["status"] != "exited" {
+		return false, ""
+	}
+	id, _ := values["shell_id"].(string)
+	return id != "", id
 }
 
 func readFileState(root, path string) fileState {
@@ -131,6 +182,46 @@ func recordShellEvidence(runtime *taskRuntime, ctx context.Context, args map[str
 	if mutated {
 		// A mutating or unclassified command may have touched any file.
 		return runtime.refreshClaims(completedAt)
+	}
+	return nil
+}
+
+// recordBackgroundMutations records the mutating steps of a command that
+// continues in the background.
+func recordBackgroundMutations(runtime *taskRuntime, args map[string]any, at time.Time) error {
+	command, _ := args["command"].(string)
+	mutated := false
+	for _, step := range planShellEvidence(command) {
+		if step.mutation {
+			if _, err := runtime.recordWorkspaceMutation(step.command, at); err != nil {
+				return err
+			}
+			mutated = true
+		}
+	}
+	if mutated {
+		return runtime.refreshClaims(at)
+	}
+	return nil
+}
+
+// recordBackgroundChecks records the check steps of a background command
+// once it has exited.
+func recordBackgroundChecks(runtime *taskRuntime, args map[string]any, result any, startedAt, completedAt time.Time) error {
+	command, _ := args["command"].(string)
+	var exitCode *int
+	if values, ok := result.(map[string]any); ok {
+		if code, ok := values["exit_code"].(int); ok {
+			exitCode = &code
+		}
+	}
+	for _, step := range planShellEvidence(command) {
+		if step.mutation {
+			continue
+		}
+		if _, err := runtime.recordCommand(step.command, step.class, exitCode, execution.TerminalExited, nil, execution.ProvenanceRuntime, startedAt, completedAt); err != nil {
+			return err
+		}
 	}
 	return nil
 }

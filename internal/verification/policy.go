@@ -105,7 +105,12 @@ func Derive(input Input) []Obligation {
 	if len(testCommands) == 0 && containsCode(paths) {
 		add(KindTest, "", execution.CommandTest)
 	}
-	add(KindDiff, input.DiffCommand, execution.CommandDiff)
+	// A diff review is required only when the caller names its command: the
+	// edit tool already returns each change, and a mandatory `git diff
+	// --stat` forced an extra repair turn after most edits.
+	if input.DiffCommand != "" {
+		add(KindDiff, input.DiffCommand, execution.CommandDiff)
+	}
 	return obligations
 }
 

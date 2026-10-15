@@ -94,6 +94,7 @@ type Orchestrator struct {
 	attBudget          *attention.Budgeter
 	teams              map[string]*team.Team
 	projectDocsWatcher *projectdocs.Watcher
+	backgroundShells   *security.BackgroundShells
 	projectDocsNotice  *ProjectDocsNotice
 	skillCatalog       []*skills.Skill
 	permissionChecker  *security.PermissionChecker
@@ -320,7 +321,10 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if !cfg.Ephemeral {
 		learningStore, err = setupLearningTelemetry(ctx, cfg, root, agents, paths)
 		if err != nil {
-			return nil, fmt.Errorf("configure learning telemetry: %w", err)
+			// Telemetry is optional: an unopenable database (for example one
+			// a newer chronos-code migrated) must not stop the agent.
+			fmt.Fprintf(os.Stderr, "warning: learning telemetry disabled for this session: %v\n", err)
+			learningStore = nil
 		}
 	}
 	orch.learningStore = learningStore
@@ -358,7 +362,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	if err != nil {
 		return nil, fmt.Errorf("configure security: %w", err)
 	}
-	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second, policy)
+	orch.backgroundShells = security.NewBackgroundShells(filepath.Join(paths.Dir, "terminals"))
+	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second, policy, orch.backgroundShells)
 	if cfg.Server.DeliveryHTTP.RequestURL != "" || cfg.Server.DeliveryHTTP.ObservationURL != "" {
 		observedHTTP, err := newDeliveryHTTPTool(cfg.Server.DeliveryHTTP)
 		if err != nil {
@@ -420,7 +425,8 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// Finish logical implementations before adding cross-cutting wrappers:
 		// outlines, ranges, grep and cache hits all enter the same pipeline.
 		incctx.Wrap(a, root)
-		incctx.WrapGrep(a, root)
+		incctx.WrapGrep(a, root, policy.PathDenied)
+		incctx.WrapGlob(a, root, policy.PathDenied)
 		if graphStore != nil {
 			activation.Wrap(a, graphStore, actBuf)
 		}
@@ -519,22 +525,32 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	return orch, nil
 }
 
-func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout time.Duration, policy *security.Policy) {
+// installWorkspaceShells replaces each agent's shell tools with the workspace
+// shell. With shells set, overrunning commands continue in the background
+// (await_shell and kill_shell are registered alongside); the policy's
+// execution limit becomes the longest a single call blocks, not a kill.
+func installWorkspaceShells(agents map[string]*agent.Agent, root string, timeout time.Duration, policy *security.Policy, shells *security.BackgroundShells) {
 	for _, a := range agents {
 		if a == nil || a.Tools == nil {
 			continue
 		}
+		installed := false
 		for _, name := range []string{"shell", "shell_auto"} {
 			current, ok := a.Tools.Get(name)
 			if !ok {
 				continue
 			}
-			replacement := security.NewWorkspaceShellToolWithPolicy(root, timeout, policy)
+			installed = true
+			replacement := security.NewBackgroundShellTool(root, timeout, policy, shells)
 			replacement.Name = name
 			replacement.Permission = current.Permission
 			replacement.RequiresConfirmation = current.RequiresConfirmation
 			replacement.RequiresUserInput = current.RequiresUserInput
 			a.Tools.Register(replacement)
+		}
+		if installed && shells != nil {
+			a.Tools.Register(security.NewAwaitShellTool(shells))
+			a.Tools.Register(security.NewKillShellTool(shells))
 		}
 	}
 }
@@ -1058,9 +1074,21 @@ func setupSessionSummaries(manager *session.Manager, agents map[string]*agent.Ag
 			var b strings.Builder
 			truncated := false
 			b.WriteString("Relevant context from prior sessions:")
+			kept := 0
 			for _, summary := range summaries {
-				fmt.Fprintf(&b, "\n- [session=%s source=%s updated=%s] %s", summary.SessionID, summary.Source, summary.UpdatedAt.UTC().Format(time.RFC3339), summary.Text)
+				// Stored messages carry the turn context of their own turn;
+				// replaying it nests prior-session context inside itself.
+				text := strings.TrimSpace(stripHarnessContext(summary.Text))
+				if text == "" {
+					continue
+				}
+				kept++
+				fmt.Fprintf(&b, "\n- [session=%s source=%s updated=%s] %s", summary.SessionID, summary.Source, summary.UpdatedAt.UTC().Format(time.RFC3339), text)
 				truncated = truncated || summary.Truncated
+			}
+			if kept == 0 {
+				contextSourceOmitted(ctx, ContextSourceSessionSummaries, ContextOmittedNotSelected)
+				return messages
 			}
 			content := b.String()
 			contextSourceSelected(ctx, ContextSourceSessionSummaries, len(summaries), len(content), truncated)
@@ -1097,10 +1125,10 @@ func setupConversationPins(store storage.Storage, agents map[string]*agent.Agent
 					continue
 				}
 				payload, ok := events[i].Payload.(map[string]any)
-				if !ok || payload["role"] != model.RoleUser {
+				if !ok || payload["role"] != model.RoleUser || payload["name"] == agent.HarnessNoteName {
 					continue
 				}
-				text, _ := payload["content"].(string)
+				text := userRequestText(payload["content"])
 				if text != "" {
 					recent = append(recent, boundedMemoryText(text, 2048))
 				}
@@ -1116,6 +1144,43 @@ func setupConversationPins(store storage.Storage, agents map[string]*agent.Agent
 			return append(pins, model.Message{Role: model.RoleSystem, Content: content.String(), TurnScoped: true})
 		}
 	}
+}
+
+// userRequestText returns what the user typed in a stored user message,
+// without the turn context and routing preamble the harness prepended.
+// Recalling the raw text nested earlier <turn_context> blocks inside new
+// ones (14 levels deep in observed sessions) and replayed stale facts.
+func userRequestText(content any) string {
+	text, _ := content.(string)
+	return strings.TrimSpace(stripHarnessContext(text))
+}
+
+func stripHarnessContext(text string) string {
+	for {
+		start := strings.Index(text, "<turn_context>")
+		if start < 0 {
+			break
+		}
+		end := strings.LastIndex(text, "</turn_context>")
+		if end < start {
+			text = text[:start]
+			break
+		}
+		text = text[:start] + text[end+len("</turn_context>"):]
+	}
+	if i := strings.Index(text, agent.HarnessNotePrefix); i >= 0 {
+		text = text[:i] // harness notes are appended after the user's text
+	}
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Path: complexity=") || strings.HasPrefix(trimmed, "Routing hint: intent=") ||
+			strings.HasPrefix(trimmed, "PPD hint:") || strings.HasPrefix(trimmed, "PPD requested:") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 func refersToPreviousTurn(query string) bool {
@@ -2031,7 +2096,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 		}
 	}
 	if !request.BoundedContext && !hasIntent {
-		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, classification, o.implementationPath(classification.Complexity), ppdDecision); hint != "" {
+		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, ppdDecision); hint != "" {
 			message = hint + "\n\n" + message
 		}
 	}
@@ -2492,11 +2557,6 @@ func assessRuntimeVerification(request ExecutionRequest, classification router.C
 	derived := verification.Derive(verification.Input{
 		TaskKind: string(classification.Kind), ChangedPaths: changedPaths,
 	})
-	if runtime != nil && !insideGitWorktree(runtime.workspaceRoot) {
-		// `git diff --stat` cannot succeed outside a repository; requiring it
-		// only pushes the model to run `git init` in the user's project.
-		derived = slices.DeleteFunc(derived, func(o verification.Obligation) bool { return o.Kind == verification.KindDiff })
-	}
 	obligations = append(obligations, derived...)
 	if runtime != nil && runtime.refusesShell != nil {
 		// A check the security policy refuses can never produce evidence;
@@ -2610,23 +2670,12 @@ func selectPrimaryAgent(agents map[string]*agent.Agent, order []string) string {
 	return ""
 }
 
-func (o *Orchestrator) implementationPath(complexity router.Complexity) router.ImplementationPath {
-	if o.routingConfig != nil {
-		return o.routingConfig.PathFor(complexity)
-	}
-	return router.DefaultPath(complexity)
-}
-
-func formatRoutingHint(agentID, intent, specialist string, matched bool, class router.Classification, path router.ImplementationPath, ppd *router.PPDDecision) string {
-	if path.Hint == "" {
-		path = router.DefaultPath(class.Complexity)
-	}
-	// The tool-count estimate stays internal: shown to the model, it anchors
-	// effort and invites stopping when the count is reached.
-	parts := []string{fmt.Sprintf("Path: complexity=%s kind=%s suggested_graph=%s suggested_plan=%s. Advisory only: reassess scope from evidence and complete every requested deliverable with verification. Suggested approach: %s.", class.Complexity, class.Kind, path.Graph, path.Plan, path.Hint)}
-	if class.Complexity == "" {
-		parts = parts[:0]
-	}
+func formatRoutingHint(agentID, intent, specialist string, matched bool, ppd *router.PPDDecision) string {
+	// The complexity classification and implementation path stay internal
+	// (routing, model choice, telemetry). Shown to the model they anchored
+	// effort: "complexity=low suggested_plan=skip" was attached to a
+	// multi-system cloud migration as readily as to a yes/no question.
+	var parts []string
 	if matched && specialist != "" && specialist != agentID {
 		parts = append(parts, fmt.Sprintf("Routing hint: intent=%s specialist=%s. You remain %s; spawn_subagent %s if that specialist loop is needed.", intent, specialist, agentID, specialist))
 	}
@@ -3496,6 +3545,40 @@ func wrapLateTools(a *agent.Agent, before map[string]struct{}, o *Orchestrator) 
 	}
 }
 
+// minCompressTokens is the smallest result that is replaced by a preview;
+// smaller results cost less in context than the round trip to refetch them.
+const minCompressTokens = 4000
+
+// neverCompressTool reports results the model needs whole: skill
+// instructions are loaded to be followed, a subagent result is the only
+// account of its work (a compressed one was lost to compaction and redone),
+// and a ranged read already asked for exactly the lines it wants.
+func neverCompressTool(name string, args map[string]any) bool {
+	switch name {
+	case skillToolName, "spawn_subagent", "await_shell":
+		return true
+	case "file_read":
+		start, hasStart := lineNumber(args["start_line"])
+		end, hasEnd := lineNumber(args["end_line"])
+		return hasStart && hasEnd && end >= start && end-start < maxUncompressedRangeLines
+	}
+	return false
+}
+
+// maxUncompressedRangeLines is the widest ranged read exempt from
+// compression; a wider range is no more targeted than a whole-file read.
+const maxUncompressedRangeLines = 400
+
+func lineNumber(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	}
+	return 0, false
+}
+
 func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config.HooksConfig, runner *security.HookRunner, activity *hookActivityTracker) {
 	toolcompress.RegisterReader(a)
 	wrapUserToolHooks(a, configured, runner, activity)
@@ -3507,16 +3590,17 @@ func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config
 		if tracker != nil {
 			base = tracker.CompressionThreshold(sessionOrAgentKey(ctx, a.ID))
 		}
-		if name == skillToolName {
-			// Skill instructions are loaded to be followed; a preview stub
-			// would force a read_stored_result round trip.
+		if neverCompressTool(name, args) {
 			return math.MaxInt32
 		}
 		weight := attention.Weight(attention.Classify(name, args))
 		if name == "codebase_search" || name == "codebase_map" || name == "codebase_context" {
 			weight = attention.Weight(attention.CatGraph)
 		}
-		return attention.AdjustThreshold(base, weight)
+		// A preview stub forces a read_stored_result round trip, which costs
+		// a whole model call over the full prefix: 290 such rounds took 6% of
+		// model time in observed sessions, mostly for results under 16 KiB.
+		return max(attention.AdjustThreshold(base, weight), minCompressTokens)
 	})
 	wrapToolResultCap(a)
 }
@@ -3948,6 +4032,9 @@ func (o *Orchestrator) Close() error {
 		runtimes := append([]*mcpdiscover.Runtime(nil), o.mcpRuntimes...)
 		o.mcpMu.Unlock()
 		var errs []error
+		if o.backgroundShells != nil {
+			o.backgroundShells.Close()
+		}
 		if o.runtimeMemory != nil {
 			if err := o.runtimeMemory.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close layered memory: %w", err))

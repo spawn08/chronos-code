@@ -705,3 +705,52 @@ func TestAgentModelPinned(t *testing.T) {
 		t.Error("nil config reported a pinned model")
 	}
 }
+
+// An agent file exported by an older `init` can still list agents later
+// removed from the bundle. Loading must not fail: the stale entry is dropped
+// with a warning that names the file, whether the copy is in the project or
+// in ~/.chronos-code, and whether the project directory exists at all.
+func TestLoadDropsUnknownSubAgentsWithWarning(t *testing.T) {
+	tests := []struct {
+		name  string
+		scope string // "user" or "project"
+	}{
+		{"stale project agent file", "project"},
+		{"stale user agent file", "user"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			repo := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Chdir(repo)
+			dir := filepath.Join(repo, ConfigDirName, "agents")
+			if tt.scope == "user" {
+				dir = filepath.Join(home, ConfigDirName, "agents")
+			}
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, "chronos-code.yaml")
+			body := "id: chronos-code\nname: Chronos Code\nsub_agents:\n- coder\n- ppd-planner\n- delivery-strategist\n"
+			if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load("")
+			if err != nil {
+				t.Fatalf("Load() error = %v; a stale sub-agent reference must not block startup", err)
+			}
+			for _, a := range cfg.Agents {
+				if a.ID != "chronos-code" {
+					continue
+				}
+				if len(a.SubAgents) != 1 || a.SubAgents[0] != "coder" {
+					t.Errorf("sub_agents = %v, want [coder]", a.SubAgents)
+				}
+			}
+			if len(cfg.Warnings) != 2 || !strings.Contains(cfg.Warnings[0], "ppd-planner") || !strings.Contains(cfg.Warnings[0], file) {
+				t.Errorf("warnings = %q, want two naming the agent and %s", cfg.Warnings, file)
+			}
+		})
+	}
+}

@@ -162,7 +162,9 @@ func TestRepairPromptRendersUnlimitedLimits(t *testing.T) {
 	}
 }
 
-func TestRuntimeVerificationSkipsDiffOutsideGit(t *testing.T) {
+// The edit tool reports each change, so a diff review is never derived on
+// its own, inside or outside a repository.
+func TestRuntimeVerificationDerivesNoDiffObligation(t *testing.T) {
 	for _, git := range []bool{false, true} {
 		root := t.TempDir()
 		if git {
@@ -182,8 +184,8 @@ func TestRuntimeVerificationSkipsDiffOutsideGit(t *testing.T) {
 		for _, obligation := range decision.Obligations {
 			hasDiff = hasDiff || obligation.Kind == verification.KindDiff
 		}
-		if hasDiff != git {
-			t.Fatalf("git=%v: diff obligation present=%v, obligations=%#v", git, hasDiff, decision.Obligations)
+		if hasDiff {
+			t.Fatalf("git=%v: unexpected diff obligation, obligations=%#v", git, decision.Obligations)
 		}
 	}
 }
@@ -222,7 +224,7 @@ func TestRuntimeVerificationDropsRefusedChecks(t *testing.T) {
 				hasTest = hasTest || obligation.Kind == verification.KindTest
 				hasDiff = hasDiff || obligation.Kind == verification.KindDiff
 			}
-			if hasTest != tc.wantTest || !hasDiff {
+			if hasTest != tc.wantTest || hasDiff {
 				t.Fatalf("test obligation=%v diff obligation=%v, obligations=%#v", hasTest, hasDiff, decision.Obligations)
 			}
 		})

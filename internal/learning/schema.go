@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -64,6 +64,15 @@ CREATE INDEX IF NOT EXISTS idx_patterns_repo_success
 	ON patterns(repo_path, success_count DESC, fail_count, id);
 `
 
+// schemaV2 records every billed token class and the priced cost, so session
+// cost and cache efficiency can be read from telemetry alone. input_tokens
+// stays the uncached prompt share; the cache columns complete the prompt.
+const schemaV2 = `
+ALTER TABLE sessions ADD COLUMN cache_read_tokens  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN unpriced_calls     INTEGER NOT NULL DEFAULT 0;
+`
+
 func migrate(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -82,11 +91,18 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, schemaV1); err != nil {
-		return fmt.Errorf("learning: migrate schema to version 1: %w", err)
+	if version < 1 {
+		if _, err := tx.ExecContext(ctx, schemaV1); err != nil {
+			return fmt.Errorf("learning: migrate schema to version 1: %w", err)
+		}
 	}
-	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
-		return fmt.Errorf("learning: set schema version 1: %w", err)
+	if version < 2 {
+		if _, err := tx.ExecContext(ctx, schemaV2); err != nil {
+			return fmt.Errorf("learning: migrate schema to version 2: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("learning: set schema version %d: %w", schemaVersion, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("learning: commit schema migration: %w", err)
