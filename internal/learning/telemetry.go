@@ -14,6 +14,8 @@ import (
 	"github.com/spawn08/chronos/engine/hooks"
 	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/storage"
+
+	"github.com/spawn08/chronos-code/internal/budget"
 )
 
 const telemetryCorrelationKey = "chronos_code_telemetry_id"
@@ -68,6 +70,10 @@ type telemetryEvent struct {
 	failed       bool
 	inputTokens  int
 	outputTokens int
+	cacheRead    int
+	cacheWrite   int
+	costMicros   int64
+	unpriced     bool
 	at           time.Time
 }
 
@@ -296,7 +302,7 @@ func (r *TelemetryRecorder) snapshot(ctx context.Context, evt *hooks.Event) (tel
 		if snapshot.outputHash, err = eventFingerprint(evt.Output); err != nil {
 			return telemetryEvent{}, fmt.Errorf("learning: fingerprint %s output: %w", evt.Type, err)
 		}
-		snapshot.inputTokens, snapshot.outputTokens = usage(evt)
+		snapshot.recordUsage(evt)
 	}
 	return snapshot, nil
 }
@@ -393,8 +399,11 @@ func (r *TelemetryRecorder) completeCall(ctx context.Context, callKey string, ca
 	}
 	if _, err := r.store.db.ExecContext(ctx, `
 		UPDATE sessions
-		SET turns = turns + 1, input_tokens = input_tokens + ?, output_tokens = output_tokens + ?
-		WHERE id = ?`, evt.inputTokens, evt.outputTokens, call.sessionID); err != nil {
+		SET turns = turns + 1, input_tokens = input_tokens + ?, output_tokens = output_tokens + ?,
+			cache_read_tokens = cache_read_tokens + ?, cache_write_tokens = cache_write_tokens + ?,
+			cost_usd = cost_usd + ?, unpriced_calls = unpriced_calls + ?, ended_at = ?
+		WHERE id = ?`, evt.inputTokens, evt.outputTokens, evt.cacheRead, evt.cacheWrite,
+		float64(evt.costMicros)/1e6, boolInt(evt.unpriced), timestamp(now), call.sessionID); err != nil {
 		return fmt.Errorf("learning: update telemetry totals for session %q: %w", call.sessionID, err)
 	}
 	call.completed = true
@@ -476,15 +485,60 @@ func eventFingerprint(value any) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-func usage(evt *hooks.Event) (int, int) {
+// recordUsage copies a model response's billed token classes and prices them
+// with the same table and formula as the session budget, so telemetry cost
+// matches the cost the TUI reports. A model without a price entry is counted
+// as unpriced rather than recorded as free.
+func (e *telemetryEvent) recordUsage(evt *hooks.Event) {
 	if evt.Error != nil {
-		return 0, 0
+		return
 	}
 	response, ok := evt.Output.(*model.ChatResponse)
 	if !ok || response == nil {
-		return 0, 0
+		return
 	}
-	return response.Usage.PromptTokens, response.Usage.CompletionTokens
+	u := response.Usage
+	e.inputTokens = u.UncachedPromptTokens()
+	e.outputTokens = u.CompletionTokens
+	e.cacheRead = u.CacheReadTokens
+	e.cacheWrite = u.CacheCreationTokens
+	if e.inputTokens+e.outputTokens+e.cacheRead+e.cacheWrite == 0 {
+		return
+	}
+	price, err := budget.PriceForModel(eventModel(evt, response))
+	if err != nil {
+		e.unpriced = true
+		return
+	}
+	cost, err := price.IncurredCost(u)
+	if err != nil {
+		e.unpriced = true
+		return
+	}
+	e.costMicros = int64(cost)
+}
+
+// eventModel is the model that served the call. Providers do not set
+// ChatResponse.Model and the SDK fills it only after the After hooks run,
+// so the request's model or the provider is the reliable source.
+func eventModel(evt *hooks.Event, response *model.ChatResponse) string {
+	if response.Model != "" {
+		return response.Model
+	}
+	if req, ok := evt.Input.(*model.ChatRequest); ok && req != nil && req.Model != "" {
+		return req.Model
+	}
+	if provider, ok := evt.Metadata["provider"].(model.Provider); ok && provider != nil {
+		return provider.Model()
+	}
+	return ""
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func telemetryID(prefix string) (string, error) {

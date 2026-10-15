@@ -60,6 +60,8 @@ func formatToolOutput(name string, result any, root string) toolOutput {
 		return formatGlobOutput(values, root)
 	case "file_grep":
 		return formatGrepOutput(values, root)
+	case "await_shell", "kill_shell":
+		return formatShellOutput(values)
 	case orchestrator.ExitPlanModeToolName:
 		status, _ := values["status"].(string)
 		message, _ := values["message"].(string)
@@ -74,18 +76,27 @@ func formatToolOutput(name string, result any, root string) toolOutput {
 }
 
 func formatShellOutput(values map[string]any) toolOutput {
-	stdout, _ := values["stdout"].(string)
-	stderr, _ := values["stderr"].(string)
-	combined := strings.TrimRight(stdout, "\n")
-	if stderr = strings.TrimRight(stderr, "\n"); stderr != "" {
-		if combined != "" {
-			combined += "\n"
+	var combined string
+	if output, ok := values["output"].(string); ok {
+		combined = strings.TrimRight(output, "\n")
+	} else {
+		stdout, _ := values["stdout"].(string)
+		stderr, _ := values["stderr"].(string)
+		combined = strings.TrimRight(stdout, "\n")
+		if stderr = strings.TrimRight(stderr, "\n"); stderr != "" {
+			if combined != "" {
+				combined += "\n"
+			}
+			combined += stderr
 		}
-		combined += stderr
 	}
 	out := toolOutput{text: combined}
 	if combined == "" {
 		out.text = "(no output)"
+	}
+	if values["status"] == "running" {
+		id, _ := values["shell_id"].(string)
+		out.summary = "running in background · " + id
 	}
 	out.preview = tailLines(out.text, toolPreviewLines)
 	if code, ok := toInt(values["exit_code"]); ok && code != 0 {
@@ -158,6 +169,34 @@ func formatGlobOutput(values map[string]any, root string) toolOutput {
 }
 
 func formatGrepOutput(values map[string]any, root string) toolOutput {
+	var out toolOutput
+	switch {
+	case values["files"] != nil:
+		files := stringItems(values["files"])
+		for i, file := range files {
+			files[i] = relativePath(file, root)
+		}
+		out = listOutput(files, pluralize(len(files), "file", "files"))
+	case values["counts"] != nil:
+		counts := sliceItems(values["counts"])
+		lines := make([]string, 0, len(counts))
+		for _, entry := range counts {
+			item, _ := entry.(map[string]any)
+			file, _ := item["file"].(string)
+			n, _ := toInt(item["count"])
+			lines = append(lines, fmt.Sprintf("%s: %d", relativePath(file, root), n))
+		}
+		out = listOutput(lines, pluralize(len(lines), "file", "files"))
+	default:
+		out = formatGrepMatches(values, root)
+	}
+	if truncated, _ := values["truncated"].(bool); truncated {
+		out.summary += " · truncated"
+	}
+	return out
+}
+
+func formatGrepMatches(values map[string]any, root string) toolOutput {
 	matches := sliceItems(values["matches"])
 	lines := make([]string, 0, len(matches))
 	for _, match := range matches {
@@ -170,11 +209,7 @@ func formatGrepOutput(values map[string]any, root string) toolOutput {
 			lines = append(lines, fmt.Sprintf("%d: %s", line, content))
 		}
 	}
-	out := listOutput(lines, pluralize(len(lines), "match", "matches"))
-	if truncated, _ := values["truncated"].(bool); truncated {
-		out.summary += " · truncated"
-	}
-	return out
+	return listOutput(lines, pluralize(len(lines), "match", "matches"))
 }
 
 func formatCompressedOutput(values map[string]any) toolOutput {

@@ -36,6 +36,33 @@ type taskRuntime struct {
 	// refusesShell reports whether the security policy refuses a shell
 	// command outright; nil refuses nothing.
 	refusesShell func(command string) bool
+	// background maps a running background shell to its original call, so
+	// its exit is recorded as evidence for the command that started it.
+	backgroundMu sync.Mutex
+	background   map[string]backgroundCall
+}
+
+type backgroundCall struct {
+	args    map[string]any
+	started time.Time
+}
+
+func (r *taskRuntime) trackBackground(id string, args map[string]any, started time.Time) {
+	r.backgroundMu.Lock()
+	defer r.backgroundMu.Unlock()
+	if r.background == nil {
+		r.background = map[string]backgroundCall{}
+	}
+	r.background[id] = backgroundCall{args: args, started: started}
+}
+
+// finishBackground returns and forgets the call that started shell id.
+func (r *taskRuntime) finishBackground(id string) (map[string]any, time.Time, bool) {
+	r.backgroundMu.Lock()
+	defer r.backgroundMu.Unlock()
+	call, ok := r.background[id]
+	delete(r.background, id)
+	return call.args, call.started, ok
 }
 
 func newTaskRuntime(taskID, workspaceRoot string) (*taskRuntime, error) {

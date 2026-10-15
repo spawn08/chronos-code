@@ -2190,9 +2190,12 @@ func runShellEscape(ctx context.Context, orch *orchestrator.Orchestrator, dir, c
 	if orch == nil {
 		return shellDoneMsg{err: fmt.Errorf("shell: orchestrator is unavailable")}
 	}
+	// The user waits on their own command: block for its whole run rather
+	// than backgrounding it (the policy's execution limit still applies).
 	result, err := orch.ExecuteTool(ctx, "shell", map[string]any{
-		"command":     cmdStr,
-		"working_dir": dir,
+		"command":        cmdStr,
+		"working_dir":    dir,
+		"block_until_ms": float64(userShellBlock.Milliseconds()),
 	})
 	output, exitCode := shellToolOutput(result)
 	if err == nil && exitCode != 0 {
@@ -2204,6 +2207,10 @@ func runShellEscape(ctx context.Context, orch *orchestrator.Orchestrator, dir, c
 	return shellDoneMsg{output: output, err: err}
 }
 
+// userShellBlock is how long a !command blocks before it continues in the
+// background; the shell tool clamps it to the policy's execution limit.
+const userShellBlock = 24 * time.Hour
+
 func shellToolOutput(result any) (string, int) {
 	values, ok := result.(map[string]any)
 	if !ok {
@@ -2212,10 +2219,25 @@ func shellToolOutput(result any) (string, int) {
 		}
 		return "", 0
 	}
+	exitCode, _ := values["exit_code"].(int)
+	text := shellResultText(values)
+	if values["status"] == "running" {
+		id, _ := values["shell_id"].(string)
+		text = strings.TrimRight(text, "\n") + fmt.Sprintf("\n[still running in the background as %s]", id)
+	}
+	return text, exitCode
+}
+
+// shellResultText is a shell result's output in either shape: the
+// background shell's combined "output", or the stdout/stderr pair of the
+// sandboxed shell.
+func shellResultText(values map[string]any) string {
+	if output, ok := values["output"].(string); ok {
+		return output
+	}
 	stdout, _ := values["stdout"].(string)
 	stderr, _ := values["stderr"].(string)
-	exitCode, _ := values["exit_code"].(int)
-	return stdout + stderr, exitCode
+	return stdout + stderr
 }
 
 func truncateShellOutput(output string) string {

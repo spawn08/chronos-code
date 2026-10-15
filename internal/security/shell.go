@@ -22,24 +22,50 @@ func NewWorkspaceShellTool(workspace string, timeout time.Duration) *tool.Defini
 // NewWorkspaceShellToolWithPolicy is NewWorkspaceShellTool that also accepts
 // working directories the user approved for this session on policy.
 func NewWorkspaceShellToolWithPolicy(workspace string, timeout time.Duration, policy *Policy) *tool.Definition {
+	return NewBackgroundShellTool(workspace, timeout, policy, nil)
+}
+
+// NewBackgroundShellTool is the workspace shell with background execution:
+// with shells set, a command still running at its yield point (block_until_ms,
+// at most timeout) keeps running and returns a shell_id instead of being
+// killed. With shells nil the command is killed at timeout, as before.
+func NewBackgroundShellTool(workspace string, timeout time.Duration, policy *Policy, shells *BackgroundShells) *tool.Definition {
 	if timeout <= 0 {
 		timeout = defaultSandboxTimeout
 	}
+	description := "Execute a shell command in the workspace and return stdout/stderr."
+	properties := map[string]any{
+		"command":     map[string]any{"type": "string"},
+		"working_dir": map[string]any{"type": "string"},
+	}
+	if shells != nil {
+		description = "Run a command with sh -c in the workspace (working_dir sets the directory; cd does not persist between calls). " +
+			"The call waits up to block_until_ms (default 30000). A command still running then is NOT killed: it continues in the background and the result has status running, a shell_id and its output so far. " +
+			"Use await_shell to wait for it (with a pattern to return early) and kill_shell to stop it; never poll with sleep or by re-reading logs. Set block_until_ms to 0 to start servers and watchers directly in the background. " +
+			"Output is the last 30 KiB; the full output is in log_path. Do not run interactive programs; use --no-pager for git."
+		properties["block_until_ms"] = map[string]any{
+			"type":        "integer",
+			"minimum":     0,
+			"maximum":     timeout.Milliseconds(),
+			"description": "How long to wait before returning while the command keeps running in the background (default 30000)",
+		}
+		properties["description"] = map[string]any{
+			"type":        "string",
+			"description": "5-10 words on what the command does, shown to the user",
+		}
+	}
 	return &tool.Definition{
 		Name:        "shell",
-		Description: "Execute a shell command in the workspace and return stdout/stderr.",
+		Description: description,
 		Permission:  tool.PermRequireApproval,
 		Effects: []tool.Effect{
 			tool.EffectRead, tool.EffectDeliveryWrite, tool.EffectProcessExecution,
 			tool.EffectNetwork, tool.EffectExternalMutation,
 		},
 		Parameters: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"command":     map[string]any{"type": "string"},
-				"working_dir": map[string]any{"type": "string"},
-			},
-			"required": []string{"command"},
+			"type":       "object",
+			"properties": properties,
+			"required":   []string{"command"},
 		},
 		Handler: func(ctx context.Context, args map[string]any) (any, error) {
 			command, _ := args["command"].(string)
@@ -69,6 +95,13 @@ func NewWorkspaceShellToolWithPolicy(workspace string, timeout time.Duration, po
 					return nil, fmt.Errorf("shell: sandbox execution: %w", err)
 				}
 				return map[string]any{"stdout": result.Stdout, "stderr": result.Stderr, "exit_code": result.ExitCode}, nil
+			}
+			if shells != nil {
+				yield := min(defaultYield, timeout)
+				if ms, ok := numberArg(args["block_until_ms"]); ok && ms >= 0 {
+					yield = min(time.Duration(ms)*time.Millisecond, timeout)
+				}
+				return shells.start(ctx, command, dir, yield)
 			}
 			runCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()

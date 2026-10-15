@@ -119,3 +119,40 @@ func TestPlanShellEvidenceCountsCommonAgentCommands(t *testing.T) {
 		}
 	}
 }
+
+// A check that outlives its shell call is recorded when await_shell reports
+// its exit, under the command that started it.
+func TestVerificationObserverRecordsBackgroundShellAtExit(t *testing.T) {
+	runtime, err := newTaskRuntime("task", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := tool.NewRegistry()
+	registry.Register(&tool.Definition{Name: "shell", Handler: func(context.Context, map[string]any) (any, error) {
+		return map[string]any{"status": "running", "shell_id": "sh-1"}, nil
+	}})
+	registry.Register(&tool.Definition{Name: "await_shell", Handler: func(context.Context, map[string]any) (any, error) {
+		return map[string]any{"status": "exited", "shell_id": "sh-1", "exit_code": 0}, nil
+	}})
+	a := &agent.Agent{ID: "coder", Tools: registry}
+	wrapVerificationEvidence(a)
+	ctx := withTaskRuntime(context.Background(), runtime)
+	if _, err := registry.Execute(ctx, "shell", map[string]any{"command": "go test ./..."}); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := runtime.snapshot(); len(state.Verification) != 0 {
+		t.Fatalf("a still-running command was recorded as evidence: %#v", state.Verification)
+	}
+	if _, err := registry.Execute(ctx, "await_shell", map[string]any{"shell_id": "sh-1"}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := runtime.snapshot()
+	if err != nil || len(state.Verification) != 1 {
+		t.Fatalf("verification evidence = %#v, %v", state.Verification, err)
+	}
+	for _, evidence := range state.Verification {
+		if evidence.Event.Command != "go test ./..." || !evidence.Event.Passed {
+			t.Fatalf("background evidence = %#v", evidence.Event)
+		}
+	}
+}

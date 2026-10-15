@@ -520,3 +520,12 @@ func TestReconcileUsageAppliesCacheReadDiscount(t *testing.T) {
 		t.Fatalf("Cost() = %+v, want %+v", got, want)
 	}
 }
+
+func TestPriceForModelCoversObservedModels(t *testing.T) {
+	for _, id := range []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-4-6", "claude-fable-5-1",
+		"claude-haiku-5-5", "claude-haiku-4-5", "anthropic/claude-haiku-4-5", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"} {
+		if _, err := PriceForModel(id); err != nil {
+			t.Errorf("PriceForModel(%q) = %v, want a bundled price", id, err)
+		}
+	}
+}

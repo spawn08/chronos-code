@@ -287,10 +287,13 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		err = fmt.Errorf("no dynamic subagent runner configured")
 	}
 	if runCtx.Err() != nil {
-		return "", fmt.Errorf("subagent %q: %w", spec.Name, runCtx.Err())
+		return "", fmt.Errorf("subagent %q: %w", spec.Name, context.Cause(runCtx))
 	}
 	if err != nil {
 		return "", fmt.Errorf("subagent %q: %w", spec.Name, err)
+	}
+	if strings.TrimSpace(result) == "" {
+		return "", fmt.Errorf("subagent %q: %w", spec.Name, errEmptySubagentResult)
 	}
 	if len(result) > subagentResultLimit {
 		end := subagentPreviewLimit
@@ -391,7 +394,11 @@ func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (st
 	if err != nil {
 		return "", err
 	}
-	var final strings.Builder
+	// final is the text after the last tool round, the child's answer.
+	// lastNonEmpty keeps the latest earlier text: a child stopped by its
+	// output limit right after a tool round would otherwise return "", and
+	// its findings were lost and the task re-delegated from scratch.
+	var final, lastNonEmpty strings.Builder
 	for chunk := range stream {
 		if chunk == nil {
 			continue
@@ -405,6 +412,10 @@ func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (st
 		}
 		switch {
 		case len(chunk.ToolCalls) > 0:
+			if strings.TrimSpace(final.String()) != "" {
+				lastNonEmpty.Reset()
+				lastNonEmpty.WriteString(final.String())
+			}
 			final.Reset()
 		case chunk.Delta:
 			final.WriteString(chunk.Content)
@@ -413,5 +424,16 @@ func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (st
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if strings.TrimSpace(final.String()) == "" {
+		if strings.TrimSpace(lastNonEmpty.String()) != "" {
+			return "STATUS: partial (the subagent ended without a final answer; this is its last report)\n\n" + lastNonEmpty.String(), nil
+		}
+		return "", errEmptySubagentResult
+	}
 	return final.String(), nil
 }
+
+// errEmptySubagentResult reports a child that finished without any answer.
+// It is an error, not an empty success, so the parent sees the failure
+// instead of treating "" as the work being done.
+var errEmptySubagentResult = errors.New("subagent finished without a result (it may have stopped at its output limit); narrow the task or do it directly")

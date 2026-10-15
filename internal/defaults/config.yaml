@@ -84,7 +84,7 @@ long_running:
     tool_calls: 100
     seconds: 900
     tokens: 250000
-  no_progress_windows: 2
+  no_progress_windows: 3
   # Wall-clock limit for one delegated subagent run; 0 = none (its own work
   # windows and no-progress check still apply). Bounded mode uses 1800.
   subagent_timeout_sec: 0

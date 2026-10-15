@@ -73,14 +73,50 @@ func wrapVerificationEvidence(a *agent.Agent) {
 					runtime.recordReadClaim(args, result)
 				}
 			case "shell", "shell_auto":
+				if running, id := backgroundRunning(result); running {
+					// The command is still running: record it once it exits,
+					// through await_shell or kill_shell, under its own command.
+					runtime.trackBackground(id, args, startedAt)
+					break
+				}
 				if recordErr := recordShellEvidence(runtime, ctx, args, result, err, startedAt, completedAt); recordErr != nil {
 					return result, errors.Join(err, recordErr)
+				}
+			case "await_shell", "kill_shell":
+				if exited, id := backgroundExited(result); exited {
+					if shellArgs, started, ok := runtime.finishBackground(id); ok {
+						if recordErr := recordShellEvidence(runtime, ctx, shellArgs, result, err, started, completedAt); recordErr != nil {
+							return result, errors.Join(err, recordErr)
+						}
+					}
 				}
 			}
 			return result, err
 		}
 		a.Tools.Register(&wrapped)
 	}
+}
+
+// backgroundRunning reports a shell result for a command that continues in
+// the background, with its shell id.
+func backgroundRunning(result any) (bool, string) {
+	values, ok := result.(map[string]any)
+	if !ok || values["status"] != "running" {
+		return false, ""
+	}
+	id, _ := values["shell_id"].(string)
+	return id != "", id
+}
+
+// backgroundExited reports an await_shell or kill_shell result for a
+// background command that has exited.
+func backgroundExited(result any) (bool, string) {
+	values, ok := result.(map[string]any)
+	if !ok || values["status"] != "exited" {
+		return false, ""
+	}
+	id, _ := values["shell_id"].(string)
+	return id != "", id
 }
 
 func readFileState(root, path string) fileState {

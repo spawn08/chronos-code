@@ -30,8 +30,8 @@ func TestDeriveUsesObservedMutationInsteadOfRequestedTaskKind(t *testing.T) {
 			t.Fatalf("%s without mutation obligations = %#v, want none", kind, got)
 		}
 		got := Derive(Input{TaskKind: kind, ChangedPaths: []string{"main.go"}})
-		if len(got) != 2 || got[0].Kind != KindTest || got[1].Kind != KindDiff {
-			t.Fatalf("%s mutated obligations = %#v, want generic test and diff", kind, got)
+		if len(got) != 1 || got[0].Kind != KindTest {
+			t.Fatalf("%s mutated obligations = %#v, want only the generic test", kind, got)
 		}
 	}
 }
