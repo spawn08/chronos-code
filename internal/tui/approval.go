@@ -20,6 +20,8 @@ type approvalRequestMsg struct {
 	toolName string
 	args     map[string]any
 	resp     chan approvalDecision
+	ctx      context.Context
+	question *questionDialog
 }
 
 type approvalDecision struct {
@@ -73,13 +75,13 @@ func NewApprovalHandler(p *tea.Program) tool.ApprovalFunc {
 // one decision cache, so approving a plan with auto-accepted edits also
 // approves later file_write calls in that session.
 type approvalBridge struct {
-	p        *tea.Program
-	cache    *approvalCache
-	promptMu sync.Mutex
+	p          *tea.Program
+	cache      *approvalCache
+	promptGate chan struct{}
 }
 
 func newApprovalBridge(p *tea.Program) *approvalBridge {
-	return &approvalBridge{p: p, cache: newApprovalCache()}
+	return &approvalBridge{p: p, cache: newApprovalCache(), promptGate: make(chan struct{}, 1)}
 }
 
 func (b *approvalBridge) toolApproval(ctx context.Context, toolName string, args map[string]any) (bool, error) {
@@ -90,8 +92,10 @@ func (b *approvalBridge) toolApproval(ctx context.Context, toolName string, args
 	// Concurrent subagents may request tools simultaneously. Serialize human
 	// prompts so one modal cannot overwrite another, then re-check the cache
 	// because an earlier "all session" decision may have approved this call.
-	b.promptMu.Lock()
-	defer b.promptMu.Unlock()
+	if err := b.acquire(ctx); err != nil {
+		return false, err
+	}
+	defer b.release()
 	if b.cache.allowed(sessionID, toolName) {
 		return true, nil
 	}
@@ -108,8 +112,10 @@ func (b *approvalBridge) toolApproval(ctx context.Context, toolName string, args
 // planApproval shows the plan review modal: y approves, a approves and
 // auto-accepts edits for the session, n keeps planning.
 func (b *approvalBridge) planApproval(ctx context.Context, plan string) (bool, error) {
-	b.promptMu.Lock()
-	defer b.promptMu.Unlock()
+	if err := b.acquire(ctx); err != nil {
+		return false, err
+	}
+	defer b.release()
 	dec, err := b.ask(ctx, orchestrator.ExitPlanModeToolName, map[string]any{"plan": plan})
 	if err != nil {
 		return false, err
@@ -129,8 +135,10 @@ const directoryAccessToolName = "directory_access"
 // security policy records the grant, so the same directory is not asked
 // about again.
 func (b *approvalBridge) directoryApproval(ctx context.Context, dir, target string, access security.DirectoryAccess) (bool, error) {
-	b.promptMu.Lock()
-	defer b.promptMu.Unlock()
+	if err := b.acquire(ctx); err != nil {
+		return false, err
+	}
+	defer b.release()
 	dec, err := b.ask(ctx, directoryAccessToolName, map[string]any{
 		"directory": dir,
 		"path":      target,
@@ -144,11 +152,29 @@ func (b *approvalBridge) directoryApproval(ctx context.Context, dir, target stri
 
 func (b *approvalBridge) ask(ctx context.Context, toolName string, args map[string]any) (approvalDecision, error) {
 	resp := make(chan approvalDecision, 1)
-	b.p.Send(approvalRequestMsg{toolName: toolName, args: args, resp: resp})
+	b.p.Send(approvalRequestMsg{toolName: toolName, args: args, resp: resp, ctx: ctx})
 	select {
 	case dec := <-resp:
 		return dec, nil
 	case <-ctx.Done():
+		b.p.Send(approvalClosedMsg{resp: resp})
 		return approvalDecision{}, ctx.Err()
 	}
 }
+
+// All human prompts share a cancellable gate, including concurrent subagents.
+func (b *approvalBridge) acquire(ctx context.Context) error {
+	select {
+	case b.promptGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			b.release()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (b *approvalBridge) release() { <-b.promptGate }
+
+type approvalClosedMsg struct{ resp chan approvalDecision }

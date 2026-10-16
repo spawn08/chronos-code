@@ -107,6 +107,8 @@ type Orchestrator struct {
 	telemetryRecorders []*learning.TelemetryRecorder
 	runtimeMemory      *runtimeMemory
 	planMode           atomic.Bool
+	userQuestionMu     sync.RWMutex
+	userQuestion       UserQuestionFunc
 	planApprovalMu     sync.Mutex
 	planApproval       PlanApprovalFunc
 	approvedPlan       string
@@ -400,6 +402,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	orch.taskPlans = newDurableTaskPlanStore(builtins.NewStoragePlanStore(store))
 	installTaskPlan(agents, orch.taskPlans, broker)
 	installExitPlanMode(agents, orch)
+	installUserQuestion(agents, orch)
 	roleModels := newRoleModelRegistry(agents)
 	if err := setupSubAgentsWithModels(agents, roleModels); err != nil {
 		return nil, fmt.Errorf("configure subagent delegation: %w", err)
@@ -2996,6 +2999,10 @@ func (o *Orchestrator) SessionDirectories() []string {
 func (o *Orchestrator) SetApprovalHandler(handler tool.ApprovalFunc) {
 	for _, a := range o.agents {
 		a.Tools.SetApprovalHandler(func(ctx context.Context, toolName string, args map[string]any) (bool, error) {
+			// Questions have no filesystem or external effects and handle input themselves.
+			if toolName == AskUserQuestionToolName {
+				return true, nil
+			}
 			// LayerTools are host-bound memory operations, not arbitrary file IO.
 			// Preserve their allow policy after generic permission normalization;
 			// the registry still enforces explicit denials and handlers enforce

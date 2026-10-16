@@ -70,6 +70,7 @@ type pendingApproval struct {
 	toolName string
 	args     map[string]any
 	resp     chan approvalDecision
+	question *questionDialog
 }
 
 // streamStartedMsg, streamDeltaMsg and streamDoneMsg drive the streaming
@@ -524,6 +525,8 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	approvals := newApprovalBridge(p)
 	installApprovalHandlers(orch, approvals.toolApproval)
 	orch.SetPlanApprovalHandler(approvals.planApproval)
+	orch.SetUserQuestionHandler(approvals.userQuestion)
+	defer orch.SetUserQuestionHandler(nil)
 	orch.SetDirectoryApprovalHandler(approvals.directoryApproval)
 	defer orch.SetDirectoryApprovalHandler(nil)
 
@@ -620,6 +623,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.PasteMsg:
+		if m.approval != nil && m.approval.question != nil {
+			m.approval.question.paste(msg.Content)
+			m.resizeViewport()
+			return m, nil
+		}
 		if m.approval == nil {
 			if cmd, ok := m.updateWizardInput(msg); ok {
 				return m, cmd
@@ -645,8 +653,18 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
+	case approvalClosedMsg:
+		if m.approval != nil && m.approval.resp == msg.resp {
+			m.approval = nil
+			m.resizeViewport()
+		}
+		return m, nil
+
 	case approvalRequestMsg:
-		m.approval = &pendingApproval{toolName: msg.toolName, args: msg.args, resp: msg.resp}
+		if msg.ctx != nil && msg.ctx.Err() != nil {
+			return m, nil
+		}
+		m.approval = &pendingApproval{toolName: msg.toolName, args: msg.args, resp: msg.resp, question: msg.question}
 		m.resizeViewport()
 		return m, nil
 
@@ -1231,6 +1249,9 @@ func (m *appModel) renderBottom() (string, bool) {
 
 func (m *appModel) handleApprovalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	a := m.approval
+	if a.question != nil {
+		return m.handleQuestionKey(msg)
+	}
 	if a.toolName == directoryAccessToolName {
 		switch msg.String() {
 		case "y", "enter":
@@ -4178,6 +4199,9 @@ func (m *appModel) displayAgentName() string {
 }
 
 func (m *appModel) renderApprovalModal() string {
+	if m.approval.question != nil {
+		return m.renderQuestionModal()
+	}
 	if m.approval.toolName == orchestrator.ExitPlanModeToolName {
 		return m.renderPlanApprovalModal()
 	}

@@ -420,7 +420,7 @@ func (o *Orchestrator) installToolSupervision(a *agent.Agent) {
 
 func supervisedName(name string) bool {
 	switch name {
-	case "file_read", "file_write", "file_edit", "file_list", "file_glob", "file_grep", "shell", "shell_auto", "await_shell", "kill_shell", "read_artifact", "list_artifacts", "read_history", "read_stored_result", "update_plan", "exit_plan_mode", "skill", "discover_tools", "call_tool", "await_tool", "cancel_tool", "message_tool", "workspace_info":
+	case "file_read", "file_write", "file_edit", "file_list", "file_glob", "file_grep", "shell", "shell_auto", "await_shell", "kill_shell", "read_artifact", "list_artifacts", "read_history", "read_stored_result", "update_plan", "exit_plan_mode", AskUserQuestionToolName, "skill", "discover_tools", "call_tool", "await_tool", "cancel_tool", "message_tool", "workspace_info":
 		return false
 	default:
 		return true
