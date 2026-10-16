@@ -173,7 +173,7 @@ func TestLiveTextCacheRollingTail(t *testing.T) {
 		var text strings.Builder
 		for i := 0; i < 40; i++ {
 			text.WriteString(chunk)
-			text.WriteString(fmt.Sprintf("frame %d", i))
+			fmt.Fprintf(&text, "frame %d", i)
 			if got, want := cache.wrap(text.String(), 40), liveTextReference(text.String(), 40); got != want {
 				t.Fatalf("rolling tail frame %d: got %d bytes, want %d", i, len(got), len(want))
 			}

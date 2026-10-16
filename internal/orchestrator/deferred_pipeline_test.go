@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +66,6 @@ func TestDeferredPipelineJournalsOnlyTargetEffect(t *testing.T) {
 	}
 	operation, err := store.Operation(ctx, scope, "delivery", "invocation:dispatch-1")
 	if err != nil || operation.Kind != "file_write" || operation.Status != execution.OperationObserved {
-		t.Fatal(fmt.Sprintf("incorrect target journal: %+v error=%v", operation, err))
+		t.Fatalf("incorrect target journal: %+v error=%v", operation, err)
 	}
 }

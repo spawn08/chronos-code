@@ -102,19 +102,6 @@ func (s *taskPlanStore) load(ctx context.Context, primary bool) (*builtins.Plan,
 	return restored.Clone(), nil
 }
 
-// markLoaded records that ctx's session has an in-process plan and reports
-// whether it already had one.
-func (s *taskPlanStore) markLoaded(ctx context.Context) bool {
-	key := storage.TenantFromContext(ctx) + "\x00" + storage.SessionFromContext(ctx)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.loaded[key] {
-		return true
-	}
-	s.loaded[key] = true
-	return false
-}
-
 // openItems returns the unfinished tasks of the primary plan for sessionID.
 func (s *taskPlanStore) openItems(ctx context.Context, sessionID string) []builtins.PlanTask {
 	if s == nil || sessionID == "" {
@@ -131,22 +118,6 @@ func (s *taskPlanStore) openItems(ctx context.Context, sessionID string) []built
 		}
 	}
 	return open
-}
-
-func (s *taskPlanStore) belongsToTask(ctx context.Context) bool {
-	if s == nil {
-		return false
-	}
-	runtime, ok := taskRuntimeFromContext(ctx)
-	if !ok {
-		return false
-	}
-	scoped, _ := s.scope(ctx)
-	key := storage.TenantFromContext(scoped) + "\x00" + storage.SessionFromContext(scoped)
-	s.mu.Lock()
-	owner := s.owners[key]
-	s.mu.Unlock()
-	return owner != "" && owner == string(runtime.taskID)
 }
 
 func (s *taskPlanStore) planForTask(ctx context.Context) (*builtins.Plan, bool) {
