@@ -43,18 +43,18 @@ type BackgroundShells struct {
 }
 
 type backgroundShell struct {
-	id       string
-	session  string
-	tenant   string
-	command  string
-	dir      string
-	logPath  string
-	cmd      *exec.Cmd
-	started  time.Time
-	output   *shellOutput
-	done     chan struct{}
-	exitCode int
-	exitErr  error
+	id        string
+	session   string
+	tenant    string
+	command   string
+	dir       string
+	logPath   string
+	cmd       *exec.Cmd
+	started   time.Time
+	output    *shellOutput
+	done      chan struct{}
+	exitCode  int
+	exitErr   error
 	completed time.Time
 
 	readMu    sync.Mutex // serializes reads that advance readCount
