@@ -118,7 +118,12 @@ func (r *ripgrep) search(ctx context.Context, s *grepSearch, dir, pattern string
 			s.truncated = true // as the Go walker: an over-long line makes the search partial
 			continue
 		}
-		s.addMatch(path, ev.Data.LineNumber, line)
+		// errStopScan only ends this file's lines, which rg's per-line
+		// events already bound; s.stopped (checked below) ends the search.
+		_ = s.addMatch(path, ev.Data.LineNumber, line)
+		if s.stopped {
+			break
+		}
 	}
 	if s.stopped {
 		cancel()

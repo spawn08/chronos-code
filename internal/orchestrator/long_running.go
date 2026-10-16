@@ -189,10 +189,10 @@ func (g *windowGovernor) AfterToolRound(ctx context.Context, round agent.ToolRou
 // escalationSteer is the middle of the ladder: after one window without
 // progress, reflect; after more, change strategy. The run continues.
 func (g *windowGovernor) escalationSteer() string {
-	switch {
-	case g.idle == 0:
+	switch g.idle {
+	case 0:
 		return ""
-	case g.idle == 1:
+	case 1:
 		return "The last work window produced no progress (no new file content, no new check results, mostly repeated calls). " +
 			"Before your next tool call, state in two or three sentences what you are trying to establish, what you tried, and why it did not work; then continue with a different approach."
 	default:
