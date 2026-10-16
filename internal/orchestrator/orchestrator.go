@@ -482,6 +482,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		learningStore:      learningStore,
 		telemetryRecorders: orch.telemetryRecorders,
 		runtimeMemory:      orch.runtimeMemory,
+		backgroundShells:   orch.backgroundShells,
 		lspManager:         languageServerManager,
 		broker:             broker,
 		policy:             policy,
@@ -4023,6 +4024,15 @@ func setupMCPRuntimesWithCaller(ctx context.Context, agents map[string]*agent.Ag
 		fmt.Fprintf(os.Stderr, "warning: MCP server(s) awaiting approval, not connected: %s (interactive: /mcp connect <name>; run: --mcp-connect <name>)\n", strings.Join(names, ", "))
 	}
 	return runtimes
+}
+
+// StopBackgroundShells kills every background shell process group. One-shot
+// headless runs call it when the run ends, since no later turn can await or
+// kill them.
+func (o *Orchestrator) StopBackgroundShells() {
+	if o.backgroundShells != nil {
+		o.backgroundShells.Close()
+	}
 }
 
 func (o *Orchestrator) Close() error {

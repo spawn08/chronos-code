@@ -288,6 +288,9 @@ func runStreamJSON(ctx context.Context, orch *orchestrator.Orchestrator, request
 	})
 	activity, stop, subErr := orch.SubscribeActivity()
 	defer stop()
+	// A headless run is one-shot: nothing can await or kill background
+	// shells afterwards, so never leave their processes behind.
+	defer orch.StopBackgroundShells()
 	activityCtx, cancelActivity := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	if subErr == nil {
