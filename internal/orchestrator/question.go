@@ -66,7 +66,7 @@ func installUserQuestion(agents map[string]*agent.Agent, o *Orchestrator) {
 func newUserQuestionTool(o *Orchestrator) *tool.Definition {
 	return &tool.Definition{
 		Name:        AskUserQuestionToolName,
-		Description: "Ask the user 1–4 questions and wait for their answers. Provide up to 8 options per question, or omit options for an open question. Custom text answers are always allowed. Recommended must match an option. If input is required or cancelled, stop and wait for user feedback; do not guess or repeat the call this turn.",
+		Description: "Ask the user 1–4 questions and wait for their answers. Provide up to 8 options per question, or omit options for an open question. Custom text answers are always allowed. Recommended must match an option. Its own interactive handler collects answers; the host automatically handles any normalized require_approval label. Repository Claude settings do not control this tool. Diagnose actual errors before claiming it is blocked. If input is required or cancelled, stop and wait for user feedback; do not guess or repeat the call this turn.",
 		Permission:  tool.PermAllow,
 		Effects:     []tool.Effect{tool.EffectScratchWrite},
 		Parameters: map[string]any{
@@ -119,6 +119,10 @@ func newUserQuestionTool(o *Orchestrator) *tool.Definition {
 				if err := validateUserAnswers(questions, result.Answers); err != nil {
 					return nil, fmt.Errorf("%s: invalid handler result: %w", AskUserQuestionToolName, err)
 				}
+				if result.Message != "" {
+					result.Message += "\n"
+				}
+				result.Message += "Answers received through the interactive handler. The host auto-allows this built-in tool; any require_approval metadata is internal routing, with no separate permission confirmation."
 				return result, nil
 			default:
 				return nil, fmt.Errorf("%s: invalid handler status %q", AskUserQuestionToolName, result.Status)

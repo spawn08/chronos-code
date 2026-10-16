@@ -102,15 +102,17 @@ func newTestAppModelWith(t *testing.T, configure func(*config.Config)) *appModel
 	})
 
 	ta := newComposer()
+	// Startup announcements have dedicated tests; keep component fixtures empty.
 	return &appModel{
-		orch:           orch,
-		ctx:            context.Background(),
-		cancel:         func() {},
-		input:          ta,
-		history:        NewHistory(),
-		clipboardRead:  func() (string, error) { return "", fmt.Errorf("unexpected clipboard read") },
-		clipboardWrite: func(string) error { return fmt.Errorf("unexpected clipboard write") },
-		mouseCapture:   true,
+		orch:             orch,
+		ctx:              context.Background(),
+		cancel:           func() {},
+		input:            ta,
+		history:          NewHistory(),
+		announcedSession: orch.CurrentSessionID(),
+		clipboardRead:    func() (string, error) { return "", fmt.Errorf("unexpected clipboard read") },
+		clipboardWrite:   func(string) error { return fmt.Errorf("unexpected clipboard write") },
+		mouseCapture:     true,
 	}
 }
 

@@ -464,6 +464,8 @@ type appModel struct {
 	headerCacheWidth   int
 	headerCacheAgent   string
 	headerCacheDir     string
+	headerCacheSession string
+	announcedSession   string
 
 	// liveModels holds provider model lists fetched from vendor APIs (azure
 	// deployments in particular) so /model completions can offer them.
@@ -535,7 +537,7 @@ func RunTUI(orch *orchestrator.Orchestrator, stream bool) error {
 	defer orch.SetDirectoryApprovalHandler(nil)
 
 	_, err = p.Run()
-	return err
+	return errors.Join(err, writeSessionResumeHint(os.Stdout, orch.CurrentSessionID()))
 }
 
 func newComposer() textarea.Model {
@@ -604,6 +606,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.viewport.SetWidth(contentWidth)
 		}
+		m.announceSession()
 		m.refreshPrompt()
 		m.resizeViewport()
 		m.refreshViewportNow()
@@ -783,6 +786,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case operationalSnapshotMsg:
 		m.operational = msg.snapshot
+		if m.announceSession() {
+			m.refreshViewport()
+		}
 		if m.inspection != nil {
 			m.inspection.resize(m.width, m.inspectionHeight())
 		}
@@ -2574,6 +2580,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		m.queuedMessages = nil
 		m.statusMsg = "new session started"
 		m.followOutput = true
+		m.announceSession()
 	case "/copy":
 		content, okStatus, err := m.copyText(arg)
 		if err != nil {
@@ -2613,7 +2620,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 		if arg == "list" {
 			return m, m.openSessionPicker()
 		}
-		m.appendSystem("current session: " + m.orch.CurrentSessionID() + "\n/session list opens searchable sessions; /resume continues the latest.")
+		m.appendSystem(sessionResumeHint(m.orch.CurrentSessionID()) + "\n/session list opens searchable sessions; /resume continues the latest.")
 	case "/memory":
 		store := m.orch.MemoryStore()
 		if store == nil {
@@ -2677,6 +2684,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.appendSystem("resumed session " + id)
+		m.announceSession()
 	case "/compact":
 		if m.sending {
 			m.appendError(fmt.Errorf("cannot compact while a response is in progress"))
@@ -4162,16 +4170,25 @@ func (m *appModel) renderHeaderBar() string {
 	if m.width <= 0 {
 		return ""
 	}
-	agentID := ""
+	agentID, sessionID := "", ""
 	if m.orch != nil {
 		agentID = m.orch.ActiveID()
+		sessionID = m.orch.CurrentSessionID()
 	}
-	if m.headerCache != "" && m.headerCacheWidth == m.width && m.headerCacheAgent == agentID && m.headerCacheDir == m.workDir {
+	if m.headerCache != "" && m.headerCacheWidth == m.width && m.headerCacheAgent == agentID && m.headerCacheDir == m.workDir && m.headerCacheSession == sessionID {
 		return m.headerCache
 	}
 	left := " ◆ chronos-code "
 	if m.orch != nil && m.orch.ActiveID() != m.orch.PrimaryID() {
 		left = " ◆ chronos-code · @" + m.orch.ActiveID() + " "
+	}
+	if sessionID != "" {
+		label := "· session "
+		available := m.width - lipgloss.Width(left) - lipgloss.Width(label) - 1
+		if available > 0 {
+			display := strings.Join(strings.Fields(ansi.Strip(sessionID)), " ")
+			left += label + ansi.Truncate(display, available, "…") + " "
+		}
 	}
 	right := ""
 	if m.workDir != "" {
@@ -4185,7 +4202,7 @@ func (m *appModel) renderHeaderBar() string {
 	}
 	if lipgloss.Width(left) >= m.width {
 		out := styleHeaderBar.Render(truncateToWidth(left, m.width))
-		m.storeHeaderCache(agentID, out)
+		m.storeHeaderCache(agentID, sessionID, out)
 		return out
 	}
 	right = truncateToWidth(right, m.width-lipgloss.Width(left))
@@ -4194,15 +4211,16 @@ func (m *appModel) renderHeaderBar() string {
 		gap = 0
 	}
 	out := styleHeaderBar.Render(left + strings.Repeat(" ", gap) + right)
-	m.storeHeaderCache(agentID, out)
+	m.storeHeaderCache(agentID, sessionID, out)
 	return out
 }
 
-func (m *appModel) storeHeaderCache(agentID, rendered string) {
+func (m *appModel) storeHeaderCache(agentID, sessionID, rendered string) {
 	m.headerCache = rendered
 	m.headerCacheWidth = m.width
 	m.headerCacheAgent = agentID
 	m.headerCacheDir = m.workDir
+	m.headerCacheSession = sessionID
 }
 
 func (m *appModel) displayAgentName() string {

@@ -286,6 +286,7 @@ Restart after changing these. `memory.enabled: false` stops both persistence and
 | `/think` | Toggle native thinking |
 | `/context` | Context sources, counts, budgets, and omission reasons (never memory bodies or secrets) |
 | `/resume` | Continue the latest session (`--resume <id>` from the CLI) |
+| `/session` · `/session list` | Show the full session ID and resume command, or browse saved sessions |
 | `/compact` | Summarize history |
 | `/rewind` | Undo the last `file_write` |
 | `/plan on` · `/plan off` | Plan read-only; approve the plan (`y`, or `a` to auto-accept edits) and implementation starts automatically. `--plan-mode` starts in plan mode; headless runs auto-approve |
@@ -293,6 +294,8 @@ Restart after changing these. `memory.enabled: false` stops both persistence and
 | `/copy` · `Ctrl+Y` · `Ctrl+Shift+C` | Copy the last reply (`/copy visible`, `/copy all`, `/copy code [n]`) |
 | `Ctrl+O` | Expand collapsed tool calls |
 | `/mouse` | Toggle between wheel scrolling and unshifted drag-select |
+
+**Session resume:** The TUI prints the full session ID and `chronos-code --resume <id>` at startup, after changing sessions, and after returning to your shell. The header shows the current ID, shortened when space is limited. `/session` shows the full details at any time.
 
 **Working status:** The footer shows an animated indicator, the current activity or tool, and elapsed time throughout a run. Question and permission dialogs show a waiting state. Tool details reuse cached rendering, and long inline plans show a bounded preview with the full content available through `/inspect`. A scoped-instruction deferral appears as **loading project instructions** while the harness prepares the next model call and retry.
 
