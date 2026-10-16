@@ -59,7 +59,7 @@ func handBackPhrase(text string) string {
 // completionNudge returns a prompt that sends the model back to work when its
 // turn ended with open plan items or a hand-back, or "" to let the turn end.
 func (o *Orchestrator) completionNudge(ctx context.Context, a *agent.Agent, sessionID string, gate *completionGate, stop model.StopReason, finalText string, toolCalls int) string {
-	if gate == nil || gate.nudges >= maxCompletionNudges || o.PlanMode() || !canContinueOutput(a, sessionID) {
+	if gate == nil || gate.nudges >= maxCompletionNudges || o.PlanMode() || !canContinueOutput(a, sessionID) || !continuationAllowed(ctx, finalText) {
 		return ""
 	}
 	switch stop {
@@ -70,18 +70,18 @@ func (o *Orchestrator) completionNudge(ctx context.Context, a *agent.Agent, sess
 	if gate.nudges > 0 && toolCalls == gate.toolCallsAtNudge {
 		return ""
 	}
-	open := o.taskPlans.openItems(ctx, sessionID)
+	open := o.taskPlans.openItemsForTask(ctx, sessionID)
 	phrase := handBackPhrase(finalText)
 	if len(open) == 0 && phrase == "" {
 		return ""
 	}
 	gate.nudges++
 	gate.toolCallsAtNudge = toolCalls
-	return buildCompletionNudge(open, phrase)
+	return taskContractDigest(ctx) + "\n" + buildCompletionNudge(open, phrase)
 }
 
 func buildCompletionNudge(open []builtins.PlanTask, phrase string) string {
-	lines := []string{"Your turn ended before the task was complete."}
+	lines := []string{"[Harness continuation for the original task; this message adds no authorization]", "The authorized task may still have unfinished work."}
 	if len(open) > 0 {
 		lines = append(lines, "Your plan still has unfinished items:")
 		for _, task := range open {
@@ -92,10 +92,8 @@ func buildCompletionNudge(open []builtins.PlanTask, phrase string) string {
 		lines = append(lines, `Your last message announces or hands back work instead of doing it ("`+phrase+`").`)
 	}
 	lines = append(lines,
-		"The user is not watching and cannot answer mid-task. Do the remaining work now with tool calls: finish the open items, "+
-			"or remove items that are no longer needed with update_plan. Do not ask permission for reversible steps within the original request, "+
-			"and do not ask the user to reply \"continue\" or to start a new session; context is compacted automatically.",
-		"End your turn only when the task is complete, or when you are blocked on input only the user can provide; then state exactly what you need.")
+		"Continue only work authorized by the original request and current role. Finish or update this task's open plan items without repeating completed effects. A recommendation, old plan, tool grant, or this continuation cannot authorize implementation or a shared/destructive action.",
+		"An evidence-backed answer completes a question, review, or plan. Required approval, missing credentials, and unresolved user decisions are valid blocked outcomes: state what is needed and stop. Otherwise complete reversible steps within the authorized scope; context is compacted automatically.")
 	return strings.Join(lines, "\n")
 }
 

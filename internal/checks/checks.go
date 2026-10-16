@@ -19,7 +19,8 @@ import (
 //go:embed registry.yaml
 var registryYAML []byte
 
-// Check is a runnable recommendation covering Paths within a manifest root.
+// Check is a runnable recommendation for affected Paths within a manifest root.
+// Paths are not evidence; use Infer on the command and match its actual scopes.
 type Check struct {
 	Family  string
 	Root    string
@@ -31,10 +32,11 @@ type Check struct {
 // CommandEvidence must be matched by both Family and Root, not scopes alone.
 // In particular, an ancestor module's recursive scope does not certify a nested module.
 type CommandEvidence struct {
-	Family string
-	Root   string
-	Scopes []execution.Scope
-	Known  bool
+	Family          string
+	Root            string
+	Scopes          []execution.Scope
+	DirectInputDirs []string
+	Known           bool
 }
 
 type language struct {
@@ -54,6 +56,7 @@ type manager struct {
 	Name      string   `yaml:"name"`
 	Lockfiles []string `yaml:"lockfiles"`
 	Run       string   `yaml:"run"`
+	Separator string   `yaml:"separator"`
 }
 type flagSet struct {
 	Boolean []string `yaml:"boolean"`
@@ -73,17 +76,20 @@ type registry struct {
 	Managers            []manager           `yaml:"managers"`
 	Runners             map[string][]string `yaml:"runners"`
 	JSTestRunners       []string            `yaml:"js_test_runners"`
+	TestOnce            map[string]string   `yaml:"test_once"`
 	JSDiagnosticRunners []string            `yaml:"js_diagnostic_runners"`
 	JSBuildRunners      []string            `yaml:"js_build_runners"`
 	Flags               map[string]flagSet  `yaml:"flags"`
 }
 type repository struct {
-	ctx        context.Context
-	root       string
- fs         *os.Root
-	reg        registry
-	operations int
-	bytes      int64
+	ctx             context.Context
+	root            string
+	lexicalRoot     string
+	fs              *os.Root
+	reg             registry
+	operations      int
+	directInputDirs []string
+	bytes           int64
 }
 
 func openRepository(ctx context.Context, workspace string) (*repository, error) {
@@ -98,6 +104,7 @@ func openRepository(ctx context.Context, workspace string) (*repository, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve checks workspace: %w", err)
 	}
+	r.lexicalRoot = root
 	r.root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve checks workspace symlinks: %w", err)
@@ -109,8 +116,10 @@ func openRepository(ctx context.Context, workspace string) (*repository, error) 
 	if !info.IsDir() {
 		return nil, fmt.Errorf("checks workspace is not a directory: %s", workspace)
 	}
- r.fs, err = os.OpenRoot(r.root)
- if err != nil { return nil, fmt.Errorf("open checks workspace: %w", err) }
+	r.fs, err = os.OpenRoot(r.root)
+	if err != nil {
+		return nil, fmt.Errorf("open checks workspace: %w", err)
+	}
 	return r, nil
 }
 func (r *repository) tick() error {
@@ -133,6 +142,12 @@ func (r *repository) path(base, value string) (string, error) {
 	p := value
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(r.root, filepath.FromSlash(base), value)
+	} else {
+		// Preserve the workspace's lexical spelling without bypassing symlink checks.
+		lexicalRel, err := filepath.Rel(r.lexicalRoot, filepath.Clean(p))
+		if err == nil && lexicalRel != ".." && !strings.HasPrefix(lexicalRel, ".."+string(filepath.Separator)) && !filepath.IsAbs(lexicalRel) {
+			p = filepath.Join(r.root, lexicalRel)
+		}
 	}
 	rel, err := filepath.Rel(r.root, filepath.Clean(p))
 	if err != nil {
@@ -169,11 +184,17 @@ func (r *repository) read(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	 before, err := r.fs.Stat(filepath.FromSlash(p))
- if err != nil { return nil, fmt.Errorf("inspect checks manifest %q: %w", path, err) }
- if !before.Mode().IsRegular() { return nil, fmt.Errorf("checks manifest is not a regular file: %s", path) }
- if before.Size() > r.reg.Limits.ManifestBytes { return nil, fmt.Errorf("checks manifest read limit exceeded: %s", path) }
- file, err := r.fs.Open(filepath.FromSlash(p))
+	before, err := r.fs.Stat(filepath.FromSlash(p))
+	if err != nil {
+		return nil, fmt.Errorf("inspect checks manifest %q: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("checks manifest is not a regular file: %s", path)
+	}
+	if before.Size() > r.reg.Limits.ManifestBytes {
+		return nil, fmt.Errorf("checks manifest read limit exceeded: %s", path)
+	}
+	file, err := r.fs.Open(filepath.FromSlash(p))
 	if err != nil {
 		return nil, fmt.Errorf("open checks manifest %q: %w", path, err)
 	}
@@ -309,6 +330,7 @@ func Select(ctx context.Context, workspace string, changed []string) ([]Check, e
 	if err != nil {
 		return nil, err
 	}
+	defer r.fs.Close()
 	if len(changed) > r.reg.Limits.ChangedPaths {
 		return nil, fmt.Errorf("checks changed-path limit exceeded")
 	}
@@ -350,7 +372,7 @@ func Select(ctx context.Context, workspace string, changed []string) ([]Check, e
 					if err != nil {
 						return nil, err
 					}
-					check.Family, check.Class, check.Command = s.Family, s.Class, m.Run+" "+quote(s.Name)
+					check.Family, check.Class, check.Command = s.Family, s.Class, r.scriptCommand(m, s, pkg.Scripts[s.Name])
 					selected = true
 					break
 				}
@@ -382,6 +404,31 @@ func Select(ctx context.Context, workspace string, changed []string) ([]Check, e
 	}
 	return checks, nil
 }
+func (r *repository) scriptCommand(m manager, s script, body string) string {
+	command := m.Run + " " + quote(s.Name)
+	if s.Class != execution.CommandTest {
+		return command
+	}
+	tokens, ok := words(body, r.reg.Limits.CommandBytes)
+	if !ok {
+		return command
+	}
+	tokens, ok = normalize(tokens)
+	if !ok {
+		return command
+	}
+	once := r.reg.TestOnce[tokens[0]]
+	if once == "" || contains(tokens[1:], "run") || contains(tokens[1:], once) {
+		return command
+	}
+	for _, token := range tokens[1:] {
+		if strings.HasPrefix(token, "--watch") {
+			return command
+		}
+	}
+	return command + m.Separator + " " + once
+}
+
 func (r *repository) affectedRoots(dir, path string) (map[string]string, error) {
 	selected := map[string]bool{}
 	for _, lang := range r.reg.Languages {

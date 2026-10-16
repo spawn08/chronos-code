@@ -13,6 +13,7 @@ import (
 
 	"github.com/spawn08/chronos/sdk/agent"
 
+	"github.com/spawn08/chronos-code/internal/checks"
 	"github.com/spawn08/chronos-code/internal/execution"
 )
 
@@ -101,19 +102,14 @@ func wrapVerificationEvidence(a *agent.Agent) {
 			case "await_shell":
 				if exited, id := backgroundExited(result); exited {
 					if shellArgs, started, revision, ok := runtime.finishBackground(id); ok {
-						// Record only its check results. Staleness follows
-						// ledger order, so a mutation appended now would
-						// stale checks that ran while it was in the
-						// background; its changes were recorded by the
-						// mutation entry written when it started.
+						// The exit-time source scan precedes acceptance of checks.
 						if recordErr := recordBackgroundChecks(runtime, shellArgs, result, started, completedAt, revision); recordErr != nil {
 							return result, errors.Join(err, recordErr)
 						}
 					}
 				}
 			case "kill_shell":
-				// A killed command produced no check result, and any change
-				// it made was already in place before later checks ran.
+				// Killing adds no check; the source scan observes any late writes.
 				if exited, id := backgroundExited(result); exited {
 					runtime.finishBackground(id)
 				}
@@ -179,19 +175,17 @@ func recordShellEvidence(runtime *taskRuntime, ctx context.Context, args map[str
 		terminal = execution.TerminalSpawnFailed
 	}
 	mutated := false
-	if len(startRevision) > 0 && runtime.ledger.Revision() != startRevision[0] && verificationClass(classifyShellCommand(command)) {
-		// A passing exit status cannot certify inputs changed while the check ran.
-		terminal = execution.TerminalCancelled
-	}
-	for _, step := range planShellEvidence(command) {
+	for _, step := range planShellEvidenceAt(command, shellDirectory(runtime.workspaceRoot, args)) {
 		if step.mutation {
-			if _, err := runtime.recordWorkspaceMutation(step.command, completedAt); err != nil {
-				return err
+			if !runtime.sourceObservationsEnabled() {
+				if _, err := runtime.recordWorkspaceMutation(step.command, completedAt); err != nil {
+					return err
+				}
 			}
 			mutated = true
 			continue
 		}
-		if _, err := runtime.recordCommand(step.command, step.class, exitCode, terminal, nil, execution.ProvenanceRuntime, startedAt, completedAt); err != nil {
+		if _, err := runtime.recordCommandEvidenceAt(step.directory, step.command, step.scopeCommand, step.class, exitCode, terminal, nil, execution.ProvenanceRuntime, startedAt, completedAt, startRevision...); err != nil {
 			return err
 		}
 	}
@@ -209,8 +203,10 @@ func recordBackgroundMutations(runtime *taskRuntime, args map[string]any, at tim
 	mutated := false
 	for _, step := range planShellEvidence(command) {
 		if step.mutation {
-			if _, err := runtime.recordWorkspaceMutation(step.command, at); err != nil {
-				return err
+			if !runtime.sourceObservationsEnabled() {
+				if _, err := runtime.recordWorkspaceMutation(step.command, at); err != nil {
+					return err
+				}
 			}
 			mutated = true
 		}
@@ -232,14 +228,11 @@ func recordBackgroundChecks(runtime *taskRuntime, args map[string]any, result an
 		}
 	}
 	terminal := execution.TerminalExited
-	if runtime.ledger.Revision() != revision {
-		terminal = execution.TerminalCancelled
-	}
-	for _, step := range planShellEvidence(command) {
+	for _, step := range planShellEvidenceAt(command, shellDirectory(runtime.workspaceRoot, args)) {
 		if step.mutation {
 			continue
 		}
-		if _, err := runtime.recordCommand(step.command, step.class, exitCode, terminal, nil, execution.ProvenanceRuntime, startedAt, completedAt); err != nil {
+		if _, err := runtime.recordCommandEvidenceAt(step.directory, step.command, step.scopeCommand, step.class, exitCode, terminal, nil, execution.ProvenanceRuntime, startedAt, completedAt, revision); err != nil {
 			return err
 		}
 	}
@@ -250,9 +243,11 @@ func recordBackgroundChecks(runtime *taskRuntime, args map[string]any, result an
 // either a workspace mutation or a verification check whose pass/fail is
 // given by the command's exit status.
 type shellStep struct {
-	mutation bool
-	command  string
-	class    execution.CommandClass
+	mutation     bool
+	command      string
+	scopeCommand string
+	class        execution.CommandClass
+	directory    string
 }
 
 // shellSegment is one simple command and the operator that follows it.
@@ -271,6 +266,10 @@ type shellSegment struct {
 // another command. Unparseable commands (subshells, heredocs, background
 // jobs) stay conservative: one mutation.
 func planShellEvidence(command string) []shellStep {
+	return planShellEvidenceAt(command, "")
+}
+
+func planShellEvidenceAt(command, directory string) []shellStep {
 	segments, ok := splitShell(command)
 	if !ok || len(segments) == 0 {
 		return []shellStep{{mutation: true, command: command}}
@@ -300,6 +299,19 @@ func planShellEvidence(command string) []shellStep {
 		exitOwned := allAnd || i == len(pipelines)-1
 		for j, segment := range p.segments {
 			class := classifySimpleCommand(segment.text)
+			normalized := normalizeShellCommand(segment.text)
+			words, literal := literalShellWords(normalized)
+			fields := strings.Fields(normalized)
+			if len(fields) > 0 && fields[0] == "cd" {
+				if !literal || len(words) != 2 || len(p.segments) != 1 || p.op != "&&" || words[1].value == "-" {
+					return []shellStep{{mutation: true, command: command}}
+				}
+				if filepath.IsAbs(words[1].value) {
+					directory = filepath.Clean(words[1].value)
+				} else {
+					directory = filepath.Join(directory, words[1].value)
+				}
+			}
 			if segment.writesFile {
 				steps = append(steps, shellStep{mutation: true, command: segment.text})
 			}
@@ -309,7 +321,7 @@ func planShellEvidence(command string) []shellStep {
 			case j > 0 && !readOnlyFilter(class):
 				steps = append(steps, shellStep{mutation: true, command: segment.text})
 			case j == 0 && len(p.segments) == 1 && exitOwned && verificationClass(class):
-				steps = append(steps, shellStep{command: normalizeShellCommand(segment.text), class: class})
+				steps = append(steps, shellStep{command: normalized, scopeCommand: segment.text, class: class, directory: directory})
 			}
 		}
 	}
@@ -352,7 +364,11 @@ func classifyShellCommand(command string) execution.CommandClass {
 
 // classifySimpleCommand classifies one command without shell operators.
 func classifySimpleCommand(command string) execution.CommandClass {
-	command = strings.ToLower(normalizeShellCommand(command))
+	command = normalizeShellCommand(command)
+	if class, known := checks.ClassifyPackageCommand(command); known {
+		return class
+	}
+	command = strings.ToLower(command)
 	if command == "" {
 		return execution.CommandUnknown
 	}
@@ -361,12 +377,12 @@ func classifySimpleCommand(command string) execution.CommandClass {
 			return execution.CommandTest
 		}
 	}
-	for _, prefix := range []string{"go build", "npm run build", "bun run build", "cargo build", "mvn package", "make build", "yarn build", "pnpm build", "cargo check"} {
+	for _, prefix := range []string{"go build", "npm run build", "bun run build", "cargo build", "mvn package", "make build", "yarn build", "pnpm build"} {
 		if hasCommandPrefix(command, prefix) {
 			return execution.CommandBuild
 		}
 	}
-	for _, prefix := range []string{"go vet", "golangci-lint", "npm run lint", "bun run lint", "tsc", "make lint", "cargo clippy", "ruff check", "eslint", "staticcheck"} {
+	for _, prefix := range []string{"go vet", "cargo check", "golangci-lint", "npm run lint", "bun run lint", "tsc", "make lint", "cargo clippy", "ruff check", "eslint", "staticcheck"} {
 		if hasCommandPrefix(command, prefix) {
 			return execution.CommandDiagnostics
 		}
@@ -418,20 +434,23 @@ func hasCommandPrefix(command, prefix string) bool {
 }
 
 // normalizeShellCommand trims whitespace, leading environment assignments,
-// and a `time` prefix, which do not change what a command verifies.
+// and a `time` prefix for display. Coverage inference retains the raw command.
 func normalizeShellCommand(command string) string {
-	fields := strings.Fields(command)
-	for len(fields) > 0 {
-		field := fields[0]
-		if eq := strings.IndexByte(field, '='); eq > 0 && validEnvName(field[:eq]) {
-			fields = fields[1:]
-			continue
-		}
-		if field == "time" {
-			fields = fields[1:]
+	words, ok := literalShellWords(command)
+	if !ok {
+		return strings.TrimSpace(command)
+	}
+	for len(words) > 0 {
+		field := words[0].value
+		if eq := strings.IndexByte(field, '='); eq > 0 && validEnvName(field[:eq]) || field == "time" {
+			words = words[1:]
 			continue
 		}
 		break
+	}
+	fields := make([]string, len(words))
+	for i, word := range words {
+		fields[i] = word.raw
 	}
 	return strings.Join(fields, " ")
 }

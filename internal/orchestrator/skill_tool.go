@@ -32,9 +32,9 @@ func skillTool(a *agent.Agent, catalog []*skills.Skill) *tool.Definition {
 			},
 			"required": []string{"name"},
 		},
-		Handler: func(_ context.Context, args map[string]any) (any, error) {
+		Handler: func(ctx context.Context, args map[string]any) (any, error) {
 			name, _ := args["name"].(string)
-			available := skills.Available(catalog, skillCapabilityManifest(a))
+			available := skills.Available(catalog, effectiveCapabilityManifest(ctx, a))
 			selected := skills.Find(available, name)
 			if selected == nil {
 				names := make([]string, len(available))

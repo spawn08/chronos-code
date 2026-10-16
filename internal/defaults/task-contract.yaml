@@ -1,0 +1,16 @@
+# Conservative continuation hints; these never grant tool or effect permission.
+restricted_patterns:
+  - '(?i)\bwithout\s+(editing|modifying|changing|writing|applying|executing)\b'
+  - '(?i)\b(do not|don.t|never)\s+(edit|modify|implement|apply|change|write|execute)\b'
+  - '(?i)\b(read.only|review.only|plan.only|diagnos(is|e).only)\b'
+answer_patterns:
+  - '(?i)^\s*(please\s+)?((can|could|would)\s+(you|we)\s+)?(please\s+)?(review|explain|describe|analy[sz]e|investigate|diagnose|plan|design|compare|assess|audit|research|find|locate|list|summari[sz]e)\b'
+  - '(?i)^\s*(please\s+)?((can|could|would)\s+you\s+)?(write|build|create|produce|prepare)\s+(an?\s+|the\s+)?(implementation\s+)?(plan|review|analysis|explanation|recommendations)\b'
+  - '(?i)^\s*(what|why|how|where|when|which|is|are|does|do|has|have|anything)\b'
+action_patterns:
+  - '(?i)^\s*(please\s+)?((can|could|would)\s+you\s+|i\s+(want|need|would like)\s+(you\s+)?to\s+|let.s\s+)?(please\s+)?(implement|fix|build|create|add|update|change|modify|edit|refactor|rename|remove|delete|run|test|verify|execute|finish|continue|apply|write|start)\b'
+  - '(?i)^\s*(ok(ay)?[!,]?\s+)?(go\s+ahead|proceed)\b'
+  - '(?i)\b(and|then)\s+(implement|fix|apply|edit|write|save|create|update)\b'
+pending_decision_patterns:
+  - '(?i)\b(awaiting|waiting for|need|needs|require|requires|required)\b[^.!?\n]{0,100}\b(approval|authorization|permission|credentials?|user input|your decision)\b'
+  - '(?i)\b(blocked on|permission denied|approval pending|cannot proceed without)\b'

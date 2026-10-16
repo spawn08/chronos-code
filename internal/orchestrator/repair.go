@@ -18,13 +18,6 @@ import (
 )
 
 func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessionID string, request ExecutionRequest, classification router.Classification, runtime *taskRuntime, response *model.ChatResponse) (*model.ChatResponse, verification.Decision, execution.StopReason, error) {
-	if request.DisableRepair {
-		decision := assessRuntimeVerification(request, classification, runtime)
-		if decision.Allowed {
-			return response, decision, execution.StopSuccess, nil
-		}
-		return response, decision, execution.StopVerificationFailed, nil
-	}
 	if response != nil && response.StopReason == model.StopReasonPaused {
 		// A no-progress pause awaits the user; repairing would resume it.
 		return response, assessRuntimeVerification(request, classification, runtime), pausedStopReason(ctx), nil
@@ -32,6 +25,19 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 	// A refusal is not a completed task, and repairing would re-ask it.
 	if filtered(response) {
 		return response, assessRuntimeVerification(request, classification, runtime), execution.StopContentFiltered, nil
+	}
+	_, hasContract := taskContractFromContext(ctx)
+	finalText := ""
+	if response != nil {
+		finalText = response.Content
+	}
+	if request.DisableRepair || hasContract && !continuationAllowed(ctx, finalText) {
+		decision := assessRuntimeVerification(request, classification, runtime)
+		if decision.Allowed {
+			response = noteUnverifiedResponse(response, decision)
+			return response, decision, execution.StopSuccess, nil
+		}
+		return response, decision, execution.StopVerificationFailed, nil
 	}
 	gate := &completionGate{}
 	response, err := o.nudgeBlocking(ctx, a, sessionID, gate, runtime, response)
@@ -47,9 +53,16 @@ func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessi
 	decision := assessRuntimeVerification(request, classification, runtime)
 	seen := make(map[string]struct{})
 	for decision.Disagreement {
+		if response != nil && hasContract && !continuationAllowed(ctx, response.Content) {
+			if decision.Allowed {
+				return noteUnverifiedResponse(response, decision), decision, execution.StopSuccess, nil
+			}
+			return response, decision, execution.StopVerificationFailed, nil
+		}
 		fingerprint := verificationFailureFingerprint(decision)
 		if _, repeated := seen[fingerprint]; repeated {
 			if decision.Allowed {
+				response = noteUnverifiedResponse(response, decision)
 				return response, decision, execution.StopSuccess, nil
 			}
 			return response, decision, execution.StopRepeatedFailure, nil
@@ -115,7 +128,7 @@ func (o *Orchestrator) nudgeBlocking(ctx context.Context, a *agent.Agent, sessio
 }
 
 func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) string {
-	lines := []string{"Verification did not support completion. Repair only the unmet obligations below; do not replay the original task or repeat completed side effects.",
+	lines := []string{taskContractDigest(runtime.observationContext()), "Verification did not support completion. Repair only the unmet obligations below; do not replay the original task or repeat completed side effects.",
 		"If a requested deliverable is still missing or incomplete, finish it first, then run the checks."}
 	paths := make(map[string]struct{})
 	for _, obligation := range decision.Obligations {
@@ -172,6 +185,9 @@ func unverifiedCompletionNote(decision verification.Decision) string {
 
 // obligationAction tells the model which command satisfies an obligation.
 func obligationAction(obligation verification.Obligation, changed []string) string {
+	if obligation.Kind == verification.KindQuiescence {
+		return fmt.Sprintf("await the existing shell %s with `await_shell`, then rerun checks affected by its final writes", strings.TrimPrefix(obligation.ID, "background:"))
+	}
 	if obligation.Command != "" {
 		return fmt.Sprintf("run `%s`", obligation.Command)
 	}
@@ -257,4 +273,13 @@ func remainingInt64(limit, used int64) int64 {
 		return 0
 	}
 	return limit - used
+}
+
+func noteUnverifiedResponse(response *model.ChatResponse, decision verification.Decision) *model.ChatResponse {
+	if response == nil || !decision.Disagreement {
+		return response
+	}
+	noted := *response
+	noted.Content += unverifiedCompletionNote(decision)
+	return &noted
 }

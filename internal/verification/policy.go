@@ -53,14 +53,14 @@ type Input struct {
 
 // Obligation identifies one check and its current evidence-derived state.
 type Obligation struct {
-	ID           string
-	Kind         Kind
-	Command      string
-	CommandClass execution.CommandClass
+	ID            string
+	Kind          Kind
+	Command       string
+	CommandClass  execution.CommandClass
 	CommandFamily string
-	CheckRoot string
-	Paths        []string
-	Status       Status
+	CheckRoot     string
+	Paths         []string
+	Status        Status
 }
 
 // Decision describes whether the policy agrees with a caller's proposed
@@ -125,6 +125,7 @@ func Reduce(obligations []Obligation, events []execution.Event) []Obligation {
 	for i := range current {
 		obligation := &current[i]
 		statuses := make([]Status, len(obligation.Paths))
+		evidence := make([]execution.Event, len(obligation.Paths))
 		for j := range statuses {
 			statuses[j] = StatusPending
 		}
@@ -132,12 +133,16 @@ func Reduce(obligations []Obligation, events []execution.Event) []Obligation {
 			for j, path := range obligation.Paths {
 				switch event.Type {
 				case execution.EventWrite:
-					if overlap([]string{path}, event.Paths) && statuses[j] == StatusSatisfied {
+					if statuses[j] == StatusSatisfied && (overlap([]string{path}, event.Paths) || execution.VerificationInputsOverlap(evidence[j], event)) {
 						statuses[j] = StatusStale
 					}
 				case execution.EventVerification:
 					if covers(event.Paths, path) && matches(*obligation, event) {
 						statuses[j] = StatusFailed
+						if event.TerminalState == execution.TerminalCancelled {
+							statuses[j] = StatusCancelled
+						}
+						evidence[j] = event
 						if event.Passed {
 							statuses[j] = StatusSatisfied
 						}
@@ -223,7 +228,7 @@ func matches(obligation Obligation, event execution.Event) bool {
 func containsCode(paths []string) bool {
 	for _, path := range paths {
 		switch strings.ToLower(filepath.Ext(path)) {
-		case ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx":
+		case ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx", ".css", ".scss", ".sass", ".less", ".html", ".htm", ".vue", ".svelte", ".proto", ".graphql", ".gql":
 			return true
 		}
 	}

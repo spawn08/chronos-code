@@ -68,7 +68,7 @@ func TestExecuteNudgesHandBackUntilTextOnlyReply(t *testing.T) {
 				t.Fatalf("model calls=%d, want 2", provider.calls)
 			}
 			nudge := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-			if nudge.Role != model.RoleUser || !strings.Contains(nudge.Content, "next is") || !strings.Contains(nudge.Content, "not watching") {
+			if nudge.Role != model.RoleUser || !strings.Contains(nudge.Content, "next is") || !strings.Contains(nudge.Content, "Authorized outcome: build the site") || !strings.Contains(nudge.Content, "adds no authorization") {
 				t.Fatalf("nudge message=%+v", nudge)
 			}
 			if !strings.Contains(response.Content, "Next is the stylesheet") || !strings.Contains(response.Content, "Shall I proceed?") {
@@ -86,7 +86,11 @@ func TestExecuteNudgesOpenPlanItems(t *testing.T) {
 	a := newExecutionTestAgent("coder", provider)
 	a.Storage = storagememory.New()
 	plans := newTaskPlanStore()
-	ctx := storage.WithSession(context.Background(), "plan-session")
+	runtime, err := newTaskRuntime("site-task", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := withTaskRuntime(storage.WithSession(context.Background(), "plan-session"), runtime)
 	if err := plans.Save(ctx, &builtins.Plan{Tasks: []builtins.PlanTask{
 		{Content: "layout", Status: builtins.TaskCompleted},
 		{Content: "write globals.css", Status: builtins.TaskInProgress},
@@ -96,7 +100,7 @@ func TestExecuteNudgesOpenPlanItems(t *testing.T) {
 	orch := &Orchestrator{agents: map[string]*agent.Agent{"coder": a}, active: "coder", taskPlans: plans}
 	t.Cleanup(func() { _ = orch.Close() })
 
-	if _, err := executeTestTurn(context.Background(), orch, ExecutionRequest{Message: "build the site", SessionID: "plan-session"}); err != nil {
+	if _, err := executeTestTurn(context.Background(), orch, ExecutionRequest{Message: "build the site", SessionID: "plan-session", TaskID: "site-task"}); err != nil {
 		t.Fatal(err)
 	}
 	if provider.calls != 2 {
@@ -111,7 +115,7 @@ func TestExecuteNudgesOpenPlanItems(t *testing.T) {
 func TestCompletionNudgeBounds(t *testing.T) {
 	a := &agent.Agent{Storage: storagememory.New()}
 	orch := &Orchestrator{taskPlans: newTaskPlanStore()}
-	ctx := context.Background()
+	ctx := withTaskContract(context.Background(), TaskContract{Mode: TaskAction, Outcome: "write the tests"})
 	handBack := "Next, I'll write the tests."
 
 	gate := &completionGate{}

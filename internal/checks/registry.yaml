@@ -39,7 +39,8 @@ managers:
   - {name: pnpm, lockfiles: [pnpm-lock.yaml], run: 'pnpm run'}
   - {name: yarn, lockfiles: [yarn.lock], run: 'yarn run'}
   - {name: bun, lockfiles: [bun.lock, bun.lockb], run: 'bun run'}
-  - {name: npm, lockfiles: [package-lock.json, npm-shrinkwrap.json], run: 'npm run'}
+  - {name: npm, lockfiles: [package-lock.json, npm-shrinkwrap.json], run: 'npm run', separator: ' --'}
+test_once: {vitest: --run}
 runners:
   go: [go]
   python: [pytest, py.test, python, python3]

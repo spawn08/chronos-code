@@ -157,6 +157,8 @@ type ExecutionRequest struct {
 	RequestedAgent string
 	SessionID      string
 	TaskID         string
+	// Contract supplies trusted request-local completion guidance, not tool authorization.
+	Contract *TaskContract
 	// PPD supplies optional complexity and recursion metadata. Task kind and
 	// classifier-derived risk are always calculated from Message.
 	PPD           *router.PPDRequest
@@ -1687,7 +1689,10 @@ func setupSkills(cfg *config.Config, root string, agents map[string]*agent.Agent
 			if prev != nil {
 				msgs = append(msgs, prev(ctx)...)
 			}
-			listing, listed := skills.RenderCatalog(skills.Available(catalog, skillCapabilityManifest(a)), skillToolName)
+			if childPins, dynamic := dynamicChildSkillPins(ctx, catalog); dynamic {
+				return append(msgs, childPins...)
+			}
+			listing, listed := skills.RenderCatalog(skills.Available(catalog, effectiveCapabilityManifest(ctx, a)), skillToolName)
 			content := listing
 			if selected, _ := ctx.Value(explicitSkillKey{}).(*skills.Skill); selected != nil {
 				content = strings.TrimSpace(skills.Render([]*skills.Skill{selected}) + "\n\n" + listing)
@@ -2030,6 +2035,11 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	if !ok || a == nil {
 		return ExecutionResult{}, fmt.Errorf("agent %q not found", agentID)
 	}
+	contract, err := resolveTaskContract(request, agentID, o.PlanMode())
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	ctx = withTaskContract(ctx, contract)
 	ctx = o.applyResolvedModel(ctx, agentID, request.Message)
 	sessionID := request.SessionID
 	if sessionID == "" {
@@ -2098,6 +2108,7 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	streamHandedOff := false
 	defer func() {
 		if !streamHandedOff {
+			releaseScopedRuleState(storage.WithSession(ctx, sessionID), a)
 			o.finishOperationalExecution(result, err)
 		}
 	}()
@@ -2463,6 +2474,7 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 			held = nil
 		}
 		complete := func(decision verification.Decision, reason execution.StopReason, err error) {
+			releaseScopedRuleState(storage.WithSession(ctx, sessionID), a)
 			flushHeld()
 			result := ExecutionResult{Verification: decision, Budget: runtime.budget.Snapshot(), StopReason: reason}
 			populateRuntimeResult(&result, runtime)
@@ -2472,6 +2484,15 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 				Usage: result.Usage, CostMicrodollars: result.CostMicrodollars, Err: err,
 			}
 		}
+		reportNote := func(decision verification.Decision) {
+			if decision.Allowed && decision.Disagreement {
+				flushHeld()
+				select {
+				case assessed <- &model.ChatResponse{Role: model.RoleAssistant, Content: unverifiedCompletionNote(decision), Delta: true}:
+				case <-ctx.Done():
+				}
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -2479,12 +2500,27 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 				return
 			case response, ok := <-stream:
 				if !ok {
-					if request.DisableRepair {
+					if stop == model.StopReasonFilter || paused {
+						decision := assessRuntimeVerification(request, classification, runtime)
+						reason := execution.StopContentFiltered
+						if paused {
+							reason = pausedStopReason(ctx)
+						}
+						complete(decision, reason, nil)
+						return
+					}
+					if request.DisableRepair || !continuationAllowed(ctx, finalText.String()) {
 						decision := assessRuntimeVerification(request, classification, runtime)
 						if decision.Allowed {
+							reportNote(decision)
 							complete(decision, execution.StopSuccess, nil)
 						} else {
-							complete(decision, execution.StopVerificationFailed, nil)
+							terminal := &execution.TerminalError{Reason: execution.StopVerificationFailed, Err: fmt.Errorf("verification does not support successful completion")}
+							select {
+							case assessed <- &model.ChatResponse{Err: terminal}:
+							case <-ctx.Done():
+							}
+							complete(decision, execution.StopVerificationFailed, terminal)
 						}
 						return
 					}
@@ -2529,6 +2565,7 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 					fingerprint := verificationFailureFingerprint(decision)
 					if _, repeated := seen[fingerprint]; repeated {
 						if decision.Allowed {
+							reportNote(decision)
 							complete(decision, execution.StopSuccess, nil)
 							return
 						}
@@ -2633,11 +2670,14 @@ func assessRuntimeVerification(request ExecutionRequest, classification router.C
 		}
 	}
 	obligations := append([]verification.Obligation(nil), request.VerificationObligations...)
-	derived := verification.Derive(verification.Input{
-		TaskKind: string(classification.Kind), ChangedPaths: changedPaths,
-		TestCommands: mixedLanguageChecks(runtime, changedPaths),
-	})
+	derived, err := scopedCheckObligations(runtime, string(classification.Kind), changedPaths)
+	if err != nil {
+		return verification.Decision{Allowed: request.VerificationMode == verification.ModeReport, Disagreement: true, Obligations: []verification.Obligation{{ID: "check-selection-unavailable", Kind: verification.KindDiagnostics, Paths: []string{"."}, Status: verification.StatusFailed}}}
+	}
 	obligations = append(obligations, derived...)
+	if runtime != nil {
+		obligations = append(obligations, runtime.pendingBackgroundObligations()...)
+	}
 	if runtime != nil && runtime.refusesShell != nil {
 		// A check the security policy refuses can never produce evidence;
 		// requiring it only sends the model into a refused command.

@@ -107,6 +107,11 @@ func (h *workingContextHook) Before(ctx context.Context, evt *hooks.Event) error
 		if msg.Name == workingContextName {
 			continue
 		}
+		if msg.Name == "harness-scoped-rules" {
+			// Rule delivery gates file access; its bytes must reach the model intact.
+			messages = append(messages, msg)
+			continue
+		}
 		if msg.Uncached {
 			mutable = append(mutable, msg.Content)
 			continue

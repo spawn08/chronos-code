@@ -160,6 +160,9 @@ func TestVerificationObserverRecordsBackgroundShellAtExit(t *testing.T) {
 // A background server killed after a passing test must not stale the test.
 func TestVerificationObserverKilledBackgroundKeepsChecks(t *testing.T) {
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"scripts":{"test":"jest"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runtime, err := newTaskRuntime("task", root)
 	if err != nil {
 		t.Fatal(err)

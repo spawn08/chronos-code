@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
- "strconv"
+	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/spawn08/chronos-code/internal/execution"
 )
@@ -25,14 +23,29 @@ func words(command string, limit int) ([]string, bool) {
 	var word strings.Builder
 	var quote rune
 	active, escape := false, false
+	// Quoted assignment names are arguments, not shell environment prefixes.
+	literalName := true
 	for _, c := range command {
 		if escape {
+			if c == '=' && assignmentName(word.String()) {
+				return nil, false
+			}
+			// In double quotes, only shell-special characters lose their backslash.
+			if quote == '"' && c != '"' && c != '\\' {
+				word.WriteRune('\\')
+			}
 			word.WriteRune(c)
 			active = true
 			escape = false
 			continue
 		}
+		if c == '=' && !literalName && assignmentName(word.String()) {
+			return nil, false
+		}
 		if c == '\\' && quote != '\'' {
+			if !strings.Contains(word.String(), "=") {
+				literalName = false
+			}
 			escape = true
 			active = true
 			continue
@@ -46,15 +59,22 @@ func words(command string, limit int) ([]string, bool) {
 			continue
 		}
 		if c == '\'' || c == '"' {
+			if !strings.Contains(word.String(), "=") {
+				literalName = false
+			}
 			quote = c
 			active = true
 			continue
 		}
-		if unicode.IsSpace(c) {
+		if strings.ContainsRune("#~*?[]{}", c) {
+			return nil, false
+		}
+		if c == ' ' || c == '\t' {
 			if active {
 				out = append(out, word.String())
 				word.Reset()
 				active = false
+				literalName = true
 			}
 			continue
 		}
@@ -69,6 +89,19 @@ func words(command string, limit int) ([]string, bool) {
 	}
 	return out, len(out) > 0
 }
+
+func assignmentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, c := range name {
+		if c != '_' && !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(i > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func normalize(tokens []string) ([]string, bool) {
 	if len(tokens) > 0 && tokens[0] == "time" {
 		tokens = tokens[1:]
@@ -105,6 +138,7 @@ func Infer(ctx context.Context, workspace, cwd, command string) (CommandEvidence
 	if err != nil {
 		return CommandEvidence{}, err
 	}
+	defer r.fs.Close()
 	if cwd == "" {
 		cwd = "."
 	}
@@ -144,6 +178,9 @@ func Infer(ctx context.Context, workspace, cwd, command string) (CommandEvidence
 			return evidence, err
 		}
 		scopes, known, err := r.goScopes(dir, tokens[2:])
+		if known {
+			evidence.DirectInputDirs = append([]string(nil), r.directInputDirs...)
+		}
 		return finish(evidence, scopes, known, err)
 	case contains(r.reg.Runners["python"], tokens[0]):
 		args := tokens[1:]
@@ -300,6 +337,24 @@ func (r *repository) goScopes(dir string, args []string) ([]execution.Scope, boo
 			if !ok {
 				return nil, false, nil
 			}
+			name, value, equals := strings.Cut(args[i], "=")
+			if name == "-count" {
+				if !equals {
+					value = args[next]
+				}
+				count, err := strconv.Atoi(value)
+				if err != nil || count <= 0 {
+					return nil, false, nil
+				}
+			}
+			if name == "-coverprofile" {
+				if !equals {
+					value = args[next]
+				}
+				if _, err := r.path(dir, value); err != nil {
+					return nil, false, err
+				}
+			}
 			i = next
 			continue
 		}
@@ -339,6 +394,7 @@ func (r *repository) goScopes(dir string, args []string) ([]execution.Scope, boo
 		if recursive {
 			scopes = append(scopes, s)
 		} else {
+			r.directInputDirs = append(r.directInputDirs, s.Path)
 			files, err := r.goFiles(s.Path)
 			if err != nil {
 				return nil, false, err
@@ -355,7 +411,7 @@ func (r *repository) goFiles(dir string) ([]execution.Scope, error) {
 	if err := r.tick(); err != nil {
 		return nil, err
 	}
-	f, err := os.Open(filepath.Join(r.root, filepath.FromSlash(dir)))
+	f, err := r.fs.Open(filepath.FromSlash(dir))
 	if err != nil {
 		return nil, fmt.Errorf("open Go package: %w", err)
 	}

@@ -256,6 +256,7 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	var result string
 	var err error
 	if configured := r.agents[spec.Name]; configured != nil {
+		runCtx = context.WithValue(runCtx, childContextKey{}, (*childContext)(nil))
 		runCtx = attenuateEffectGrant(runCtx, configured.Tools.List())
 		provider := configured.Model
 		if r.models != nil {
@@ -273,6 +274,7 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 		identity.InvocationID = session.NewSessionID()
 		identity.RoleID = configured.ID
 		runCtx = agent.WithRunIdentity(runCtx, identity)
+		defer releaseScopedRuleState(runCtx, configured)
 		runCtx = agent.WithModelProvider(runCtx, provider)
 		if renewing {
 			// The child gets its own windows and progress history; the
@@ -406,7 +408,7 @@ func setupSubAgentsWithModels(agents map[string]*agent.Agent, models *roleModelR
 			agents:    agents,
 			tools:     parent.Tools,
 			models:    models,
-			fallback:  harness.NewInProcessRunner(svc),
+			fallback:  &dynamicChildRunner{parent: parent},
 			store:     parent.Storage,
 			resources: resources,
 		})

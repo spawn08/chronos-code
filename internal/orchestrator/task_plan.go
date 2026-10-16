@@ -13,6 +13,8 @@ import (
 	"github.com/spawn08/chronos/storage"
 )
 
+const priorTaskPlanHeader = "Previous task plan (reference only; adopt relevant work with update_plan for the current task):\n"
+
 const taskPlanHeader = "Current task plan (update_plan; replace it when you start a different task):\n"
 
 // taskPlanStore scopes the update_plan list. A delegated child inherits the
@@ -30,6 +32,7 @@ type taskPlanStore struct {
 
 	mu     sync.Mutex
 	loaded map[string]bool
+	owners map[string]string
 }
 
 func newTaskPlanStore() *taskPlanStore {
@@ -37,7 +40,7 @@ func newTaskPlanStore() *taskPlanStore {
 }
 
 func newDurableTaskPlanStore(durable builtins.PlanStore) *taskPlanStore {
-	return &taskPlanStore{plans: builtins.NewInMemoryPlanStore(), durable: durable, loaded: make(map[string]bool)}
+	return &taskPlanStore{plans: builtins.NewInMemoryPlanStore(), durable: durable, loaded: make(map[string]bool), owners: make(map[string]string)}
 }
 
 // scope returns the plan context and whether it is a primary session, the
@@ -56,10 +59,22 @@ func (s *taskPlanStore) Load(ctx context.Context) (*builtins.Plan, error) {
 
 func (s *taskPlanStore) Save(ctx context.Context, plan *builtins.Plan) error {
 	scoped, primary := s.scope(ctx)
+	key := storage.TenantFromContext(scoped) + "\x00" + storage.SessionFromContext(scoped)
+	s.mu.Lock()
 	if err := s.plans.Save(scoped, plan); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	s.markLoaded(scoped)
+	s.loaded[key] = true
+	if s.owners == nil {
+		s.owners = make(map[string]string)
+	}
+	if runtime, ok := taskRuntimeFromContext(ctx); ok {
+		s.owners[key] = string(runtime.taskID)
+	} else {
+		delete(s.owners, key)
+	}
+	s.mu.Unlock()
 	if primary && s.durable != nil {
 		_ = s.durable.Save(scoped, plan)
 	}
@@ -67,9 +82,16 @@ func (s *taskPlanStore) Save(ctx context.Context, plan *builtins.Plan) error {
 }
 
 func (s *taskPlanStore) load(ctx context.Context, primary bool) (*builtins.Plan, error) {
-	if !primary || s.durable == nil || s.markLoaded(ctx) {
+	if !primary || s.durable == nil {
 		return s.plans.Load(ctx)
 	}
+	key := storage.TenantFromContext(ctx) + "\x00" + storage.SessionFromContext(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loaded[key] {
+		return s.plans.Load(ctx)
+	}
+	s.loaded[key] = true
 	restored, err := s.durable.Load(ctx)
 	if err != nil || restored == nil || len(restored.Tasks) == 0 {
 		return s.plans.Load(ctx)
@@ -100,6 +122,56 @@ func (s *taskPlanStore) openItems(ctx context.Context, sessionID string) []built
 	}
 	plan, err := s.load(storage.WithSession(ctx, sessionID), true)
 	if err != nil || plan == nil {
+		return nil
+	}
+	var open []builtins.PlanTask
+	for _, task := range plan.Tasks {
+		if task.Status != builtins.TaskCompleted {
+			open = append(open, task)
+		}
+	}
+	return open
+}
+
+func (s *taskPlanStore) belongsToTask(ctx context.Context) bool {
+	if s == nil {
+		return false
+	}
+	runtime, ok := taskRuntimeFromContext(ctx)
+	if !ok {
+		return false
+	}
+	scoped, _ := s.scope(ctx)
+	key := storage.TenantFromContext(scoped) + "\x00" + storage.SessionFromContext(scoped)
+	s.mu.Lock()
+	owner := s.owners[key]
+	s.mu.Unlock()
+	return owner != "" && owner == string(runtime.taskID)
+}
+
+func (s *taskPlanStore) planForTask(ctx context.Context) (*builtins.Plan, bool) {
+	if s == nil {
+		return nil, false
+	}
+	if _, err := s.Load(ctx); err != nil {
+		return nil, false
+	}
+	scoped, _ := s.scope(ctx)
+	key := storage.TenantFromContext(scoped) + "\x00" + storage.SessionFromContext(scoped)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	plan, err := s.plans.Load(scoped)
+	if err != nil {
+		return nil, false
+	}
+	runtime, ok := taskRuntimeFromContext(ctx)
+	owned := ok && s.owners[key] != "" && s.owners[key] == string(runtime.taskID)
+	return plan, owned
+}
+
+func (s *taskPlanStore) openItemsForTask(ctx context.Context, sessionID string) []builtins.PlanTask {
+	plan, owned := s.planForTask(storage.WithSession(ctx, sessionID))
+	if !owned || plan == nil {
 		return nil
 	}
 	var open []builtins.PlanTask
@@ -150,15 +222,15 @@ func (h taskPlanHook) Before(ctx context.Context, evt *hooks.Event) error {
 		// as the update_plan result, so the history stays append-only.
 		return nil
 	}
-	plan, err := h.store.Load(ctx)
-	if err != nil || plan == nil {
+	plan, owned := h.store.planForTask(ctx)
+	if plan == nil {
 		return nil
 	}
 	// The SDK carries a round's request messages into the next round, so drop
 	// the previous pin instead of stacking one per call.
 	messages := make([]model.Message, 0, len(req.Messages)+1)
 	for _, message := range req.Messages {
-		if message.Role == model.RoleSystem && strings.HasPrefix(message.Content, taskPlanHeader) {
+		if message.Role == model.RoleSystem && (strings.HasPrefix(message.Content, taskPlanHeader) || strings.HasPrefix(message.Content, priorTaskPlanHeader)) {
 			continue
 		}
 		messages = append(messages, message)
@@ -166,7 +238,11 @@ func (h taskPlanHook) Before(ctx context.Context, evt *hooks.Event) error {
 	if len(plan.Tasks) > 0 {
 		// The plan changes during a turn; as an uncached trailing message it
 		// never invalidates the provider's cached prompt and conversation.
-		messages = append(messages, model.Message{Role: model.RoleSystem, Content: taskPlanHeader + plan.Summary(), Uncached: true})
+		header := taskPlanHeader
+		if _, active := taskRuntimeFromContext(ctx); active && !owned {
+			header = priorTaskPlanHeader
+		}
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: header + plan.Summary(), Uncached: true})
 	}
 	req.Messages = messages
 	return nil

@@ -103,6 +103,8 @@ func TestSelectScriptsAndManagers(t *testing.T) {
 		{"pnpm", `{"scripts":{"check":"tsc --noEmit"}}`, "pnpm-lock.yaml", "pnpm run check", "javascript-diagnostics", execution.CommandDiagnostics},
 		{"bun", `{"scripts":{"lint":"eslint ."}}`, "bun.lockb", "bun run lint", "javascript-diagnostics", execution.CommandDiagnostics},
 		{"build", `{"scripts":{"build":"vite build"}}`, "", "npm run build", "javascript-build", execution.CommandBuild},
+		{"vitest npm", `{"scripts":{"test":"vitest"}}`, "", "npm run test -- --run", "javascript-test", execution.CommandTest},
+		{"vitest pnpm", `{"scripts":{"test":"vitest"}}`, "pnpm-lock.yaml", "pnpm run test --run", "javascript-test", execution.CommandTest},
 		{"declared", `{"packageManager":"yarn@4.0.0","scripts":{"typecheck":"tsc --noEmit","check":"tsc"}}`, "pnpm-lock.yaml", "yarn run typecheck", "javascript-diagnostics", execution.CommandDiagnostics},
 	}
 	for _, tc := range cases {
@@ -188,6 +190,12 @@ func TestInferScopes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := Infer(context.Background(), root, tc.cwd, tc.command)
 			want := CommandEvidence{Family: tc.family, Root: tc.evidenceRoot, Scopes: tc.scopes, Known: true}
+			switch tc.name {
+			case "go package nonrecursive":
+				want.DirectInputDirs = []string{"pkg"}
+			case "go default package":
+				want.DirectInputDirs = []string{"."}
+			}
 			if err != nil || !reflect.DeepEqual(got, want) {
 				t.Fatalf("Infer(%q) = %#v, %v, want %#v", tc.command, got, err, want)
 			}
@@ -202,7 +210,7 @@ func TestInferUnknownSelectorsNeverHaveCoverage(t *testing.T) {
 		"package.json": `{"scripts":{"test":"vitest run","typecheck":"tsc --noEmit","build":"vite build"}}`, "tests/a.test.ts": "",
 	})
 	commands := []string{
-		"go test all", "go test example.org/pkg", "go test ./missing/...", "go test ./... -run TestOne", "go test ./... -tags integration",
+		"go test -count=0 ./...", "go test -count -1 ./...", "go test -count=oops ./...", "go test all", "go test example.org/pkg", "go test ./missing/...", "go test ./... -run TestOne", "go test ./... -tags integration",
 		"go test ./... -args -test.run X", "go test ./... ./missing", "go test ./... -count", "GOFLAGS='-run TestOne' go test ./...",
 		"pytest -k one", "pytest -m fast", "pytest --pyargs foo", "pytest tests/missing.py", "pytest tests/*.py", "pytest tests/test_a.py --collect-only",
 		"PYTEST_ADDOPTS='-k one' pytest", "python -c 'print(1)'", "cargo test --test integration", "cargo test --lib", "cargo test -p unknown",
@@ -345,6 +353,77 @@ func TestPathsQuotesAndBoundaries(t *testing.T) {
 	}
 }
 
+func TestSymlinkWorkspacePathsAndCwd(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"go.mod": "module root\n", "main.go": "package root\n",
+		"pkg/a.go": "package pkg\n",
+	})
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases := t.TempDir()
+	link := filepath.Join(aliases, "workspace")
+	if err := os.Symlink(canonical, link); err != nil {
+		t.Fatal(err)
+	}
+	ancestor := filepath.Join(aliases, "ancestor")
+	if err := os.Symlink(filepath.Dir(canonical), ancestor); err != nil {
+		t.Fatal(err)
+	}
+	for _, workspace := range []string{link, filepath.Join(ancestor, filepath.Base(canonical))} {
+		t.Run(workspace, func(t *testing.T) {
+			for _, cwd := range []string{"", ".", workspace, canonical} {
+				got, err := Infer(context.Background(), workspace, cwd, "go test ./...")
+				want := CommandEvidence{Family: "go-test", Root: ".", Scopes: []execution.Scope{directory(".")}, Known: true}
+				if err != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("root cwd %q = %#v, %v, want %#v", cwd, got, err, want)
+				}
+			}
+			for _, cwd := range []string{"pkg", filepath.Join(workspace, "pkg"), filepath.Join(canonical, "pkg")} {
+				got, err := Infer(context.Background(), workspace, cwd, "go test ./...")
+				want := CommandEvidence{Family: "go-test", Root: ".", Scopes: []execution.Scope{directory("pkg")}, Known: true}
+				if err != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("nested cwd %q = %#v, %v, want %#v", cwd, got, err, want)
+				}
+			}
+			got, err := Select(context.Background(), workspace, []string{filepath.Join(workspace, "pkg/a.go"), filepath.Join(workspace, "pkg/new.go")})
+			want := []Check{{Family: "go-test", Root: ".", Command: "go test ./...", Class: execution.CommandTest, Paths: []string{"pkg/a.go", "pkg/new.go"}}}
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("absolute changed paths = %#v, %v, want %#v", got, err, want)
+			}
+		})
+	}
+}
+
+func TestSymlinkWorkspaceRejectsEscapes(t *testing.T) {
+	root := fixture(t, map[string]string{"go.mod": "module root\n", "a.go": "package root\n"})
+	outside := fixture(t, map[string]string{"go.mod": "module outside\n", "a.go": "package outside\n"})
+	link := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, link+"-sibling"); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{outside, filepath.Dir(link), link + "-sibling", filepath.Join(link, "escape")} {
+		if _, err := Infer(context.Background(), link, cwd, "go test ./..."); err == nil {
+			t.Fatalf("accepted escaping cwd %q", cwd)
+		}
+	}
+	for _, path := range []string{filepath.Join(outside, "a.go"), filepath.Join(link+"-sibling", "a.go"), filepath.Join(link, "escape/a.go"), filepath.Join(link, "escape/new.go")} {
+		if _, err := Select(context.Background(), link, []string{path}); err == nil {
+			t.Fatalf("accepted escaping changed path %q", path)
+		}
+		if _, err := Infer(context.Background(), link, link, "pytest "+quote(path)); err == nil {
+			t.Fatalf("accepted escaping command path %q", path)
+		}
+	}
+}
+
 func TestLimitsAndCancellation(t *testing.T) {
 	root := fixture(t, map[string]string{"go.mod": strings.Repeat("x", 262145), "a.go": "package root\n"})
 	if _, err := Select(context.Background(), root, []string{"a.go"}); err == nil {
@@ -367,6 +446,70 @@ func TestLimitsAndCancellation(t *testing.T) {
 	}
 }
 
+func TestRecommendedChecksRoundTripToManifestEvidence(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"go.mod": "module root\n", "pkg/a.go": "package pkg\n",
+		"python/setup.cfg": "[tool:pytest]\n", "python/app.py": "",
+		"rust workspace/Cargo.toml": "[package]\nname='crate'\n", "rust workspace/src/lib.rs": "",
+		"web/package.json": `{"scripts":{"test":"vitest"}}`, "web/src/a.ts": "",
+	})
+	checks, err := Select(context.Background(), root, []string{"go.mod", "pkg/a.go", "python/setup.cfg", "python/app.py", "rust workspace/Cargo.toml", "rust workspace/src/lib.rs", "web/package.json", "web/src/a.ts"})
+	if err != nil || len(checks) != 4 {
+		t.Fatalf("Select = %#v, %v", checks, err)
+	}
+	for _, check := range checks {
+		command := check.Command
+		if check.Root != "." {
+			command = strings.TrimPrefix(command, "cd "+quote(check.Root)+" && ")
+		}
+		evidence, err := Infer(context.Background(), root, check.Root, command)
+		if err != nil || !evidence.Known || evidence.Family != check.Family || evidence.Root != check.Root {
+			t.Fatalf("roundtrip %v = %#v, %v", check, evidence, err)
+		}
+		for _, path := range check.Paths {
+			if !execution.ScopesOverlap(evidence.Scopes, []execution.Scope{exact(path)}) {
+				t.Errorf("recommendation %q does not cover %q: %#v", command, path, evidence)
+			}
+		}
+	}
+}
+
+func TestTargetedTestsDoNotCertifyProductionOrOtherTests(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"pyproject.toml": "", "tests/test_one.py": "", "tests/test_two.py": "", "src/app.py": "",
+		"package.json": `{"scripts":{"test":"jest tests/one.test.ts"}}`, "tests/one.test.ts": "", "tests/two.test.ts": "", "src/app.ts": "",
+	})
+	for _, command := range []string{"pytest tests/test_one.py::test_one", "npm test"} {
+		evidence, err := Infer(context.Background(), root, ".", command)
+		if err != nil || !evidence.Known {
+			t.Fatalf("Infer = %#v, %v", evidence, err)
+		}
+		for _, path := range []string{"src/app.py", "src/app.ts", "tests/test_two.py", "tests/two.test.ts"} {
+			if execution.ScopesOverlap(evidence.Scopes, []execution.Scope{exact(path)}) {
+				t.Errorf("targeted command %q certifies unrelated %q", command, path)
+			}
+		}
+	}
+}
+
+func TestNonRegularAndTotalReadLimits(t *testing.T) {
+	root := fixture(t, map[string]string{"a.go": "package root\n"})
+	if err := os.Mkdir(filepath.Join(root, "go.mod"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Select(context.Background(), root, []string{"a.go"}); err == nil {
+		t.Fatal("accepted nonregular manifest")
+	}
+	root = fixture(t, map[string]string{"go.mod": strings.Repeat("x", 262144), "a.go": "package root\n"})
+	changed := make([]string, 17)
+	for i := range changed {
+		changed[i] = "a.go"
+	}
+	if _, err := Select(context.Background(), root, changed); err == nil {
+		t.Fatal("accepted excessive total reads")
+	}
+}
+
 func TestConcurrentCalls(t *testing.T) {
 	root := fixture(t, map[string]string{"go.mod": "module root\n", "pkg/a.go": "package pkg\n"})
 	var group sync.WaitGroup
@@ -383,4 +526,125 @@ func TestConcurrentCalls(t *testing.T) {
 		})
 	}
 	group.Wait()
+}
+
+func TestWordsLiteralShellQuoting(t *testing.T) {
+	cases := []struct {
+		command string
+		want    []string
+	}{
+		{`pytest "tests/test\ one.py"`, []string{"pytest", `tests/test\ one.py`}},
+		{`pytest "tests/test\\one.py"`, []string{"pytest", `tests/test\one.py`}},
+		{`pytest "tests/test\"one.py"`, []string{"pytest", `tests/test"one.py`}},
+		{`pytest tests/test\ one.py`, []string{"pytest", "tests/test one.py"}},
+		{`pytest 'tests/test\one.py'`, []string{"pytest", `tests/test\one.py`}},
+		{`pytest tests/"test one".py`, []string{"pytest", "tests/test one.py"}},
+		{"pytest tests/test\u00a0one.py", []string{"pytest", "tests/test\u00a0one.py"}},
+		{`CI="1" go test "-count=1" ./...`, []string{"CI=1", "go", "test", "-count=1", "./..."}},
+		{`pytest ''`, []string{"pytest", ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			got, ok := words(tc.command, 16384)
+			if !ok || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("words(%q) = %#v, %v, want %#v", tc.command, got, ok, tc.want)
+			}
+		})
+	}
+	for _, command := range []string{`pytest "unterminated`, `pytest trailing\`, `go test # ./pkg`, `pytest ~/tests`, `pytest tests/{one,two}.py`, `"CI=1" go test`, `C"I"=1 go test`, `CI\=1 go test`, `C\I=1 go test`} {
+		if got, ok := words(command, 16384); ok {
+			t.Errorf("accepted ambiguous shell command %q: %#v", command, got)
+		}
+	}
+}
+
+func TestInferSelectorsEnvironmentAndQuoting(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"go.mod": "module root\n", "pkg/a.go": "package pkg\n", "pkg/b_test.go": "package pkg\n", "other/a.go": "package other\n",
+		"pyproject.toml": "", "tests/test one.py": "", "tests/test\\ one.py": "", "tests/test\\one.py": "", "tests/test\"one.py": "", "tests/test\u00a0one.py": "",
+		"package.json": `{"scripts":{"test":"jest"}}`, "tests/one.test.ts": "", "tests/two.test.ts": "",
+	})
+	cases := []struct {
+		command string
+		scopes  []execution.Scope
+	}{
+		{`go test ./pkg ./other`, []execution.Scope{exact("other/a.go"), exact("pkg/a.go"), exact("pkg/b_test.go")}},
+		{`go test ./pkg/a.go ./pkg/b_test.go`, []execution.Scope{exact("pkg/a.go"), exact("pkg/b_test.go")}},
+		{`env CI="1" NO_COLOR=1 TERM=dumb FORCE_COLOR=0 go test ./pkg`, []execution.Scope{exact("pkg/a.go"), exact("pkg/b_test.go")}},
+		{`CI=1 time -p env NO_COLOR=1 go test ./pkg`, nil},
+		{`time -p env CI='1' pytest "tests/test one.py"`, []execution.Scope{exact("tests/test one.py")}},
+		{`pytest "tests/test\ one.py"`, []execution.Scope{exact(`tests/test\ one.py`)}},
+		{`pytest "tests/test\\one.py"`, []execution.Scope{exact(`tests/test\one.py`)}},
+		{`pytest "tests/test\"one.py"`, []execution.Scope{exact(`tests/test"one.py`)}},
+		{`pytest tests/test\ one.py`, []execution.Scope{exact("tests/test one.py")}},
+		{"pytest tests/test\u00a0one.py", []execution.Scope{exact("tests/test\u00a0one.py")}},
+		{`pytest 'tests/test one.py::test_case[a*]'`, []execution.Scope{exact("tests/test one.py")}},
+		{`npm test -- --runTestsByPath tests/one.test.ts tests/two.test.ts`, []execution.Scope{exact("tests/one.test.ts"), exact("tests/two.test.ts")}},
+		{`go test ./pkg ./other/a.go`, nil},
+		{`go test ./pkg -run=TestOne`, nil},
+		{`GOFLAGS=-short go test ./pkg`, nil},
+		{`env GOOS=linux go test ./pkg`, nil},
+		{`env -i go test ./pkg`, nil},
+		{`env -C pkg go test`, nil},
+		{`"CI=1" go test ./pkg`, nil},
+		{`CI\=1 go test ./pkg`, nil},
+		{`PYTEST_ADDOPTS=-x pytest`, nil},
+		{`NODE_OPTIONS=--require=hook.js npm test`, nil},
+		{`pytest tests/test\ one.py -k case`, nil},
+		{"go test\u00a0./pkg", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.command, func(t *testing.T) {
+			got, err := Infer(context.Background(), root, ".", tc.command)
+			if err != nil || got.Known != (len(tc.scopes) > 0) || !reflect.DeepEqual(got.Scopes, tc.scopes) {
+				t.Fatalf("Infer(%q) = %#v, %v, want scopes %#v", tc.command, got, err, tc.scopes)
+			}
+		})
+	}
+}
+
+func TestInferDoubleQuotedBackslashDoesNotCertifyDecodedPath(t *testing.T) {
+	root := fixture(t, map[string]string{"pyproject.toml": "", "tests/test one.py": ""})
+	got, err := Infer(context.Background(), root, ".", `pytest "tests/test\ one.py"`)
+	if err != nil || got.Known || len(got.Scopes) != 0 {
+		t.Fatalf("backslash incorrectly removed: %#v, %v", got, err)
+	}
+}
+
+func TestInferNonrecursiveGoRescansDeletedSiblings(t *testing.T) {
+	root := fixture(t, map[string]string{"go.mod": "module root\n", "pkg/a.go": "package pkg\n", "pkg/b_test.go": "package pkg\n", "pkg/deep/c.go": "package deep\n"})
+	before, err := Infer(context.Background(), root, ".", "go test ./pkg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "pkg/b_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Infer(context.Background(), root, ".", "go test ./pkg")
+	if err != nil || !reflect.DeepEqual(before.Scopes, []execution.Scope{exact("pkg/a.go"), exact("pkg/b_test.go")}) || !reflect.DeepEqual(after.Scopes, []execution.Scope{exact("pkg/a.go")}) {
+		t.Fatalf("deleted sibling rescan: before=%#v after=%#v, %v", before, after, err)
+	}
+}
+
+func TestInferInspectedScriptEnvironmentAndQuoting(t *testing.T) {
+	cases := []struct {
+		pkg    string
+		known  bool
+		scopes []execution.Scope
+	}{
+		{`{"scripts":{"test":"CI=1 jest \"tests/test one.ts\""}}`, true, []execution.Scope{exact("tests/test one.ts")}},
+		{`{"scripts":{"test":"jest \"tests/test\\ one.ts\""}}`, false, nil},
+		{`{"scripts":{"test":"NODE_OPTIONS=--require=hook.js jest"}}`, false, nil},
+		{`{"scripts":{"test":"\"CI=1\" jest"}}`, false, nil},
+		{`{"scripts":{"test":"jest --testNamePattern=one"}}`, false, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.pkg, func(t *testing.T) {
+			root := fixture(t, map[string]string{"package.json": tc.pkg, "tests/test one.ts": ""})
+			got, err := Infer(context.Background(), root, ".", "npm test")
+			if err != nil || got.Known != tc.known || !reflect.DeepEqual(got.Scopes, tc.scopes) {
+				t.Fatalf("script evidence = %#v, %v, want known=%v scopes=%#v", got, err, tc.known, tc.scopes)
+			}
+		})
+	}
 }

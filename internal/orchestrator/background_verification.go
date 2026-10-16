@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/spawn08/chronos-code/internal/checks"
 	"github.com/spawn08/chronos-code/internal/execution"
+	"github.com/spawn08/chronos-code/internal/security"
 	"github.com/spawn08/chronos-code/internal/verification"
 )
 
@@ -26,10 +26,6 @@ func (r *taskRuntime) sourceObservationsEnabled() bool {
 
 func (r *taskRuntime) backgroundMayChangeSource(args map[string]any) bool {
 	command, _ := args["command"].(string)
-	directory := shellDirectory(r.workspaceRoot, args)
-	if checks.IsDevelopmentServer(r.observationContext(), r.workspaceRoot, directory, command) {
-		return false
-	}
 	for _, step := range planShellEvidence(command) {
 		if step.mutation || verificationClass(step.class) && step.class != execution.CommandDiff {
 			return true
@@ -54,18 +50,26 @@ func (r *taskRuntime) reconcileBackgrounds() error {
 	if r.backgroundShells == nil {
 		return nil
 	}
-	for _, snapshot := range r.backgroundShells.Snapshots(r.observationContext()) {
+	snapshots := r.backgroundShells.Snapshots(r.observationContext())
+	r.backgroundMu.Lock()
+	r.backgroundSnapshots = snapshots
+	r.backgroundMu.Unlock()
+	for _, snapshot := range snapshots {
+		if snapshot.Exited {
+			// One final scan covers every exit in this lifecycle snapshot.
+			if err := r.refreshSourceChanges(false); err != nil {
+				return err
+			}
+			break
+		}
+	}
+	for _, snapshot := range snapshots {
 		if !snapshot.Exited {
 			continue
 		}
 		args, started, revision, ok := r.finishBackground(snapshot.ID)
 		if !ok {
 			continue
-		}
-		// The final source scan follows observed process exit, covering late writes.
-		if err := r.refreshSourceChanges(false); err != nil {
-			r.trackBackground(snapshot.ID, args, started, revision)
-			return err
 		}
 		result := map[string]any{"status": "exited", "shell_id": snapshot.ID, "exit_code": snapshot.ExitCode}
 		if err := recordBackgroundChecks(r, args, result, started, snapshot.CompletedAt, revision); err != nil {
@@ -82,13 +86,11 @@ func (r *taskRuntime) pendingBackgroundObligations() []verification.Obligation {
 	for id, call := range r.background {
 		calls[id] = call.args
 	}
+	snapshots := append([]security.ShellSnapshot(nil), r.backgroundSnapshots...)
 	r.backgroundMu.Unlock()
-	if r.backgroundShells != nil {
-		for _, snapshot := range r.backgroundShells.Snapshots(r.observationContext()) {
-			if snapshot.Exited {
-				delete(calls, snapshot.ID)
-				continue
-			}
+	// Use the lifecycle snapshot whose exited processes received a final source scan.
+	for _, snapshot := range snapshots {
+		if !snapshot.Exited {
 			calls[snapshot.ID] = map[string]any{"command": snapshot.Command, "working_dir": snapshot.Directory}
 		}
 	}

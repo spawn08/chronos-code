@@ -82,16 +82,17 @@ const (
 // Event is one immutable fact about a task. Sequence defines the only valid
 // reduction order and is assigned by Ledger.Record for runtime events.
 type Event struct {
-	ID         EventID
-	TaskID     TaskID
-	Sequence   uint64
-	Type       EventType
-	CallID     CallID
-	EvidenceID EvidenceID
-	Paths      []string
-	Scopes     []Scope
-	Passed     bool
-	Detail     string
+	ID              EventID
+	TaskID          TaskID
+	Sequence        uint64
+	Type            EventType
+	CallID          CallID
+	EvidenceID      EvidenceID
+	Paths           []string
+	Scopes          []Scope
+	DirectInputDirs []string
+	Passed          bool
+	Detail          string
 
 	ContentHash      string
 	SizeBytes        int64
@@ -434,7 +435,7 @@ func validProvenance(provenance EvidenceProvenance) bool {
 
 func invalidateVerification(verification map[EvidenceID]Verification, write Event) {
 	for id, evidence := range verification {
-		if !evidence.Current || !eventScopesOverlap(evidence.Event, write) {
+		if !evidence.Current || !VerificationInputsOverlap(evidence.Event, write) {
 			continue
 		}
 		evidence.Current = false
@@ -447,7 +448,7 @@ func verificationRevisionCurrent(writes []Event, verification Event) bool {
 		return true
 	}
 	for _, write := range writes {
-		if write.MutationRevision > verification.MutationRevision && eventScopesOverlap(verification, write) {
+		if write.MutationRevision > verification.MutationRevision && VerificationInputsOverlap(verification, write) {
 			return false
 		}
 	}
@@ -523,6 +524,7 @@ func cloneEvents(events []Event) []Event {
 func cloneEvent(event Event) Event {
 	event.Paths = append([]string(nil), event.Paths...)
 	event.Scopes = append([]Scope(nil), event.Scopes...)
+	event.DirectInputDirs = append([]string(nil), event.DirectInputDirs...)
 	if event.ExitCode != nil {
 		exitCode := *event.ExitCode
 		event.ExitCode = &exitCode

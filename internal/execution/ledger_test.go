@@ -52,6 +52,9 @@ func TestScopesOverlapHierarchy(t *testing.T) {
 		{name: "same exact", left: []Scope{{Kind: ScopeExact, Path: "a/b.go"}}, right: []Scope{{Kind: ScopeExact, Path: "a/b.go"}}, want: true},
 		{name: "directory contains exact", left: []Scope{{Kind: ScopeDirectory, Path: "a"}}, right: []Scope{{Kind: ScopeExact, Path: "a/b.go"}}, want: true},
 		{name: "workspace contains exact", left: []Scope{{Kind: ScopeWorkspace}}, right: []Scope{{Kind: ScopeExact, Path: "a/b.go"}}, want: true},
+		{name: "root directory contains nested exact", left: []Scope{{Kind: ScopeDirectory, Path: "."}}, right: []Scope{{Kind: ScopeExact, Path: "a/b/file.go"}}, want: true},
+		{name: "nested exact overlaps root directory", left: []Scope{{Kind: ScopeExact, Path: "a/b/file.go"}}, right: []Scope{{Kind: ScopeDirectory, Path: "."}}, want: true},
+		{name: "root directory contains nested directory", left: []Scope{{Kind: ScopeDirectory, Path: "."}}, right: []Scope{{Kind: ScopeDirectory, Path: "a/b"}}, want: true},
 		{name: "prefix is not ancestor", left: []Scope{{Kind: ScopeDirectory, Path: "a"}}, right: []Scope{{Kind: ScopeExact, Path: "ab/b.go"}}},
 		{name: "unrelated exact", left: []Scope{{Kind: ScopeExact, Path: "a.go"}}, right: []Scope{{Kind: ScopeExact, Path: "b.go"}}},
 	}
@@ -290,5 +293,47 @@ func TestLedgerDoesNotExposeMutableHistory(t *testing.T) {
 	}
 	if state.Writes[0].Paths[0] != "main.go" {
 		t.Fatal("caller mutated append-only ledger history")
+	}
+}
+
+func TestReduceRootDirectoryVerificationStalesOnNestedWrite(t *testing.T) {
+	rootScope, err := NormalizeScope(t.TempDir(), Scope{Kind: ScopeDirectory, Path: "."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootScope != (Scope{Kind: ScopeDirectory, Path: "."}) {
+		t.Fatalf("normalized root scope = %#v", rootScope)
+	}
+	for _, test := range []struct {
+		name  string
+		write Event
+	}{
+		{name: "legacy path", write: Event{Paths: []string{"internal/nested/file.go"}}},
+		{name: "exact scope", write: Event{Scopes: []Scope{{Kind: ScopeExact, Path: "internal/nested/file.go"}}}},
+		{name: "directory scope", write: Event{Scopes: []Scope{{Kind: ScopeDirectory, Path: "internal/nested"}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			check := Event{ID: "check", TaskID: "task", Sequence: 1, Type: EventVerification, EvidenceID: "before", Scopes: []Scope{rootScope}, Passed: true, MutationRevision: 1}
+			state, err := Reduce([]Event{check})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.Verification["before"].Current {
+				t.Fatal("root verification was not initially current")
+			}
+			write := test.write
+			write.ID, write.TaskID, write.Sequence, write.Type, write.MutationRevision = "write", "task", 2, EventWrite, 2
+			late := check
+			late.ID, late.EvidenceID, late.Sequence = "late", "late", 3
+			fresh := check
+			fresh.ID, fresh.EvidenceID, fresh.Sequence, fresh.MutationRevision = "fresh", "fresh", 4, 2
+			state, err = Reduce([]Event{check, write, late, fresh})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Verification["before"].Current || state.Verification["late"].Current || !state.Verification["fresh"].Current {
+				t.Fatalf("root verification currency after nested write = %#v", state.Verification)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -11,8 +12,8 @@ import (
 	"github.com/spawn08/chronos/engine/model"
 
 	"github.com/spawn08/chronos-code/internal/budget"
-	"github.com/spawn08/chronos-code/internal/claims"
 	"github.com/spawn08/chronos-code/internal/checks"
+	"github.com/spawn08/chronos-code/internal/claims"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/security"
@@ -40,14 +41,15 @@ type taskRuntime struct {
 	refusesShell func(command string) bool
 	// background maps a running background shell to its original call, so
 	// its exit is recorded as evidence for the command that started it.
-	backgroundMu   sync.Mutex
-	background     map[string]backgroundCall
-	sourceMu       sync.Mutex
-	sources        map[string]string
-	knowledgeMu    sync.Mutex
-	knowledge      []readKnowledge
-	observationCtx context.Context
-	backgroundShells *security.BackgroundShells
+	backgroundMu        sync.Mutex
+	background          map[string]backgroundCall
+	backgroundSnapshots []security.ShellSnapshot
+	sourceMu            sync.Mutex
+	sources             map[string]string
+	knowledgeMu         sync.Mutex
+	knowledge           []readKnowledge
+	observationCtx      context.Context
+	backgroundShells    *security.BackgroundShells
 }
 
 type backgroundCall struct {
@@ -62,7 +64,11 @@ func (r *taskRuntime) trackBackground(id string, args map[string]any, started ti
 	if r.background == nil {
 		r.background = map[string]backgroundCall{}
 	}
-	r.background[id] = backgroundCall{args: args, started: started, revision: revision}
+	copyArgs := make(map[string]any, len(args))
+	for key, value := range args {
+		copyArgs[key] = value
+	}
+	r.background[id] = backgroundCall{args: copyArgs, started: started, revision: revision}
 }
 
 // finishBackground returns and forgets the call that started shell id.
@@ -185,17 +191,21 @@ func (r *taskRuntime) recordCommand(command string, class execution.CommandClass
 }
 
 func (r *taskRuntime) recordCommandAt(directory, command string, class execution.CommandClass, exitCode *int, terminal execution.TerminalState, scopes []execution.Scope, provenance execution.EvidenceProvenance, startedAt, completedAt time.Time, revision ...uint64) (execution.Event, error) {
+	return r.recordCommandEvidenceAt(directory, command, command, class, exitCode, terminal, scopes, provenance, startedAt, completedAt, revision...)
+}
+
+func (r *taskRuntime) recordCommandEvidenceAt(directory, command, scopeCommand string, class execution.CommandClass, exitCode *int, terminal execution.TerminalState, scopes []execution.Scope, provenance execution.EvidenceProvenance, startedAt, completedAt time.Time, revision ...uint64) (execution.Event, error) {
 	ctx := r.observationCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	inferred, err := checks.Infer(ctx, r.workspaceRoot, directory, command)
+	inferred, err := checks.Infer(ctx, r.workspaceRoot, directory, scopeCommand)
 	if err != nil {
 		return execution.Event{}, fmt.Errorf("infer verification coverage: %w", err)
 	}
 	if len(scopes) == 0 {
 		if !inferred.Known || len(inferred.Scopes) == 0 {
-			return r.ledger.Record(execution.Event{Type: execution.EventUncertainty, Command: command, CommandClass: class, Detail: "verification coverage unknown: " + command, Provenance: provenance, StartedAt: startedAt, CompletedAt: completedAt})
+			return r.ledger.Record(execution.Event{Type: execution.EventUncertainty, Command: command, CommandClass: class, ExitCode: exitCode, TerminalState: terminal, Detail: "verification coverage unknown: " + command, Provenance: provenance, StartedAt: startedAt, CompletedAt: completedAt})
 		}
 		scopes = inferred.Scopes
 	}
@@ -213,6 +223,29 @@ func (r *taskRuntime) recordCommandAt(directory, command string, class execution
 			paths = append(paths, normalizedScope.Path)
 		}
 	}
+	// A successful package check covers removal of a formerly recorded Go input.
+	if len(inferred.DirectInputDirs) > 0 {
+		state, stateErr := r.ledger.State()
+		if stateErr != nil {
+			return execution.Event{}, stateErr
+		}
+		for _, write := range state.Writes {
+			for _, path := range write.Paths {
+				if filepath.Ext(path) != ".go" {
+					continue
+				}
+				if _, err := os.Stat(filepath.Join(r.workspaceRoot, path)); !os.IsNotExist(err) {
+					continue
+				}
+				for _, directory := range inferred.DirectInputDirs {
+					if filepath.ToSlash(filepath.Dir(path)) == directory {
+						paths = append(paths, path)
+						normalized = append(normalized, execution.Scope{Kind: execution.ScopeExact, Path: path})
+					}
+				}
+			}
+		}
+	}
 	if len(revision) > 0 {
 		state, err := r.ledger.State()
 		if err != nil {
@@ -225,7 +258,7 @@ func (r *taskRuntime) recordCommandAt(directory, command string, class execution
 					writeScopes = append(writeScopes, execution.Scope{Kind: execution.ScopeDirectory, Path: path})
 				}
 			}
-			if write.MutationRevision > revision[0] && execution.ScopesOverlap(normalized, writeScopes) {
+			if write.MutationRevision > revision[0] && execution.VerificationInputsOverlap(execution.Event{Scopes: normalized, Paths: paths, CommandFamily: inferred.Family, CheckRoot: inferred.Root, DirectInputDirs: inferred.DirectInputDirs}, execution.Event{Scopes: writeScopes, Paths: write.Paths}) {
 				terminal = execution.TerminalCancelled
 				break
 			}
@@ -233,25 +266,29 @@ func (r *taskRuntime) recordCommandAt(directory, command string, class execution
 	}
 	passed := terminal == execution.TerminalExited && exitCode != nil && *exitCode == 0
 	return r.ledger.Record(execution.Event{
-		Type:          execution.EventVerification,
-		Scopes:        normalized,
-		Paths:         paths,
-		Passed:        passed,
-		Detail:        command,
-		Command:       command,
-		CommandClass:  class,
-		CommandFamily: inferred.Family,
-		CheckRoot:     inferred.Root,
-		ExitCode:      exitCode,
-		TerminalState: terminal,
-		Provenance:    provenance,
-		StartedAt:     startedAt,
-		CompletedAt:   completedAt,
+		Type:            execution.EventVerification,
+		Scopes:          normalized,
+		Paths:           paths,
+		Passed:          passed,
+		Detail:          command,
+		Command:         command,
+		CommandClass:    class,
+		CommandFamily:   inferred.Family,
+		CheckRoot:       inferred.Root,
+		DirectInputDirs: inferred.DirectInputDirs,
+		ExitCode:        exitCode,
+		TerminalState:   terminal,
+		Provenance:      provenance,
+		StartedAt:       startedAt,
+		CompletedAt:     completedAt,
 	})
 }
 
 func (r *taskRuntime) snapshot() (execution.State, error) {
 	if err := r.refreshSourceChanges(false); err != nil {
+		return execution.State{}, err
+	}
+	if err := r.reconcileBackgrounds(); err != nil {
 		return execution.State{}, err
 	}
 	return r.ledger.State()

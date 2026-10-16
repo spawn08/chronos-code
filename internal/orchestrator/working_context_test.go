@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,14 +53,45 @@ func TestScopedRulesActivateForSourceSubdirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := &scopedRulesHook{root: root, paths: map[string][]string{}}
-	if err := hook.Before(context.Background(), &hooks.Event{Type: hooks.EventToolCallBefore, Name: "file_read", Input: map[string]any{"path": "src/main.ts"}}); err != nil {
+	ctx := scopedRulesContext(root, "nested")
+	if err := hook.Before(ctx, &hooks.Event{Type: hooks.EventToolCallBefore, Name: "file_read", Input: map[string]any{"path": "src/main.ts"}}); !errors.Is(err, errScopedInstructionsNeeded) {
 		t.Fatal(err)
 	}
 	req := &model.ChatRequest{Messages: []model.Message{{Role: model.RoleUser, Content: "task"}}}
-	if err := hook.Before(context.Background(), &hooks.Event{Type: hooks.EventModelCallBefore, Input: req}); err != nil {
+	if err := hook.Before(ctx, &hooks.Event{Type: hooks.EventModelCallBefore, Input: req}); err != nil {
 		t.Fatal(err)
 	}
 	if len(req.Messages) != 2 || !strings.Contains(req.Messages[1].Content, "NESTED_RULE") || !strings.Contains(req.Messages[1].Content, "TYPESCRIPT_RULE") {
 		t.Fatalf("rules missing: %+v", req.Messages)
+	}
+}
+
+func TestWorkingContextPreservesScopedInstructionBytes(t *testing.T) {
+	a := pipelineAgent(t)
+	o := &Orchestrator{cfg: &config.Config{Tools: config.ToolsConfig{LeanContext: true}}}
+	o.installWorkingContext(a)
+	rules := strings.Repeat("instruction ", 1200) + "CRITICAL_LAST_RESTRICTION"
+	req := &model.ChatRequest{Messages: []model.Message{{Role: model.RoleUser, Content: "live request"}, {Role: model.RoleUser, Name: "harness-scoped-rules", TurnScoped: true, Uncached: true, Content: rules}}}
+	if err := a.Hooks.Before(context.Background(), &hooks.Event{Type: hooks.EventModelCallBefore, Input: req}); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, message := range req.Messages {
+		if message.Name == "harness-scoped-rules" {
+			found = message.Content == rules
+		}
+	}
+	if !found {
+		t.Fatal("working context changed delivered rule bytes")
+	}
+	trimmed, _ := trimMessages(model.NewTokenCounter("gpt-4o"), req.Messages, 0, 1)
+	found = false
+	for _, message := range trimmed {
+		if message.Name == "harness-scoped-rules" {
+			found = message.Content == rules
+		}
+	}
+	if !found {
+		t.Fatal("context pressure silently removed delivered rules")
 	}
 }

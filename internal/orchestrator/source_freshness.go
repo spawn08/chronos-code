@@ -101,7 +101,7 @@ func sourceInput(path string) bool {
 		return false
 	}
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".go", ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".c", ".h", ".cc", ".cpp", ".java", ".kt", ".cs", ".rb", ".php", ".swift", ".sh", ".sql", ".yaml", ".yml", ".toml", ".json", ".css", ".scss", ".sass", ".less", ".html", ".htm", ".vue", ".svelte", ".proto", ".graphql", ".gql":
+	case ".go", ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".c", ".h", ".s", ".asm", ".hpp", ".cc", ".cpp", ".java", ".kt", ".cs", ".rb", ".php", ".swift", ".sh", ".sql", ".yaml", ".yml", ".toml", ".json", ".css", ".scss", ".sass", ".less", ".html", ".htm", ".vue", ".svelte", ".proto", ".graphql", ".gql":
 		return true
 	}
 	switch filepath.Base(path) {
