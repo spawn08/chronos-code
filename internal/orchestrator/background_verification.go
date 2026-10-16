@@ -1,0 +1,103 @@
+package orchestrator
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"sort"
+
+	"github.com/spawn08/chronos-code/internal/checks"
+	"github.com/spawn08/chronos-code/internal/execution"
+	"github.com/spawn08/chronos-code/internal/verification"
+)
+
+func (r *taskRuntime) observationContext() context.Context {
+	if r.observationCtx != nil {
+		return r.observationCtx
+	}
+	return context.Background()
+}
+
+func (r *taskRuntime) sourceObservationsEnabled() bool {
+	r.sourceMu.Lock()
+	defer r.sourceMu.Unlock()
+	return r.sources != nil
+}
+
+func (r *taskRuntime) backgroundMayChangeSource(args map[string]any) bool {
+	command, _ := args["command"].(string)
+	directory := shellDirectory(r.workspaceRoot, args)
+	if checks.IsDevelopmentServer(r.observationContext(), r.workspaceRoot, directory, command) {
+		return false
+	}
+	for _, step := range planShellEvidence(command) {
+		if step.mutation || verificationClass(step.class) && step.class != execution.CommandDiff {
+			return true
+		}
+	}
+	return false
+}
+
+func shellDirectory(root string, args map[string]any) string {
+	directory, _ := args["working_dir"].(string)
+	if directory == "" {
+		return root
+	}
+	if !filepath.IsAbs(directory) {
+		return filepath.Join(root, directory)
+	}
+	return directory
+}
+
+// Observe terminal receipts without consuming the shell's output stream.
+func (r *taskRuntime) reconcileBackgrounds() error {
+	if r.backgroundShells == nil {
+		return nil
+	}
+	for _, snapshot := range r.backgroundShells.Snapshots(r.observationContext()) {
+		if !snapshot.Exited {
+			continue
+		}
+		args, started, revision, ok := r.finishBackground(snapshot.ID)
+		if !ok {
+			continue
+		}
+		// The final source scan follows observed process exit, covering late writes.
+		if err := r.refreshSourceChanges(false); err != nil {
+			r.trackBackground(snapshot.ID, args, started, revision)
+			return err
+		}
+		result := map[string]any{"status": "exited", "shell_id": snapshot.ID, "exit_code": snapshot.ExitCode}
+		if err := recordBackgroundChecks(r, args, result, started, snapshot.CompletedAt, revision); err != nil {
+			r.trackBackground(snapshot.ID, args, started, revision)
+			return fmt.Errorf("record observed background completion: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *taskRuntime) pendingBackgroundObligations() []verification.Obligation {
+	calls := map[string]map[string]any{}
+	r.backgroundMu.Lock()
+	for id, call := range r.background {
+		calls[id] = call.args
+	}
+	r.backgroundMu.Unlock()
+	if r.backgroundShells != nil {
+		for _, snapshot := range r.backgroundShells.Snapshots(r.observationContext()) {
+			if snapshot.Exited {
+				delete(calls, snapshot.ID)
+				continue
+			}
+			calls[snapshot.ID] = map[string]any{"command": snapshot.Command, "working_dir": snapshot.Directory}
+		}
+	}
+	var result []verification.Obligation
+	for id, args := range calls {
+		if r.backgroundMayChangeSource(args) {
+			result = append(result, verification.Obligation{ID: "background:" + id, Kind: verification.KindQuiescence, Paths: []string{"."}, Status: verification.StatusPending})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}

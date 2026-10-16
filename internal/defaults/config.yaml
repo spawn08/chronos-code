@@ -1,5 +1,7 @@
 workspace:
   index_on_start: true
+  indexer:
+    prefetch_tokens: 0
 
 tools:
   # Base size above which a tool result is replaced by a preview the model
@@ -8,6 +10,18 @@ tools:
   # ~1 KB were compressed and about 60% were fetched back, each fetch an
   # extra model call that also kept the preview in context.
   compression_threshold_tokens: 8000
+  # Specialized schemas are discovered lazily; permissions and middleware still apply.
+  deferred_schemas: true
+  core_tools: [file_read, file_write, file_edit, file_list, file_glob, file_grep, shell, await_shell, kill_shell, update_plan, skill, codebase_search, codebase_context, read_artifact, list_artifacts, read_history, discover_tools, call_tool, await_tool, cancel_tool, message_tool]
+  journal: true
+  lean_context: true
+  fresh_edits: true
+  post_edit_diagnostics: true
+  model_profiles: true
+  # Yield slow specialized calls without imposing an overall execution deadline.
+  yield_ms: 30000
+  unary_output_tokens: 4096
+  max_background_tools: 8
 
 memory:
   enabled: true

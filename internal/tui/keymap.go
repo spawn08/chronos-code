@@ -1,6 +1,12 @@
 package tui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"strings"
+	"unicode"
+
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+)
 
 // keyMap declares the interactive REPL's top-level key bindings — the ones
 // intercepted before falling through to the input textarea's own bindings
@@ -32,10 +38,32 @@ var keys = keyMap{
 	ModelPicker:    key.NewBinding(key.WithKeys("ctrl+m"), key.WithHelp("ctrl+m", "model picker")),
 	LoginWizard:    key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "login")),
 	CommandPalette: key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "command palette")),
-	CopyLast:       key.NewBinding(key.WithKeys("ctrl+y", "ctrl+shift+c"), key.WithHelp("ctrl+shift+c", "copy last response")),
+	CopyLast:       key.NewBinding(key.WithKeys("ctrl+y", "ctrl+shift+c"), key.WithHelp("ctrl+y", "copy current response")),
 	CopyCode:       key.NewBinding(key.WithKeys("ctrl+shift+x"), key.WithHelp("ctrl+shift+x", "copy last code block")),
 	ToggleTools:    key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "expand or collapse tool calls")),
 	Paste:          key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste from clipboard")),
+}
+
+func matchesShortcut(msg tea.KeyPressMsg, binding key.Binding) bool {
+	// xterm can report the shifted letter while Kitty reports its base code.
+	if msg.Mod.Contains(tea.ModCtrl) {
+		msg.Code = unicode.ToLower(msg.Code)
+	}
+	return key.Matches(msg, binding)
+}
+
+func immediateUICommand(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "/copy", "/mouse", "/perf", "/help", "/h", "/quit", "/exit", "/q", "/inspect", "/diff":
+		return true
+	case "/session":
+		return len(fields) == 2 && strings.EqualFold(fields[1], "list")
+	}
+	return false
 }
 
 const helpText = `You are talking to Chronos Code (primary). Specialists run as subagents unless you @mention or /agent switch.
@@ -81,7 +109,8 @@ Commands:
   /add-dir [path] [read]
                      Allow a directory outside the workspace for this session
                      (read/write by default); no path lists approved ones
-  /copy              Copy the last assistant response
+  /copy              Copy the current response (live text while running)
+  /copy last         Copy the last completed assistant response
   /copy visible      Copy the currently visible transcript
   /copy all          Copy the full conversation transcript
   /copy code [n]     Copy the last (or nth) fenced code block
@@ -95,14 +124,15 @@ Commands:
   !<cmd>             Run a local shell command in the workspace (output in chat)
 
 Keys:
-  Inspection         up/down/pgup/pgdown scroll; left/right select; ctrl+shift+c copy
-  enter              Send; while running, add to the running task (commands queue)
+  Inspection         up/down/pgup/pgdown scroll; left/right select; ctrl+y copy
+  enter              Send; while running, add to the running task
+  Local controls     /copy, /mouse, /help, /perf and /quit run immediately
   alt+enter          Queue a follow-up to run after the current turn
   ctrl+c             Stop the running turn (queued input still runs); quit when idle
   ctrl+j             Insert newline
   up / down          Select completion, otherwise recall message history
   ctrl+r             Search message history
-  ctrl+y, ctrl+shift+c Copy the last assistant response (visible output if none)
+  ctrl+y, ctrl+shift+c Copy the current response (visible output if none)
   ctrl+shift+x       Copy the last fenced code block from the reply
   ctrl+o             Expand or collapse tool inputs, results, and edit previews
   tab                Complete the selected slash command, /model, agent, or @file

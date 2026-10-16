@@ -48,7 +48,7 @@ func TestBackgroundShellLifecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			g := got.(map[string]any)
-			if g["matched"] != true || !strings.Contains(g["output"].(string), "READY") || strings.Contains(g["output"].(string), "start") {
+			if g["matched"] != true || !strings.Contains(g["output"].(string), "READY") || (strings.Contains(r["output"].(string), "start") && strings.Contains(g["output"].(string), "start")) {
 				t.Fatalf("pattern await = %v (want only new output, containing READY)", g)
 			}
 			got, err = await.Handler(ctx, map[string]any{"shell_id": id, "timeout_ms": 5000.0})

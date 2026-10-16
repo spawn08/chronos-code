@@ -12,11 +12,12 @@ import (
 // EnvelopeRecord is the production execution contract plus observations that
 // are not represented in the terminal envelope itself.
 type EnvelopeRecord struct {
-	Envelope       execution.ExecutionEnvelope
-	Events         []execution.EventEnvelope
-	Calls          []Call
-	RetryAttempts  int
-	RepairAttempts int
+	Envelope        execution.ExecutionEnvelope
+	Events          []execution.EventEnvelope
+	Calls           []Call
+	RetryAttempts   int
+	RepairAttempts  int
+	RequestContexts []any
 }
 
 type EnvelopeExecutor func(context.Context, TaskExecution) (EnvelopeRecord, error)
@@ -52,6 +53,7 @@ func (a ChronosCodeAdapter) Run(ctx context.Context, task TaskExecution) (TaskEx
 		LatestChangeAt: completedAt,
 	}
 	result.Calls = append(result.Calls, record.Calls...)
+	result.RequestContexts = record.RequestContexts
 	deriveCallsFromEvents := len(record.Calls) == 0
 	for _, event := range record.Events {
 		result.Events = append(result.Events, TaskEvent{ID: fmt.Sprintf("event-%d", event.Sequence), Name: string(event.Type)})

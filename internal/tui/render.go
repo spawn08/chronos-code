@@ -83,7 +83,7 @@ func (v *inspectionOverlay) View() string {
 }
 
 func (m *appModel) handleInspectionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "ctrl+shift+c" {
+	if matchesShortcut(msg, keys.CopyLast) {
 		return m, m.copyClipboardCmd(ansi.Strip(m.inspection.content), "copied inspection")
 	}
 	switch msg.Code {

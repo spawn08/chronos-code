@@ -23,6 +23,7 @@ const (
 	KindDiagnostics Kind = "diagnostics"
 	KindTest        Kind = "test"
 	KindDiff        Kind = "diff"
+	KindQuiescence  Kind = "quiescence"
 )
 
 type Status string
@@ -56,6 +57,8 @@ type Obligation struct {
 	Kind         Kind
 	Command      string
 	CommandClass execution.CommandClass
+	CommandFamily string
+	CheckRoot string
 	Paths        []string
 	Status       Status
 }
@@ -120,36 +123,59 @@ func Derive(input Input) []Obligation {
 func Reduce(obligations []Obligation, events []execution.Event) []Obligation {
 	current := clone(obligations)
 	for i := range current {
-		current[i].Status = StatusPending
-	}
-	for _, event := range events {
-		for i := range current {
-			obligation := &current[i]
-			if !overlap(obligation.Paths, event.Paths) {
-				continue
+		obligation := &current[i]
+		statuses := make([]Status, len(obligation.Paths))
+		for j := range statuses {
+			statuses[j] = StatusPending
+		}
+		for _, event := range events {
+			for j, path := range obligation.Paths {
+				switch event.Type {
+				case execution.EventWrite:
+					if overlap([]string{path}, event.Paths) && statuses[j] == StatusSatisfied {
+						statuses[j] = StatusStale
+					}
+				case execution.EventVerification:
+					if covers(event.Paths, path) && matches(*obligation, event) {
+						statuses[j] = StatusFailed
+						if event.Passed {
+							statuses[j] = StatusSatisfied
+						}
+					}
+				case execution.EventUncertainty:
+					if overlap([]string{path}, event.Paths) && matchesDetail(*obligation, strings.TrimPrefix(event.Detail, "cancelled:")) && strings.HasPrefix(event.Detail, "cancelled:") {
+						statuses[j] = StatusCancelled
+					}
+				}
 			}
-			switch event.Type {
-			case execution.EventWrite:
-				if obligation.Status == StatusSatisfied {
-					obligation.Status = StatusStale
+		}
+		obligation.Status = StatusPending
+		if len(statuses) > 0 {
+			obligation.Status = StatusSatisfied
+			for _, status := range []Status{StatusFailed, StatusCancelled, StatusStale, StatusPending} {
+				for _, pathStatus := range statuses {
+					if pathStatus == status {
+						obligation.Status = status
+						break
+					}
 				}
-			case execution.EventVerification:
-				if !matches(*obligation, event) {
-					continue
-				}
-				if event.Passed {
-					obligation.Status = StatusSatisfied
-				} else {
-					obligation.Status = StatusFailed
-				}
-			case execution.EventUncertainty:
-				if matchesDetail(*obligation, strings.TrimPrefix(event.Detail, "cancelled:")) && strings.HasPrefix(event.Detail, "cancelled:") {
-					obligation.Status = StatusCancelled
+				if obligation.Status != StatusSatisfied {
+					break
 				}
 			}
 		}
 	}
 	return current
+}
+
+// Verification coverage must contain an input; overlap alone can cover a sibling.
+func covers(paths []string, target string) bool {
+	for _, path := range paths {
+		if path == "." || path == target || strings.HasPrefix(target, strings.TrimSuffix(path, "/")+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesDetail(obligation Obligation, detail string) bool {
@@ -172,7 +198,23 @@ func Assess(mode Mode, proposedSuccess bool, obligations []Obligation, events []
 }
 
 func matches(obligation Obligation, event execution.Event) bool {
+	if obligation.CommandFamily != "" {
+		return event.CommandFamily == obligation.CommandFamily && event.CheckRoot == obligation.CheckRoot && event.CommandClass == obligation.CommandClass
+	}
+	if obligation.Kind == KindQuiescence {
+		return false
+	}
 	if obligation.Command != "" {
+		if obligation.Kind == KindTest {
+			command := event.Command
+			command = strings.TrimPrefix(strings.TrimPrefix(command, "python3 -m "), "python -m ")
+			switch obligation.Command {
+			case "go test", "pytest", "cargo test", "npm test":
+				if command == obligation.Command || strings.HasPrefix(command, obligation.Command+" ") {
+					return true
+				}
+			}
+		}
 		return event.Command == obligation.Command || event.Detail == obligation.ID || event.Detail == obligation.Command
 	}
 	return event.CommandClass == obligation.CommandClass
@@ -191,7 +233,7 @@ func containsCode(paths []string) bool {
 func overlap(left, right []string) bool {
 	for _, l := range left {
 		for _, r := range right {
-			if l == r {
+			if l == "." || r == "." || l == r || strings.HasPrefix(l, strings.TrimSuffix(r, "/")+"/") || strings.HasPrefix(r, strings.TrimSuffix(l, "/")+"/") {
 				return true
 			}
 		}

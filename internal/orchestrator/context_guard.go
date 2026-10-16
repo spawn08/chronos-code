@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -73,6 +74,8 @@ const (
 
 // guardEstimateMetadataKey carries the request's local token estimate from
 // Before to After for calibration.
+const guardBudgetMetadataKey = "chronos_code.context_guard_budget"
+
 const guardEstimateMetadataKey = "chronos_code.context_guard_estimate"
 
 type guardEstimate struct {
@@ -91,6 +94,7 @@ const maxContextTrims = 256
 type contextGuardOptions struct {
 	ContextLimit    int
 	MaxOutputTokens int
+	Store           storage.Storage
 }
 
 const contextGuardMargin = 0.15
@@ -187,15 +191,15 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 	// The ceiling is in provider tokens; convert it to local counter units.
 	effectiveLimit := int(float64(contextLimit-outputTokens)/h.tokenScale(modelID)) - schemaTokens
 	total := counter.CountTokens(req.Messages)
-	if total <= effectiveLimit {
-		evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: total + schemaTokens}
-		return nil
+	pinnedTokens := 0
+	for _, msg := range req.Messages {
+		if msg.Role == model.RoleSystem && !msg.Uncached {
+			pinnedTokens += counter.CountTokens([]model.Message{msg})
+		}
 	}
-
-	// Count system/pinned messages that should not be trimmed.
-	protectedPrefix := 0
-	for protectedPrefix < len(req.Messages) && req.Messages[protectedPrefix].Role == model.RoleSystem {
-		protectedPrefix++
+	evt.Metadata[guardBudgetMetadataKey] = map[string]any{"context_limit": contextLimit, "schema_tokens": schemaTokens, "output_reserve_tokens": outputTokens, "token_scale": h.tokenScale(modelID), "message_budget_tokens": effectiveLimit, "pinned_tokens": pinnedTokens, "original_message_tokens": total}
+	if effectiveLimit <= 0 {
+		return &ContextBudgetOverflowError{ModelID: modelID, MessageTokens: total, BudgetTokens: effectiveLimit, ContextLimit: contextLimit, SchemaTokens: schemaTokens, OutputTokens: outputTokens}
 	}
 	trimKey := contextTrimKey(ctx)
 	if trimmed, dropped, ok := h.reuseTrim(trimKey, modelID, effectiveLimit, counter, req.Messages); ok {
@@ -204,11 +208,25 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 		}
 		req.Messages = trimmed
 		evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: counter.CountTokens(trimmed) + schemaTokens}
+		evt.Metadata["chronos_code.context_guard_trim"] = "reused"
 		return nil
+	}
+	if total <= effectiveLimit {
+		evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: total + schemaTokens}
+		evt.Metadata["chronos_code.context_guard_trim"] = "none"
+		return nil
+	}
+	protectedPrefix := 0
+	for protectedPrefix < len(req.Messages) && req.Messages[protectedPrefix].Role == model.RoleSystem {
+		protectedPrefix++
+	}
+	recoverable, err := recoverToolMessages(ctx, h.options.Store, req.Messages)
+	if err != nil {
+		return err
 	}
 	// Trim below the budget so the next calls fit with the same prefix.
 	target := effectiveLimit - int(float64(effectiveLimit)*contextGuardHeadroom)
-	trimmed, droppedSources := trimMessages(counter, req.Messages, protectedPrefix, target)
+	trimmed, droppedSources := trimMessages(counter, recoverable, protectedPrefix, target)
 	if model.AnthropicThinkingBoundToConversation(modelID) {
 		// Trimming edits earlier turns, so thinking kept from before it no
 		// longer verifies. Later blocks bind to this remembered, append-only
@@ -224,6 +242,7 @@ func (h *contextGuardHook) Before(ctx context.Context, evt *hooks.Event) error {
 			SchemaTokens: schemaTokens, OutputTokens: outputTokens}
 	}
 	h.rememberTrim(trimKey, modelID, req.Messages, trimmed, droppedSources)
+	evt.Metadata["chronos_code.context_guard_trim"] = "rebuilt"
 	req.Messages = trimmed
 	evt.Metadata[guardEstimateMetadataKey] = guardEstimate{modelID: modelID, tokens: counter.CountTokens(trimmed) + schemaTokens}
 	return nil
@@ -268,9 +287,9 @@ func contextTrimKey(ctx context.Context) string {
 	identity, _ := agent.RunIdentityFromContext(ctx)
 	session := storage.SessionFromContext(ctx)
 	if identity.ParentInvocationID != "" {
-		return session + "\x00child\x00" + identity.InvocationID
+		return storage.TenantFromContext(ctx) + "\x00" + session + "\x00child\x00" + identity.InvocationID
 	}
-	return session + "\x00role\x00" + identity.RoleID
+	return storage.TenantFromContext(ctx) + "\x00" + session + "\x00role\x00" + identity.RoleID
 }
 
 // reuseTrim returns the remembered trimmed prefix plus the request's newer
@@ -463,7 +482,7 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 	// retain a few small user prompts even when their assistant/tool turns go.
 	keepUserPrompts := false
 	for i := len(msgs) - 1; i >= protectedPrefix; i-- {
-		if msgs[i].Role == model.RoleUser {
+		if rawUserMessage(msgs[i]) {
 			keepUserPrompts = len(msgs[i].Content) <= 256
 			break
 		}
@@ -472,7 +491,7 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 	for total > limit {
 		nextUser := -1
 		for i := protectedPrefix + 1; i < len(msgs); i++ {
-			if msgs[i].Role == model.RoleUser {
+			if rawUserMessage(msgs[i]) {
 				nextUser = i
 				break
 			}
@@ -482,7 +501,7 @@ func trimMessages(counter model.TokenCounter, messages []model.Message, protecte
 		}
 		if keepUserPrompts {
 			for _, m := range msgs[protectedPrefix:nextUser] {
-				if m.Role == model.RoleUser && len(m.Content) <= 4096 {
+				if rawUserMessage(m) && len(m.Content) <= 4096 {
 					droppedUserPrompts = append(droppedUserPrompts, m)
 					if len(droppedUserPrompts) > 4 {
 						droppedUserPrompts = droppedUserPrompts[1:]
@@ -598,10 +617,11 @@ func wrapToolResultCap(a *agent.Agent) {
 		wrapped := *def
 		wrapped.Handler = func(ctx context.Context, args map[string]any) (any, error) {
 			result, err := orig(ctx, args)
-			if err != nil || result == nil {
+			if result == nil {
 				return result, err
 			}
-			return capResult(result), nil
+			recovered, recoveryErr := recoverAndCapToolResult(ctx, a.Storage, result)
+			return recovered, errors.Join(err, recoveryErr)
 		}
 		a.Tools.Register(&wrapped)
 	}
@@ -636,11 +656,14 @@ func cappedResult(data []byte, limit int) map[string]any {
 	out := map[string]any{"truncated": true, "total_bytes": len(data), "shown_bytes": 0, "preview": ""}
 	var object map[string]any
 	if json.Unmarshal(data, &object) == nil {
-		for _, key := range []string{"storage_key", "artifact_id", "artifact_path", "artifact_uri", "full_content_ref", "full_size_bytes", "total_bytes"} {
+		for _, key := range []string{"artifact_refs", "storage_key", "artifact_id", "artifact_path", "artifact_uri", "full_content_ref", "full_size_bytes", "total_bytes"} {
 			if value, ok := object[key]; ok {
 				out[key] = value
 			}
 		}
+	}
+	if refs := resultReferences(object); len(refs) > 0 {
+		out["artifact_refs"] = refs
 	}
 	// References are indivisible. If they alone exceed a request-time preview
 	// target, keep them; the guard will reject the still-oversized request.
@@ -670,4 +693,83 @@ func utf8Prefix(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+const summaryToolRecoveryBytes = 1000
+
+// Keep real references before content in serialized tool messages: the SDK's
+// summary renderer retains only the first 1,000 bytes of each result.
+func resultReferences(object map[string]any) map[string]any {
+	refs := map[string]any{}
+	if nested, ok := object["artifact_refs"].(map[string]any); ok {
+		for key, value := range nested {
+			refs[key] = value
+		}
+	}
+	for _, key := range []string{"artifact_id", "storage_key", "artifact_path", "artifact_uri", "full_content_ref"} {
+		if value, ok := object[key]; ok {
+			refs[key] = value
+		}
+	}
+	return refs
+}
+
+func recoverAndCapToolResult(ctx context.Context, store storage.Storage, result any) (any, error) {
+	data, err := json.Marshal(result)
+	if err != nil || len(data) <= summaryToolRecoveryBytes {
+		return capResult(result), nil
+	}
+	var object map[string]any
+	if original, ok := result.(map[string]any); ok {
+		object = make(map[string]any, len(original)+2)
+		for key, value := range original {
+			object[key] = value
+		}
+	} else if text, ok := result.(string); ok {
+		_ = json.Unmarshal([]byte(text), &object)
+	}
+	refs := resultReferences(object)
+	if len(refs) == 0 {
+		if _, ok := store.(storage.SessionFileStore); ok && storage.SessionFromContext(ctx) != "" {
+			id := fmt.Sprintf("tool:%x", sha256.Sum256(data))
+			if err := saveArtifact(ctx, store, id, result); err != nil {
+				return result, fmt.Errorf("persist tool result before reduction: %w", err)
+			}
+			refs["artifact_id"] = id
+		}
+	}
+	if len(refs) == 0 {
+		return capResult(result), nil
+	}
+	if object == nil {
+		object = map[string]any{"content": result}
+	}
+	object["artifact_refs"] = refs
+	if id, ok := refs["artifact_id"]; ok {
+		object["artifact_id"] = id
+	}
+	return capResult(object), nil
+}
+
+func recoverToolMessages(ctx context.Context, store storage.Storage, messages []model.Message) ([]model.Message, error) {
+	recovered := append([]model.Message(nil), messages...)
+	for i, msg := range messages {
+		if msg.Role != model.RoleTool || len(msg.Content) <= summaryToolRecoveryBytes {
+			continue
+		}
+		value, err := recoverAndCapToolResult(ctx, store, msg.Content)
+		if err != nil {
+			return nil, err
+		}
+		if text, ok := value.(string); ok {
+			recovered[i].Content = text
+			continue
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("encode recoverable tool result: %w", err)
+		}
+		recovered[i].Content = string(data)
+	}
+	return recovered, nil
 }

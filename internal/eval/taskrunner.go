@@ -55,6 +55,7 @@ type TaskExecutionResult struct {
 	LatestChangeAt   time.Time
 	Grader           GraderOutcome
 	Failure          *Failure
+	RequestContexts  []any
 }
 
 // TaskAdapter executes an agent in the supplied isolated workspace.
@@ -148,6 +149,7 @@ func (r TaskRunner) Run(ctx context.Context, run TaskRun) (TaskRunResult, error)
 		LatestChangeAt:     execution.LatestChangeAt,
 		Grader:             execution.Grader,
 		Failure:            execution.Failure,
+		RequestContexts:    execution.RequestContexts,
 	}
 	if adapterErr == nil && (len(run.Grading.Commands) > 0 || len(run.Grading.Artifacts) > 0) {
 		graderCtx := context.Background()

@@ -2,13 +2,14 @@ package security
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 
@@ -38,13 +39,13 @@ type BackgroundShells struct {
 	dir string // log directory
 
 	mu     sync.Mutex
-	next   int
 	shells map[string]*backgroundShell // id -> shell
 }
 
 type backgroundShell struct {
 	id       string
 	session  string
+	tenant   string
 	command  string
 	dir      string
 	logPath  string
@@ -54,6 +55,7 @@ type backgroundShell struct {
 	done     chan struct{}
 	exitCode int
 	exitErr  error
+	completed time.Time
 
 	readMu    sync.Mutex // serializes reads that advance readCount
 	readCount int        // output bytes already returned to the model
@@ -123,15 +125,14 @@ func (o *shellOutput) since(n int) (string, int, time.Time) {
 // start runs command in dir and returns once it exits or yield passes,
 // whichever is first. A yield of 0 returns immediately.
 func (b *BackgroundShells) start(ctx context.Context, command, dir string, yield time.Duration) (map[string]any, error) {
-	if err := os.MkdirAll(b.dir, 0o755); err != nil {
+	owner := fmt.Sprintf("%x", sha256.Sum256([]byte(storage.TenantFromContext(ctx)+"\x00"+storage.SessionFromContext(ctx))))
+	dirName := filepath.Join(b.dir, owner)
+	if err := os.MkdirAll(dirName, 0o700); err != nil {
 		return nil, fmt.Errorf("shell: create log directory: %w", err)
 	}
-	b.mu.Lock()
-	b.next++
-	id := "sh-" + strconv.Itoa(b.next)
-	b.mu.Unlock()
-	logPath := filepath.Join(b.dir, id+".log")
-	file, err := os.Create(logPath)
+	id := "sh-" + rand.Text()
+	logPath := filepath.Join(dirName, id+".log")
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("shell: create log: %w", err)
 	}
@@ -147,7 +148,7 @@ func (b *BackgroundShells) start(ctx context.Context, command, dir string, yield
 		file.Close()
 		return nil, fmt.Errorf("shell: %w", err)
 	}
-	sh := &backgroundShell{id: id, session: storage.SessionFromContext(ctx), command: command, dir: dir,
+	sh := &backgroundShell{id: id, session: storage.SessionFromContext(ctx), tenant: storage.TenantFromContext(ctx), command: command, dir: dir,
 		logPath: logPath, cmd: cmd, started: time.Now(), output: out, done: make(chan struct{})}
 	b.mu.Lock()
 	b.shells[id] = sh
@@ -155,6 +156,7 @@ func (b *BackgroundShells) start(ctx context.Context, command, dir string, yield
 	go func() {
 		err := cmd.Wait()
 		sh.exitErr, sh.exitCode = err, exitCode(err)
+		sh.completed = time.Now().UTC()
 		out.mu.Lock()
 		fmt.Fprintf(file, "\n# exit_code: %d\n# elapsed_ms: %d\n", sh.exitCode, time.Since(sh.started).Milliseconds())
 		file.Close()
@@ -195,9 +197,10 @@ func (b *BackgroundShells) report(sh *backgroundShell, final bool) map[string]an
 	sh.readCount = total
 	sh.readMu.Unlock()
 	result := map[string]any{
-		"shell_id":   sh.id,
-		"log_path":   sh.logPath,
-		"elapsed_ms": time.Since(sh.started).Milliseconds(),
+		"shell_id":    sh.id,
+		"log_path":    sh.logPath,
+		"artifact_id": "shell:" + sh.id,
+		"elapsed_ms":  time.Since(sh.started).Milliseconds(),
 	}
 	text, truncated := tailOutput(text)
 	result["output"] = text
@@ -228,7 +231,7 @@ func (b *BackgroundShells) get(ctx context.Context, id string) (*backgroundShell
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	sh, ok := b.shells[id]
-	if !ok || sh.session != storage.SessionFromContext(ctx) {
+	if !ok || sh.session != storage.SessionFromContext(ctx) || sh.tenant != storage.TenantFromContext(ctx) {
 		return nil, fmt.Errorf("no background shell %q in this session", id)
 	}
 	return sh, nil
@@ -285,11 +288,15 @@ func (b *BackgroundShells) kill(ctx context.Context, id string) (map[string]any,
 
 // Running lists a session's background shells for the per-turn context.
 func (b *BackgroundShells) Running(sessionID string) []string {
+	return b.RunningContext(storage.WithSession(context.Background(), sessionID))
+}
+
+func (b *BackgroundShells) RunningContext(ctx context.Context) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var lines []string
 	for _, sh := range b.shells {
-		if sh.session != sessionID {
+		if sh.session != storage.SessionFromContext(ctx) || sh.tenant != storage.TenantFromContext(ctx) {
 			continue
 		}
 		state := "running"

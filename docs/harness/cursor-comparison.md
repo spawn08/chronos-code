@@ -1,5 +1,9 @@
 # chronos-code vs Cursor Agent — Harness Comparison & Improvement Plan
 
+> Historical baseline. Several gaps below are now implemented in source. See the
+> [2026-10-16 runtime audit](CURSOR-RUNTIME-AUDIT-2026-10-16.md) for re-measured
+> transcript counts, current implementation evidence, and the remaining roadmap.
+
 _Date: 2026-10-15. Evidence: 4 Cursor agent transcripts on quant-trade (Oct 2026,
 `~/.cursor/projects/…-chronos-code/agent-transcripts/`), 7 chronos-code sessions on quant-trade
 Oct 13–15 (`~/.chronos-code/projects/quant-trade-716662…/sessions.db` + `telemetry.db`), and the

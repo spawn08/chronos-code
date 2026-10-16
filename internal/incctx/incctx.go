@@ -89,6 +89,8 @@ func Wrap(a *agent.Agent, root string) {
 		"minimum":     1,
 		"description": "Last line to return, 1-indexed inclusive. Omit to read to the end of the file.",
 	}
+	props["offset"] = map[string]any{"type": "integer", "description": "First line, 1-indexed; a negative offset selects lines from the end. Use with limit instead of start_line/end_line."}
+	props["limit"] = map[string]any{"type": "integer", "minimum": 1, "description": "Maximum lines with offset; defaults to 200 when offset is provided."}
 
 	props["force"] = map[string]any{"type": "boolean", "description": "Re-read fresh source (the default); resource bounds still apply."}
 	props["outline_only"] = map[string]any{"type": "boolean", "description": "Request a Go declaration outline; false requests source. Explicit line ranges take precedence. Outlines are limited to 1 MiB input."}
@@ -112,6 +114,40 @@ func Wrap(a *agent.Agent, root string) {
 		if end != 0 && end < start {
 			return nil, fmt.Errorf("file_read: end_line must be >= start_line")
 		}
+		aliasRange := args["offset"] != nil || args["limit"] != nil
+		offset := 1
+		limit := 200
+		if aliasRange {
+			if args["start_line"] != nil || args["end_line"] != nil {
+				return nil, fmt.Errorf("file_read: use either offset/limit or start_line/end_line")
+			}
+			if value, exists := args["offset"]; exists {
+				switch n := value.(type) {
+				case int:
+					offset = n
+				case float64:
+					if math.Trunc(n) != n || n <= -float64(math.MaxInt) || n >= float64(math.MaxInt) {
+						return nil, fmt.Errorf("file_read: invalid offset")
+					}
+					offset = int(n)
+				default:
+					return nil, fmt.Errorf("file_read: invalid offset")
+				}
+				if offset == 0 {
+					return nil, fmt.Errorf("file_read: offset is 1-indexed; zero is invalid")
+				}
+			}
+			limit, err = lineArg(args, "limit", 200)
+			if err != nil {
+				return nil, err
+			}
+			if offset > 0 {
+				if offset > math.MaxInt-limit+1 {
+					return nil, fmt.Errorf("file_read: range overflows")
+				}
+				start, end = offset, offset+limit-1
+			}
+		}
 		for _, key := range []string{"force", "outline_only"} {
 			if v, exists := args[key]; exists {
 				if _, ok := v.(bool); !ok {
@@ -130,8 +166,11 @@ func Wrap(a *agent.Agent, root string) {
 		if document.Supported(resolved) {
 			return readDocumentRange(ctx, resolved, start, end)
 		}
+		if aliasRange && offset < 0 {
+			return readTailRange(ctx, resolved, offset, limit)
+		}
 		outline, explicit := args["outline_only"].(bool)
-		canOutline := args["start_line"] == nil && args["end_line"] == nil &&
+		canOutline := !aliasRange && args["start_line"] == nil && args["end_line"] == nil &&
 			(!explicit || outline) && strings.HasSuffix(resolved, ".go") &&
 			stat.Mode().IsRegular() && stat.Size() <= maxOutlineBytes &&
 			(outline || stat.Size() > outlineSizeThreshold)

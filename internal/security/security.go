@@ -47,14 +47,18 @@ func (g *Guard) Before(ctx context.Context, evt *hooks.Event) error {
 	args, _ := evt.Input.(map[string]any)
 	var blockErr error
 	switch evt.Name {
-	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
+	case "file_read", "file_write", "file_edit", "file_list", "file_glob", "file_grep":
 		root := builtins.WorkspaceRoot(ctx, g.root)
-		blockErr = g.checkFileArgsAtRoot(evt.Name, args, root)
+		name := evt.Name
+		if name == "file_edit" {
+			name = "file_write"
+		}
+		blockErr = g.checkFileArgsAtRoot(name, args, root)
 		if outside, ok := isOutsideRoots(blockErr); ok {
 			if allowed, err := g.policy.requestDirectory(ctx, root, outside); err != nil {
 				blockErr = fmt.Errorf("%s: %w", outside.msg, err)
 			} else if allowed {
-				blockErr = g.checkFileArgsAtRoot(evt.Name, args, root)
+				blockErr = g.checkFileArgsAtRoot(name, args, root)
 			}
 		}
 	case "shell", "shell_auto":

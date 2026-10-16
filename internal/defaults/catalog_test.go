@@ -208,8 +208,8 @@ func TestSpecialistPromptsAvoidUnsupportedBehaviorClaims(t *testing.T) {
 	}
 }
 
-// The code-index tools are registered at runtime, not in agent YAML, so the
-// prompts are the only place that routes symbol lookups to them.
+// The primary agent uses shared runtime navigation policy; specialist prompts
+// also carry the routing guidance for their standalone use.
 func TestPromptsRouteSymbolLookupsToCodeIndex(t *testing.T) {
 	for _, id := range []string{"chronos-code", "coder", "researcher"} {
 		data, err := ReadFile("agents/" + id + ".yaml")
@@ -220,8 +220,22 @@ func TestPromptsRouteSymbolLookupsToCodeIndex(t *testing.T) {
 		if err := yaml.Unmarshal(data, &definition); err != nil {
 			t.Fatalf("parse %s: %v", id, err)
 		}
+		prompt := definition.SystemPrompt
+		if id == "chronos-code" {
+			shared, err := ReadFile("context-engineering.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var policy struct {
+				SystemPrompt string `yaml:"system_prompt"`
+			}
+			if err := yaml.Unmarshal(shared, &policy); err != nil {
+				t.Fatal(err)
+			}
+			prompt += "\n" + policy.SystemPrompt
+		}
 		for _, required := range []string{"codebase_search", "codebase_context", "literal text"} {
-			if !strings.Contains(definition.SystemPrompt, required) {
+			if !strings.Contains(prompt, required) {
 				t.Errorf("%s prompt missing %q", id, required)
 			}
 		}

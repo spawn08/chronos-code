@@ -28,7 +28,8 @@ func wrapDeliveryOperations(a *agent.Agent) {
 		return
 	}
 	for _, definition := range a.Tools.List() {
-		if definition == nil || definition.Handler == nil {
+		if definition == nil || definition.Handler == nil || definition.Name == "call_tool" {
+			// Deferred dispatch delegates effect journaling to its target.
 			continue
 		}
 		wrapped := *definition

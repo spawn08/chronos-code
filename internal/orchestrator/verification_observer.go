@@ -41,7 +41,13 @@ func wrapVerificationEvidence(a *agent.Agent) {
 				return nil, err
 			}
 			startedAt := time.Now().UTC()
+			if wrapped.Name == "shell" || wrapped.Name == "shell_auto" || wrapped.Name == "await_shell" || wrapped.Name == "kill_shell" {
+				if err := runtime.refreshSourceChanges(true); err != nil {
+					return nil, err
+				}
+			}
 			var before fileState
+			startedRevision := runtime.ledger.Revision()
 			var path string
 			if wrapped.Name == "file_write" {
 				path, _ = args["path"].(string)
@@ -49,6 +55,11 @@ func wrapVerificationEvidence(a *agent.Agent) {
 			}
 			result, err := original(ctx, args)
 			completedAt := time.Now().UTC()
+			if wrapped.Name == "shell" || wrapped.Name == "shell_auto" || wrapped.Name == "await_shell" || wrapped.Name == "kill_shell" {
+				if refreshErr := runtime.refreshSourceChanges(false); refreshErr != nil {
+					return result, errors.Join(err, refreshErr)
+				}
+			}
 			switch wrapped.Name {
 			case "file_write":
 				evidencePath := path
@@ -71,30 +82,31 @@ func wrapVerificationEvidence(a *agent.Agent) {
 			case "file_read":
 				if err == nil {
 					runtime.recordReadClaim(args, result)
+					runtime.rememberRead(result)
 				}
 			case "shell", "shell_auto":
 				if running, id := backgroundRunning(result); running {
 					// Still running: record its mutations now, in order with
 					// the calls around it, and its check results when
 					// await_shell reports the exit.
-					runtime.trackBackground(id, args, startedAt)
+					runtime.trackBackground(id, args, startedAt, startedRevision)
 					if recordErr := recordBackgroundMutations(runtime, args, completedAt); recordErr != nil {
 						return result, errors.Join(err, recordErr)
 					}
 					break
 				}
-				if recordErr := recordShellEvidence(runtime, ctx, args, result, err, startedAt, completedAt); recordErr != nil {
+				if recordErr := recordShellEvidence(runtime, ctx, args, result, err, startedAt, completedAt, startedRevision); recordErr != nil {
 					return result, errors.Join(err, recordErr)
 				}
 			case "await_shell":
 				if exited, id := backgroundExited(result); exited {
-					if shellArgs, started, ok := runtime.finishBackground(id); ok {
+					if shellArgs, started, revision, ok := runtime.finishBackground(id); ok {
 						// Record only its check results. Staleness follows
 						// ledger order, so a mutation appended now would
 						// stale checks that ran while it was in the
 						// background; its changes were recorded by the
 						// mutation entry written when it started.
-						if recordErr := recordBackgroundChecks(runtime, shellArgs, result, started, completedAt); recordErr != nil {
+						if recordErr := recordBackgroundChecks(runtime, shellArgs, result, started, completedAt, revision); recordErr != nil {
 							return result, errors.Join(err, recordErr)
 						}
 					}
@@ -149,7 +161,7 @@ func readFileState(root, path string) fileState {
 	return fileState{hash: hex.EncodeToString(sum[:]), size: int64(len(data)), exists: true}
 }
 
-func recordShellEvidence(runtime *taskRuntime, ctx context.Context, args map[string]any, result any, callErr error, startedAt, completedAt time.Time) error {
+func recordShellEvidence(runtime *taskRuntime, ctx context.Context, args map[string]any, result any, callErr error, startedAt, completedAt time.Time, startRevision ...uint64) error {
 	command, _ := args["command"].(string)
 	terminal := execution.TerminalExited
 	var exitCode *int
@@ -167,6 +179,10 @@ func recordShellEvidence(runtime *taskRuntime, ctx context.Context, args map[str
 		terminal = execution.TerminalSpawnFailed
 	}
 	mutated := false
+	if len(startRevision) > 0 && runtime.ledger.Revision() != startRevision[0] && verificationClass(classifyShellCommand(command)) {
+		// A passing exit status cannot certify inputs changed while the check ran.
+		terminal = execution.TerminalCancelled
+	}
 	for _, step := range planShellEvidence(command) {
 		if step.mutation {
 			if _, err := runtime.recordWorkspaceMutation(step.command, completedAt); err != nil {
@@ -207,7 +223,7 @@ func recordBackgroundMutations(runtime *taskRuntime, args map[string]any, at tim
 
 // recordBackgroundChecks records the check steps of a background command
 // once it has exited.
-func recordBackgroundChecks(runtime *taskRuntime, args map[string]any, result any, startedAt, completedAt time.Time) error {
+func recordBackgroundChecks(runtime *taskRuntime, args map[string]any, result any, startedAt, completedAt time.Time, revision uint64) error {
 	command, _ := args["command"].(string)
 	var exitCode *int
 	if values, ok := result.(map[string]any); ok {
@@ -215,11 +231,15 @@ func recordBackgroundChecks(runtime *taskRuntime, args map[string]any, result an
 			exitCode = &code
 		}
 	}
+	terminal := execution.TerminalExited
+	if runtime.ledger.Revision() != revision {
+		terminal = execution.TerminalCancelled
+	}
 	for _, step := range planShellEvidence(command) {
 		if step.mutation {
 			continue
 		}
-		if _, err := runtime.recordCommand(step.command, step.class, exitCode, execution.TerminalExited, nil, execution.ProvenanceRuntime, startedAt, completedAt); err != nil {
+		if _, err := runtime.recordCommand(step.command, step.class, exitCode, terminal, nil, execution.ProvenanceRuntime, startedAt, completedAt); err != nil {
 			return err
 		}
 	}

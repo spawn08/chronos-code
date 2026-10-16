@@ -9,7 +9,8 @@ import (
 	"github.com/spawn08/chronos-code/internal/execution"
 )
 
-// outputTokensHook raises the per-reply output allowance for streaming
+// outputTokensHook sets the configured finite allowance for unary replies and
+// raises the per-reply output allowance for streaming
 // Anthropic calls that leave MaxTokens unset. The provider otherwise sends
 // max_tokens=4096, which truncates a single large file_write mid tool call;
 // the truncated call is discarded and never executes.
@@ -18,9 +19,9 @@ import (
 // request timeout, where a longer reply would become a timeout instead of a
 // recoverable output-limit stop. Cost-capped deliveries keep their own finite
 // reservation (see deliveryBudgetHook).
-type outputTokensHook struct{}
+type outputTokensHook struct{ unaryTokens int }
 
-func (outputTokensHook) Before(ctx context.Context, evt *hooks.Event) error {
+func (h outputTokensHook) Before(ctx context.Context, evt *hooks.Event) error {
 	if evt == nil || evt.Type != hooks.EventModelCallBefore {
 		return nil
 	}
@@ -29,6 +30,12 @@ func (outputTokensHook) Before(ctx context.Context, evt *hooks.Event) error {
 		return nil
 	}
 	if streaming, _ := evt.Metadata["stream"].(bool); !streaming {
+		if h.unaryTokens > 0 {
+			req.MaxTokens = h.unaryTokens
+			if limit := model.KnownOutputLimit(req.Model); limit > 0 && limit < req.MaxTokens {
+				req.MaxTokens = limit
+			}
+		}
 		return nil
 	}
 	provider, ok := evt.Metadata["provider"].(model.Provider)

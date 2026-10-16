@@ -1,5 +1,9 @@
 # Cursor parity check
 
+> **Design mapping, not implemented parity.** For the current source, recent Cursor
+> quant-trade runs, verification results and remaining integration gaps, see
+> [Runtime audit — 2026-10-16](CURSOR-RUNTIME-AUDIT-2026-10-16.md).
+
 Each Cursor harness behaviour observed in the quant-trade transcripts
 ([cursor-comparison.md](cursor-comparison.md)) is mapped to its counterpart in
 [HARNESS-SPEC.md](HARNESS-SPEC.md). The goal is to **match** Cursor wherever it works well, and to

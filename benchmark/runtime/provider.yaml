@@ -1,0 +1,15 @@
+version: chronos.eval.provider.v1
+model: fixture-script-v1
+responses:
+  - tool: file_read
+    arguments:
+      path: answer.txt
+  - tool: file_write
+    arguments:
+      path: answer.txt
+      old_content: original
+      new_content: resolved
+  - tool: shell
+    arguments:
+      command: 'test "$(cat answer.txt)" = resolved'
+  - content: 'Changed answer.txt to resolved and verified its content.'

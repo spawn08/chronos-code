@@ -62,7 +62,7 @@ func (h sessionUXHook) Before(ctx context.Context, evt *hooks.Event) error {
 func authorizeSessionEffect(ctx context.Context, name string) error {
 	var effects []tool.Effect
 	switch {
-	case name == "file_write":
+	case name == "file_write" || name == "file_edit":
 		if tool.IsScratchWorkspace(ctx) {
 			effects = []tool.Effect{tool.EffectScratchWrite}
 		} else {
@@ -111,7 +111,7 @@ func mutatingTool(name string) bool {
 		return true
 	}
 	switch name {
-	case "file_write", "shell", "shell_auto":
+	case "file_write", "file_edit", "shell", "shell_auto":
 		return true
 	default:
 		return false

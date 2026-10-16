@@ -11,8 +11,9 @@ import (
 	"github.com/spawn08/chronos-code/internal/defaults"
 )
 
-// installIndexGuidance couples navigation policy to runtime tool availability,
-// including agents with custom or previously exported system prompts.
+// installIndexGuidance pins intent, evidence, and navigation policy, including
+// for agents with custom or previously exported system prompts. The policy
+// includes direct-source fallback when the code index cannot be opened.
 func installIndexGuidance(agents map[string]*agent.Agent) error {
 	data, err := defaults.ReadFile("context-engineering.yaml")
 	if err != nil {
@@ -25,13 +26,16 @@ func installIndexGuidance(agents map[string]*agent.Agent) error {
 		return fmt.Errorf("parse index guidance: %w", err)
 	}
 	for _, a := range agents {
+		if a == nil {
+			continue
+		}
 		previous := a.ContextPinsFn
 		a.ContextPinsFn = func(ctx context.Context) []model.Message {
 			var pins []model.Message
 			if previous != nil {
 				pins = append(pins, previous(ctx)...)
 			}
-			return append(pins, model.Message{Role: model.RoleSystem, Content: policy.SystemPrompt})
+			return append(pins, model.Message{Role: model.RoleSystem, Name: "harness-index-guidance", Content: policy.SystemPrompt})
 		}
 	}
 	return nil

@@ -98,6 +98,8 @@ type Event struct {
 	MutationRevision uint64
 	Command          string
 	CommandClass     CommandClass
+	CommandFamily    string
+	CheckRoot        string
 	ExitCode         *int
 	TerminalState    TerminalState
 	Provenance       EvidenceProvenance
@@ -494,7 +496,7 @@ func scopeOverlaps(left, right Scope) bool {
 }
 
 func pathWithin(path, directory string) bool {
-	return strings.HasPrefix(path, strings.TrimSuffix(directory, "/")+"/")
+	return directory == "." || strings.HasPrefix(path, strings.TrimSuffix(directory, "/")+"/")
 }
 
 func pathsOverlap(left, right []string) bool {

@@ -1,5 +1,8 @@
 > See [HARNESS-SPEC.md](HARNESS-SPEC.md) — authoritative v2 spec (no runtime caps; futility governance; all languages).
 
+Current implementation and Cursor comparison: [Runtime audit — 2026-10-16](CURSOR-RUNTIME-AUDIT-2026-10-16.md).
+The spec and tool designs below are proposals; the audit distinguishes them from shipped source and historical run behavior.
+
 # chronos-code harness: performance, subagents, tools & prompts (2026-10-15)
 
 Companion to [cursor-comparison.md](cursor-comparison.md).

@@ -30,10 +30,12 @@ const (
 
 // Usage contains the resource use attributed to one correlated call.
 type Usage struct {
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	CacheTokens  int     `json:"cache_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheTokens      int     `json:"cache_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CacheWriteTokens int     `json:"cache_write_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
 }
 
 // Call records one uniquely correlated model or tool invocation.
@@ -87,6 +89,7 @@ type TaskOutcome struct {
 	LatestChangeAt     time.Time              `json:"latest_change_at"`
 	Grader             GraderOutcome          `json:"grader"`
 	Failure            *Failure               `json:"failure,omitempty"`
+	RequestContexts    []any                  `json:"request_contexts,omitempty"`
 }
 
 // Validate checks the invariants required before using an outcome in reports.
@@ -151,6 +154,8 @@ func (r TaskOutcome) Usage() Usage {
 		total.InputTokens += call.Usage.InputTokens
 		total.OutputTokens += call.Usage.OutputTokens
 		total.CacheTokens += call.Usage.CacheTokens
+		total.CacheReadTokens += call.Usage.CacheReadTokens
+		total.CacheWriteTokens += call.Usage.CacheWriteTokens
 		total.CostUSD += call.Usage.CostUSD
 	}
 	return total

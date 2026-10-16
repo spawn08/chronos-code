@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spawn08/chronos-code/internal/session"
 	"github.com/spawn08/chronos/engine/tool"
+	"github.com/spawn08/chronos/storage"
 
 	"github.com/spawn08/chronos-code/internal/execution"
 	"github.com/spawn08/chronos-code/internal/verification"
@@ -87,6 +89,30 @@ func (o *Orchestrator) finishOperationalExecution(result ExecutionResult, err er
 	delete(o.operationalActive, result.TaskID)
 	o.operationalLast = snapshot
 	o.operationalMu.Unlock()
+	if active != nil && active.runtime != nil && active.runtime.observationCtx != nil && o.sessionMgr != nil && o.store != nil {
+		ctx, cancel := context.WithTimeout(active.runtime.observationCtx, 5*time.Second)
+		defer cancel()
+		status := "failed"
+		if snapshot.StopReason == execution.StopSuccess {
+			status = "completed"
+			if snapshot.Verification.Disagreement {
+				status = "partial"
+			}
+		}
+		if snapshot.StopReason == execution.StopNoProgress || snapshot.StopReason == execution.StopMaxTurns {
+			status = "paused"
+		}
+		_ = o.sessionMgr.Touch(ctx, result.SessionID, status)
+		if events, err := o.store.ListEvents(ctx, result.SessionID, 0); err == nil {
+			seq := int64(1)
+			for _, event := range events {
+				if event.SeqNum >= seq {
+					seq = event.SeqNum + 1
+				}
+			}
+			_ = o.store.AppendEvent(ctx, &storage.Event{ID: "terminal-" + session.NewSessionID(), SessionID: result.SessionID, SeqNum: seq, Type: "harness_execution_finished", Payload: map[string]any{"task_id": result.TaskID, "status": status, "stop_reason": snapshot.StopReason, "cost_microdollars": result.CostMicrodollars}, CreatedAt: time.Now().UTC()})
+		}
+	}
 }
 
 func (o *Orchestrator) observeOperationalCompletion(initial ExecutionResult, source <-chan ExecutionCompletion) <-chan ExecutionCompletion {
@@ -217,4 +243,79 @@ func (o *Orchestrator) vcsChangedPaths(ctx context.Context) []string {
 	}
 	sort.Strings(result)
 	return boundStrings(result)
+}
+
+// recoveryDigest uses observed task versions and ledger evidence, not VCS
+// status or selected repository context, to describe resumable working state.
+func (r *taskRuntime) recoveryDigest() string {
+	if r == nil {
+		return ""
+	}
+	lines := []string{fmt.Sprintf("Active task: %s (source=task-runtime)", r.taskID)}
+	r.sourceMu.Lock()
+	paths := make([]string, 0, len(r.sources))
+	for path := range r.sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths[:min(len(paths), maxOperationalItems)] {
+		lines = append(lines, fmt.Sprintf("Observed file version: %s sha256=%s", path, r.sources[path]))
+	}
+	r.sourceMu.Unlock()
+	if len(paths) > maxOperationalItems {
+		lines = append(lines, fmt.Sprintf("Partial observed versions: %d more inputs omitted; re-read omitted sources before accepting checks.", len(paths)-maxOperationalItems))
+	}
+	if r.ledger == nil {
+		lines = append(lines, "Task ledger unavailable; checks are unverified.")
+		lines = append(lines, r.claimsDigest()...)
+		return strings.Join(lines, "\n")
+	}
+	if state, err := r.ledger.State(); err == nil {
+		ids := make([]string, 0, len(state.Verification))
+		for id := range state.Verification {
+			ids = append(ids, string(id))
+		}
+		sort.Slice(ids, func(i, j int) bool {
+			left, right := state.Verification[execution.EvidenceID(ids[i])], state.Verification[execution.EvidenceID(ids[j])]
+			if left.Event.Sequence == right.Event.Sequence {
+				return ids[i] < ids[j]
+			}
+			return left.Event.Sequence < right.Event.Sequence
+		})
+		changed := map[string]string{}
+		for _, event := range state.Writes {
+			for _, path := range event.Paths {
+				changed[path] = event.ContentHash
+			}
+		}
+		changedPaths := make([]string, 0, len(changed))
+		for path := range changed {
+			changedPaths = append(changedPaths, path)
+		}
+		sort.Strings(changedPaths)
+		for _, path := range changedPaths[:min(len(changedPaths), maxOperationalItems)] {
+			hash := changed[path]
+			if hash == "" {
+				hash = "unknown; re-read source"
+			}
+			lines = append(lines, fmt.Sprintf("Changed-file version: %s sha256=%s", path, hash))
+		}
+		if len(changedPaths) > maxOperationalItems {
+			lines = append(lines, fmt.Sprintf("Partial changes: %d more changed-file versions in task ledger.", len(changedPaths)-maxOperationalItems))
+		}
+		for _, id := range ids[max(0, len(ids)-maxOperationalItems):] {
+			check := state.Verification[execution.EvidenceID(id)]
+			lines = append(lines, fmt.Sprintf("Check: id=%s accepted=%t revision=%d command=%s", id, check.Current, check.Event.MutationRevision, check.Event.Command))
+		}
+		if len(ids) > maxOperationalItems {
+			lines = append(lines, fmt.Sprintf("Partial checks: %d more in task ledger.", len(ids)-maxOperationalItems))
+		}
+		for _, event := range state.Uncertainties[max(0, len(state.Uncertainties)-maxOperationalItems):] {
+			lines = append(lines, "Unresolved effect: "+event.Detail)
+		}
+	} else {
+		lines = append(lines, "Task ledger unavailable; checks are unverified.")
+	}
+	lines = append(lines, r.claimsDigest()...)
+	return strings.Join(lines, "\n")
 }

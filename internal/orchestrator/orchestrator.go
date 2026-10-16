@@ -95,6 +95,7 @@ type Orchestrator struct {
 	teams              map[string]*team.Team
 	projectDocsWatcher *projectdocs.Watcher
 	backgroundShells   *security.BackgroundShells
+	toolSupervisor     *toolSupervisor
 	projectDocsNotice  *ProjectDocsNotice
 	skillCatalog       []*skills.Skill
 	permissionChecker  *security.PermissionChecker
@@ -174,6 +175,8 @@ type ExecutionRequest struct {
 	// rounds) for the primary agent; reaching it ends the run with
 	// execution.StopMaxTurns.
 	MaxTurns int
+	// DisableRepair supports controlled evaluations; verification remains reported.
+	DisableRepair bool
 }
 
 // ExecutionResult carries the common identity and either a blocking response
@@ -269,7 +272,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 	var learningStore *learning.SQLStore
 	var languageServerManager *lsp.Manager
 	var mcpRuntimes []*mcpdiscover.Runtime
-	orch := &Orchestrator{store: store}
+	orch := &Orchestrator{store: store, cfg: cfg}
 	defer func() {
 		if err == nil {
 			return
@@ -363,6 +366,9 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		return nil, fmt.Errorf("configure security: %w", err)
 	}
 	orch.backgroundShells = security.NewBackgroundShells(filepath.Join(paths.Dir, "terminals"))
+	if cfg.Tools.YieldMilliseconds > 0 && cfg.Tools.MaxBackgroundTools > 0 {
+		orch.toolSupervisor = &toolSupervisor{runs: map[string]*supervisedTool{}, active: map[string]string{}, gate: make(chan struct{}, cfg.Tools.MaxBackgroundTools), yield: time.Duration(cfg.Tools.YieldMilliseconds) * time.Millisecond, store: store}
+	}
 	installWorkspaceShells(agents, root, time.Duration(policy.MaxExecSeconds)*time.Second, policy, orch.backgroundShells)
 	if cfg.Server.DeliveryHTTP.RequestURL != "" || cfg.Server.DeliveryHTTP.ObservationURL != "" {
 		observedHTTP, err := newDeliveryHTTPTool(cfg.Server.DeliveryHTTP)
@@ -427,10 +433,14 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		incctx.Wrap(a, root)
 		incctx.WrapGrep(a, root, policy.PathDenied)
 		incctx.WrapGlob(a, root, policy.PathDenied)
+		orch.installArtifacts(a)
+		orch.installFreshEdits(a, root)
 		if graphStore != nil {
 			activation.Wrap(a, graphStore, actBuf)
 		}
+		orch.installDeferredTools(a)
 		wrapToolPipeline(a, tracker, cfg.Hooks, hookRunner, hookActivity)
+		orch.installToolSupervision(a)
 	}
 
 	teams := setupTeams(cfg, agents)
@@ -483,6 +493,7 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		telemetryRecorders: orch.telemetryRecorders,
 		runtimeMemory:      orch.runtimeMemory,
 		backgroundShells:   orch.backgroundShells,
+		toolSupervisor:     orch.toolSupervisor,
 		lspManager:         languageServerManager,
 		broker:             broker,
 		policy:             policy,
@@ -507,12 +518,25 @@ func New(ctx context.Context, cfg *config.Config, resumeSessionID string) (_ *Or
 		// Context guard runs before budget: it trims messages that would exceed
 		// the model's context window, preventing 413/400 token-limit errors that
 		// the SDK's tool-calling loop doesn't guard against.
+		if err := orch.installModelProfiles(a); err != nil {
+			return nil, err
+		}
+		if cfg.Tools.LeanContext {
+			a.Hooks = append(a.Hooks, &scopedRulesHook{root: root, paths: map[string][]string{}})
+		}
+		orch.installWorkingContext(a)
 		a.Hooks = append(a.Hooks, sessionUXHook{orchestrator: orch})
 		// Set the output allowance before the guard reserves room for it.
-		a.Hooks = append(a.Hooks, outputTokensHook{})
+		a.Hooks = append(a.Hooks, outputTokensHook{unaryTokens: cfg.Tools.UnaryOutputTokens})
+		if cfg.Tools.Journal {
+			a.Hooks = append(a.Hooks, &interactiveJournal{a: a, root: root})
+		}
 		a.Hooks = append(a.Hooks, newContextGuardHook(a.Model.Model(), len(a.Tools.List()), contextGuardOptions{
-			ContextLimit: a.ContextCfg.MaxContextTokens,
+			ContextLimit:    a.ContextCfg.MaxContextTokens,
+			MaxOutputTokens: cfg.Tools.UnaryOutputTokens,
+			Store:           store,
 		}))
+		a.Hooks = append(a.Hooks, requestMetricsHook{store: store})
 		// Admit both session and durable delivery budgets as one final hook.
 		// If the second reservation fails before the provider call, undo the first.
 		a.Hooks = append(a.Hooks, deliveryBudgetHook{session: budgetHook{tracker: tracker, orchestrator: orch, agentID: a.ID}})
@@ -1185,6 +1209,10 @@ func stripHarnessContext(text string) string {
 }
 
 func refersToPreviousTurn(query string) bool {
+	switch strings.Trim(strings.Join(strings.Fields(strings.ToLower(query)), " "), "`'\"()[]{}<>,:;!?.") {
+	case "check", "please check", "recheck", "now", "and now", "what about now":
+		return true
+	}
 	for _, word := range strings.Fields(strings.ToLower(query)) {
 		switch strings.Trim(word, "`'\"()[]{}<>,:;!?.") {
 		case "this", "that", "it", "above", "previous", "same", "continue", "already", "again", "also", "aswell", "yes", "yea":
@@ -1913,6 +1941,10 @@ const repositoryContextTimeout = 250 * time.Millisecond
 // setupGraph opens the code index for the workspace; the index lives under
 // the project data directory (dataDir/index).
 func setupGraph(ctx context.Context, cfg *config.Config, dataDir, projectDir, userDir string, agents map[string]*agent.Agent) (graph.Backend, *graph.IndexScope) {
+	// Evidence and intent guidance still applies when index startup fails.
+	if err := installIndexGuidance(agents); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: configure code index guidance: %v\n", err)
+	}
 	root := cfg.Workspace.Root
 	if root == "" {
 		root = config.WorkspaceRoot()
@@ -1951,9 +1983,6 @@ func setupGraph(ctx context.Context, cfg *config.Config, dataDir, projectDir, us
 		for _, def := range scope.ImpactTools() {
 			a.Tools.Register(def)
 		}
-	}
-	if err := installIndexGuidance(agents); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: configure code index guidance: %v\n", err)
 	}
 	return scope.Live(), scope
 }
@@ -2043,6 +2072,8 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	if err != nil {
 		return ExecutionResult{}, err
 	}
+	taskRuntime.observationCtx = context.WithoutCancel(storage.WithSession(ctx, sessionID))
+	taskRuntime.backgroundShells = o.backgroundShells
 	longRunning, renewing := o.longRunningPolicy(ctx)
 	var loopController agent.ToolLoopController
 	if renewing {
@@ -2098,10 +2129,14 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 	}
 	if !request.BoundedContext && !hasIntent {
 		if hint := formatRoutingHint(agentID, routeIntent, routeSpecialist, routeMatched, ppdDecision); hint != "" {
-			message = hint + "\n\n" + message
+			if o.leanContext() {
+				ctx = context.WithValue(ctx, routingContextKey{}, hint)
+			} else {
+				message = hint + "\n\n" + message
+			}
 		}
 	}
-	if !request.BoundedContext {
+	if !request.BoundedContext && !o.leanContext() {
 		message = taskRuntime.withWorkingMemory(ctx, message)
 	}
 	if hasIntent && intent.Action == memory.IntentRecallPast && result.MemoryIntent.Applied {
@@ -2122,14 +2157,22 @@ func (o *Orchestrator) Execute(ctx context.Context, request ExecutionRequest) (E
 			contextSourceOmitted(ctx, ContextSourceRepositoryContext, ContextOmittedSourceError)
 		} else if preloaded != "" {
 			contextSourceSelected(ctx, ContextSourceRepositoryContext, strings.Count(preloaded, "\n"), len(preloaded), false)
-			message += "\n\n" + preloaded
+			if o.leanContext() {
+				ctx = context.WithValue(ctx, repositoryContextKey{}, preloaded)
+			} else {
+				message += "\n\n" + preloaded
+			}
 		} else {
 			contextSourceOmitted(ctx, ContextSourceRepositoryContext, ContextOmittedNotSelected)
 		}
 	} else if !request.BoundedContext && o.graphStore != nil && o.actBuf != nil {
 		if preloaded := activation.PredictiveContext(ctx, o.graphStore, o.actBuf, message); preloaded != "" {
 			contextSourceSelected(ctx, ContextSourceGraphPrediction, strings.Count(preloaded, "\n"), len(preloaded), false)
-			message += "\n\n" + preloaded
+			if o.leanContext() {
+				ctx = context.WithValue(ctx, repositoryContextKey{}, preloaded)
+			} else {
+				message += "\n\n" + preloaded
+			}
 		} else {
 			contextSourceOmitted(ctx, ContextSourceGraphPrediction, ContextOmittedNotSelected)
 		}
@@ -2409,7 +2452,18 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 		// model ends its turn with. stop is the last terminal stop reason.
 		var finalText strings.Builder
 		var stop model.StopReason
+		var held []*model.ChatResponse
+		flushHeld := func() {
+			for _, chunk := range held {
+				select {
+				case assessed <- chunk:
+				case <-ctx.Done():
+				}
+			}
+			held = nil
+		}
 		complete := func(decision verification.Decision, reason execution.StopReason, err error) {
+			flushHeld()
 			result := ExecutionResult{Verification: decision, Budget: runtime.budget.Snapshot(), StopReason: reason}
 			populateRuntimeResult(&result, runtime)
 			completed <- ExecutionCompletion{
@@ -2425,8 +2479,20 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 				return
 			case response, ok := <-stream:
 				if !ok {
+					if request.DisableRepair {
+						decision := assessRuntimeVerification(request, classification, runtime)
+						if decision.Allowed {
+							complete(decision, execution.StopSuccess, nil)
+						} else {
+							complete(decision, execution.StopVerificationFailed, nil)
+						}
+						return
+					}
 					if !paused {
 						if nudge := o.completionNudge(ctx, a, sessionID, gate, stop, finalText.String(), runtime.toolCallCount()); nudge != "" {
+							if o.leanContext() {
+								held = nil
+							}
 							next, err := o.executeStreamWithRecovery(ctx, a, sessionID, nudge)
 							if err != nil {
 								assessed <- &model.ChatResponse{Err: err}
@@ -2434,7 +2500,7 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 								return
 							}
 							select {
-							case assessed <- &model.ChatResponse{Role: model.RoleAssistant, Content: "\n\n", Delta: true}:
+							case assessed <- &model.ChatResponse{Role: model.RoleAssistant, Content: streamRepairSeparator(o.leanContext()), Delta: true}:
 							case <-ctx.Done():
 							}
 							stream = next
@@ -2478,6 +2544,7 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 					seen[fingerprint] = struct{}{}
 					if err := runtime.budget.ConsumeRepairAttempt(); err != nil {
 						if request.VerificationMode != verification.ModeEnforce {
+							flushHeld()
 							// Report mode is advisory: finish with the gaps
 							// listed instead of failing a completed turn.
 							select {
@@ -2493,6 +2560,10 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 						return
 					}
 					var err error
+					if o.leanContext() {
+						held = nil
+						finalText.Reset()
+					}
 					stream, err = o.executeStreamWithRecovery(ctx, a, sessionID, buildRepairPrompt(decision, runtime))
 					if err != nil {
 						assessed <- &model.ChatResponse{Err: err}
@@ -2512,12 +2583,17 @@ func (o *Orchestrator) assessStreamWithRepair(ctx context.Context, stream <-chan
 				if response != nil {
 					switch {
 					case len(response.ToolCalls) > 0:
+						flushHeld()
 						finalText.Reset()
 					case response.Delta:
 						finalText.WriteString(response.Content)
 					default:
 						stop = response.StopReason
 					}
+				}
+				if o.leanContext() && response != nil && response.Err == nil && len(response.ToolCalls) == 0 {
+					held = append(held, response)
+					continue
 				}
 				select {
 				case assessed <- response:
@@ -2552,11 +2628,14 @@ func assessRuntimeVerification(request ExecutionRequest, classification router.C
 					changedPaths = append(changedPaths, write.Paths...)
 				}
 			}
+		} else {
+			return verification.Decision{Allowed: request.VerificationMode == verification.ModeReport, Disagreement: true, Obligations: []verification.Obligation{{ID: "source-freshness-unavailable", Kind: verification.KindDiagnostics, Paths: []string{"."}, Status: verification.StatusFailed}}}
 		}
 	}
 	obligations := append([]verification.Obligation(nil), request.VerificationObligations...)
 	derived := verification.Derive(verification.Input{
 		TaskKind: string(classification.Kind), ChangedPaths: changedPaths,
+		TestCommands: mixedLanguageChecks(runtime, changedPaths),
 	})
 	obligations = append(obligations, derived...)
 	if runtime != nil && runtime.refusesShell != nil {
@@ -3539,6 +3618,7 @@ func wrapLateTools(a *agent.Agent, before map[string]struct{}, o *Orchestrator) 
 		configured = o.cfg.Hooks
 	}
 	wrapToolPipeline(partial, o.budget, configured, o.hookRunner, o.hookActivity)
+	o.installToolSupervision(partial)
 	for _, def := range partial.Tools.List() {
 		if _, existed := before[def.Name]; !existed {
 			a.Tools.Register(def)
@@ -3556,7 +3636,7 @@ const minCompressTokens = 4000
 // and a ranged read already asked for exactly the lines it wants.
 func neverCompressTool(name string, args map[string]any) bool {
 	switch name {
-	case skillToolName, "spawn_subagent", "await_shell":
+	case skillToolName, "spawn_subagent", "await_shell", "read_artifact", "list_artifacts", "read_history", "await_tool", "cancel_tool", "discover_tools", "call_tool":
 		return true
 	case "file_read":
 		start, hasStart := lineNumber(args["start_line"])
@@ -3586,6 +3666,7 @@ func wrapToolPipeline(a *agent.Agent, tracker *budget.Tracker, configured config
 	wrapVerificationEvidence(a)
 	wrapDeliveryOperations(a)
 	wrapToolOutputEvents(a)
+	wrapArtifactResults(a)
 	toolcompress.WrapDynamicForTool(a, func(ctx context.Context, name string, args map[string]any) int {
 		base := toolcompress.DefaultThresholdTokens
 		if tracker != nil {
@@ -3650,17 +3731,8 @@ func (o *Orchestrator) mcpToolTransform(a *agent.Agent) mcpdiscover.ToolTransfor
 		if o.cfg != nil {
 			configured = o.cfg.Hooks
 		}
-		wrapUserToolHooks(partial, configured, o.hookRunner, o.hookActivity)
-		wrapVerificationEvidence(partial)
-		wrapToolOutputEvents(partial)
-		toolcompress.WrapDynamicForTool(partial, func(ctx context.Context, name string, args map[string]any) int {
-			threshold := toolcompress.DefaultThresholdTokens
-			if o.budget != nil {
-				threshold = o.budget.CompressionThreshold(sessionOrAgentKey(ctx, a.ID))
-			}
-			return attention.AdjustThreshold(threshold, attention.Weight(attention.Classify(name, args)))
-		})
-		wrapToolResultCap(partial)
+		wrapToolPipeline(partial, o.budget, configured, o.hookRunner, o.hookActivity)
+		o.installToolSupervision(partial)
 		return partial.Tools.List()
 	}
 }
@@ -4032,6 +4104,9 @@ func setupMCPRuntimesWithCaller(ctx context.Context, agents map[string]*agent.Ag
 func (o *Orchestrator) StopBackgroundShells() {
 	if o.backgroundShells != nil {
 		o.backgroundShells.Close()
+	}
+	if o.toolSupervisor != nil {
+		o.toolSupervisor.Close()
 	}
 }
 

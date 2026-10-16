@@ -1,0 +1,18 @@
+agents:
+  - id: coder
+    name: Coder
+    model:
+      provider: openai
+      model: fixture-script-v1
+      api_key: fixture-not-a-credential
+    tools:
+      - name: file_read
+        permission: allow
+      - name: file_write
+        permission: require_approval
+      - name: shell
+        permission: require_approval
+workspace:
+  index_on_start: false
+mcp:
+  discovery: false

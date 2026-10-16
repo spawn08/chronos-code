@@ -99,8 +99,12 @@ cost/task ≈ Σ_calls [ prefix_tokens·0.1  +  new_tokens·1.25  +  output·5 ]
 
 That gives three levers, in order of size:
 1. **Never rewrite what was cached.** The history must be append-only and the prefix
-   byte-identical. A single in-place rewrite of 150k tokens costs as much as about 1,250 cached
-   rounds of 150 new tokens each.
+   byte-identical. At the simplified 1.25× write / 0.1× read rates above, rewriting 150k
+   tokens costs 187.5k input-price units. A cached round that reads the same 150k prefix
+   and writes 150 new tokens costs about 15,187.5 units **before output**, so the rewrite
+   costs about 12 such rounds, not 1,250. Output cost reduces that equivalence further;
+   one-hour cache writes use a different rate. This is illustrative arithmetic, not a
+   measured per-task saving.
 2. **Keep the context small.** Read cost grows with context size × number of calls, so a 40k
    working set is 3–4× cheaper per call than 150k.
 3. **Use fewer calls and fewer output tokens.** Batch tool calls, read each file once, avoid

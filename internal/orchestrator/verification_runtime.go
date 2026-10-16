@@ -12,8 +12,10 @@ import (
 
 	"github.com/spawn08/chronos-code/internal/budget"
 	"github.com/spawn08/chronos-code/internal/claims"
+	"github.com/spawn08/chronos-code/internal/checks"
 	"github.com/spawn08/chronos-code/internal/config"
 	"github.com/spawn08/chronos-code/internal/execution"
+	"github.com/spawn08/chronos-code/internal/security"
 )
 
 type taskRuntimeKey struct{}
@@ -38,31 +40,38 @@ type taskRuntime struct {
 	refusesShell func(command string) bool
 	// background maps a running background shell to its original call, so
 	// its exit is recorded as evidence for the command that started it.
-	backgroundMu sync.Mutex
-	background   map[string]backgroundCall
+	backgroundMu   sync.Mutex
+	background     map[string]backgroundCall
+	sourceMu       sync.Mutex
+	sources        map[string]string
+	knowledgeMu    sync.Mutex
+	knowledge      []readKnowledge
+	observationCtx context.Context
+	backgroundShells *security.BackgroundShells
 }
 
 type backgroundCall struct {
-	args    map[string]any
-	started time.Time
+	args     map[string]any
+	started  time.Time
+	revision uint64
 }
 
-func (r *taskRuntime) trackBackground(id string, args map[string]any, started time.Time) {
+func (r *taskRuntime) trackBackground(id string, args map[string]any, started time.Time, revision uint64) {
 	r.backgroundMu.Lock()
 	defer r.backgroundMu.Unlock()
 	if r.background == nil {
 		r.background = map[string]backgroundCall{}
 	}
-	r.background[id] = backgroundCall{args: args, started: started}
+	r.background[id] = backgroundCall{args: args, started: started, revision: revision}
 }
 
 // finishBackground returns and forgets the call that started shell id.
-func (r *taskRuntime) finishBackground(id string) (map[string]any, time.Time, bool) {
+func (r *taskRuntime) finishBackground(id string) (map[string]any, time.Time, uint64, bool) {
 	r.backgroundMu.Lock()
 	defer r.backgroundMu.Unlock()
 	call, ok := r.background[id]
 	delete(r.background, id)
-	return call.args, call.started, ok
+	return call.args, call.started, call.revision, ok
 }
 
 func newTaskRuntime(taskID, workspaceRoot string) (*taskRuntime, error) {
@@ -172,25 +181,26 @@ func (r *taskRuntime) recordWorkspaceMutation(detail string, completedAt time.Ti
 }
 
 func (r *taskRuntime) recordCommand(command string, class execution.CommandClass, exitCode *int, terminal execution.TerminalState, scopes []execution.Scope, provenance execution.EvidenceProvenance, startedAt, completedAt time.Time) (execution.Event, error) {
+	return r.recordCommandAt(r.workspaceRoot, command, class, exitCode, terminal, scopes, provenance, startedAt, completedAt)
+}
+
+func (r *taskRuntime) recordCommandAt(directory, command string, class execution.CommandClass, exitCode *int, terminal execution.TerminalState, scopes []execution.Scope, provenance execution.EvidenceProvenance, startedAt, completedAt time.Time, revision ...uint64) (execution.Event, error) {
+	ctx := r.observationCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	inferred, err := checks.Infer(ctx, r.workspaceRoot, directory, command)
+	if err != nil {
+		return execution.Event{}, fmt.Errorf("infer verification coverage: %w", err)
+	}
+	if len(scopes) == 0 {
+		if !inferred.Known || len(inferred.Scopes) == 0 {
+			return r.ledger.Record(execution.Event{Type: execution.EventUncertainty, Command: command, CommandClass: class, Detail: "verification coverage unknown: " + command, Provenance: provenance, StartedAt: startedAt, CompletedAt: completedAt})
+		}
+		scopes = inferred.Scopes
+	}
 	normalized := make([]execution.Scope, 0, len(scopes))
 	paths := make([]string, 0, len(scopes))
-	if len(scopes) == 0 {
-		state, err := r.ledger.State()
-		if err != nil {
-			return execution.Event{}, err
-		}
-		for _, write := range state.Writes {
-			scopes = append(scopes, write.Scopes...)
-			if len(write.Scopes) == 0 {
-				for _, path := range write.Paths {
-					scopes = append(scopes, execution.Scope{Kind: execution.ScopeExact, Path: path})
-				}
-			}
-		}
-		if len(scopes) == 0 {
-			scopes = []execution.Scope{{Kind: execution.ScopeWorkspace}}
-		}
-	}
 	for _, scope := range scopes {
 		normalizedScope, err := execution.NormalizeScope(r.workspaceRoot, scope)
 		if err != nil {
@@ -203,6 +213,24 @@ func (r *taskRuntime) recordCommand(command string, class execution.CommandClass
 			paths = append(paths, normalizedScope.Path)
 		}
 	}
+	if len(revision) > 0 {
+		state, err := r.ledger.State()
+		if err != nil {
+			return execution.Event{}, err
+		}
+		for _, write := range state.Writes {
+			writeScopes := append([]execution.Scope(nil), write.Scopes...)
+			if len(writeScopes) == 0 {
+				for _, path := range write.Paths {
+					writeScopes = append(writeScopes, execution.Scope{Kind: execution.ScopeDirectory, Path: path})
+				}
+			}
+			if write.MutationRevision > revision[0] && execution.ScopesOverlap(normalized, writeScopes) {
+				terminal = execution.TerminalCancelled
+				break
+			}
+		}
+	}
 	passed := terminal == execution.TerminalExited && exitCode != nil && *exitCode == 0
 	return r.ledger.Record(execution.Event{
 		Type:          execution.EventVerification,
@@ -212,6 +240,8 @@ func (r *taskRuntime) recordCommand(command string, class execution.CommandClass
 		Detail:        command,
 		Command:       command,
 		CommandClass:  class,
+		CommandFamily: inferred.Family,
+		CheckRoot:     inferred.Root,
 		ExitCode:      exitCode,
 		TerminalState: terminal,
 		Provenance:    provenance,
@@ -221,6 +251,9 @@ func (r *taskRuntime) recordCommand(command string, class execution.CommandClass
 }
 
 func (r *taskRuntime) snapshot() (execution.State, error) {
+	if err := r.refreshSourceChanges(false); err != nil {
+		return execution.State{}, err
+	}
 	return r.ledger.State()
 }
 

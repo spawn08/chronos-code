@@ -18,11 +18,11 @@ CGO_ENABLED ?= 0
 # indexer/extract/packs. Without these tags gotreesitter embeds all
 # of its ~200 grammars (about 18 MiB instead of 5 MiB); the build still works.
 GRAMMARS := bash c cpp c_sharp dart java javascript kotlin objc php python ruby rust scala swift tsx typescript
-GRAMMAR_TAGS := grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
+GRAMMAR_TAGS := lsp grammar_subset $(addprefix grammar_subset_,$(GRAMMARS))
 
 SIZE_LIMIT  := 58720256
 
-.PHONY: build build-core build-full build-release grammar-tags test lint size-check size-check-core fmt vet tidy clean install install-core eval eval-edges bench-index
+.PHONY: build build-core build-full build-release grammar-tags test lint size-check size-check-core fmt vet tidy clean install install-core eval eval-edges eval-tasks-validate eval-fixture eval-live eval-runtime-test bench-index
 
 build: build-full
 
@@ -70,6 +70,28 @@ test:
 # offline/deterministic — no API key or network access required.
 eval: build
 	$(BIN_DIR)/$(BINARY) eval run --md benchmark/eval/report.md
+
+EVAL_MANIFEST ?= benchmark/runtime/manifest.yaml
+EVAL_REPETITIONS ?= 2
+EVAL_OUTPUT ?= bin/eval/runtime.jsonl
+EVAL_CONFIG ?= benchmark/runtime/config.yaml
+EVAL_LIVE_CONFIG ?=
+
+# Runtime fixtures use the actual orchestrator with a scripted loopback provider.
+eval-tasks-validate: build
+	$(BIN_DIR)/$(BINARY) eval tasks --validate-only --manifest "$(EVAL_MANIFEST)"
+
+eval-fixture: build
+	@DATA_HOME=$$(mktemp -d); trap 'rm -rf "$$DATA_HOME"' EXIT; \
+	CHRONOS_CODE_DATA_HOME="$$DATA_HOME" $(BIN_DIR)/$(BINARY) --config "$(EVAL_CONFIG)" eval tasks --run --manifest "$(EVAL_MANIFEST)" --fixture-provider benchmark/runtime/provider.yaml --repetitions $(EVAL_REPETITIONS) --output "$(EVAL_OUTPUT)"
+
+# Live runs require explicit model configuration and real provider credentials.
+eval-live: build
+	@test -n "$(EVAL_LIVE_CONFIG)" || (echo 'Set EVAL_LIVE_CONFIG to a real provider configuration'; exit 1)
+	$(BIN_DIR)/$(BINARY) --config "$(EVAL_LIVE_CONFIG)" eval tasks --run --manifest "$(EVAL_MANIFEST)" --repetitions $(EVAL_REPETITIONS) --output "$(EVAL_OUTPUT)"
+
+eval-runtime-test:
+	go test -tags "$(GRAMMAR_TAGS)" -race ./internal/eval ./internal/cli -run 'Test(ConfiguredFixture|RunMetadata|SourceSnapshot|FixtureHash|RunRecord|EvalTasks)' -count=1
 
 # eval-edges measures reference resolution against SCIP indexes of pinned
 # repositories (benchmark/edges/repos.tsv) and updates

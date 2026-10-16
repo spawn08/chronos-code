@@ -1,0 +1,69 @@
+limits:
+  manifest_bytes: 262144
+  total_bytes: 4194304
+  operations: 4096
+  changed_paths: 1024
+  path_depth: 64
+  command_bytes: 16384
+languages:
+  - name: go
+    manifests: [go.mod]
+    extensions: [.go]
+    family: go-test
+    command: go test ./...
+    class: test
+  - name: python
+    manifests: [pyproject.toml, pytest.ini, setup.cfg, setup.py, requirements.txt]
+    extensions: [.py, .pyi]
+    family: python-test
+    command: python -m pytest
+    class: test
+  - name: rust
+    manifests: [Cargo.toml]
+    extensions: [.rs]
+    family: rust-test
+    command: cargo test
+    class: test
+  - name: javascript
+    manifests: [package.json]
+    extensions: [.js, .jsx, .ts, .tsx, .mjs, .cjs, .mts, .cts, .vue, .svelte]
+    family: javascript-test
+    class: test
+scripts:
+  - {name: test, family: javascript-test, class: test}
+  - {name: typecheck, family: javascript-diagnostics, class: diagnostics}
+  - {name: check, family: javascript-diagnostics, class: diagnostics}
+  - {name: lint, family: javascript-diagnostics, class: diagnostics}
+  - {name: build, family: javascript-build, class: build}
+managers:
+  - {name: pnpm, lockfiles: [pnpm-lock.yaml], run: 'pnpm run'}
+  - {name: yarn, lockfiles: [yarn.lock], run: 'yarn run'}
+  - {name: bun, lockfiles: [bun.lock, bun.lockb], run: 'bun run'}
+  - {name: npm, lockfiles: [package-lock.json, npm-shrinkwrap.json], run: 'npm run'}
+runners:
+  go: [go]
+  python: [pytest, py.test, python, python3]
+  rust: [cargo]
+  javascript: [npm, yarn, pnpm, bun]
+js_test_runners: [vitest, jest, bun]
+js_diagnostic_runners: [tsc, eslint, vue-tsc, svelte-check]
+js_build_runners: [vite, next, tsc, vue-tsc]
+flags:
+  go:
+    boolean: [-race, -v, -short, -failfast, -json, -trimpath, -work, -x, -cover]
+    value: [-count, -timeout, -parallel, -p, -cpu, -coverprofile, -covermode]
+  python:
+    boolean: [-q, -v, -vv, -s, -x, --disable-warnings, --strict-markers, --strict-config]
+    value: [--maxfail, --tb, --color, --durations]
+  rust:
+    boolean: [--workspace, --all, --all-targets, --all-features, --no-default-features, --locked, --offline, --release, -q, --quiet, -v, --verbose]
+    value: [--features, -j, --jobs, --target]
+  js_test:
+    boolean: [--run, --watch=false, --watchAll=false, --ci, --runInBand, --passWithNoTests, --silent]
+    value: [--reporter, --reporters, --maxWorkers]
+  js_diagnostics:
+    boolean: [--noEmit, --pretty, --fix=false]
+    value: [--format]
+  js_build:
+    boolean: [--noEmit]
+    value: []

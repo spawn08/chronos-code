@@ -16,6 +16,7 @@ import (
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/sdk/agent"
 	"github.com/spawn08/chronos/sdk/harness"
+	"github.com/spawn08/chronos/storage"
 )
 
 const (
@@ -32,12 +33,16 @@ type subagentSizeError struct {
 	Size     int
 	Limit    int
 	Preview  string
+	Artifact string
 }
 
 func (e *subagentSizeError) Error() string {
 	message := fmt.Sprintf("subagent %s exceeds byte limit: %d > %d", e.Resource, e.Size, e.Limit)
 	if e.Preview != "" {
 		message += "; truncated preview: " + e.Preview
+	}
+	if e.Artifact != "" {
+		message += "; recover full report with read_artifact artifact_id=" + e.Artifact
 	}
 	return message
 }
@@ -78,6 +83,7 @@ type configuredAgentRunner struct {
 	tools     *tool.Registry
 	models    *roleModelRegistry
 	fallback  harness.Runner
+	store     storage.Storage
 	resources *subagentResources
 	once      sync.Once
 }
@@ -243,13 +249,17 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	// Relevance-ranked context (memory, diagnostics, learned patterns) is
 	// chosen for the delegated task, not the parent's user message.
 	runCtx = context.WithValue(runCtx, messageKey{}, task)
+	requestedTask := task
+	if runtime, ok := taskRuntimeFromContext(runCtx); ok {
+		task += runtime.boundedHandoff(task, subagentTaskLimit-size)
+	}
 	var result string
 	var err error
 	if configured := r.agents[spec.Name]; configured != nil {
 		runCtx = attenuateEffectGrant(runCtx, configured.Tools.List())
 		provider := configured.Model
 		if r.models != nil {
-			provider = r.models.providerFor(runCtx, spec.Name, task)
+			provider = r.models.providerFor(runCtx, spec.Name, requestedTask)
 		}
 		if provider == nil {
 			return "", fmt.Errorf("configured subagent %q has no model", spec.Name)
@@ -270,6 +280,9 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 			runtime, _ := taskRuntimeFromContext(runCtx)
 			runCtx = agent.WithToolLoopController(runCtx, configured.ID, newWindowGovernor(longRunning, runtime, time.Now))
 		}
+		if inbox, ok := runCtx.Value(supervisedInboxKey{}).(*SteeringInbox); ok {
+			runCtx = agent.WithPendingInput(runCtx, configured.ID, inbox)
+		}
 		// Durable delivery relies on the blocking path's reply journal; other
 		// providers keep their existing blocking behavior.
 		if _, durable := execution.OperationLeaseFromContext(runCtx); !durable && anthropicMessagesProvider(provider) {
@@ -286,24 +299,39 @@ func (r *configuredAgentRunner) Run(ctx context.Context, spec harness.SubAgentSp
 	} else {
 		err = fmt.Errorf("no dynamic subagent runner configured")
 	}
+	artifactID, artifactErr := r.saveSubagentReport(runCtx, spec.Name, result, err)
+	if artifactErr != nil {
+		return "", fmt.Errorf("persist subagent %q report: %w", spec.Name, artifactErr)
+	}
+	recovery := ""
+	if artifactID != "" {
+		recovery = "\n[Recover full report with read_artifact artifact_id=" + artifactID + "]"
+	}
 	if runCtx.Err() != nil {
+		if strings.TrimSpace(result) != "" {
+			partial := partialSubagentReport(result, context.Cause(runCtx))
+			return partial + recovery, fmt.Errorf("subagent %q interrupted (partial findings): %w\n%s%s", spec.Name, context.Cause(runCtx), boundedSubagentEvidence(partial, subagentPreviewLimit), recovery)
+		}
 		return "", fmt.Errorf("subagent %q: %w", spec.Name, context.Cause(runCtx))
 	}
 	if err != nil {
+		if strings.TrimSpace(result) != "" {
+			partial := partialSubagentReport(result, err)
+			return partial + recovery, fmt.Errorf("subagent %q failed (partial findings): %w\n%s%s", spec.Name, err, boundedSubagentEvidence(partial, subagentPreviewLimit), recovery)
+		}
 		return "", fmt.Errorf("subagent %q: %w", spec.Name, err)
 	}
 	if strings.TrimSpace(result) == "" {
 		return "", fmt.Errorf("subagent %q: %w", spec.Name, errEmptySubagentResult)
 	}
 	if len(result) > subagentResultLimit {
-		end := subagentPreviewLimit
-		for end > 0 && !utf8.RuneStart(result[end]) {
-			end--
-		}
 		return "", &subagentSizeError{
 			Resource: "result", Size: len(result), Limit: subagentResultLimit,
-			Preview: strings.Clone(result[:end]),
+			Preview: boundedSubagentEvidence(result, subagentPreviewLimit), Artifact: artifactID,
 		}
+	}
+	if recovery != "" {
+		result = boundedSubagentEvidence(result, subagentResultLimit-len(recovery)) + recovery
 	}
 	return result, nil
 }
@@ -379,6 +407,7 @@ func setupSubAgentsWithModels(agents map[string]*agent.Agent, models *roleModelR
 			tools:     parent.Tools,
 			models:    models,
 			fallback:  harness.NewInProcessRunner(svc),
+			store:     parent.Storage,
 			resources: resources,
 		})
 	}
@@ -408,7 +437,7 @@ func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (st
 				for range stream {
 				}
 			}()
-			return "", chunk.Err
+			return latestSubagentText(&final, &lastNonEmpty), chunk.Err
 		}
 		switch {
 		case len(chunk.ToolCalls) > 0:
@@ -422,7 +451,7 @@ func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (st
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return latestSubagentText(&final, &lastNonEmpty), err
 	}
 	if strings.TrimSpace(final.String()) == "" {
 		if strings.TrimSpace(lastNonEmpty.String()) != "" {
@@ -437,3 +466,31 @@ func executeSubagentStream(ctx context.Context, a *agent.Agent, task string) (st
 // It is an error, not an empty success, so the parent sees the failure
 // instead of treating "" as the work being done.
 var errEmptySubagentResult = errors.New("subagent finished without a result (it may have stopped at its output limit); narrow the task or do it directly")
+
+func latestSubagentText(final, previous *strings.Builder) string {
+	if strings.TrimSpace(final.String()) != "" {
+		return final.String()
+	}
+	return previous.String()
+}
+
+func partialSubagentReport(text string, err error) string {
+	return "STATUS: partial (interrupted; " + validPrefix(errorText(err), 256) + ")\n" + boundedSubagentEvidence(text, subagentResultLimit-512)
+}
+
+func boundedSubagentEvidence(text string, limit int) string {
+	if len(text) <= limit {
+		return strings.Clone(text)
+	}
+	const marker = "\n[... middle omitted; head/tail evidence only ...]\n"
+	if limit <= len(marker) {
+		return strings.Clone(validPrefix(text, limit))
+	}
+	budget := limit - len(marker)
+	head := validPrefix(text, budget/2)
+	start := len(text) - (budget - len(head))
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return head + marker + text[start:]
+}

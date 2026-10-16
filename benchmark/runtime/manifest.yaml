@@ -1,0 +1,27 @@
+version: chronos.eval.tasks.v1
+tasks:
+  - id: scripted-edit-001
+    kind: debug
+    language: text
+    fixture:
+      source: fixture
+      type: local
+      revision: fixture-v1
+    prompt:
+      reference: prompt.txt
+    timeout: 30s
+    permissions: [read, write, shell]
+    hidden_grader:
+      commands:
+        - id: exact-content-and-scope
+          command: [sh, -c, 'test "$(cat answer.txt)" = resolved && test "$(git diff --name-only HEAD)" = answer.txt && test "$(wc -c < answer.txt | tr -d " ")" = 9']
+      artifacts:
+        - path: answer.txt
+          contains: resolved
+    ablation:
+      graph: false
+      skills: false
+      specialists: false
+      repair: false
+      worktrees: false
+    expected_outcome: passed

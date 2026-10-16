@@ -45,7 +45,10 @@ func (c *PermissionChecker) Check(toolName string, args map[string]any, yolo boo
 // CheckContext evaluates file policy against the request-scoped workspace.
 func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, args map[string]any, yolo bool) Decision {
 	switch toolName {
-	case "file_read", "file_write", "file_list", "file_glob", "file_grep":
+	case "file_read", "file_write", "file_edit", "file_list", "file_glob", "file_grep":
+		if toolName == "file_edit" {
+			toolName = "file_write"
+		}
 		if err := c.guard.checkFileArgsAtRoot(toolName, args, builtins.WorkspaceRoot(ctx, c.guard.root)); err != nil {
 			// Paths outside the roots are not a hard denial when a human can
 			// grant the directory: the Guard hook asks at execution time.
@@ -86,7 +89,7 @@ func (c *PermissionChecker) CheckContext(ctx context.Context, toolName string, a
 		"workspace_info", "update_plan", "exit_plan_mode", "skill",
 		// Background shell control acts only on processes the shell tool
 		// already approved in this session.
-		"await_shell", "kill_shell":
+		"await_shell", "kill_shell", "read_artifact", "list_artifacts", "read_history", "discover_tools", "call_tool", "await_tool", "cancel_tool", "message_tool":
 		return Auto
 	case "file_write", "shell":
 		if yolo {

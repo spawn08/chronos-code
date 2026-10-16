@@ -1088,13 +1088,18 @@ func TestConversationPinsKeepFollowupInCurrentSession(t *testing.T) {
 	}}
 	setupConversationPins(store, map[string]*agent.Agent{"coder": a})
 	ctx = storage.WithSession(ctx, "current")
-	ctx = context.WithValue(ctx, messageKey{}, "yes, fix it")
-	pins := a.ContextPinsFn(ctx)
-	if len(pins) != 2 || !strings.Contains(pins[1].Content, "fix Azure gpt-6-sol") || !strings.Contains(pins[1].Content, "already shared") || strings.Contains(pins[1].Content, "AB-47") || !pins[1].TurnScoped {
-		t.Fatalf("follow-up pins = %#v", pins)
+	for _, query := range []string{"yes, fix it", "check", "Please check.", "recheck", "and now?", "what about now?", "again"} {
+		t.Run(query, func(t *testing.T) {
+			pins := a.ContextPinsFn(context.WithValue(ctx, messageKey{}, query))
+			if len(pins) != 2 || pins[0].Content != "existing pin" || !strings.Contains(pins[1].Content, "fix Azure gpt-6-sol") || !strings.Contains(pins[1].Content, "already shared") || strings.Contains(pins[1].Content, "AB-47") || !pins[1].TurnScoped {
+				t.Fatalf("follow-up pins = %#v", pins)
+			}
+		})
 	}
-	if pins := a.ContextPinsFn(context.WithValue(ctx, messageKey{}, "start a new task")); len(pins) != 1 {
-		t.Fatalf("new topic inherited follow-up pin: %#v", pins)
+	for _, query := range []string{"start a new task", "check whether cost analysis is done", "implement a health check now"} {
+		if pins := a.ContextPinsFn(context.WithValue(ctx, messageKey{}, query)); len(pins) != 1 {
+			t.Fatalf("new topic %q inherited follow-up pin: %#v", query, pins)
+		}
 	}
 }
 

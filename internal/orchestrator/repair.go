@@ -18,6 +18,13 @@ import (
 )
 
 func (o *Orchestrator) repairBlocking(ctx context.Context, a *agent.Agent, sessionID string, request ExecutionRequest, classification router.Classification, runtime *taskRuntime, response *model.ChatResponse) (*model.ChatResponse, verification.Decision, execution.StopReason, error) {
+	if request.DisableRepair {
+		decision := assessRuntimeVerification(request, classification, runtime)
+		if decision.Allowed {
+			return response, decision, execution.StopSuccess, nil
+		}
+		return response, decision, execution.StopVerificationFailed, nil
+	}
 	if response != nil && response.StopReason == model.StopReasonPaused {
 		// A no-progress pause awaits the user; repairing would resume it.
 		return response, assessRuntimeVerification(request, classification, runtime), pausedStopReason(ctx), nil
@@ -99,7 +106,9 @@ func (o *Orchestrator) nudgeBlocking(ctx context.Context, a *agent.Agent, sessio
 			return response, nil
 		}
 		joined := *next
-		joined.Content = strings.TrimSpace(response.Content + "\n\n" + next.Content)
+		if !o.leanContext() {
+			joined.Content = strings.TrimSpace(response.Content + "\n\n" + next.Content)
+		}
 		response = &joined
 	}
 	return response, nil
@@ -125,7 +134,7 @@ func buildRepairPrompt(decision verification.Decision, runtime *taskRuntime) str
 		}
 		lines = append(lines, fmt.Sprintf("- %s status=%s: %s", obligation.ID, obligation.Status, obligationAction(obligation, changed)))
 	}
-	lines = append(lines, "Run each check as its own shell command, without pipes, output redirection, or chained commands after it; only then is its exit status recorded. Run checks after your final edit: any later edit or mutating command makes them stale.")
+	lines = append(lines, "Prefer a separate command for each check, without pipes. An all-&& success chain is supported; a check piped into another command does not prove its exit status. Run checks after the final source change; a later change of the affected inputs makes them stale.")
 	if len(changed) > 0 {
 		lines = append(lines, "Changed paths: "+strings.Join(changed, ", "))
 	}

@@ -28,6 +28,7 @@ type Artifact struct {
 var catalog = map[string]Artifact{
 	"context-engineering.yaml":     {Path: "context-engineering.yaml", Activation: RuntimeActive, Rationale: "pins index-first navigation guidance when code index tools are registered"},
 	"config.yaml":                  {Path: "config.yaml", Activation: RuntimeActive, Rationale: "loaded as the zero-config base"},
+	"model-profiles.yaml":          {Path: "model-profiles.yaml", Activation: RuntimeActive, Rationale: "adds YAML model-family guidance when tools.model_profiles is enabled"},
 	"security.yaml":                {Path: "security.yaml", Activation: RuntimeActive, Rationale: "loaded into every agent security hook"},
 	"routing.yaml":                 {Path: "routing.yaml", Activation: RuntimeActive, Rationale: "loaded by the message router"},
 	"learning.yaml":                {Path: "learning.yaml", Activation: RuntimeActive, Rationale: "loaded by the learn command"},

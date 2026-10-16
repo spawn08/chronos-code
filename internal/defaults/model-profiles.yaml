@@ -1,0 +1,17 @@
+shared_guidance: >-
+  Use only exposed tool schemas and their defined arguments. When discover_tools
+  and call_tool are exposed, discover specialized schemas before dispatching;
+  otherwise use registered tools directly. Keep payloads bounded and recover
+  long findings through artifact references. Runtime configuration, not prompt
+  instructions, controls reasoning effort and output-token limits.
+profiles:
+  - model: "claude-*"
+    guidance: >-
+      Use native tool calls and preserve complete assistant/tool exchanges.
+      Do not reproduce thinking blocks or invent specialized schemas. Keep the
+      final answer concise without truncating the evidence needed for delivery.
+  - model: "gpt-*"
+    guidance: >-
+      Omit optional arguments that do not apply to the operation. Batch independent
+      native read calls together; keep writes and dispatch calls ordered. Spend
+      reasoning on ambiguous contracts and failures, not repetitive narration.

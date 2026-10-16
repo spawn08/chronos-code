@@ -488,7 +488,30 @@ func (c IndexerConfig) PrefetchTokensOrDefault() int {
 type ToolsConfig struct {
 	// CompressionThresholdTokens is the token size above which a tool result
 	// is evicted to storage and replaced with a preview (PRD P1-006).
-	CompressionThresholdTokens int `yaml:"compression_threshold_tokens,omitempty"`
+	CompressionThresholdTokens int      `yaml:"compression_threshold_tokens,omitempty"`
+	DeferredSchemas            bool     `yaml:"deferred_schemas,omitempty"`
+	CoreTools                  []string `yaml:"core_tools,omitempty"`
+	Journal                    bool     `yaml:"journal,omitempty"`
+	YieldMilliseconds          int      `yaml:"yield_ms,omitempty"`
+	UnaryOutputTokens          int      `yaml:"unary_output_tokens,omitempty"`
+	MaxBackgroundTools         int      `yaml:"max_background_tools,omitempty"`
+	LeanContext                bool     `yaml:"lean_context,omitempty"`
+	FreshEdits                 bool     `yaml:"fresh_edits,omitempty"`
+	PostEditDiagnostics        bool     `yaml:"post_edit_diagnostics,omitempty"`
+	ModelProfiles              bool     `yaml:"model_profiles,omitempty"`
+}
+
+func (c *ToolsConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain ToolsConfig
+	var decoded plain
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	if decoded.CompressionThresholdTokens < 0 || decoded.YieldMilliseconds < 0 || decoded.UnaryOutputTokens < 0 || decoded.MaxBackgroundTools < 0 || decoded.MaxBackgroundTools > 64 {
+		return fmt.Errorf("tools: invalid compression/yield/concurrency value")
+	}
+	*c = ToolsConfig(decoded)
+	return nil
 }
 
 // VerificationConfig controls whether supplied or runtime-derived obligations

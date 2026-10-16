@@ -102,12 +102,18 @@ func WrapDynamicForTool(a *agent.Agent, thresholdFn func(context.Context, string
 			if evErr != nil || evicted == nil {
 				return result, nil
 			}
-			return map[string]any{
+			compressed := map[string]any{
 				"compressed":      true,
 				"preview":         evicted.Preview,
 				"full_size_bytes": evicted.FullSize,
 				"storage_key":     evicted.StorageKey,
-			}, nil
+			}
+			if fields, ok := result.(map[string]any); ok {
+				if id, ok := fields["artifact_id"].(string); ok && id != "" {
+					compressed["artifact_id"] = id
+				}
+			}
+			return compressed, nil
 		}
 	}
 	RegisterReader(a)

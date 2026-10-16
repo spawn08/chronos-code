@@ -156,6 +156,7 @@ type turnItem struct {
 	observedTime  bool
 	settled       bool
 	inputBytes    int
+	liveText      liveTextCache
 }
 
 type activityKind uint8
@@ -262,8 +263,10 @@ type clipboardWriteResultMsg struct {
 }
 
 type clipboardReadResultMsg struct {
-	content string
-	err     error
+	content   string
+	err       error
+	requestID uint64
+	turnID    uint64
 }
 
 const frameTimingSamples = 100
@@ -449,6 +452,9 @@ type appModel struct {
 	completionCached   bool
 	viewportViewCache  string
 	viewportViewValid  bool
+	viewportFrozen     bool
+	viewportDirty      bool
+	clipboardRequestID uint64
 	headerCache        string
 	headerCacheWidth   int
 	headerCacheAgent   string
@@ -593,7 +599,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshPrompt()
 		m.resizeViewport()
-		m.refreshViewport()
+		m.refreshViewportNow()
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -665,6 +671,8 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// content every tick wipes the terminal selection.
 		if m.followOutput {
 			m.refreshViewport()
+		} else {
+			m.viewportDirty = true
 		}
 		return m, nil
 
@@ -829,6 +837,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.picker.applyFilter()
 		}
+		m.resizeViewport()
 		return m, nil
 
 	case sessionPickerMsg:
@@ -868,6 +877,13 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case clipboardReadResultMsg:
+		if msg.requestID != m.clipboardRequestID || msg.turnID != m.turnID {
+			return m, nil
+		}
+		if m.approval != nil || m.wizard != nil || m.picker != nil || m.inspection != nil || m.searching {
+			m.statusMsg = "paste cancelled: composer is not focused"
+			return m, nil
+		}
 		if msg.err != nil {
 			m.statusMsg = "paste failed: " + msg.err.Error()
 			return m, nil
@@ -931,14 +947,16 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if msg.Code == tea.KeyHome {
 			m.viewport.GotoTop()
 			m.followOutput = false
+			m.viewportFrozen = true
 			m.viewportViewValid = false
 		} else {
 			m.followOutput = true
+			m.viewportFrozen = false
 			m.refreshViewport()
 		}
 		return m, nil
 	}
-	if key.Matches(msg, keys.CopyLast) {
+	if matchesShortcut(msg, keys.CopyLast) {
 		content, okStatus, err := m.copyText("")
 		if err != nil {
 			m.statusMsg = err.Error()
@@ -946,7 +964,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.copyClipboardCmd(content, okStatus)
 	}
-	if key.Matches(msg, keys.CopyCode) {
+	if matchesShortcut(msg, keys.CopyCode) {
 		content, okStatus, err := m.copyText("code")
 		if err != nil {
 			m.statusMsg = err.Error()
@@ -959,13 +977,14 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(msg, keys.Paste) {
 		m.statusMsg = "pasting"
-		read := m.clipboardRead
+		m.clipboardRequestID++
+		read, requestID, turnID := m.clipboardRead, m.clipboardRequestID, m.turnID
 		return m, func() tea.Msg {
 			if read == nil {
-				return clipboardReadResultMsg{err: fmt.Errorf("clipboard reader unavailable")}
+				return clipboardReadResultMsg{err: fmt.Errorf("clipboard reader unavailable"), requestID: requestID, turnID: turnID}
 			}
 			content, err := read()
-			return clipboardReadResultMsg{content: content, err: err}
+			return clipboardReadResultMsg{content: content, err: err, requestID: requestID, turnID: turnID}
 		}
 	}
 	if completions := m.inputCompletions(); len(completions) > 0 {
@@ -999,7 +1018,7 @@ func (m *appModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.input.Reset()
 		m.completionIdx = 0
 		m.resizeViewport()
-		if strings.Fields(line)[0] == "/inspect" || line == "/session list" || line == "/diff" {
+		if immediateUICommand(line) {
 			return m.handleSubmit(line)
 		}
 		if m.sending {
@@ -2107,8 +2126,13 @@ func (m *appModel) budgetActivityDetail(text string) string {
 }
 
 func (m *appModel) setViewportContent(s string) {
+	if m.viewportFrozen && !m.followOutput {
+		m.viewportDirty = true
+		return
+	}
 	m.viewport.SetContentLines(lastNLines(s, maxViewportLines))
 	m.viewportViewValid = false
+	m.viewportDirty = false
 }
 
 func lastNLines(s string, n int) []string {
@@ -2150,6 +2174,10 @@ func joinLayout(parts ...string) string {
 }
 
 func (m *appModel) refreshViewport() {
+	if m.viewportFrozen && !m.followOutput {
+		m.viewportDirty = true
+		return
+	}
 	m.setViewportContent(m.renderTranscript())
 	if m.followOutput {
 		m.viewport.GotoBottom()
@@ -2157,9 +2185,18 @@ func (m *appModel) refreshViewport() {
 	}
 }
 
+// Explicit reflow or detail changes may replace a frozen view at its offset.
+func (m *appModel) refreshViewportNow() {
+	frozen := m.viewportFrozen
+	m.viewportFrozen = false
+	m.refreshViewport()
+	m.viewportFrozen = frozen && !m.followOutput
+}
+
 func (m *appModel) afterViewportScroll() {
 	wasFollowing := m.followOutput
 	m.followOutput = m.viewport.AtBottom()
+	m.viewportFrozen = !m.followOutput
 	m.viewportViewValid = false
 	if !wasFollowing && m.followOutput {
 		m.refreshViewport()
@@ -2496,10 +2533,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.statusMsg = err.Error()
 			break
 		}
-		copyCmd := m.copyClipboardCmd(content, okStatus)
-		m.setViewportContent(m.renderTranscript())
-		m.viewport.GotoBottom()
-		return m, copyCmd
+		return m, m.copyClipboardCmd(content, okStatus)
 	case "/add-dir":
 		if arg == "" {
 			dirs := m.orch.SessionDirectories()
@@ -2652,8 +2686,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 	default:
 		m.appendError(fmt.Errorf("unknown command: %s (try /help)", cmd))
 	}
-	m.setViewportContent(m.renderTranscript())
-	m.viewport.GotoBottom()
+	m.refreshViewport()
 	return m, nil
 }
 
@@ -2663,7 +2696,15 @@ func (m *appModel) copyText(arg string) (content, okStatus string, err error) {
 		return m.copyCodeBlock(fields[1:])
 	}
 	switch strings.ToLower(strings.TrimSpace(arg)) {
-	case "", "last", "response":
+	case "", "response", "current":
+		if m.sending {
+			if m.activeAgentText.Len() > 0 {
+				return m.activeAgentText.String(), "copied current response", nil
+			}
+			if m.lastAssistantText != "" {
+				return "", "", fmt.Errorf("current response has no text yet; use /copy last for the completed response")
+			}
+		}
 		if m.lastAssistantText != "" {
 			return m.lastAssistantText, "copied response", nil
 		}
@@ -2671,6 +2712,11 @@ func (m *appModel) copyText(arg string) (content, okStatus string, err error) {
 			return visible, "copied visible output", nil
 		}
 		return "", "", fmt.Errorf("nothing to copy")
+	case "last":
+		if m.lastAssistantText == "" {
+			return "", "", fmt.Errorf("no completed response to copy")
+		}
+		return m.lastAssistantText, "copied last completed response", nil
 	case "visible":
 		visible := m.visiblePlainText()
 		if strings.TrimSpace(visible) == "" {
@@ -2684,13 +2730,13 @@ func (m *appModel) copyText(arg string) (content, okStatus string, err error) {
 		}
 		return all, "copied transcript", nil
 	default:
-		return "", "", fmt.Errorf("usage: /copy [last|visible|all|code]")
+		return "", "", fmt.Errorf("usage: /copy [current|last|visible|all|code]")
 	}
 }
 
 func (m *appModel) copyCodeBlock(args []string) (content, okStatus string, err error) {
 	src := m.lastAssistantText
-	if src == "" {
+	if m.sending && m.activeAgentText.Len() > 0 || src == "" {
 		src = m.activeAgentText.String()
 	}
 	blocks := extractFencedBlocks(src)
@@ -2981,8 +3027,7 @@ func listenOAuth(ch <-chan oauthEvent) tea.Cmd {
 func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
 	if msg.ev.url != "" {
 		m.appendSystem("open this URL to sign in:\n  " + msg.ev.url)
-		m.setViewportContent(m.renderTranscript())
-		m.viewport.GotoBottom()
+		m.refreshViewport()
 		return m, listenOAuth(msg.ch)
 	}
 	if msg.ev.err != nil {
@@ -2992,10 +3037,7 @@ func (m *appModel) handleOAuthEvent(msg oauthEventMsg) (tea.Model, tea.Cmd) {
 		m.refreshPrompt()
 		m.appendSystem("OAuth login complete")
 	}
-	m.setViewportContent(m.renderTranscript())
-	if m.followOutput {
-		m.viewport.GotoBottom()
-	}
+	m.refreshViewport()
 	return m, nil
 }
 
@@ -3498,6 +3540,7 @@ func (m *appModel) finalizeTurn(err error) tea.Cmd {
 		m.activeTurnItems[i].settled = true
 		if m.activeTurnItems[i].kind == turnItemText {
 			m.activeTurnItems[i].rendered = ""
+			m.activeTurnItems[i].liveText.reset()
 		}
 	}
 	if m.turnCancel != nil {
@@ -3671,7 +3714,7 @@ func (m *appModel) toggleToolDetails() (tea.Model, tea.Cmd) {
 		m.rewriteLastTurnBlock()
 	}
 	if m.ready {
-		m.refreshViewport()
+		m.refreshViewportNow()
 	}
 	return m, nil
 }
@@ -3696,6 +3739,7 @@ func cloneTurnItems(items []turnItem) []turnItem {
 	copy(out, items)
 	for i := range out {
 		out[i].text = nil // Snapshot strings remain immutable as a live builder grows.
+		out[i].liveText.reset()
 	}
 	return out
 }
@@ -3888,10 +3932,17 @@ func (m *appModel) renderOneItem(item *turnItem) string {
 		return line
 	}
 	width := m.viewport.Width()
+	live := m.sending && !item.settled
+	if live && strings.ContainsRune(content, '\n') && !strings.ContainsRune(content, '\x1b') {
+		item.rendered = item.liveText.wrap(item.content, width)
+		item.renderedWidth = width
+		return item.rendered
+	}
 	if item.rendered != "" && item.renderedWidth == width {
 		return item.rendered
 	}
-	if m.sending && !item.settled {
+	item.liveText.reset()
+	if live {
 		item.rendered = wrapText(content, width)
 	} else {
 		item.rendered = RenderMarkdownLite(content, width)
@@ -3919,6 +3970,7 @@ func (m *appModel) invalidateRenderCache() {
 	m.finalizedCount = 0
 	for i := range m.activeTurnItems {
 		m.activeTurnItems[i].rendered = ""
+		m.activeTurnItems[i].liveText.reset()
 	}
 }
 
@@ -4284,7 +4336,11 @@ func (m *appModel) renderStatusBar() string {
 	// Keep the resume hint ahead of model/routing metadata so it cannot be
 	// truncated off-screen while output is paused near the bottom.
 	if !m.followOutput {
-		leftText += fmt.Sprintf(" │ scrolled %d%% · ctrl+end follow", int(m.viewport.ScrollPercent()*100))
+		if m.viewportDirty {
+			leftText += " │ new output · ctrl+end follow"
+		} else {
+			leftText += fmt.Sprintf(" │ scrolled %d%% · ctrl+end follow", int(m.viewport.ScrollPercent()*100))
+		}
 	}
 	if m.orch.PlanMode() {
 		leftText += " │ plan"
@@ -4353,7 +4409,16 @@ func (m *appModel) renderStatusBar() string {
 		leftText += " "
 		highlightRanges = nil
 	}
-	leftText = truncateToWidth(leftText, m.width)
+	status := strings.Join(strings.Fields(m.statusMsg), " ")
+	leftWidth := m.width
+	if status != "" {
+		leftWidth -= min(m.width, lipgloss.Width(status)+2)
+	}
+	if leftWidth <= 0 {
+		leftText = ""
+	} else {
+		leftText = truncateToWidth(leftText, leftWidth)
+	}
 	leftSeg := styleStatusLeft.Render(leftText)
 	if len(highlightRanges) > 0 {
 		// Render highlighted spans as their own complete lipgloss chunks
@@ -4389,12 +4454,11 @@ func (m *appModel) renderStatusBar() string {
 		leftSeg = b.String()
 	}
 
-	rightText := " drag-select copy │ ctrl+shift+c last │ ctrl+/ commands │ ctrl+c interrupt/quit "
+	rightText := " drag-select copy │ ctrl+y copy │ ctrl+/ commands │ ctrl+c interrupt/quit "
 	if m.mouseCapture {
-		rightText = " wheel scroll │ shift+drag copy │ ctrl+shift+c last │ ctrl+/ commands "
+		rightText = " wheel scroll │ shift+drag copy │ ctrl+y copy │ ctrl+/ commands "
 	}
 	// Errors can contain provider newlines; fixed chrome must remain one row.
-	status := strings.Join(strings.Fields(m.statusMsg), " ")
 	if status != "" {
 		rightText = " " + status + " │" + rightText
 	}
