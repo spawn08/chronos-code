@@ -38,6 +38,16 @@ var (
 	errScopedRulesIgnored       = errors.New("scoped rules: ignored path")
 )
 
+// IsScopedInstructionsNeeded recognizes the typed deferral and serialized hook errors.
+// It only classifies presentation; callers still preserve the tool result and access gate.
+func IsScopedInstructionsNeeded(value any) bool {
+	if err, ok := value.(error); ok {
+		return errors.Is(err, errScopedInstructionsNeeded) || strings.Contains(err.Error(), errScopedInstructionsNeeded.Error()+":")
+	}
+	text, ok := value.(string)
+	return ok && strings.Contains(text, errScopedInstructionsNeeded.Error()+":")
+}
+
 // Source bodies are reloaded, not retained across requests. Limits fail closed.
 type scopedRulesState struct {
 	paths       map[string]bool
@@ -150,7 +160,7 @@ func (h *scopedRulesHook) Before(ctx context.Context, evt *hooks.Event) error {
 			}
 		}
 		if len(needed) > 0 {
-			return fmt.Errorf("%w: file access has NOT run. Request the next model turn to receive full project instructions, then retry this call. Pending sources: %s", errScopedInstructionsNeeded, strings.Join(needed, ", "))
+			return fmt.Errorf("%w: file access is deferred. The next model call loads the pending project instructions automatically; retry this call after that response. Pending sources: %s", errScopedInstructionsNeeded, strings.Join(needed, ", "))
 		}
 		return nil
 	}

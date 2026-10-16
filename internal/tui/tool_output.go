@@ -235,6 +235,9 @@ func listOutput(lines []string, summary string) toolOutput {
 // RenderToolActivity it marks a completed call that reported failure (such as
 // a non-zero shell exit) as failed and appends the output summary.
 func RenderToolResultActivity(agent, name string, args any, eventErr any, out toolOutput) string {
+	if orchestrator.IsScopedInstructionsNeeded(eventErr) {
+		return fmt.Sprintf("  %s %s%s %s", styleTool.Render("↻"), agent, styleBold.Render(name), styleDim.Render("· deferred · loading project instructions"))
+	}
 	if name == "spawn_subagent" || eventErr != nil || (!out.failed && out.summary == "") {
 		return RenderToolActivity(agent, name, args, true, eventErr)
 	}

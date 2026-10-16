@@ -148,7 +148,7 @@ type turnItem struct {
 	args          string
 	result        string
 	preview       []string // short readable output excerpt under the tool line
-	plan          string   // exit_plan_mode: the proposed plan, shown in full
+	plan          string   // Full plan retained for inspection; inline rendering is bounded.
 	failure       string
 	editPreview   string
 	editApplied   bool
@@ -158,6 +158,7 @@ type turnItem struct {
 	settled       bool
 	inputBytes    int
 	liveText      liveTextCache
+	activityCache *activityRenderCache
 }
 
 type activityKind uint8
@@ -407,6 +408,9 @@ type appModel struct {
 	turnCostStart     budget.SessionCost
 	lastTurnCost      budget.SessionCost
 	sending           bool
+	busyStarted       time.Time
+	spinnerRunning    bool
+	workLabel         string
 	turnID            uint64
 	turnCtx           context.Context
 	turnCancel        context.CancelFunc
@@ -641,16 +645,13 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if !m.sending {
+		if !m.workInProgress() || m.approval != nil {
+			m.spinnerRunning = false
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		// The spinner is only visible before the first turn item. Continuing
-		// the tick loop after that forces a full-frame View ~10Hz for no gain.
-		if !m.followOutput || len(m.activeTurnItems) > 0 {
-			return m, nil
-		}
+		// Only the footer animates; transcript rendering and selection stay cached.
 		return m, cmd
 
 	case approvalClosedMsg:
@@ -786,7 +787,11 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inspection.resize(m.width, m.inspectionHeight())
 		}
 		m.resizeViewport()
-		return m, m.operationalSnapshotCmd(time.Second)
+		next := m.operationalSnapshotCmd(time.Second)
+		if m.workInProgress() && m.approval == nil && !m.spinnerRunning {
+			return m, tea.Batch(next, m.startSpinner())
+		}
+		return m, next
 
 	case maintenanceDoneMsg:
 		if msg.turnID != m.turnID || !m.sending {
@@ -1382,6 +1387,9 @@ func (m *appModel) beginTurn(displayLine, line, explicitSkill string) (tea.Model
 	m.refreshPrompt()
 
 	m.sending = true
+	m.busyStarted = time.Now()
+	m.workLabel = "thinking"
+	m.statusMsg = ""
 	m.activeRequest = line
 	m.budgetRetried = false
 	m.turnID++
@@ -1418,7 +1426,7 @@ func (m *appModel) beginTurn(displayLine, line, explicitSkill string) (tea.Model
 	}
 	m.steering = orchestrator.NewSteeringInbox()
 	m.refreshViewport()
-	return m, tea.Batch(m.sendCmd(turnCtx, turnID, line), m.spin.Tick, activityCmd, listenSteering(turnCtx, turnID, m.steering))
+	return m, tea.Batch(m.sendCmd(turnCtx, turnID, line), m.startSpinner(), activityCmd, listenSteering(turnCtx, turnID, m.steering))
 }
 
 func (m *appModel) parseSkillInvocation(line string) (name, task string, ok bool) {
@@ -1482,6 +1490,9 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 	m.followOutput = true
 	m.appendUserTurn(line)
 	m.sending = true
+	m.busyStarted = time.Now()
+	m.workLabel = "subagent:" + name
+	m.statusMsg = ""
 	m.activeRequest = ""
 	m.budgetRetried = false
 	m.turnID++
@@ -1510,7 +1521,7 @@ func (m *appModel) handleSubagentCommand(line string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(func() tea.Msg {
 		result, err := m.orch.RunSubagent(turnCtx, args)
 		return subagentDoneMsg{turnID: turnID, name: name, result: result, err: err}
-	}, m.spin.Tick, activityCmd)
+	}, m.startSpinner(), activityCmd)
 }
 
 func (m *appModel) sendCmd(ctx context.Context, turnID uint64, message string) tea.Cmd {
@@ -1759,6 +1770,7 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		m.lastUsage.Merge(resp.Usage)
 	}
 	for _, tc := range resp.ToolCalls {
+		m.workLabel = "preparing " + tc.Name
 		if tc.Name == "spawn_subagent" {
 			if m.activityIndex == nil {
 				m.activityIndex = make(map[string]int)
@@ -1783,6 +1795,7 @@ func (m *appModel) handleStreamDelta(msg streamDeltaMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if text := m.streamText(resp); text != "" {
+		m.workLabel = "responding"
 		if m.activityCh == nil && m.pendingToolCalls > 0 && len(resp.ToolCalls) == 0 {
 			label := progressLabel(m.pendingToolCalls, m.pendingSubagents, "completed")
 			m.appendActivity(activityProgress, styleAgentName.Render("  ✓ "+label))
@@ -1866,6 +1879,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 	changed := true
 	switch msg.event.Type {
 	case chronosstream.EventModelCall:
+		m.workLabel = "thinking"
 		// A new model round means this agent's earlier replies are over.
 		m.settleToolInputs(agentID)
 		m.turnModelCalls++
@@ -1879,6 +1893,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 			m.activityIndex[key] = len(m.activeTurnItems) - 1
 		}
 	case chronosstream.EventToolInput:
+		m.workLabel = "preparing " + toolName
 		if _, started := m.activityIndex[activityKey]; callID == "" || started {
 			changed = false
 			break
@@ -1896,6 +1911,7 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		item := &m.activeTurnItems[idx]
 		item.toolName, item.agentID, item.callID, item.inputBytes = toolName, agentID, callID, intValue(data["bytes"])
 	case chronosstream.EventToolCall:
+		m.workLabel = toolName
 		line := RenderToolActivity(label, toolName, data["args"], false, data["error"])
 		provisionalKey := "stream/" + callID
 		if idx, ok := m.activityIndex[provisionalKey]; toolName == "spawn_subagent" && callID != "" && ok {
@@ -1941,6 +1957,11 @@ func (m *appModel) handleActivity(msg activityMsg) (tea.Model, tea.Cmd) {
 		m.activityOutputs[activityKey] = data["output"]
 		changed = false
 	case chronosstream.EventToolResult:
+		if orchestrator.IsScopedInstructionsNeeded(data["error"]) {
+			m.workLabel = "loading project instructions"
+		} else {
+			m.workLabel = "thinking"
+		}
 		result := data["result"]
 		if output, ok := m.activityOutputs[activityKey]; ok {
 			result = output
@@ -2234,6 +2255,9 @@ func (m *appModel) handleShellEscape(cmdStr string) (tea.Model, tea.Cmd) {
 	m.history.Add("!" + cmdStr)
 	m.appendSystem("$ " + cmdStr)
 	m.statusMsg = "running shell"
+	if !m.workInProgress() {
+		m.busyStarted = time.Now()
+	}
 	m.shellPending++
 	m.refreshViewport()
 	orch := m.orch
@@ -2336,6 +2360,8 @@ func (m *appModel) workspaceRoot() string {
 // callbacks can therefore wait for Update without deadlocking it.
 func (m *appModel) maintenanceCmd(status string, run func(context.Context) (string, error)) tea.Cmd {
 	m.sending = true
+	m.busyStarted = time.Now()
+	m.workLabel = status
 	m.turnID++
 	m.turnCtx, m.turnCancel = context.WithCancel(m.ctx)
 	m.turnInterrupted = false
@@ -3840,6 +3866,15 @@ func (m *appModel) renderItemList(items []turnItem) string {
 }
 
 func (m *appModel) renderExpandedItems(items []turnItem) string {
+	// Select the visible tail using rendered detail sizes before assembling it.
+	start, bytes, lines := len(items), 0, 0
+	for start > 0 && bytes < maxRenderBytes && lines < maxViewportLines {
+		rendered := m.renderOneItem(&items[start-1])
+		bytes += len(rendered) + 2
+		lines += strings.Count(rendered, "\n") + 2
+		start--
+	}
+	items = items[start:]
 	var b strings.Builder
 	for i := range items {
 		item := &items[i]
@@ -3929,28 +3964,7 @@ func (m *appModel) renderOneItem(item *turnItem) string {
 		return renderSteeringNote("you · added to task", content, m.viewport.Width())
 	}
 	if item.kind == turnItemActivity {
-		line := truncateToWidth(content, m.viewport.Width())
-		if item.editApplied && item.editPreview != "" {
-			line += "\n" + m.renderToolExcerpt("edit diff (captured replacement):", item.editPreview)
-		}
-		if item.plan != "" {
-			line += "\n" + indentLines(RenderMarkdownLite(item.plan, m.viewport.Width()-4), "    ")
-		}
-		if !m.toolsExpanded && len(item.preview) > 0 {
-			line += "\n" + m.renderToolPreview(item.preview)
-		}
-		if m.toolsExpanded && item.activity == activityTool {
-			if item.args != "" && (!item.editApplied || item.editPreview == "") {
-				line += "\n" + m.renderToolExcerptLimit("arguments:", item.args, expandedExcerptBytes, expandedExcerptLines, false)
-			}
-			if item.result != "" {
-				line += "\n" + m.renderToolExcerptLimit("result:", item.result, expandedExcerptBytes, expandedExcerptLines, false)
-			}
-			if item.failure != "" {
-				line += "\n" + m.renderToolExcerpt("error:", item.failure)
-			}
-		}
-		return line
+		return m.renderActivityItem(item, content)
 	}
 	width := m.viewport.Width()
 	live := m.sending && !item.settled
@@ -4275,6 +4289,7 @@ func (m *appModel) renderPlanApprovalModal() string {
 	b.WriteByte('\n')
 	plan, _ := m.approval.args["plan"].(string)
 	if plan = strings.TrimSpace(plan); plan != "" {
+		plan = boundedTextTail(plan, inlinePlanPreviewBytes, inlinePlanPreviewLines)
 		b.WriteString(truncateApprovalDetails(RenderMarkdownLite(plan, m.width-inputBoxBorderWidth-inputBoxPaddingWidth), m.approvalDetailBudget()))
 		b.WriteByte('\n')
 	}
@@ -4335,13 +4350,7 @@ func (m *appModel) renderStatusBar() string {
 	if m.stream {
 		streamLabel = "stream"
 	}
-	runLabel := "idle"
-	if m.sending {
-		runLabel = "running"
-		if m.turnInterrupted {
-			runLabel = "stopping"
-		}
-	}
+	activityPrefix := m.activityStatus()
 	// highlightRanges track [start,end) grapheme offsets (matching
 	// lipgloss.StyleRanges/ansi.Cut, not byte offsets) of segments below that
 	// get their own color on top of styleStatusLeft's base styling, applied
@@ -4353,9 +4362,9 @@ func (m *appModel) renderStatusBar() string {
 		highlightRanges = append(highlightRanges, lipgloss.NewRange(start, utf8.RuneCountInString(*text), style))
 	}
 
-	leftText := " ● " + runLabel + " │ " + streamLabel
+	leftText := activityPrefix + " │ " + streamLabel
 	if m.orch.ActiveID() != m.orch.PrimaryID() {
-		leftText = " ● " + runLabel + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
+		leftText = activityPrefix + " │ @" + m.orch.ActiveID() + " │ " + streamLabel
 	}
 	// Keep the resume hint ahead of model/routing metadata so it cannot be
 	// truncated off-screen while output is paused near the bottom.
@@ -4366,6 +4375,7 @@ func (m *appModel) renderStatusBar() string {
 			leftText += fmt.Sprintf(" │ scrolled %d%% · ctrl+end follow", int(m.viewport.ScrollPercent()*100))
 		}
 	}
+	priorityWidth := lipgloss.Width(leftText)
 	if m.orch.PlanMode() {
 		leftText += " │ plan"
 	}
@@ -4417,7 +4427,7 @@ func (m *appModel) renderStatusBar() string {
 	}
 	leftText += " "
 	if m.width < 72 {
-		leftText = " ● " + runLabel
+		leftText = activityPrefix
 		if m.orch.PlanMode() {
 			leftText += " │ plan"
 		}
@@ -4431,12 +4441,16 @@ func (m *appModel) renderStatusBar() string {
 			leftText += " ↑ ctrl+end"
 		}
 		leftText += " "
+		priorityWidth = lipgloss.Width(leftText)
 		highlightRanges = nil
 	}
 	status := strings.Join(strings.Fields(m.statusMsg), " ")
 	leftWidth := m.width
 	if status != "" {
 		leftWidth -= min(m.width, lipgloss.Width(status)+2)
+		if m.workInProgress() || m.approval != nil {
+			leftWidth = max(min(m.width, priorityWidth), leftWidth)
+		}
 	}
 	if leftWidth <= 0 {
 		leftText = ""

@@ -294,9 +294,11 @@ Restart after changing these. `memory.enabled: false` stops both persistence and
 | `Ctrl+O` | Expand collapsed tool calls |
 | `/mouse` | Toggle between wheel scrolling and unshifted drag-select |
 
+**Working status:** The footer shows an animated indicator, the current activity or tool, and elapsed time throughout a run. Question and permission dialogs show a waiting state. Tool details reuse cached rendering, and long inline plans show a bounded preview with the full content available through `/inspect`. A scoped-instruction deferral appears as **loading project instructions** while the harness prepares the next model call and retry.
+
 **Scrolling and selection:** The mouse wheel scrolls the transcript by default. Shift-drag selects text, which you copy with your terminal's shortcut. Streaming doesn't repaint the pane while you're scrolled away from the live tail, so your selection stays put until `Ctrl+End`.
 
-**Clarification dialogs:** When a decision needs your input, the agent can call `ask_user_question` to show up to four questions. Use arrow keys or Tab to move, Space to toggle multi-select choices, and Enter to answer and advance. Select **Other** to type a custom answer. Recommended options are marked. Escape cancels the questions; Ctrl+C interrupts the running task. Answers return to the agent in the same run. Headless `run` and HTTP `serve` return an `input_required` tool result so the agent can explain the missing decision and wait for a follow-up.
+**Clarification dialogs:** Agents are guided to resolve routine choices themselves and ask a small number of high-information questions for essential user decisions. When a decision needs your input, the agent can call `ask_user_question` to show up to four questions. Use arrow keys or Tab to move, Space to toggle multi-select choices, and Enter to answer and advance. Select **Other** to type a custom answer. Recommended options are marked. Escape cancels the questions; Ctrl+C interrupts the running task. Answers return to the agent in the same run. Headless `run` and HTTP `serve` return an `input_required` tool result so the agent can explain the missing decision and wait for a follow-up.
 
 **Memory intents:** Only explicit forms persist: `remember <category>: <fact>`, `forget: <mem_ID>`, `recall-past: <query>`. Casual use of "remember", "always", or "never" does not.
 
