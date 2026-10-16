@@ -196,9 +196,10 @@ type chatDoneMsg struct {
 }
 
 type maintenanceDoneMsg struct {
-	turnID uint64
-	text   string
-	err    error
+	resumed bool
+	turnID  uint64
+	text    string
+	err     error
 }
 
 type subagentDoneMsg struct {
@@ -599,12 +600,16 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.inspection != nil {
 			m.inspection.resize(msg.Width, m.inspectionHeight())
 		}
+		firstWindow := !m.ready
 		if !m.ready {
 			m.viewport = viewport.New()
 			m.viewport.SetWidth(contentWidth)
 			m.ready = true
 		} else {
 			m.viewport.SetWidth(contentWidth)
+		}
+		if firstWindow && m.announcedSession == "" {
+			m.restoreSessionHistory()
 		}
 		m.announceSession()
 		m.refreshPrompt()
@@ -813,6 +818,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.appendError(msg.err)
 		} else {
+			if msg.resumed {
+				m.restoreSessionHistory()
+			}
 			m.appendSystem(msg.text)
 		}
 		m.refreshViewport()
@@ -2558,25 +2566,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.appendError(err)
 			break
 		}
-		m.blocks = nil
-		m.blockSources = nil
-		m.rawBlockBytes = 0
-		m.blockBytes = 0
-		m.trimmedBlocks = 0
-		m.invalidateRenderCache()
-		m.lastKnownUsage = model.Usage{}
-		m.lastContextReport = nil
-		m.lastMemoryIntent = nil
-		m.lastTurnCost = budget.SessionCost{}
-		m.lastModelCalls = 0
-		m.lastSubagents = 0
-		m.lastAssistantText = ""
-		m.lastTurnItems = nil
-		m.lastTurnErr = nil
-		m.lastTurnInterrupted = false
-		m.lastExecution = orchestrator.ExecutionSnapshot{}
-		m.hasLastTurn = false
-		m.lastTurnBlockIdx = -1
+		m.resetDisplayedSession()
 		m.queuedMessages = nil
 		m.statusMsg = "new session started"
 		m.followOutput = true
@@ -2683,6 +2673,7 @@ func (m *appModel) handleSlashCommand(line string) (tea.Model, tea.Cmd) {
 			m.appendError(err)
 			break
 		}
+		m.restoreSessionHistory()
 		m.appendSystem("resumed session " + id)
 		m.announceSession()
 	case "/compact":

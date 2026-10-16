@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spawn08/chronos/engine/hooks"
+	"github.com/spawn08/chronos/engine/model"
 	"github.com/spawn08/chronos/engine/tool"
 	"github.com/spawn08/chronos/storage"
 
@@ -173,6 +175,39 @@ func (o *Orchestrator) ResumeSession(ctx context.Context, sessionID string) (str
 	o.sessions[agentID] = sessionID
 	o.sessionMu.Unlock()
 	return sessionID, nil
+}
+
+// SessionHistory reads visible messages from the original ledger. Summary
+// checkpoints only change model context; the transcript keeps earlier messages.
+func (o *Orchestrator) SessionHistory(ctx context.Context, sessionID string) ([]model.Message, error) {
+	if o == nil || o.store == nil {
+		return nil, fmt.Errorf("session storage unavailable")
+	}
+	events, err := o.store.ListEvents(ctx, sessionID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("load session %s history: %w", sessionID, err)
+	}
+	var messages []model.Message
+	for _, event := range events {
+		if event == nil || event.Type != "chat_message" {
+			continue
+		}
+		data, err := json.Marshal(event.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode session %s message: %w", sessionID, err)
+		}
+		var message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(data, &message); err != nil {
+			return nil, fmt.Errorf("decode session %s message: %w", sessionID, err)
+		}
+		if (message.Role == model.RoleUser || message.Role == model.RoleAssistant) && strings.TrimSpace(message.Content) != "" {
+			messages = append(messages, model.Message{Role: message.Role, Content: message.Content})
+		}
+	}
+	return messages, nil
 }
 
 // A fresh startup creates an empty current session, which may be the newest

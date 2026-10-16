@@ -408,10 +408,15 @@ func (m *appModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			p.cancel()
 			m.picker = nil
 			orch, id := m.orch, strings.TrimPrefix(value, "/resume ")
-			return m, m.maintenanceCmd("resuming session", func(ctx context.Context) (string, error) {
+			cmd := m.maintenanceCmd("resuming session", func(ctx context.Context) (string, error) {
 				resumed, err := orch.ResumeSession(ctx, id)
 				return "resumed session " + resumed, err
 			})
+			return m, func() tea.Msg {
+				msg := cmd().(maintenanceDoneMsg)
+				msg.resumed = msg.err == nil
+				return msg
+			}
 		}
 		m.picker = nil
 		return m.handleSubmit(value)

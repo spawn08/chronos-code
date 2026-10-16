@@ -6,6 +6,11 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/spawn08/chronos/engine/model"
+
+	"github.com/spawn08/chronos-code/internal/budget"
+	"github.com/spawn08/chronos-code/internal/orchestrator"
 )
 
 func sessionResumeHint(id string) string {
@@ -37,6 +42,35 @@ func (m *appModel) announceSession() bool {
 	return true
 }
 
+func (m *appModel) restoreSessionHistory() {
+	messages, err := m.orch.SessionHistory(m.ctx, m.orch.CurrentSessionID())
+	m.resetDisplayedSession()
+	m.announcedSession = ""
+	m.followOutput = true
+	if err != nil {
+		m.appendSystem("session history unavailable: " + err.Error())
+		m.announceSession()
+		m.refreshViewport()
+		return
+	}
+	for _, message := range messages {
+		if message.Role == model.RoleUser {
+			// Batch rendering avoids rebuilding the full transcript per message.
+			m.appendBlock(RenderTurnHeader("❯", "you", styleUserPrefix, m.viewport.Width()) + "\n" +
+				wrapText(boundedTextTail(message.Content, maxItemRenderBytes, maxViewportLines), m.viewport.Width()))
+			m.setBlockSource(&transcriptSource{user: message.Content, bytes: len(message.Content), width: m.viewport.Width()})
+			continue
+		}
+		items := []turnItem{{kind: turnItemText, content: message.Content}}
+		name := m.displayAgentName()
+		m.appendBlock(m.buildAssistantBlockNamed(items, false, nil, name))
+		m.setBlockSource(&transcriptSource{items: items, name: name, bytes: len(message.Content), width: m.viewport.Width()})
+		m.lastAssistantText = message.Content
+	}
+	m.announceSession()
+	m.refreshViewport()
+}
+
 func writeSessionResumeHint(w io.Writer, id string) error {
 	hint := sessionResumeHint(id)
 	if hint == "" {
@@ -46,4 +80,26 @@ func writeSessionResumeHint(w io.Writer, id string) error {
 		return fmt.Errorf("write session resume hint: %w", err)
 	}
 	return nil
+}
+
+func (m *appModel) resetDisplayedSession() {
+	m.blocks = nil
+	m.blockSources = nil
+	m.rawBlockBytes = 0
+	m.blockBytes = 0
+	m.trimmedBlocks = 0
+	m.invalidateRenderCache()
+	m.lastKnownUsage = model.Usage{}
+	m.lastContextReport = nil
+	m.lastMemoryIntent = nil
+	m.lastTurnCost = budget.SessionCost{}
+	m.lastModelCalls = 0
+	m.lastSubagents = 0
+	m.lastAssistantText = ""
+	m.lastTurnItems = nil
+	m.lastTurnErr = nil
+	m.lastTurnInterrupted = false
+	m.lastExecution = orchestrator.ExecutionSnapshot{}
+	m.hasLastTurn = false
+	m.lastTurnBlockIdx = -1
 }
